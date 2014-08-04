@@ -189,6 +189,38 @@ func Benchmark__PubSubTwoConns(b *testing.B) {
 	s.Shutdown()
 }
 
+func Benchmark__PubOneQueueSub(b *testing.B) {
+	b.StopTimer()
+	s := runBenchServer()
+	c := createClientConn(b, "localhost", PERF_PORT)
+	doDefaultConnect(b, c)
+	sendProto(b, c, "SUB foo bar 1\r\n")
+	bw := bufio.NewWriterSize(c, defaultSendBufSize)
+	sendOp := []byte(fmt.Sprintf("PUB foo 2\r\nok\r\n"))
+	ch := make(chan bool)
+	expected := len("MSG foo 1 2\r\nok\r\n") * b.N
+	go drainConnection(b, c, ch, expected)
+	b.StartTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, err := bw.Write(sendOp)
+		if err != nil {
+			b.Fatalf("Received error on PUB write: %v\n", err)
+		}
+	}
+	err := bw.Flush()
+	if err != nil {
+		b.Fatalf("Received error on FLUSH write: %v\n", err)
+	}
+
+	// Wait for connection to be drained
+	<-ch
+
+	b.StopTimer()
+	c.Close()
+	s.Shutdown()
+}
+
 func Benchmark__PubTwoQueueSub(b *testing.B) {
 	b.StopTimer()
 	s := runBenchServer()

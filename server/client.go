@@ -617,6 +617,11 @@ writeErr:
 	}
 }
 
+// sync.Pool for amap processing when queue subscribers exist.
+var qmapsFree = sync.Pool{
+	New: func() interface{} { return make(map[string][]*subscription) },
+}
+
 // processMsg is called to process an inbound msg from a client.
 func (c *client) processMsg(msg []byte) {
 
@@ -692,7 +697,8 @@ func (c *client) processMsg(msg []byte) {
 			}
 			// FIXME(dlc), this can be more efficient
 			if qmap == nil {
-				qmap = make(map[string][]*subscription)
+				qmap = qmapsFree.Get().(map[string][]*subscription)
+				// qmap = make(map[string][]*subscription)
 			}
 			qname := string(sub.queue)
 			qsubs = qmap[qname]
@@ -737,12 +743,19 @@ func (c *client) processMsg(msg []byte) {
 	}
 
 	if qmap != nil {
-		for _, qsubs := range qmap {
+		for k, qsubs := range qmap {
+			if len(qsubs) <= 0 {
+				continue
+			}
 			index := rand.Int() % len(qsubs)
 			sub := qsubs[index]
 			mh := c.msgHeader(msgh[:si], sub)
 			c.deliverMsg(sub, mh, msg)
+			// Clear list here
+			qmap[k] = qsubs[:0]
 		}
+		// Place back in pool.
+		qmapsFree.Put(qmap)
 	}
 }
 
