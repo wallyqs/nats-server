@@ -617,7 +617,7 @@ writeErr:
 	}
 }
 
-// sync.Pool for amap processing when queue subscribers exist.
+// sync.Pool for qmap processing when queue subscribers exist.
 var qmapsFree = sync.Pool{
 	New: func() interface{} { return make(map[string][]*subscription) },
 }
@@ -698,7 +698,6 @@ func (c *client) processMsg(msg []byte) {
 			// FIXME(dlc), this can be more efficient
 			if qmap == nil {
 				qmap = qmapsFree.Get().(map[string][]*subscription)
-				// qmap = make(map[string][]*subscription)
 			}
 			qname := string(sub.queue)
 			qsubs = qmap[qname]
@@ -752,6 +751,7 @@ func (c *client) processMsg(msg []byte) {
 			mh := c.msgHeader(msgh[:si], sub)
 			c.deliverMsg(sub, mh, msg)
 			// Clear list here
+			// FIXME(dlc) - Should we clear completely to avoid Loop?
 			qmap[k] = qsubs[:0]
 		}
 		// Place back in pool.
