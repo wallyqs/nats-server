@@ -8,17 +8,28 @@ import (
 	"runtime"
 )
 
+const (
+	procfsStatPath   = "/proc/self/stat"
+	procfsUptimePath = "/proc/uptime"
+
+	// FIXME(wallyqs): Should be retrieved from sysconf(_SC_CLK_TCK) value
+	hertz = 100.0
+
+	// FIXME(wallyqs): Should be retrieved from sysconf(_SC_PAGE_SIZE) value
+	pageSize = 4 // kB
+)
+
 func getCPUandMemFromProcfs() (float64, int64) {
 
-	// Report empty values upon monitoring errors
-	statData, err := ioutil.ReadFile("/proc/self/stat")
+	// Report negative values upon monitoring errors
+	statData, err := ioutil.ReadFile(procfsStatPath)
 	if err != nil {
-		return 0.0, 0
+		return -1, -1
 	}
 
-	uptimeData, err := ioutil.ReadFile("/proc/uptime")
+	uptimeData, err := ioutil.ReadFile(procfsUptimePath)
 	if err != nil {
-		return 0.0, 0
+		return -1, -1
 	}
 
 	// Formula to get CPU usage
@@ -36,12 +47,10 @@ func getCPUandMemFromProcfs() (float64, int64) {
 	var secondsSinceBoot float64
 	var totalCPUTimeUsed int64
 	var secondsOfProcessLife float64
+	var rssKB int64
 
 	// FIXME(wallyqs): fmt.Sscanf cannot discard, so capturing everything and ignore
 	var ign string
-
-	// FIXME(wallyqs): Should be retrieved from sysconf(_SC_CLK_TCK) value
-	hertz := 100.0
 
 	fmt.Sscanf(string(statData), "%s %s %s %s %s %s %s %s %s %s %s %s %s %d %d %d %d %s %s %s %s %d %s %d", &ign, &ign, &ign, &ign, &ign, &ign, &ign, &ign, &ign, &ign, &ign, &ign, &ign, &utime, &stime, &cutime, &cstime, &ign, &ign, &ign, &ign, &starttime, &ign, &rss)
 	fmt.Sscanf(string(uptimeData), "%f", &secondsSinceBoot)
@@ -50,11 +59,13 @@ func getCPUandMemFromProcfs() (float64, int64) {
 	secondsOfProcessLife = secondsSinceBoot - (float64(starttime) / hertz)
 	pcpu := (float64(totalCPUTimeUsed) * 100 / hertz) / secondsOfProcessLife
 
-	return pcpu, rss
+	// Return memory size in KB
+	rssKB = rss * pageSize
+
+	return pcpu, rssKB
 }
 
 func updateUsage(v *Varz) {
 	v.Cores = runtime.NumCPU()
 	v.CPU, v.Mem = getCPUandMemFromProcfs()
-	v.Mem *= 1024 // 1k blocks, want bytes.
 }
