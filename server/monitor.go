@@ -4,12 +4,8 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"os/exec"
-	"runtime"
 	"strconv"
 	"time"
 
@@ -164,17 +160,4 @@ func (s *Server) HandleVarz(w http.ResponseWriter, r *http.Request) {
 		Errorf("Error marshalling response to /varz request: %v", err)
 	}
 	w.Write(b)
-}
-
-// FIXME(dlc): This is a big hack, make real..
-func updateUsage(v *Varz) {
-	v.Cores = runtime.NumCPU()
-	pidStr := fmt.Sprintf("%d", os.Getpid())
-	out, err := exec.Command("ps", "o", "pcpu=,rss=", "-p", pidStr).Output()
-	if err != nil {
-		// FIXME(dlc): Log?
-		return
-	}
-	fmt.Sscanf(string(out), "%f %d", &v.CPU, &v.Mem)
-	v.Mem *= 1024 // 1k blocks, want bytes.
 }
