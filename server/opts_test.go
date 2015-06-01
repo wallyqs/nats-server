@@ -4,6 +4,7 @@ package server
 
 import (
 	"net/url"
+	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -106,6 +107,33 @@ func TestMergeOverrides(t *testing.T) {
 	if !reflect.DeepEqual(golden, merged) {
 		t.Fatalf("Options are incorrect.\nexpected: %+v\ngot: %+v",
 			golden, merged)
+	}
+}
+
+func TestConfigTemplate(t *testing.T) {
+	golden := &Options{
+		Host:        "127.0.0.1",
+		Port:        8888,
+		Username:    "hoge",
+		Password:    "fuga",
+		AuthTimeout: 1.0,
+		HTTPPort:    8889,
+	}
+
+	os.Setenv("GNATSD_HOST", "127.0.0.1")
+	os.Setenv("GNATSD_PORT", "8888")
+	os.Setenv("GNATSD_MONITORING_PORT", "8889")
+	os.Setenv("GNATSD_USER", "hoge")
+	os.Setenv("GNATSD_PASSWORD", "fuga")
+	os.Setenv("GNATSD_AUTH_TIMEOUT", "1.0")
+	fopts, err := ProcessConfigFile("./configs/test_template.conf")
+	if err != nil {
+		t.Fatalf("Error when parsig config as template")
+	}
+
+	if !reflect.DeepEqual(golden, fopts) {
+		t.Fatalf("Options are incorrect.\nexpected: %+v\ngot: %+v",
+			golden, fopts)
 	}
 }
 

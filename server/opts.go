@@ -3,12 +3,15 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/apcera/gnatsd/conf"
@@ -67,7 +70,19 @@ func ProcessConfigFile(configFile string) (*Options, error) {
 		return nil, fmt.Errorf("error opening config file: %v", err)
 	}
 
-	m, err := conf.Parse(string(data))
+	// Support templating, and also add confd style getenv to support env vars
+	fmap := template.FuncMap{
+		"getenv": os.Getenv,
+	}
+
+	confbuf := &bytes.Buffer{}
+	tmpl, err := template.New("dconf").Funcs(fmap).Parse(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("error parsing config template: %v", err)
+	}
+	tmpl.Execute(confbuf, nil)
+
+	m, err := conf.Parse(confbuf.String())
 	if err != nil {
 		return nil, err
 	}
