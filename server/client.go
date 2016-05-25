@@ -523,7 +523,9 @@ func (c *client) processPub(arg []byte) error {
 
 	if c.opts.Pedantic && !IsValidLiteralSubject(string(c.pa.subject)) {
 		c.sendErr("Invalid Subject")
+		return ErrInvalidSubject
 	}
+
 	return nil
 }
 

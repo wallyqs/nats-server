@@ -167,6 +167,16 @@ func (c *client) parse(buf []byte) error {
 					arg = buf[c.as : i-c.drop]
 				}
 				if err := c.processPub(arg); err != nil {
+					// If subject is invalid, then drop the message and reset parser state...
+					if err == ErrInvalidSubject {
+						// FIXME: Consume but drop message instead to handle clients
+						// more gracefully? Client receives this error but most of them
+						// not synchronous so this would result in a parser error
+						// in the client if it does to send a payload.
+						c.argBuf, c.msgBuf = nil, nil
+						c.drop, c.as, c.state = 0, i+1, OP_START
+						continue
+					}
 					return err
 				}
 				c.drop, c.as, c.state = 0, i+1, MSG_PAYLOAD
