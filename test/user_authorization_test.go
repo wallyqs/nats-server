@@ -29,6 +29,16 @@ func TestUserAuthorizationProto(t *testing.T) {
 	// Check that we now reserve _SYS.> though for internal, so no clients.
 	sendProto(t, c, "PUB _SYS.HB 2\r\nok\r\n")
 	expectResult(t, c, permErrRe)
+
+	// Check that partial matches to _SYS are still allowed.
+	sendProto(t, c, "PUB _ 2\r\nok\r\n")
+	expectResult(t, c, okRe)
+	sendProto(t, c, "PUB _S 2\r\nok\r\n")
+	expectResult(t, c, okRe)
+	sendProto(t, c, "PUB _SY 2\r\nok\r\n")
+	expectResult(t, c, okRe)
+	sendProto(t, c, "PUB _SYSTEM 2\r\nok\r\n")
+	expectResult(t, c, okRe)
 	c.Close()
 
 	// Bob is a requestor only, e.g. req.foo, req.bar for publish, subscribe only to INBOXes.
@@ -64,6 +74,10 @@ func TestUserAuthorizationProto(t *testing.T) {
 	sendProto(t, c, "SUB foo.bar.* 1\r\n")
 	expectResult(t, c, permErrRe)
 	sendProto(t, c, "PUB foo.bar.baz 2\r\nok\r\n")
+	expectResult(t, c, permErrRe)
+
+	// Not allowed either to just send to _SYS
+	sendProto(t, c, "PUB _SYS 2\r\nok\r\n")
 	expectResult(t, c, permErrRe)
 
 	// These should work ok.

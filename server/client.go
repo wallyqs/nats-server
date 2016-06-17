@@ -869,12 +869,28 @@ func (c *client) processMsg(msg []byte) {
 		c.traceMsg(msg)
 	}
 
-	// Disallow publish to _SYS.>, these are reserved for internals.
-	if c.pa.subject[0] == '_' && c.pa.subject[1] == 'S' &&
-		c.pa.subject[2] == 'Y' && c.pa.subject[3] == 'S' {
-		c.sendErr(fmt.Sprintf("Permissions Violation for Publish to %q", c.pa.subject))
-		c.Debugf("Permissions Violation for Publish to %q", c.pa.subject)
-		return
+	// Disallow publish to _SYS and _SYS.>, these are reserved for internals.
+	if c.pa.subject[0] == '_' {
+		subjectSize := len(c.pa.subject)
+
+		if subjectSize == 4 {
+			// Disallow _SYS
+			if c.pa.subject[1] == 'S' &&
+				c.pa.subject[2] == 'Y' && c.pa.subject[3] == 'S' {
+				c.sendErr(fmt.Sprintf("Permissions Violation for Publish to %q", c.pa.subject))
+				c.Debugf("Permissions Violation for Publish to %q", c.pa.subject)
+				return
+			}
+		} else if subjectSize > 4 {
+			// Disallow _SYS.>
+			if c.pa.subject[1] == 'S' &&
+				c.pa.subject[2] == 'Y' && c.pa.subject[3] == 'S' && c.pa.subject[4] == '.' {
+				c.sendErr(fmt.Sprintf("Permissions Violation for Publish to %q", c.pa.subject))
+				c.Debugf("Permissions Violation for Publish to %q", c.pa.subject)
+				return
+			}
+		}
+		// Still allow: _, _S, _SY and partial matches like _SYSTEM
 	}
 
 	// Check if published subject is allowed if we have permissions in place.
