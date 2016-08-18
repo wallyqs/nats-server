@@ -169,7 +169,7 @@ func createRouteConn(t tLogger, host string, port int) net.Conn {
 
 func createClientConn(t tLogger, host string, port int) net.Conn {
 	addr := fmt.Sprintf("%s:%d", host, port)
-	c, err := net.DialTimeout("tcp", addr, 1*time.Second)
+	c, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		stackFatalf(t, "Could not connect to server: %v\n", err)
 	}
