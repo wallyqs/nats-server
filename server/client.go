@@ -94,6 +94,7 @@ type client struct {
 	start time.Time
 	nc    net.Conn
 	mpay  int
+	mpend int
 	ncs   string
 	bw    *bufio.Writer
 	srv   *Server
@@ -309,10 +310,15 @@ func (c *client) readLoop() {
 					sz := cp.bw.Available()
 					// Check for expansion opportunity.
 					if wfc > 2 && sz <= maxBufSize/2 {
+						// if wfc > 10 {
+						// 	fmt.Println("------------------------------------------", c, c.opts.Lang, c.mpend, sz, c.bw.Buffered())
+						// }
+						fmt.Println("expanding....", wfc, sz, c)
 						cp.bw = bufio.NewWriterSize(cp.nc, sz*2)
 					}
 					// Check for shrinking opportunity.
 					if wfc == 0 && sz >= minBufSize*2 {
+						// fmt.Println("shrinking....", wfc, sz, c)
 						cp.bw = bufio.NewWriterSize(cp.nc, sz/2)
 					}
 				}
@@ -897,6 +903,11 @@ func (c *client) deliverMsg(sub *subscription, mh, msg []byte) {
 			}
 			return
 		}
+	}
+
+	// Eagerly check for SlowConsumers in case pending size over the limit
+	if client.bw.Buffered() > 65000 {
+		fmt.Println("------------------------------------------", client, client.opts.Lang, client.mpend, client.bw.Buffered())
 	}
 
 	if client.nc == nil {

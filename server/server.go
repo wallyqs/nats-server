@@ -524,7 +524,7 @@ func (s *Server) startMonitoring(secure bool) {
 }
 
 func (s *Server) createClient(conn net.Conn) *client {
-	c := &client{srv: s, nc: conn, opts: defaultOpts, mpay: s.info.MaxPayload, start: time.Now()}
+	c := &client{srv: s, nc: conn, opts: defaultOpts, mpay: s.info.MaxPayload, mpend: s.opts.MaxPending, start: time.Now()}
 
 	// Grab JSON info string
 	s.mu.Lock()
