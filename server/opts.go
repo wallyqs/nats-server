@@ -401,7 +401,7 @@ func parseUsers(mv interface{}) ([]*User, error) {
 				user.Username = v.(string)
 			case "pass", "password":
 				user.Password = v.(string)
-			case "permission", "permissions", "authroization":
+			case "permission", "permissions", "authorization":
 				pm, ok := v.(map[string]interface{})
 				if !ok {
 					return nil, fmt.Errorf("Expected user permissions to be a map/struct, got %+v", v)
