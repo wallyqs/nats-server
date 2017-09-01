@@ -800,6 +800,10 @@ func (c *client) processSub(argo []byte) (err error) {
 				shouldForward = c.typ != ROUTER
 			}
 		}
+	} else {
+		c.mu.Unlock()
+		c.sendErr("Invalid Subject Identifier (sid), already taken")
+		return nil
 	}
 	c.mu.Unlock()
 	if err != nil {
