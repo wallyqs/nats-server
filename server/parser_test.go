@@ -238,6 +238,43 @@ func TestParsePubArg(t *testing.T) {
 	testPubArg(c, t)
 }
 
+func testPubArg2(c *client, t *testing.T) {
+	t.Helper()
+	if !bytes.Equal(c.pa.subject, []byte("f")) {
+		t.Fatalf("Mismatched subject: '%s'\n", c.pa.subject)
+	}
+	if !bytes.Equal(c.pa.szb, []byte("2")) {
+		t.Fatalf("Bad size buf: '%s'\n", c.pa.szb)
+	}
+	if c.pa.size != 2 {
+		t.Fatalf("Bad size: %d\n", c.pa.size)
+	}
+}
+
+func TestParsePubArg2(t *testing.T) {
+	c := dummyClient()
+	if err := c.processPub([]byte("f 2")); err != nil {
+		t.Fatalf("Unexpected parse error: %v\n", err)
+	}
+	testPubArg2(c, t)
+	if err := c.processPub([]byte(" f 2")); err != nil {
+		t.Fatalf("Unexpected parse error: %v\n", err)
+	}
+	testPubArg2(c, t)
+	if err := c.processPub([]byte("  f   2  ")); err != nil {
+		t.Fatalf("Unexpected parse error: %v\n", err)
+	}
+	testPubArg2(c, t)
+	if err := c.processPub([]byte(" f 2 ")); err != nil {
+		t.Fatalf("Unexpected parse error: %v\n", err)
+	}
+	testPubArg2(c, t)
+	if err := c.processPub([]byte("f   2")); err != nil {
+		t.Fatalf("Unexpected parse error: %v\n", err)
+	}
+	testPubArg2(c, t)
+}
+
 func testPubArgWithReply(c *client, t *testing.T) {
 	t.Helper()
 	if !bytes.Equal(c.pa.subject, []byte("foo")) {
