@@ -202,45 +202,87 @@ func TestParsePub(t *testing.T) {
 }
 
 func testPubArg(c *client, t *testing.T) {
+	t.Helper()
 	if !bytes.Equal(c.pa.subject, []byte("foo")) {
 		t.Fatalf("Mismatched subject: '%s'\n", c.pa.subject)
 	}
-	if !bytes.Equal(c.pa.szb, []byte("22")) {
+	if !bytes.Equal(c.pa.szb, []byte("222")) {
 		t.Fatalf("Bad size buf: '%s'\n", c.pa.szb)
 	}
-	if c.pa.size != 22 {
+	if c.pa.size != 222 {
 		t.Fatalf("Bad size: %d\n", c.pa.size)
 	}
 }
 
 func TestParsePubArg(t *testing.T) {
 	c := dummyClient()
-	if err := c.processPub([]byte("foo 22")); err != nil {
+	if err := c.processPub([]byte("foo 222")); err != nil {
 		t.Fatalf("Unexpected parse error: %v\n", err)
 	}
 	testPubArg(c, t)
-	if err := c.processPub([]byte(" foo 22")); err != nil {
+	if err := c.processPub([]byte(" foo 222")); err != nil {
 		t.Fatalf("Unexpected parse error: %v\n", err)
 	}
 	testPubArg(c, t)
-	if err := c.processPub([]byte(" foo 22 ")); err != nil {
+	if err := c.processPub([]byte("  foo   222  ")); err != nil {
 		t.Fatalf("Unexpected parse error: %v\n", err)
 	}
 	testPubArg(c, t)
-	if err := c.processPub([]byte("foo   22")); err != nil {
-		t.Fatalf("Unexpected parse error: %v\n", err)
-	}
-	if err := c.processPub([]byte("foo   22\r")); err != nil {
+	if err := c.processPub([]byte(" foo 222 ")); err != nil {
 		t.Fatalf("Unexpected parse error: %v\n", err)
 	}
 	testPubArg(c, t)
+	if err := c.processPub([]byte("foo   222")); err != nil {
+		t.Fatalf("Unexpected parse error: %v\n", err)
+	}
+	testPubArg(c, t)
+}
+
+func testPubArgWithReply(c *client, t *testing.T) {
+	t.Helper()
+	if !bytes.Equal(c.pa.subject, []byte("foo")) {
+		t.Fatalf("Mismatched subject: '%s'\n", c.pa.subject)
+	}
+	if !bytes.Equal(c.pa.reply, []byte("bar")) {
+		t.Fatalf("Mismatched reply: '%s'\n", c.pa.reply)
+	}
+	if !bytes.Equal(c.pa.szb, []byte("222")) {
+		t.Fatalf("Bad size buf: '%s'\n", c.pa.szb)
+	}
+	if c.pa.size != 222 {
+		t.Fatalf("Bad size: %d\n", c.pa.size)
+	}
+}
+
+func TestParsePubArgWithReply(t *testing.T) {
+	c := dummyClient()
+	if err := c.processPub([]byte("foo bar 222")); err != nil {
+		t.Fatalf("Unexpected parse error: %v\n", err)
+	}
+	testPubArgWithReply(c, t)
+	if err := c.processPub([]byte(" foo bar 222")); err != nil {
+		t.Fatalf("Unexpected parse error: %v\n", err)
+	}
+	testPubArgWithReply(c, t)
+	if err := c.processPub([]byte("  foo   bar   222  ")); err != nil {
+		t.Fatalf("Unexpected parse error: %v\n", err)
+	}
+	testPubArgWithReply(c, t)
+	if err := c.processPub([]byte("foo   bar 222")); err != nil {
+		t.Fatalf("Unexpected parse error: %v\n", err)
+	}
+	testPubArgWithReply(c, t)
+	if err := c.processPub([]byte("foo   bar    222")); err != nil {
+		t.Fatalf("Unexpected parse error: %v\n", err)
+	}
+	testPubArgWithReply(c, t)
 }
 
 func TestParsePubBadSize(t *testing.T) {
 	c := dummyClient()
 	// Setup localized max payload
 	c.mpay = 32768
-	if err := c.processPub([]byte("foo 2222222222222222\r")); err == nil {
+	if err := c.processPub([]byte("foo 2222222222222222")); err == nil {
 		t.Fatalf("Expected parse error for size too large")
 	}
 }

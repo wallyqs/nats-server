@@ -171,10 +171,14 @@ func (c *client) parse(buf []byte) error {
 				} else {
 					arg = buf[c.as : i-c.drop]
 				}
+
+				// wip: faster implementation here
+				// Note: does 'arg' already does not escape here.
 				if err := c.processPub(arg); err != nil {
 					return err
 				}
 				c.drop, c.as, c.state = OP_START, i+1, MSG_PAYLOAD
+
 				// If we don't have a saved buffer then jump ahead with
 				// the index. If this overruns what is left we fall out
 				// and process split buffer.
