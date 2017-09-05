@@ -669,6 +669,7 @@ func (c *client) processMsgArgs(arg []byte) error {
 }
 
 func (c *client) processPub(arg []byte) error {
+	// fmt.Println("--------------", arg, string(arg))
 	if c.trace {
 		c.traceInOp("PUB", arg)
 	}
@@ -679,6 +680,7 @@ func (c *client) processPub(arg []byte) error {
 	end := larg - 1
 	if arg[0] != ' ' && arg[end] != ' ' {
 		var b byte
+		// done := false
 
 		// Find subject delimiter then go backwards and get size
 		// and reply box in case there is any.
@@ -693,46 +695,57 @@ func (c *client) processPub(arg []byte) error {
 		j := end - 1
 		for ; j > i; j-- {
 			b = arg[j]
+			// fmt.Println("AAA:::", b, string(b))
 			if b == ' ' || b == '\t' {
 				// "PUB hello 5" will not get here if there are
 				// no extra whitespace characters before the
 				// payload size.
 				//
-				// "PUB hello world 5" does get here and we then
+				// "PUB hello world 5" does get here and so we then
 				// continue going backward until finding the boundaries
-				// of the reply subject.
+				// of the reply subject in case there is one.
 				size := arg[j+1:]
 				c.pa.size = parseSize(size)
 				c.pa.szb = size
-
-				k := j
-				for ; k > i; k-- {
-					b = arg[k]
-					if b != ' ' && b != '\t' {
-						// Move from after subject and find the start position
-						// from the reply inbox.
-						l := i
-						for ; l < k; l++ {
-							b = arg[l]
-							if b != ' ' && b != '\t' {
-								c.pa.reply = arg[l : k+1]
-								break
-							}
-						}
-						goto Done
-					}
-				}
+				break
 			}
 		}
+		// fmt.Println("RESULT: ---", i, j, arg, string(arg))
 		if i == j {
+			// There is no reply inbox and there were no spaces
+			// in between so we are done.
 			size := arg[j+1:]
 			c.pa.size = parseSize(size)
 			c.pa.szb = size
-			goto Done
+			// done = true
+		} else {
+			// Could go one step further behind??
+			k := j - 1 // + 1 // - 1
+			// fmt.Println("ARG", string(arg), arg, "||||", arg[:k], string(arg[:k]))
+			for ; k > i; k-- {
+				b = arg[k]
+				// fmt.Println("b", b, string(b))
+				if b != ' ' && b != '\t' {
+					// Move from after subject and find the start position
+					// from the reply inbox.
+					l := i + 1
+					for ; l < k; l++ {
+						b = arg[l]
+						if b != ' ' && b != '\t' {
+							c.pa.reply = arg[l : k+1]
+							break
+						}
+					}
+					break
+				}
+			}
+			// done = true
 		}
-		
+
 		// Should escape sooner than reaching here...
-		return fmt.Errorf("processPub Parse Error: '%s'", arg)
+		// if !done {
+		// 	return fmt.Errorf("processPub Parse Error: '%s'", arg)
+		// }
 	} else {
 		// Unroll splitArgs to avoid runtime/heap issues
 		a := [MAX_PUB_ARGS][]byte{}
@@ -770,7 +783,6 @@ func (c *client) processPub(arg []byte) error {
 		}
 
 	}
-Done:
 	if c.pa.size < 0 {
 		return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
 	}
