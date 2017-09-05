@@ -669,89 +669,108 @@ func (c *client) processMsgArgs(arg []byte) error {
 }
 
 func (c *client) processPub(arg []byte) error {
-	// fmt.Println(arg, "||", string(arg))
 	if c.trace {
 		c.traceInOp("PUB", arg)
 	}
 
-	// Unroll splitArgs to avoid runtime/heap issues
-	// start := 0
-
-	// TODO: ------
-	// Possibility of fast path when there are no gratuituous extra spaces.
-	// -----
-	// fmt.Println(arg, "||", string(arg))
-	// for i, b := range arg {
-
-	// Start with fast path for lines where we are not getting extra spaces
-	// in between the arguments which is the most general case.
-	// If there is no match, then we do a more meticulous check.
-	start := -1
-	end := -1
-Loop:
-	for i, b := range arg {
-		// subject
-		start = i
-		a := arg[start:]
-		for j := 0; j < len(a); j++ {
-			b = a[j]
-			// fmt.Println(":::", b, ":::", string(b))
+	// Attempt fast path only if initial and final bytes are not spaces,
+	// which should be the most common case.
+	larg := len(arg)
+	end := larg - 1
+	if larg > 1 && arg[0] != ' ' && arg[end] != ' ' {
+		// Find subject delimiter then go backwards and get size
+		// and reply box in case there is any.
+		i := 1
+		for ; i < end; i++ {
+			b := arg[i]
 			if b == ' ' || b == '\t' {
-				c.pa.subject = arg[start : start+j]
+				c.pa.subject = arg[:i]
+				break
+			}
+		}
+		j := end - 1
+		for ; j > i; j-- {
+			b := arg[j]
 
-				// Move start to the next position.
-				start += j + 1
+			// Notes:
+			//
+			// "PUB hello 5" will not get here because that means
+			// that 'i' will eventually be the same as 'j'.
+			if b == ' ' || b == '\t' {
+				size := arg[j+1:]
+				c.pa.size = parseSize(size)
+				c.pa.szb = size
+
+				// Continue looking backwards instead here?
 				break
 			}
 		}
 
-		// reply or payload size
-		var token []byte
-		a = arg[start:]
-		end = len(a) - 1
-		for j, b := range a {
-			if b == ' ' || b == '\t' {
-				token = arg[start : start+j]
-				start += j + 1
-				end = -1
-				break
-			}
-
-			// If made it to the end of the line already,
-			// then only try to get size.
-			if j == end {
-				size := a
-				c.pa.size = parseSize(size)
-				c.pa.szb = size
-				break Loop
-			}
-		}
-
-		// Use reply from earlier and get the size.
-		a = arg[start:]
-		end = len(a) - 1
-		for j, b := range a {
-			if b == ' ' || b == '\t' {
-				c.pa.reply = token
-				size := arg[start : start+j]
-				c.pa.size = parseSize(size)
-				c.pa.szb = size
-				break Loop
-			}
-
-			// If made it to the end of the line already,
-			// then we only got try to get size.
-			if j == end {
-				c.pa.reply = token
-				size := arg[start : start+j]
-				c.pa.size = parseSize(size)
-				c.pa.szb = size
-				break Loop
+		// TODO: This check has been done by for loop above already.
+		if i == j {
+			// There is no reply inbox and there were no spaces
+			// in between so we are done.
+			size := arg[j+1:]
+			c.pa.size = parseSize(size)
+			c.pa.szb = size
+		} else {
+			// There might be a reply inbox so skip whitespace
+			// until finding it.
+			k := j
+			for ; k > i; k-- {
+				b := arg[k]
+				if b != ' ' && b != '\t' {
+					// Move from after subject and find the start position
+					// from the reply inbox.
+					l := i
+					for ; l < k; l++ {
+						b := arg[l]
+						if b != ' ' && b != '\t' {
+							c.pa.reply = arg[l : k+1]
+							break
+						}
+					}
+					break
+				}
 			}
 		}
-		break
+	} else {
+		// Unroll splitArgs to avoid runtime/heap issues
+		a := [MAX_PUB_ARGS][]byte{}
+		args := a[:0]
+		start := -1
+		for i, b := range arg {
+			switch b {
+			case ' ', '\t':
+				if start >= 0 {
+					args = append(args, arg[start:i])
+					start = -1
+				}
+			default:
+				if start < 0 {
+					start = i
+				}
+			}
+		}
+		if start >= 0 {
+			args = append(args, arg[start:])
+		}
+		switch len(args) {
+		case 2:
+			c.pa.subject = args[0]
+			c.pa.reply = nil
+			c.pa.size = parseSize(args[1])
+			c.pa.szb = args[1]
+		case 3:
+			c.pa.subject = args[0]
+			c.pa.reply = args[1]
+			c.pa.size = parseSize(args[2])
+			c.pa.szb = args[2]
+		default:
+			return fmt.Errorf("processPub Parse Error: '%s'", arg)
+		}
+
 	}
-
 	if c.pa.size < 0 {
 		return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
 	}
