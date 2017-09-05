@@ -720,16 +720,14 @@ func (c *client) processPub(arg []byte) error {
 		}
 	}
 
-	// Volskwagen: small subject lands here so would be faster.
-	// if end-1 == i {
-	// 	// There is no reply inbox and there were no spaces
-	// 	// in between so we are done.
-	// 	size := arg[end:]
-	// 	fmt.Println("Short subject fast path: ", size, string(size))
-	// 	c.pa.size = parseSize(size)
-	// 	c.pa.szb = size
-	// 	goto OK
-	// }
+	if end-1 == i {
+		// There is no reply inbox and there were no spaces
+		// in between so we are done.
+		size := arg[end:]
+		c.pa.size = parseSize(size)
+		c.pa.szb = size
+		goto OK
+	}
 
 	j = end // -1 :: can decrease another one?
 	for ; j > i; j-- {
