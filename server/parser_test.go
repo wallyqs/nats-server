@@ -214,7 +214,7 @@ func testPubArg(c *client, t *testing.T) {
 	}
 }
 
-func TestParsePubArg(t *testing.T) {
+func TestParsePubArg11(t *testing.T) {
 	c := dummyClient()
 	if err := c.processPub([]byte("foo 222")); err != nil {
 		t.Fatalf("Unexpected parse error: %v\n", err)
