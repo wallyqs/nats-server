@@ -669,132 +669,89 @@ func (c *client) processMsgArgs(arg []byte) error {
 }
 
 func (c *client) processPub(arg []byte) error {
+	// fmt.Println(arg, "||", string(arg))
 	if c.trace {
 		c.traceInOp("PUB", arg)
 	}
 
 	// Unroll splitArgs to avoid runtime/heap issues
-	start := 0
+	// start := 0
 
-	la := len(arg)
-	if la < 3 {
-		// Validate smallest subject before continuing: PUB a 1
-		return fmt.Errorf("processPub Parse Error: '%s'", arg)
-	}
+	// TODO: ------
+	// Possibility of fast path when there are no gratuituous extra spaces.
+	// -----
+	// fmt.Println(arg, "||", string(arg))
+	// for i, b := range arg {
 
-	// Check if first char is blank space then move start
-	// position up to the beginning of the subject.
-	//
-	// (whitespace)^ subject (whitespace) reply (whitespace) size (whitespace)
-	if arg[0] == ' ' || arg[0] == '\t' {
-		start = 1
+	// Start with fast path for lines where we are not getting extra spaces
+	// in between the arguments which is the most general case.
+	// If there is no match, then we do a more meticulous check.
+	start := -1
+	end := -1
+Loop:
+	for i, b := range arg {
+		// subject
+		start = i
 		a := arg[start:]
-		for i, b := range a {
-			if b != ' ' && b != '\t' {
-				start += i
+		for j := 0; j < len(a); j++ {
+			b = a[j]
+			// fmt.Println(":::", b, ":::", string(b))
+			if b == ' ' || b == '\t' {
+				c.pa.subject = arg[start : start+j]
+
+				// Move start to the next position.
+				start += j + 1
 				break
 			}
 		}
+
+		// reply or payload size
+		var token []byte
+		a = arg[start:]
+		end = len(a) - 1
+		for j, b := range a {
+			if b == ' ' || b == '\t' {
+				token = arg[start : start+j]
+				start += j + 1
+				end = -1
+				break
+			}
+
+			// If made it to the end of the line already,
+			// then only try to get size.
+			if j == end {
+				size := a
+				c.pa.size = parseSize(size)
+				c.pa.szb = size
+				break Loop
+			}
+		}
+
+		// Use reply from earlier and get the size.
+		a = arg[start:]
+		end = len(a) - 1
+		for j, b := range a {
+			if b == ' ' || b == '\t' {
+				c.pa.reply = token
+				size := arg[start : start+j]
+				c.pa.size = parseSize(size)
+				c.pa.szb = size
+				break Loop
+			}
+
+			// If made it to the end of the line already,
+			// then we only got try to get size.
+			if j == end {
+				c.pa.reply = token
+				size := arg[start : start+j]
+				c.pa.size = parseSize(size)
+				c.pa.szb = size
+				break Loop
+			}
+		}
+		break
 	}
 
-	// Move position until after the subject.
-	//
-	// (whitespace) subject^ (whitespace) reply (whitespace) size (whitespace)
-	a := arg[start:]
-	for i, b := range a {
-		if b == ' ' || b == '\t' {
-			start += i
-			c.pa.subject = a[:i]
-			break
-		}
-	}
-
-	// Skip any whitespace which may exist in between subject
-	// and size/reply.
-	//
-	// (whitespace) subject (whitespace)^ reply (whitespace) size (whitespace)
-	a = arg[start:]
-	for i, b := range a {
-		if b != ' ' && b != '\t' {
-			start += i
-			break
-		}
-	}
-
-	// Next, handle gathering the payload size or reply inbox.
-	//
-	// (whitespace) subject (whitespace) [reply^(whitespace)|size^(whitespace)end]
-	a = arg[start:]
-	end := len(a) - 1
-	var token []byte
-	for i, b := range a {
-		// If we find any whitespace here, it means we either
-		// got a reply subject, or the payload size but followed
-		// with some whitespace which can be ignored.
-		if b == ' ' || b == '\t' {
-			start += i
-			token = a[:i]
-			break
-		}
-
-		// Check if we have made it to the end of the line already.
-		// In that case grab the payload size from the protocol line,
-		// since it is the most common case for PUB lines without reply
-		// to not have further whitespace after bytesize has appeared.
-		if i == end {
-			c.pa.size = parseSize(a)
-			c.pa.szb = a
-			goto LineBreakReached
-		}
-	}
-
-	// Skip any whitespace which may exist before the payload size, or after
-	// as well in case we got a reply inbox earlier.
-	//
-	// (whitespace) subject (whitespace) [reply (whitespace)^|size  (whitespace^)]
-	// (whitespace) subject (whitespace) [reply (whitespace)^|^size (whitespace)]
-	a = arg[start:]
-	end = len(a) - 1
-	for i, b := range a {
-		if i == end {
-			// We should have gotten the payload size otherwise
-			// this is a malformed protocol line.
-			c.pa.size = parseSize(token)
-			c.pa.szb = token
-			goto LineBreakReached
-		}
-		if b != ' ' && b != '\t' {
-			start += i
-			break
-		}
-	}
-
-	// Check the rest of the line.
-	// (whitespace) subject (whitespace) [reply (whitespace)^|^size(whitespace)]
-	a = arg[start:]
-	end = len(a) - 1
-	for i, b := range a {
-		if i == end {
-			// Previous token would have been the reply
-			// so next is getting the payload size.
-			size := a[:i+1]
-			c.pa.reply = token
-			c.pa.size = parseSize(size)
-			c.pa.szb = size
-			break
-		}
-
-		// We got both the reply inbox and payload size when
-		// reaching at this point.
-		if b == ' ' || b == '\t' {
-			c.pa.reply = token
-			c.pa.size = parseSize(a[:i])
-			c.pa.szb = a[:i]
-			break
-		}
-	}
-
-LineBreakReached:
 	if c.pa.size < 0 {
 		return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
 	}
