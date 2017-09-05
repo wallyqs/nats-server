@@ -669,7 +669,6 @@ func (c *client) processMsgArgs(arg []byte) error {
 }
 
 func (c *client) processPub(arg []byte) error {
-	// fmt.Println("--------------", arg, string(arg))
 	if c.trace {
 		c.traceInOp("PUB", arg)
 	}
@@ -682,11 +681,6 @@ func (c *client) processPub(arg []byte) error {
 	// TODO: In case of fast path check failing, then try to find
 	// the correct 'i' and 'j' that have skipped the whitespace.
 	// This check drops from 75.9 ns/op to 82.6 ns/op
-	// if arg[0] != ' ' && arg[end] != ' ' {
-	// Check
-	// }
-	println("---------------", string(arg), arg)
-
 	var b byte
 	var start, i, j, k int
 
@@ -711,22 +705,16 @@ func (c *client) processPub(arg []byte) error {
 	// and reply box in case there is any.
 	for ; i < end; i++ {
 		b = arg[i]
-		println("AAA", b, string(b))
 		if b == ' ' || b == '\t' {
 			c.pa.subject = arg[start:i]
-			// i++
 			break
 		}
 	}
-	fmt.Println("SUBJECT: ", c.pa.subject, string(c.pa.subject))
 
-	// j = end //  - 1?
 	if arg[end] == ' ' || arg[end] == '\t' {
-		// end--
 		for ; end > i; end-- {
 			b = arg[end]
 			if b != ' ' && b != '\t' {
-				fmt.Println("here???", i, j, b, string(b), arg[end:], arg[:end])
 				break
 			}
 		}
@@ -744,14 +732,9 @@ func (c *client) processPub(arg []byte) error {
 	// }
 
 	j = end // -1 :: can decrease another one?
-	fmt.Println("======", start, j, i, "|||", end, "|||", arg[i:j], string(arg[i:j]))
-
-	// 
 	for ; j > i; j-- {
 		b = arg[j]
-		fmt.Println("OOO:::", i, j, "|||||", b, string(b), arg[j:end+1])
 		if b == ' ' || b == '\t' {
-			fmt.Println("here it is fine------------------")
 			// "PUB hello 5" will not get here if there are
 			// no extra whitespace characters before the
 			// payload size.
@@ -764,7 +747,6 @@ func (c *client) processPub(arg []byte) error {
 		}
 	}
 	if j == i {
-		fmt.Println("_________________________________________!!!!!!!!!!!!!________", string(arg[j+1:end+1]))
 		// There is no reply inbox and there were no spaces
 		// in between so we are done.
 		size := arg[j+1:end+1]
@@ -773,15 +755,10 @@ func (c *client) processPub(arg []byte) error {
 		goto OK
 	}
 
-	// fmt.Println("RESULT: ---", i, j, arg, string(arg))
-
 	// Continue going backward until finding the boundaries
 	// of the reply subject in case there is one.
 	k = j - 1
-	// fmt.Println("ARG", string(arg), arg, "||||", arg[:k], string(arg[:k]))
 	for ; k > i; k-- {
-		// for ; ; k-- {
-		// fmt.Println(k, i, "b", b, string(b))
 		b = arg[k]
 		if b != ' ' && b != '\t' {
 			// Move from after subject and find the start position
@@ -804,43 +781,7 @@ func (c *client) processPub(arg []byte) error {
 	}
 
 	return fmt.Errorf("processPub Parse Error: '%s'", arg)
-	// } else {
-	// 	// Unroll splitArgs to avoid runtime/heap issues
-	// 	a := [MAX_PUB_ARGS][]byte{}
-	// 	args := a[:0]
-	// 	start := -1
-	// 	for i, b := range arg {
-	// 		switch b {
-	// 		case ' ', '\t':
-	// 			if start >= 0 {
-	// 				args = append(args, arg[start:i])
-	// 				start = -1
-	// 			}
-	// 		default:
-	// 			if start < 0 {
-	// 				start = i
-	// 			}
-	// 		}
-	// 	}
-	// 	if start >= 0 {
-	// 		args = append(args, arg[start:])
-	// 	}
-	// 	switch len(args) {
-	// 	case 2:
-	// 		c.pa.subject = args[0]
-	// 		c.pa.reply = nil
-	// 		c.pa.size = parseSize(args[1])
-	// 		c.pa.szb = args[1]
-	// 	case 3:
-	// 		c.pa.subject = args[0]
-	// 		c.pa.reply = args[1]
-	// 		c.pa.size = parseSize(args[2])
-	// 		c.pa.szb = args[2]
-	// 	default:
-	// 		return fmt.Errorf("processPub Parse Error: '%s'", arg)
-	// 	}
 
-	// }
 OK:
 	if c.pa.size < 0 {
 		return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
