@@ -678,13 +678,16 @@ func (c *client) processPub(arg []byte) error {
 	// which should be the most common case.
 	larg := len(arg)
 	end := larg - 1
+
+	// TODO: In case of fast path check failing, then try to find
+	// the correct 'i' and 'j' that have skipped the whitespace.
 	if arg[0] != ' ' && arg[end] != ' ' {
 		var b byte
-		// done := false
+		var i, j, k int
 
 		// Find subject delimiter then go backwards and get size
 		// and reply box in case there is any.
-		i := 1
+		i = 1
 		for ; i < end; i++ {
 			b = arg[i]
 			if b == ' ' || b == '\t' {
@@ -692,19 +695,8 @@ func (c *client) processPub(arg []byte) error {
 				break
 			}
 		}
-		// Move one step further behind.
-		j := end - 1
-		var k int
-		for ; ; j-- {
-			if j == i {
-				// There is no reply inbox and there were no spaces
-				// in between so we are done.
-				size := arg[j+1:]
-				c.pa.size = parseSize(size)
-				c.pa.szb = size
-				goto OK
-			}
-
+		j = end - 1
+		for ; j > i; j-- {
 			b = arg[j]
 			// fmt.Println("AAA:::", b, string(b))
 			if b == ' ' || b == '\t' {
@@ -719,18 +711,24 @@ func (c *client) processPub(arg []byte) error {
 				break
 			}
 		}
+		if j == i {
+			// There is no reply inbox and there were no spaces
+			// in between so we are done.
+			size := arg[j+1:]
+			c.pa.size = parseSize(size)
+			c.pa.szb = size
+			goto OK
+		}
+
 		// fmt.Println("RESULT: ---", i, j, arg, string(arg))
 
 		// Continue going backward until finding the boundaries
 		// of the reply subject in case there is one.
 		k = j - 1
 		// fmt.Println("ARG", string(arg), arg, "||||", arg[:k], string(arg[:k]))
-		// for ; k > i; k-- {
-		for ; ; k-- {
+		for ; k > i; k-- {
+			// for ; ; k-- {
 			// fmt.Println(k, i, "b", b, string(b))
-			if k == i {
-				goto OK
-			}
 			b = arg[k]
 			if b != ' ' && b != '\t' {
 				// Move from after subject and find the start position
@@ -746,10 +744,13 @@ func (c *client) processPub(arg []byte) error {
 				goto OK
 			}
 		}
+		if k == i {
+			// In case it was only whitespace between payload size
+			// and the subject, then we have finished too.
+			goto OK
+		}
 
 		return fmt.Errorf("processPub Parse Error: '%s'", arg)
-
-	OK:
 	} else {
 		// Unroll splitArgs to avoid runtime/heap issues
 		a := [MAX_PUB_ARGS][]byte{}
@@ -787,6 +788,7 @@ func (c *client) processPub(arg []byte) error {
 		}
 
 	}
+OK:
 	if c.pa.size < 0 {
 		return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
 	}
