@@ -674,7 +674,6 @@ func (c *client) processPub(arg []byte) error {
 	}
 
 	var b byte
-	// var size []byte
 	var start, i, j, k, n, end int
 	n = len(arg)
 	end = n - 1
