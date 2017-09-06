@@ -679,7 +679,7 @@ func (c *client) processPub(arg []byte) error {
 	end = n - 1
 
 	// Skip all whitespace before the subject if any.
-	if arg[i] == ' ' || arg[i] == '\t' {
+	if arg[0] == ' ' || arg[0] == '\t' {
 		i = 1
 		for ; i < end; i++ {
 			b = arg[i]
