@@ -674,7 +674,8 @@ func (c *client) processPub(arg []byte) error {
 	}
 
 	var b byte
-	var start, i, j, k, l, n, end int
+	// var size []byte
+	var start, i, j, k, n, end int
 	n = len(arg)
 	end = n - 1
 
@@ -695,6 +696,7 @@ func (c *client) processPub(arg []byte) error {
 	}
 
 	// Move position until end of subject.
+	// Best: 77.7 - 79.2 ns/op
 	for ; i < end; i++ {
 		b = arg[i]
 		if b == ' ' || b == '\t' {
@@ -705,7 +707,6 @@ func (c *client) processPub(arg []byte) error {
 
 	// Go backwards skipping all whitespace in case until finding
 	// the start of payload size in the protocol line.
-	l = end - 1
 	if arg[end] == ' ' || arg[end] == '\t' {
 		for ; end > i; end-- {
 			b = arg[end]
@@ -713,9 +714,9 @@ func (c *client) processPub(arg []byte) error {
 				break
 			}
 		}
-	} else if i == l {
-		// Fast path: This should be a PUB protocol line of less than
-		// 10 bytes without a reply inbox nor extra spaces after subject.
+	} else if i == end-1 {
+		// Fast path: This would be a PUB protocol line of less than
+		// 10 bytes without a reply inbox and no extra spaces after subject.
 		size := arg[end:]
 		c.pa.size = parseSize(size)
 		c.pa.szb = size
