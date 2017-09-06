@@ -674,11 +674,11 @@ func (c *client) processPub(arg []byte) error {
 	}
 
 	var b byte
-	var start, i, j, k, n, end int
+	var start, i, j, k, l, n, end int
 	n = len(arg)
 	end = n - 1
 
-	// Skip all whitespace before the subject if any.
+	// Skip all whitespace before the subject in case there is any.
 	if arg[0] == ' ' || arg[0] == '\t' {
 		i = 1
 		for ; i < end; i++ {
@@ -690,12 +690,11 @@ func (c *client) processPub(arg []byte) error {
 		start = i
 	} else {
 		// Already checked first byte that it is not
-		// whitespace so we can move by one already.
+		// whitespace so we can offset by one.
 		i = 1
 	}
 
-	// Find subject delimiter then go backwards and get size
-	// and reply box in case there is any.
+	// Move position until end of subject.
 	for ; i < end; i++ {
 		b = arg[i]
 		if b == ' ' || b == '\t' {
@@ -704,6 +703,9 @@ func (c *client) processPub(arg []byte) error {
 		}
 	}
 
+	// Go backwards skipping all whitespace in case until finding
+	// the start of payload size in the protocol line.
+	l = end - 1
 	if arg[end] == ' ' || arg[end] == '\t' {
 		for ; end > i; end-- {
 			b = arg[end]
@@ -711,24 +713,24 @@ func (c *client) processPub(arg []byte) error {
 				break
 			}
 		}
-	} else if end-1 == i {
-		// There is no reply inbox and there were no spaces
-		// in between so we are done.
+	} else if i == l {
+		// Fast path: This should be a PUB protocol line of less than
+		// 10 bytes without a reply inbox nor extra spaces after subject.
 		size := arg[end:]
 		c.pa.size = parseSize(size)
 		c.pa.szb = size
-		goto OK
+		return nil
 	}
 
+	// Move backwards until gathering all bytes for the payload size.
 	j = end - 1
 	for ; j > i; j-- {
 		b = arg[j]
 		if b == ' ' || b == '\t' {
-			// "PUB hello 5" will not get here if there are
-			// no extra whitespace characters before the
-			// payload size.
+			// 'PUB hello 5' will not get here if there is
+			// no extra whitespace before the payload size.
 			//
-			// "PUB hello world 5" does get here.
+			// 'PUB hello world 5' does get here.
 			size := arg[j+1 : end+1]
 			c.pa.size = parseSize(size)
 			c.pa.szb = size
@@ -741,7 +743,7 @@ func (c *client) processPub(arg []byte) error {
 		size := arg[j+1 : end+1]
 		c.pa.size = parseSize(size)
 		c.pa.szb = size
-		goto OK
+		return nil
 	}
 
 	// Continue going backward until finding the boundaries
@@ -757,34 +759,19 @@ func (c *client) processPub(arg []byte) error {
 				b = arg[l]
 				if b != ' ' && b != '\t' {
 					c.pa.reply = arg[l : k+1]
-					goto OK
+					return nil
 				}
 			}
-			goto OK
+			return nil
 		}
 	}
 	if k == i {
 		// In case it was only whitespace between payload size
 		// and the subject, then we have finished too.
-		goto OK
+		return nil
 	}
 
 	return fmt.Errorf("processPub Parse Error: '%s'", arg)
-
-OK:
-	if c.pa.size < 0 {
-		return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
-	}
-	maxPayload := atomic.LoadInt64(&c.mpay)
-	if maxPayload > 0 && int64(c.pa.size) > maxPayload {
-		c.maxPayloadViolation(c.pa.size, maxPayload)
-		return ErrMaxPayload
-	}
-
-	if c.opts.Pedantic && !IsValidLiteralSubject(string(c.pa.subject)) {
-		c.sendErr("Invalid Subject")
-	}
-	return nil
 }
 
 func splitArg(arg []byte) [][]byte {
