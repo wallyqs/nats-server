@@ -718,9 +718,7 @@ func (c *client) processPub(arg []byte) error {
 				break
 			}
 		}
-	}
-
-	if end-1 == i {
+	} else if end-1 == i {
 		// There is no reply inbox and there were no spaces
 		// in between so we are done.
 		size := arg[end:]
@@ -729,7 +727,7 @@ func (c *client) processPub(arg []byte) error {
 		goto OK
 	}
 
-	j = end // -1 :: can decrease another one?
+	j = end - 1
 	for ; j > i; j-- {
 		b = arg[j]
 		if b == ' ' || b == '\t' {
@@ -738,7 +736,7 @@ func (c *client) processPub(arg []byte) error {
 			// payload size.
 			//
 			// "PUB hello world 5" does get here.
-			size := arg[j+1:end+1]
+			size := arg[j+1 : end+1]
 			c.pa.size = parseSize(size)
 			c.pa.szb = size
 			break
@@ -747,7 +745,7 @@ func (c *client) processPub(arg []byte) error {
 	if j == i {
 		// There is no reply inbox and there were no spaces
 		// in between so we are done.
-		size := arg[j+1:end+1]
+		size := arg[j+1 : end+1]
 		c.pa.size = parseSize(size)
 		c.pa.szb = size
 		goto OK
