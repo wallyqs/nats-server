@@ -693,7 +693,6 @@ func (c *client) processPub(arg []byte) error {
 	}
 
 	// Move position until end of subject.
-	// Best: 76.9 - 77.7 - 79.2 ns/op
 	for ; i < end; i++ {
 		b := arg[i]
 		if b == ' ' || b == '\t' {
@@ -711,16 +710,19 @@ func (c *client) processPub(arg []byte) error {
 				break
 			}
 		}
-	} else if i == end-1 {
-		// Fast path: This would be a PUB protocol line of less than
-		// 10 bytes without a reply inbox and no extra spaces after subject.
-		size := arg[end:]
-		c.pa.size = parseSize(size)
-		c.pa.szb = size
-		return nil
 	}
+	// Best: 76.9 - 77.7 - 79.2 ns/op
+	// if i == end-1 {
+	// 	// Fast path: This would be a PUB protocol line of less than
+	// 	// 10 bytes without a reply inbox and no extra spaces after subject.
+	// 	size := arg[end:]
+	// 	c.pa.size = parseSize(size)
+	// 	c.pa.szb = size
+	// 	return nil
+	// }
 
 	// Move backwards until gathering all bytes for the payload size.
+	// Best: 80.9 ns/op !~ 81.4 ns/op
 	j = end - 1
 	for ; j > i; j-- {
 		b := arg[j]
