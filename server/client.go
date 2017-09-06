@@ -721,27 +721,28 @@ func (c *client) processPub(arg []byte) error {
 	// }
 
 	// Move backwards until gathering all bytes for the payload size.
-	// Best: 80.9 ns/op !~ 81.4 ns/op
+	// Best: 79.9 ns/op - 80.9 ns/op - 81.4 ns/op
 	j = end - 1
-	for ; j > i; j-- {
-		if arg[j] == ' ' || arg[j] == '\t' {
-			// 'PUB hello 5' will not get here if there is
-			// no extra whitespace before the payload size.
-			//
-			// 'PUB hello world 5' does get here.
+	for ; ; j-- {
+		if j > i {
+			if arg[j] == ' ' || arg[j] == '\t' {
+				// 'PUB hello 5' will not get here if there is
+				// no extra whitespace before the payload size.
+				//
+				// 'PUB hello world 5' does get here.
+				size := arg[j+1 : end+1]
+				c.pa.size = parseSize(size)
+				c.pa.szb = size
+				break
+			}
+		} else {
+			// There is no reply inbox and there were no spaces
+			// in between so we are done.
 			size := arg[j+1 : end+1]
 			c.pa.size = parseSize(size)
 			c.pa.szb = size
-			break
+			return nil
 		}
-	}
-	if j == i {
-		// There is no reply inbox and there were no spaces
-		// in between so we are done.
-		size := arg[j+1 : end+1]
-		c.pa.size = parseSize(size)
-		c.pa.szb = size
-		return nil
 	}
 
 	// Continue going backward until finding the boundaries
