@@ -694,8 +694,7 @@ func (c *client) processPub(arg []byte) error {
 
 	// Move position until end of subject.
 	for ; i < end; i++ {
-		b := arg[i]
-		if b == ' ' || b == '\t' {
+		if arg[i] == ' ' || arg[i] == '\t' {
 			c.pa.subject = arg[start:i]
 			break
 		}
@@ -725,8 +724,7 @@ func (c *client) processPub(arg []byte) error {
 	// Best: 80.9 ns/op !~ 81.4 ns/op
 	j = end - 1
 	for ; j > i; j-- {
-		b := arg[j]
-		if b == ' ' || b == '\t' {
+		if arg[j] == ' ' || arg[j] == '\t' {
 			// 'PUB hello 5' will not get here if there is
 			// no extra whitespace before the payload size.
 			//
