@@ -673,20 +673,12 @@ func (c *client) processPub(arg []byte) error {
 		c.traceInOp("PUB", arg)
 	}
 
-	// Attempt fast path only if initial and final bytes are not spaces,
-	// which should be the most common case.
-	larg := len(arg)
-	end := larg - 1
-
-	// TODO: In case of fast path check failing, then try to find
-	// the correct 'i' and 'j' that have skipped the whitespace.
-	// This check drops from 75.9 ns/op to 82.6 ns/op
 	var b byte
-	var start, i, j, k int
+	var start, i, j, k, n, end int
+	n = len(arg)
+	end = n - 1
 
-	// Find first non whitespace char which is start of subject.
-	start = 0
-	i = 0
+	// Skip all whitespace before the subject if any.
 	if arg[i] == ' ' || arg[i] == '\t' {
 		i = 1
 		for ; i < end; i++ {
@@ -697,8 +689,9 @@ func (c *client) processPub(arg []byte) error {
 		}
 		start = i
 	} else {
-		start = 0
-		i++
+		// Already checked first byte that it is not
+		// whitespace so we can move by one already.
+		i = 1
 	}
 
 	// Find subject delimiter then go backwards and get size
