@@ -745,6 +745,15 @@ func (c *client) processPub(arg []byte) error {
 				return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
 			}
 
+			// Attempt fast path to get reply for the most common case,
+			// which is to have a single space after the subject and before
+			// the payload size.  We can skip traversing the bytes of the reply,
+			// since already know the boundaries of the reply.
+			if arg[i+1] != ' ' && arg[j-1] != ' ' {
+				c.pa.reply = arg[i+1 : j]
+				return nil
+			}
+
 			break
 		}
 	}
