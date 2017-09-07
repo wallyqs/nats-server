@@ -708,18 +708,6 @@ func (c *client) processPub(arg []byte) error {
 	default:
 		return fmt.Errorf("processPub Parse Error: '%s'", arg)
 	}
-	if c.pa.size < 0 {
-		return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
-	}
-	maxPayload := atomic.LoadInt64(&c.mpay)
-	if maxPayload > 0 && int64(c.pa.size) > maxPayload {
-		c.maxPayloadViolation(c.pa.size, maxPayload)
-		return ErrMaxPayload
-	}
-
-	if c.opts.Pedantic && !IsValidLiteralSubject(string(c.pa.subject)) {
-		c.sendErr("Invalid Subject")
-	}
 	return nil
 }
 
