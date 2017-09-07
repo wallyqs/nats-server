@@ -669,18 +669,20 @@ func (c *client) processMsgArgs(arg []byte) error {
 }
 
 func (c *client) processPub(arg []byte) error {
+	var b byte
+	var start, end, i, j, k int
+
 	if c.trace {
 		c.traceInOp("PUB", arg)
 	}
-
-	var start, end, i, j, k int
 	end = len(arg) - 1
 
 	// Skip all whitespace before the subject in case there is any.
-	if arg[0] == ' ' || arg[0] == '\t' {
+	b = arg[0]
+	if b == ' ' || b == '\t' {
 		i = 1
 		for ; i < end; i++ {
-			b := arg[i]
+			b = arg[i]
 			if b != ' ' && b != '\t' {
 				break
 			}
@@ -694,7 +696,8 @@ func (c *client) processPub(arg []byte) error {
 
 	// Move position until end of subject.
 	for ; i < end; i++ {
-		if arg[i] == ' ' || arg[i] == '\t' {
+		b = arg[i]
+		if b == ' ' || b == '\t' {
 			c.pa.subject = arg[start:i]
 			if c.opts.Pedantic && !IsValidLiteralSubject(string(c.pa.subject)) {
 				c.sendErr("Invalid Subject")
@@ -704,11 +707,12 @@ func (c *client) processPub(arg []byte) error {
 		}
 	}
 
-	// Go backwards skipping all whitespace in case until finding
+	// Go backwards skipping all whitespace until finding
 	// the start of payload size in the protocol line.
-	if arg[end] == ' ' || arg[end] == '\t' {
+	b = arg[end] 
+	if b == ' ' || b == '\t' {
 		for ; end > i; end-- {
-			b := arg[end]
+			b = arg[end]
 			if b != ' ' && b != '\t' {
 				break
 			}
@@ -718,23 +722,9 @@ func (c *client) processPub(arg []byte) error {
 	// Move backwards until gathering all bytes for the payload size.
 	j = end - 1
 	for ; ; j-- {
-		if j > i {
-			if arg[j] == ' ' || arg[j] == '\t' {
-				// 'PUB hello 5' will not get here if there is
-				// no extra whitespace before the payload size.
-				//
-				// 'PUB hello world 5' does get here.
-				c.pa.szb = arg[j+1 : end+1]
-				c.pa.size = parseSize(c.pa.szb)
-				if c.pa.size < 0 {
-					return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
-				}
-
-				break
-			}
-		} else {
-			// There is no reply inbox and there were no spaces
-			// in between so we just gather size and we're done.
+		// There is no reply inbox and there were no spaces
+		// in between so we just gather size and we're done.
+		if i == j {
 			c.pa.szb = arg[j+1 : end+1]
 			c.pa.size = parseSize(c.pa.szb)
 			if c.pa.size < 0 {
@@ -743,13 +733,28 @@ func (c *client) processPub(arg []byte) error {
 
 			return nil
 		}
+
+		// 'PUB hello 5' will not get here if there is
+		// no extra whitespace before the payload size.
+		//
+		// 'PUB hello world 5' does get here.
+		b = arg[j]
+		if b == ' ' || b == '\t' {
+			c.pa.szb = arg[j+1 : end+1]
+			c.pa.size = parseSize(c.pa.szb)
+			if c.pa.size < 0 {
+				return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
+			}
+
+			break
+		}
 	}
 
 	// Continue going backward until finding the boundaries
 	// of the reply subject in case there is one.
 	k = j - 1
 	for ; k > i; k-- {
-		b := arg[k]
+		b = arg[k]
 		if b != ' ' && b != '\t' {
 			// Move from after subject and find the start position
 			// from the reply inbox.
