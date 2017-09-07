@@ -721,11 +721,13 @@ func (c *client) processPub(arg []byte) error {
 
 	// Move backwards until gathering all bytes for the payload size.
 	for j = end - 1; ; j-- {
-		// There is no reply inbox and there were no spaces
-		// in between so we just gather size and we're done.
 		if i == j {
-			c.pa.szb = arg[j+1 : end+1]
-			c.pa.size = parseSize(c.pa.szb)
+			// There is no reply inbox and there were no spaces
+			// in between so we just gather size and we're done,
+			// e.g. PUB hello 5\r\n
+			size := arg[j+1 : end+1]
+			c.pa.szb = size
+			c.pa.size = parseSize(size)
 			if c.pa.size < 0 {
 				return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
 			}
@@ -733,14 +735,14 @@ func (c *client) processPub(arg []byte) error {
 			return nil
 		}
 
-		// 'PUB hello 5' will not get here if there is
-		// no extra whitespace before the payload size.
-		//
-		// 'PUB hello world 5' does get here.
 		b = arg[j]
 		if b == ' ' || b == '\t' {
-			c.pa.szb = arg[j+1 : end+1]
-			c.pa.size = parseSize(c.pa.szb)
+			// We'll only get here if there is a either a reply
+			// or extra whitespace before the payload size,
+			// e.g. PUB hello world 5\r\n
+			size := arg[j+1 : end+1]
+			c.pa.szb = size
+			c.pa.size = parseSize(size)
 			if c.pa.size < 0 {
 				return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
 			}
