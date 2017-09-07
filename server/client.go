@@ -709,7 +709,7 @@ func (c *client) processPub(arg []byte) error {
 
 	// Go backwards skipping all whitespace until finding
 	// the start of payload size in the protocol line.
-	b = arg[end] 
+	b = arg[end]
 	if b == ' ' || b == '\t' {
 		for ; end > i; end-- {
 			b = arg[end]
@@ -720,8 +720,7 @@ func (c *client) processPub(arg []byte) error {
 	}
 
 	// Move backwards until gathering all bytes for the payload size.
-	j = end - 1
-	for ; ; j-- {
+	for j = end - 1; ; j-- {
 		// There is no reply inbox and there were no spaces
 		// in between so we just gather size and we're done.
 		if i == j {
@@ -752,8 +751,7 @@ func (c *client) processPub(arg []byte) error {
 
 	// Continue going backward until finding the boundaries
 	// of the reply subject in case there is one.
-	k = j - 1
-	for ; k > i; k-- {
+	for k = j - 1; k > i; k-- {
 		b = arg[k]
 		if b != ' ' && b != '\t' {
 			// Move from after subject and find the start position
