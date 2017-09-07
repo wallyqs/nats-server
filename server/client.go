@@ -696,6 +696,10 @@ func (c *client) processPub(arg []byte) error {
 	for ; i < end; i++ {
 		if arg[i] == ' ' || arg[i] == '\t' {
 			c.pa.subject = arg[start:i]
+			if c.opts.Pedantic && !IsValidLiteralSubject(string(c.pa.subject)) {
+				c.sendErr("Invalid Subject")
+				return nil
+			}
 			break
 		}
 	}
@@ -720,17 +724,23 @@ func (c *client) processPub(arg []byte) error {
 				// no extra whitespace before the payload size.
 				//
 				// 'PUB hello world 5' does get here.
-				size := arg[j+1 : end+1]
-				c.pa.size = parseSize(size)
-				c.pa.szb = size
+				c.pa.szb = arg[j+1 : end+1]
+				c.pa.size = parseSize(c.pa.szb)
+				if c.pa.size < 0 {
+					return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
+				}
+
 				break
 			}
 		} else {
 			// There is no reply inbox and there were no spaces
-			// in between so we are done.
-			size := arg[j+1 : end+1]
-			c.pa.size = parseSize(size)
-			c.pa.szb = size
+			// in between so we just gather size and we're done.
+			c.pa.szb = arg[j+1 : end+1]
+			c.pa.size = parseSize(c.pa.szb)
+			if c.pa.size < 0 {
+				return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
+			}
+
 			return nil
 		}
 	}
@@ -755,8 +765,8 @@ func (c *client) processPub(arg []byte) error {
 		}
 	}
 	if k == i {
-		// In case it was only whitespace between payload size
-		// and the subject, then we have finished too.
+		// In case it was only extra whitespace between payload size
+		// and the subject, then nothing else to do.
 		return nil
 	}
 
