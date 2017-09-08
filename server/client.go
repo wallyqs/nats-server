@@ -696,10 +696,6 @@ func (c *client) processPub(arg []byte) error {
 	for ; i < end; i++ {
 		if arg[i] == ' ' || arg[i] == '\t' {
 			c.pa.subject = arg[start:i]
-			if c.opts.Pedantic && !IsValidLiteralSubject(string(c.pa.subject)) {
-				c.sendErr("Invalid Subject")
-				return nil
-			}
 			break
 		}
 	}
