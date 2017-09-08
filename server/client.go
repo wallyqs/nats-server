@@ -703,6 +703,12 @@ func (c *client) processPub(arg []byte) error {
 		}
 	}
 
+	// Check for invalid subject if in pedantic mode
+	if c.opts.Pedantic && !IsValidLiteralSubject(string(c.pa.subject)) {
+		c.sendErr("Invalid Subject")
+		return nil
+	}
+
 	// Go backwards skipping all whitespace until finding
 	// the start of payload size in the protocol line.
 	b = arg[end]
