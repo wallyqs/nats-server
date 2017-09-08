@@ -176,10 +176,6 @@ func (c *client) parse(buf []byte) error {
 				if err := c.processPub(arg); err != nil {
 					return err
 				}
-				if c.opts.Pedantic && !IsValidLiteralSubject(string(c.pa.subject)) {
-					c.sendErr("Invalid Subject")
-					return nil
-				}
 				maxPayload := atomic.LoadInt64(&c.mpay)
 				if maxPayload > 0 && int64(c.pa.size) > maxPayload {
 					c.maxPayloadViolation(c.pa.size, maxPayload)
