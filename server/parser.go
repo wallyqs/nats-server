@@ -2,10 +2,7 @@
 
 package server
 
-import (
-	"fmt"
-	"sync/atomic"
-)
+import "fmt"
 
 type pubArg struct {
 	subject []byte
@@ -176,12 +173,6 @@ func (c *client) parse(buf []byte) error {
 				if err := c.processPub(arg); err != nil {
 					return err
 				}
-				maxPayload := atomic.LoadInt64(&c.mpay)
-				if maxPayload > 0 && int64(c.pa.size) > maxPayload {
-					c.maxPayloadViolation(c.pa.size, maxPayload)
-					return ErrMaxPayload
-				}
-
 				c.drop, c.as, c.state = OP_START, i+1, MSG_PAYLOAD
 
 				// If we don't have a saved buffer then jump ahead with

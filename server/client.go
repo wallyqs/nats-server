@@ -671,11 +671,13 @@ func (c *client) processMsgArgs(arg []byte) error {
 func (c *client) processPub(arg []byte) error {
 	var b byte
 	var start, end, i, j, k int
+	var maxPayload int64
 
 	if c.trace {
 		c.traceInOp("PUB", arg)
 	}
 	end = len(arg) - 1
+	maxPayload = atomic.LoadInt64(&c.mpay)
 
 	// Skip all whitespace before the subject in case there is any.
 	b = arg[0]
@@ -733,6 +735,10 @@ func (c *client) processPub(arg []byte) error {
 			if c.pa.size < 0 {
 				return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
 			}
+			if maxPayload > 0 && int64(c.pa.size) > maxPayload {
+				c.maxPayloadViolation(c.pa.size, maxPayload)
+				return ErrMaxPayload
+			}
 
 			return nil
 		}
@@ -747,6 +753,10 @@ func (c *client) processPub(arg []byte) error {
 			c.pa.size = parseSize(size)
 			if c.pa.size < 0 {
 				return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
+			}
+			if maxPayload > 0 && int64(c.pa.size) > maxPayload {
+				c.maxPayloadViolation(c.pa.size, maxPayload)
+				return ErrMaxPayload
 			}
 
 			// Attempt fast path to get reply for the most common case,
