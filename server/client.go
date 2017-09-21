@@ -259,6 +259,7 @@ func (c *client) readLoop() {
 	c.mu.Lock()
 	nc := c.nc
 	s := c.srv
+	tlsRequired := s.info.TLSRequired
 	defer s.grWG.Done()
 	c.mu.Unlock()
 
@@ -272,8 +273,23 @@ func (c *client) readLoop() {
 	// Snapshot server options.
 	opts := s.getOpts()
 
+	type readFn func() (int, error)
+	var read readFn
+
+	if tlsRequired {
+		tlsconn := nc.(*tls.Conn)
+		read = func() (int, error) {
+			return tlsconn.Read(b)
+		}
+	} else {
+		conn := nc.(*net.TCPConn)
+		read = func() (int, error) {
+			return conn.Read(b)
+		}
+	}
+
 	for {
-		n, err := nc.Read(b)
+		n, err := read()
 		if err != nil {
 			c.closeConnection()
 			return
@@ -625,15 +641,24 @@ func (c *client) processMsgArgs(arg []byte) error {
 	}
 
 	// Unroll splitArgs to avoid runtime/heap issues
-	a := [MAX_MSG_ARGS][]byte{}
-	args := a[:0]
+	// (MSG) first 2 third 4
 	start := -1
+
+	// Make a manual msg arg protocol line parser
+	// SUB -> SID -> REPLY -> BYTES
+SubjectLoop:
 	for i, b := range arg {
+		// Parse subject
 		switch b {
-		case ' ', '\t', '\r', '\n':
+		case ' ', '\t':
+			// Change state to capture SID
 			if start >= 0 {
-				args = append(args, arg[start:i])
-				start = -1
+				// Take a string copy from the buffer
+				// FIXME: These need to be copies so that
+				// it really does not escape!!!
+				c.pa.subject = arg[start:i]
+				start = i + 1
+				break SubjectLoop
 			}
 		default:
 			if start < 0 {
@@ -641,32 +666,138 @@ func (c *client) processMsgArgs(arg []byte) error {
 			}
 		}
 	}
-	if start >= 0 {
-		args = append(args, arg[start:])
+
+	// Subview of the buffer slice
+	sarg := arg[start:]
+	start = -1
+SidLoop:
+	for i, b := range sarg {
+		switch b {
+		case ' ', '\t':
+			// Change state to capture SID
+			if start >= 0 {
+				// Take a string copy from the buffer
+				c.pa.sid = sarg[start:i]
+
+				// Loop to get the 'sid' next
+				start = i + 1
+				break SidLoop
+			}
+		default:
+			if start < 0 {
+				start = i
+			}
+		}
 	}
 
-	switch len(args) {
-	case 3:
-		c.pa.reply = nil
-		c.pa.szb = args[2]
-		c.pa.size = parseSize(args[2])
-	case 4:
-		c.pa.reply = args[2]
-		c.pa.szb = args[3]
-		c.pa.size = parseSize(args[3])
-	default:
-		return fmt.Errorf("processMsgArgs Parse Error: '%s'", arg)
-	}
-	if c.pa.size < 0 {
-		return fmt.Errorf("processMsgArgs Bad or Missing Size: '%s'", arg)
+	// Subview of the buffer slice
+	srarg := sarg[start:]
+	start = -1
+SizeOrReplyLoop:
+	for i, b := range srarg {
+
+		// Check if we are at the end of the buffer, in that case
+		// just grab the size from the protocol line.
+		if i == len(srarg)-1 {
+			c.pa.size = parseSize(srarg)
+			if c.pa.size < 0 {
+				return fmt.Errorf("nats: processMsgArgs Bad or Missing Size: '%s'", string(arg))
+			}
+
+			return nil
+		}
+
+		// We could either abort already gathering bytes if we get the size
+		// or continue gathering if we got a reply inbox.
+		switch b {
+		case ' ', '\t':
+			// We have line with a reply inbox
+			if start >= 0 {
+				// Take a string copy from the buffer
+				c.pa.reply = srarg[start:i]
+				start = i + 1
+				break SizeOrReplyLoop
+			}
+		default:
+			if start < 0 {
+				start = i
+			}
+		}
+
 	}
 
-	// Common ones processed after check for arg length
-	c.pa.subject = args[0]
-	c.pa.sid = args[1]
+	// Subview of the buffer slice
+	sizearg := srarg[start:]
+	start = -1
+	for i := range sizearg {
+
+		// Check if we are at the end of the buffer, in that case
+		// just grab the size from the protocol line.
+		if i == len(sizearg)-1 {
+			c.pa.size = parseSize(sizearg)
+			if c.pa.size < 0 {
+				return fmt.Errorf("nats: processMsgArgs Bad or Missing Size: '%s'", string(arg))
+			}
+
+			return nil
+		}
+
+		if start < 0 {
+			start = i
+		}
+	}
 
 	return nil
 }
+
+// func (c *client) processMsgArgs(arg []byte) error {
+// 	if c.trace {
+// 		c.traceInOp("MSG", arg)
+// 	}
+
+// 	// Unroll splitArgs to avoid runtime/heap issues
+// 	a := [MAX_MSG_ARGS][]byte{}
+// 	args := a[:0]
+// 	start := -1
+// 	for i, b := range arg {
+// 		switch b {
+// 		case ' ', '\t', '\r', '\n':
+// 			if start >= 0 {
+// 				args = append(args, arg[start:i])
+// 				start = -1
+// 			}
+// 		default:
+// 			if start < 0 {
+// 				start = i
+// 			}
+// 		}
+// 	}
+// 	if start >= 0 {
+// 		args = append(args, arg[start:])
+// 	}
+
+// 	switch len(args) {
+// 	case 3:
+// 		c.pa.reply = nil
+// 		c.pa.szb = args[2]
+// 		c.pa.size = parseSize(args[2])
+// 	case 4:
+// 		c.pa.reply = args[2]
+// 		c.pa.szb = args[3]
+// 		c.pa.size = parseSize(args[3])
+// 	default:
+// 		return fmt.Errorf("processMsgArgs Parse Error: '%s'", arg)
+// 	}
+// 	if c.pa.size < 0 {
+// 		return fmt.Errorf("processMsgArgs Bad or Missing Size: '%s'", arg)
+// 	}
+
+// 	// Common ones processed after check for arg length
+// 	c.pa.subject = args[0]
+// 	c.pa.sid = args[1]
+
+// 	return nil
+// }
 
 func (c *client) processPub(arg []byte) error {
 	var b byte
