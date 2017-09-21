@@ -731,7 +731,7 @@ func protoSnippet(start int, buf []byte) string {
 	if stop > bufSize {
 		stop = bufSize - 1
 	}
-	return fmt.Sprintf("%q", buf[start:stop])
+	return fmt.Sprintf("%q", string(buf[start:stop]))
 }
 
 // clonePubArg is used when the split buffer scenario has the pubArg in the existing read buffer, but

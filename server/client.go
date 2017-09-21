@@ -414,7 +414,9 @@ func (c *client) traceOp(format, op string, arg []byte) {
 // Process the information messages from Clients and other Routes.
 func (c *client) processInfo(arg []byte) error {
 	info := Info{}
-	if err := json.Unmarshal(arg, &info); err != nil {
+	aarg := make([]byte, len(arg))
+	copy(aarg, arg)
+	if err := json.Unmarshal(aarg, &info); err != nil {
 		return err
 	}
 	if c.typ == ROUTER {
@@ -458,7 +460,10 @@ func (c *client) processConnect(arg []byte) error {
 	// that other routines lookup the client, and access its options under
 	// the client's lock, so unmarshalling the options outside of the lock
 	// would cause data RACEs.
-	if err := json.Unmarshal(arg, &c.opts); err != nil {
+
+	aarg := make([]byte, len(arg))
+	copy(aarg, arg)
+	if err := json.Unmarshal(aarg, &c.opts); err != nil {
 		c.mu.Unlock()
 		return err
 	}
@@ -656,7 +661,8 @@ SubjectLoop:
 				// Take a string copy from the buffer
 				// FIXME: These need to be copies so that
 				// it really does not escape!!!
-				c.pa.subject = arg[start:i]
+				// c.pa.subject = arg[start:i]
+				copy(c.pa.subject, arg[start:i])
 				start = i + 1
 				break SubjectLoop
 			}
@@ -677,7 +683,8 @@ SidLoop:
 			// Change state to capture SID
 			if start >= 0 {
 				// Take a string copy from the buffer
-				c.pa.sid = sarg[start:i]
+				// c.pa.sid = sarg[start:i]
+				copy(c.pa.sid, sarg[start:i])
 
 				// Loop to get the 'sid' next
 				start = i + 1
@@ -714,7 +721,8 @@ SizeOrReplyLoop:
 			// We have line with a reply inbox
 			if start >= 0 {
 				// Take a string copy from the buffer
-				c.pa.reply = srarg[start:i]
+				// c.pa.reply = srarg[start:i]
+				copy(c.pa.reply, srarg[start:i])
 				start = i + 1
 				break SizeOrReplyLoop
 			}
@@ -831,7 +839,8 @@ func (c *client) processPub(arg []byte) error {
 	for ; i < end; i++ {
 		b = arg[i]
 		if b == ' ' || b == '\t' {
-			c.pa.subject = arg[start:i]
+			// c.pa.subject = arg[start:i]
+			copy(c.pa.subject, arg[start:i])
 			break
 		}
 	}
@@ -861,10 +870,11 @@ func (c *client) processPub(arg []byte) error {
 			// in between so we just gather size and we're done,
 			// e.g. PUB hello 5\r\n
 			size := arg[j+1 : end+1]
-			c.pa.szb = size
+			// c.pa.szb = size
+			copy(c.pa.szb, size)
 			c.pa.size = parseSize(size)
 			if c.pa.size < 0 {
-				return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
+				return fmt.Errorf("processPub Bad or Missing Size: '%s'", string(arg))
 			}
 			if maxPayload > 0 && int64(c.pa.size) > maxPayload {
 				c.maxPayloadViolation(c.pa.size, maxPayload)
@@ -880,10 +890,11 @@ func (c *client) processPub(arg []byte) error {
 			// or extra whitespace before the payload size,
 			// e.g. PUB hello world 5\r\n
 			size := arg[j+1 : end+1]
-			c.pa.szb = size
+			// c.pa.szb = size
+			copy(c.pa.szb, size)
 			c.pa.size = parseSize(size)
 			if c.pa.size < 0 {
-				return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
+				return fmt.Errorf("processPub Bad or Missing Size: '%s'", string(arg))
 			}
 			if maxPayload > 0 && int64(c.pa.size) > maxPayload {
 				c.maxPayloadViolation(c.pa.size, maxPayload)
@@ -895,7 +906,8 @@ func (c *client) processPub(arg []byte) error {
 			// the payload size.  We can skip traversing the bytes of the reply,
 			// since already know the boundaries of the reply.
 			if arg[i+1] != ' ' && arg[j-1] != ' ' {
-				c.pa.reply = arg[i+1 : j]
+				// c.pa.reply = arg[i+1 : j]
+				copy(c.pa.reply, arg[i+1 : j])
 				return nil
 			}
 
@@ -914,7 +926,8 @@ func (c *client) processPub(arg []byte) error {
 			for ; l < k; l++ {
 				b = arg[l]
 				if b != ' ' && b != '\t' {
-					c.pa.reply = arg[l : k+1]
+					// c.pa.reply = arg[l : k+1]
+					copy(c.pa.reply, arg[l : k+1])
 					return nil
 				}
 			}
@@ -927,7 +940,7 @@ func (c *client) processPub(arg []byte) error {
 		return nil
 	}
 
-	return fmt.Errorf("processPub Parse Error: '%s'", arg)
+	return fmt.Errorf("processPub Parse Error: '%s'", string(arg))
 }
 
 func splitArg(arg []byte) [][]byte {
@@ -1182,6 +1195,7 @@ func (c *client) deliverMsg(sub *subscription, mh, msg []byte) {
 		goto writeErr
 	}
 
+	// FIXME: After all the rest of the ordeal it escapes here!!!
 	_, err = client.bw.Write(msg)
 	if err != nil {
 		goto writeErr
@@ -1338,7 +1352,12 @@ func (c *client) processMsg(msg []byte) {
 		if sub, ok := srv.routeSidQueueSubscriber(c.pa.sid); ok {
 			if sub != nil {
 				mh := c.msgHeader(msgh[:si], sub)
-				c.deliverMsg(sub, mh, msg)
+
+				// FIXME: Copy the message to prevent readLoop stack buffer
+				// from escaping.
+				mmsg := make([]byte, len(msg))
+				copy(mmsg, msg)
+				c.deliverMsg(sub, mh, mmsg)
 			}
 			return
 		}
@@ -1380,7 +1399,12 @@ func (c *client) processMsg(msg []byte) {
 		}
 		// Normal delivery
 		mh := c.msgHeader(msgh[:si], sub)
-		c.deliverMsg(sub, mh, msg)
+
+		// FIXME: Copy the message to prevent readLoop stack buffer
+		// from escaping.
+		mmsg := make([]byte, len(msg))
+		copy(mmsg, msg)
+		c.deliverMsg(sub, mh, mmsg)
 	}
 
 	// Now process any queue subs we have if not a route
@@ -1397,7 +1421,13 @@ func (c *client) processMsg(msg []byte) {
 			sub := qsubs[index]
 			if sub != nil {
 				mh := c.msgHeader(msgh[:si], sub)
-				c.deliverMsg(sub, mh, msg)
+
+				// FIXME: Copy the message to prevent readLoop stack buffer
+				// from escaping.
+				mmsg := make([]byte, len(msg))
+				copy(mmsg, msg)
+				c.deliverMsg(sub, mh, mmsg)
+				// c.deliverMsg(sub, mh, msg)
 			}
 		}
 	}

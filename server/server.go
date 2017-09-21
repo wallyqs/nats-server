@@ -644,6 +644,12 @@ func (s *Server) createClient(conn net.Conn) *client {
 	opts := s.getOpts()
 
 	c := &client{srv: s, nc: conn, opts: defaultOpts, mpay: int64(opts.MaxPayload), start: time.Now()}
+	c.pa = pubArg{
+		subject: make([]byte, 1024),
+		reply:   make([]byte, 1024),
+		sid:     make([]byte, 1024),
+		szb:     make([]byte, 1024),
+	}
 
 	// Grab JSON info string
 	s.mu.Lock()
