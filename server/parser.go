@@ -343,17 +343,18 @@ func (c *client) parse(buf []byte) error {
 			case '\r':
 				c.drop = 1
 			case '\n':
-				// var arg []byte
-				// if c.argBuf != nil {
-				// 	arg = c.argBuf
-				// 	c.argBuf = nil
-				// } else {
-				// 	arg = buf[c.as : i-c.drop]
-				// }
-				// if err := c.processUnsub(arg); err != nil {
-				// 	return err
-				// }
-				// c.drop, c.as, c.state = 0, i+1, OP_START
+				var arg []byte
+				if c.argBuf != nil {
+					arg = c.argBuf
+					c.argBuf = nil
+				} else {
+					arg = buf[c.as : i-c.drop]
+					// arg = append(arg, buf[c.as : i-c.drop]...)
+				}
+				if err := c.processUnsub(arg); err != nil {
+					return err
+				}
+				c.drop, c.as, c.state = 0, i+1, OP_START
 			default:
 				if c.argBuf != nil {
 					c.argBuf = append(c.argBuf, b)
