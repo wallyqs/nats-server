@@ -785,9 +785,6 @@ func (c *client) processPub(arg []byte) error {
 		b = arg[i]
 		if b == ' ' || b == '\t' {
 			c.pa.subject = arg[start:i]
-
-			// OK: Not needed now
-			// copy(c.pa.subject, arg[start:i])
 			break
 		}
 	}
@@ -1132,21 +1129,12 @@ func (c *client) deliverMsg(sub *subscription, mh, msg []byte) {
 	}
 
 	// Deliver to the client.
-	// msgBuf := c.msgBuf[:0]
-	var msgBuf []byte
-
 	_, err := client.bw.Write(mh)
 	if err != nil {
 		goto writeErr
 	}
 
-	// FIXME: Need to copy here once to avoid escaping read loop buffer
-	// from being in the stack, caused by bufio.Write internally.
-	// Could it just use the msgBuf instead to avoid allocation?
-	// msgBuf = make([]byte, len(msg))
-	// copy(msgBuf, msg)
-	msgBuf = append(msgBuf, msg...)
-	_, err = client.bw.Write(msgBuf)
+	_, err = client.bw.Write(msg)
 	if err != nil {
 		goto writeErr
 	}

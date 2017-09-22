@@ -167,16 +167,12 @@ func (c *client) parse(buf []byte) error {
 				if c.argBuf != nil {
 					arg = c.argBuf
 				} else {
-					// arg = buf[c.as : i-c.drop]
-					// Does not escape this way
 					arg = append(arg, buf[c.as:i-c.drop]...)
 				}
-
 				if err := c.processPub(arg); err != nil {
 					return err
 				}
 				c.drop, c.as, c.state = OP_START, i+1, MSG_PAYLOAD
-
 				// If we don't have a saved buffer then jump ahead with
 				// the index. If this overruns what is left we fall out
 				// and process split buffer.
@@ -218,29 +214,16 @@ func (c *client) parse(buf []byte) error {
 			case '\n':
 				if c.msgBuf != nil {
 					c.msgBuf = append(c.msgBuf, b)
-
-					// strict check for proto
-					if len(c.msgBuf) != c.pa.size+LEN_CR_LF {
-						goto parseErr
-					}
-
-					c.processMsg(c.msgBuf)
-					c.argBuf, c.msgBuf = nil, nil
-					c.drop, c.as, c.state = 0, i+1, OP_START
 				} else {
-					// FIXME: Append in split args
-					// causes the buffer to escape.
-					bb := buf[c.as : i+1]
-
-					// strict check for proto
-					if len(bb) != c.pa.size+LEN_CR_LF {
-						goto parseErr
-					}
-
-					c.processMsg(bb)
-					c.argBuf, c.msgBuf = nil, nil
-					c.drop, c.as, c.state = 0, i+1, OP_START
+					c.msgBuf = append(c.msgBuf, buf[c.as:i+1]...)
 				}
+				// strict check for proto
+				if len(c.msgBuf) != c.pa.size+LEN_CR_LF {
+					goto parseErr
+				}
+				c.processMsg(c.msgBuf)
+				c.argBuf, c.msgBuf = nil, nil
+				c.drop, c.as, c.state = 0, i+1, OP_START
 			default:
 				if c.msgBuf != nil {
 					c.msgBuf = append(c.msgBuf, b)
