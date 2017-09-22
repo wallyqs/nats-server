@@ -1190,13 +1190,18 @@ func (c *client) deliverMsg(sub *subscription, mh, msg []byte) {
 	}
 
 	// Deliver to the client.
+	var msgBuf []byte
+
 	_, err := client.bw.Write(mh)
 	if err != nil {
 		goto writeErr
 	}
 
-	// FIXME: After all the rest of the ordeal it escapes here!!!
-	_, err = client.bw.Write(msg)
+	// FIXME: Need to copy here once to avoid escaping read loop buffer
+	// from being in the stack, caused by bufio.Write internally.
+	msgBuf = make([]byte, len(msg))
+	copy(msgBuf, msg)
+	_, err = client.bw.Write(msgBuf)
 	if err != nil {
 		goto writeErr
 	}
@@ -1352,12 +1357,7 @@ func (c *client) processMsg(msg []byte) {
 		if sub, ok := srv.routeSidQueueSubscriber(c.pa.sid); ok {
 			if sub != nil {
 				mh := c.msgHeader(msgh[:si], sub)
-
-				// FIXME: Copy the message to prevent readLoop stack buffer
-				// from escaping.
-				mmsg := make([]byte, len(msg))
-				copy(mmsg, msg)
-				c.deliverMsg(sub, mh, mmsg)
+				c.deliverMsg(sub, mh, msg)
 			}
 			return
 		}
@@ -1399,12 +1399,7 @@ func (c *client) processMsg(msg []byte) {
 		}
 		// Normal delivery
 		mh := c.msgHeader(msgh[:si], sub)
-
-		// FIXME: Copy the message to prevent readLoop stack buffer
-		// from escaping.
-		mmsg := make([]byte, len(msg))
-		copy(mmsg, msg)
-		c.deliverMsg(sub, mh, mmsg)
+		c.deliverMsg(sub, mh, msg)
 	}
 
 	// Now process any queue subs we have if not a route
@@ -1421,13 +1416,7 @@ func (c *client) processMsg(msg []byte) {
 			sub := qsubs[index]
 			if sub != nil {
 				mh := c.msgHeader(msgh[:si], sub)
-
-				// FIXME: Copy the message to prevent readLoop stack buffer
-				// from escaping.
-				mmsg := make([]byte, len(msg))
-				copy(mmsg, msg)
-				c.deliverMsg(sub, mh, mmsg)
-				// c.deliverMsg(sub, mh, msg)
+				c.deliverMsg(sub, mh, msg)
 			}
 		}
 	}
