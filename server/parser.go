@@ -509,26 +509,21 @@ func (c *client) parse(buf []byte) error {
 			case '\r':
 				c.drop = 1
 			case '\n':
+				var arg []byte
 				if c.argBuf != nil {
-					if err := c.processMsgArgs(c.argBuf); err != nil {
-						return err
-					}
-					c.drop, c.as, c.state = 0, i+1, MSG_PAYLOAD
-
-					// jump ahead with the index. If this overruns
-					// what is left we fall out and process split
-					// buffer.
-					i = c.as + c.pa.size - 1
+					arg = c.argBuf
 				} else {
-					if err := c.processMsgArgs(buf[c.as : i-c.drop]); err != nil {
-						return err
-					}
-					c.drop, c.as, c.state = 0, i+1, MSG_PAYLOAD
-
-					// jump ahead with the index. If this overruns
-					// what is left we fall out and process split
-					// buffer.
-					i = c.as + c.pa.size - 1
+					arg = append(arg, buf[c.as:i-c.drop]...)
+				}
+				if err := c.processPub(arg); err != nil {
+					return err
+				}
+				c.drop, c.as, c.state = OP_START, i+1, MSG_PAYLOAD
+				// If we don't have a saved buffer then jump ahead with
+				// the index. If this overruns what is left we fall out
+				// and process split buffer.
+				if c.msgBuf == nil {
+					i = c.as + c.pa.size - LEN_CR_LF
 				}
 			default:
 				if c.argBuf != nil {

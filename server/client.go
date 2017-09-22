@@ -659,10 +659,7 @@ SubjectLoop:
 			// Change state to capture SID
 			if start >= 0 {
 				// Take a string copy from the buffer
-				// FIXME: These need to be copies so that
-				// it really does not escape!!!
-				// c.pa.subject = arg[start:i]
-				copy(c.pa.subject, arg[start:i])
+				c.pa.subject = arg[start:i]
 				start = i + 1
 				break SubjectLoop
 			}
@@ -682,9 +679,7 @@ SidLoop:
 		case ' ', '\t':
 			// Change state to capture SID
 			if start >= 0 {
-				// Take a string copy from the buffer
-				// c.pa.sid = sarg[start:i]
-				copy(c.pa.sid, sarg[start:i])
+				c.pa.sid = sarg[start:i]
 
 				// Loop to get the 'sid' next
 				start = i + 1
@@ -721,8 +716,7 @@ SizeOrReplyLoop:
 			// We have line with a reply inbox
 			if start >= 0 {
 				// Take a string copy from the buffer
-				// c.pa.reply = srarg[start:i]
-				copy(c.pa.reply, srarg[start:i])
+				c.pa.reply = srarg[start:i]
 				start = i + 1
 				break SizeOrReplyLoop
 			}
@@ -757,55 +751,6 @@ SizeOrReplyLoop:
 
 	return nil
 }
-
-// func (c *client) processMsgArgs(arg []byte) error {
-// 	if c.trace {
-// 		c.traceInOp("MSG", arg)
-// 	}
-
-// 	// Unroll splitArgs to avoid runtime/heap issues
-// 	a := [MAX_MSG_ARGS][]byte{}
-// 	args := a[:0]
-// 	start := -1
-// 	for i, b := range arg {
-// 		switch b {
-// 		case ' ', '\t', '\r', '\n':
-// 			if start >= 0 {
-// 				args = append(args, arg[start:i])
-// 				start = -1
-// 			}
-// 		default:
-// 			if start < 0 {
-// 				start = i
-// 			}
-// 		}
-// 	}
-// 	if start >= 0 {
-// 		args = append(args, arg[start:])
-// 	}
-
-// 	switch len(args) {
-// 	case 3:
-// 		c.pa.reply = nil
-// 		c.pa.szb = args[2]
-// 		c.pa.size = parseSize(args[2])
-// 	case 4:
-// 		c.pa.reply = args[2]
-// 		c.pa.szb = args[3]
-// 		c.pa.size = parseSize(args[3])
-// 	default:
-// 		return fmt.Errorf("processMsgArgs Parse Error: '%s'", arg)
-// 	}
-// 	if c.pa.size < 0 {
-// 		return fmt.Errorf("processMsgArgs Bad or Missing Size: '%s'", arg)
-// 	}
-
-// 	// Common ones processed after check for arg length
-// 	c.pa.subject = args[0]
-// 	c.pa.sid = args[1]
-
-// 	return nil
-// }
 
 func (c *client) processPub(arg []byte) error {
 	var b byte
@@ -872,8 +817,6 @@ func (c *client) processPub(arg []byte) error {
 			// in between so we just gather size and we're done,
 			// e.g. PUB hello 5\r\n
 			size := arg[j+1 : end+1]
-			// c.pa.szb = size
-			// copy(c.pa.szb, size)
 			c.pa.size = parseSize(size)
 			if c.pa.size < 0 {
 				return fmt.Errorf("processPub Bad or Missing Size: '%s'", string(arg))
@@ -893,7 +836,6 @@ func (c *client) processPub(arg []byte) error {
 			// e.g. PUB hello world 5\r\n
 			size := arg[j+1 : end+1]
 			c.pa.szb = size
-			// copy(c.pa.szb, size)
 			c.pa.size = parseSize(size)
 			if c.pa.size < 0 {
 				return fmt.Errorf("processPub Bad or Missing Size: '%s'", string(arg))
@@ -908,9 +850,7 @@ func (c *client) processPub(arg []byte) error {
 			// the payload size.  We can skip traversing the bytes of the reply,
 			// since already know the boundaries of the reply.
 			if arg[i+1] != ' ' && arg[j-1] != ' ' {
-				// from c.parseState.pa.reply (dot-equals) at ../server/client.go:909:16
 				c.pa.reply = arg[i+1 : j]
-				// copy(c.pa.reply, arg[i+1:j])
 				return nil
 			}
 
@@ -930,7 +870,6 @@ func (c *client) processPub(arg []byte) error {
 				b = arg[l]
 				if b != ' ' && b != '\t' {
 					c.pa.reply = arg[l : k+1]
-					// copy(c.pa.reply, arg[l:k+1])
 					return nil
 				}
 			}
