@@ -167,7 +167,9 @@ func (c *client) parse(buf []byte) error {
 				if c.argBuf != nil {
 					arg = c.argBuf
 				} else {
-					arg = buf[c.as : i-c.drop]
+					// arg = buf[c.as : i-c.drop]
+					// Does not escape this way
+					arg = append(arg, buf[c.as:i-c.drop]...)
 				}
 
 				if err := c.processPub(arg); err != nil {
@@ -459,7 +461,8 @@ func (c *client) parse(buf []byte) error {
 					arg = c.argBuf
 					c.argBuf = nil
 				} else {
-					arg = buf[c.as : i-c.drop]
+					// arg = buf[c.as : i-c.drop]
+					arg = append(arg, buf[c.as:i-c.drop]...)
 				}
 				if err := c.processConnect(arg); err != nil {
 					return err
@@ -571,7 +574,8 @@ func (c *client) parse(buf []byte) error {
 					arg = c.argBuf
 					c.argBuf = nil
 				} else {
-					arg = buf[c.as : i-c.drop]
+					// arg = buf[c.as : i-c.drop]
+					arg = append(arg, buf[c.as:i-c.drop]...)
 				}
 				if err := c.processInfo(arg); err != nil {
 					return err

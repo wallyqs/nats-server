@@ -414,9 +414,9 @@ func (c *client) traceOp(format, op string, arg []byte) {
 // Process the information messages from Clients and other Routes.
 func (c *client) processInfo(arg []byte) error {
 	info := Info{}
-	aarg := make([]byte, len(arg))
-	copy(aarg, arg)
-	if err := json.Unmarshal(aarg, &info); err != nil {
+	// aarg := make([]byte, len(arg))
+	// copy(aarg, arg)
+	if err := json.Unmarshal(arg, &info); err != nil {
 		return err
 	}
 	if c.typ == ROUTER {
@@ -461,9 +461,9 @@ func (c *client) processConnect(arg []byte) error {
 	// the client's lock, so unmarshalling the options outside of the lock
 	// would cause data RACEs.
 
-	aarg := make([]byte, len(arg))
-	copy(aarg, arg)
-	if err := json.Unmarshal(aarg, &c.opts); err != nil {
+	// aarg := make([]byte, len(arg))
+	// copy(aarg, arg)
+	if err := json.Unmarshal(arg, &c.opts); err != nil {
 		c.mu.Unlock()
 		return err
 	}
@@ -839,8 +839,10 @@ func (c *client) processPub(arg []byte) error {
 	for ; i < end; i++ {
 		b = arg[i]
 		if b == ' ' || b == '\t' {
-			// c.pa.subject = arg[start:i]
-			copy(c.pa.subject, arg[start:i])
+			c.pa.subject = arg[start:i]
+
+			// OK: Not needed now
+			// copy(c.pa.subject, arg[start:i])
 			break
 		}
 	}
@@ -871,7 +873,7 @@ func (c *client) processPub(arg []byte) error {
 			// e.g. PUB hello 5\r\n
 			size := arg[j+1 : end+1]
 			// c.pa.szb = size
-			copy(c.pa.szb, size)
+			// copy(c.pa.szb, size)
 			c.pa.size = parseSize(size)
 			if c.pa.size < 0 {
 				return fmt.Errorf("processPub Bad or Missing Size: '%s'", string(arg))
@@ -890,8 +892,8 @@ func (c *client) processPub(arg []byte) error {
 			// or extra whitespace before the payload size,
 			// e.g. PUB hello world 5\r\n
 			size := arg[j+1 : end+1]
-			// c.pa.szb = size
-			copy(c.pa.szb, size)
+			c.pa.szb = size
+			// copy(c.pa.szb, size)
 			c.pa.size = parseSize(size)
 			if c.pa.size < 0 {
 				return fmt.Errorf("processPub Bad or Missing Size: '%s'", string(arg))
@@ -906,8 +908,9 @@ func (c *client) processPub(arg []byte) error {
 			// the payload size.  We can skip traversing the bytes of the reply,
 			// since already know the boundaries of the reply.
 			if arg[i+1] != ' ' && arg[j-1] != ' ' {
-				// c.pa.reply = arg[i+1 : j]
-				copy(c.pa.reply, arg[i+1 : j])
+				// from c.parseState.pa.reply (dot-equals) at ../server/client.go:909:16
+				c.pa.reply = arg[i+1 : j]
+				// copy(c.pa.reply, arg[i+1:j])
 				return nil
 			}
 
@@ -926,8 +929,8 @@ func (c *client) processPub(arg []byte) error {
 			for ; l < k; l++ {
 				b = arg[l]
 				if b != ' ' && b != '\t' {
-					// c.pa.reply = arg[l : k+1]
-					copy(c.pa.reply, arg[l : k+1])
+					c.pa.reply = arg[l : k+1]
+					// copy(c.pa.reply, arg[l:k+1])
 					return nil
 				}
 			}
@@ -1190,6 +1193,7 @@ func (c *client) deliverMsg(sub *subscription, mh, msg []byte) {
 	}
 
 	// Deliver to the client.
+	// msgBuf := c.msgBuf[:0]
 	var msgBuf []byte
 
 	_, err := client.bw.Write(mh)
@@ -1199,8 +1203,10 @@ func (c *client) deliverMsg(sub *subscription, mh, msg []byte) {
 
 	// FIXME: Need to copy here once to avoid escaping read loop buffer
 	// from being in the stack, caused by bufio.Write internally.
-	msgBuf = make([]byte, len(msg))
-	copy(msgBuf, msg)
+	// Could it just use the msgBuf instead to avoid allocation?
+	// msgBuf = make([]byte, len(msg))
+	// copy(msgBuf, msg)
+	msgBuf = append(msgBuf, msg...)
 	_, err = client.bw.Write(msgBuf)
 	if err != nil {
 		goto writeErr
