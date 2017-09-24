@@ -816,6 +816,7 @@ func (c *client) processPub(arg []byte) error {
 }
 
 func splitArg(arg []byte) [][]byte {
+	// FIXME: escapes to heap
 	a := [MAX_MSG_ARGS][]byte{}
 	args := a[:0]
 	start := -1
@@ -934,19 +935,42 @@ func (c *client) unsubscribe(sub *subscription) {
 
 func (c *client) processUnsub(arg []byte) error {
 	c.traceInOp("UNSUB", arg)
-	args := splitArg(arg)
-	var sid []byte
-	max := -1
+	// splitArg(arg)
 
-	switch len(args) {
-	case 1:
-		sid = args[0]
-	case 2:
-		sid = args[0]
-		max = parseSize(args[1])
-	default:
-		return fmt.Errorf("processUnsub Parse Error: '%s'", arg)
-	}
+	// 1) parse sid
+	// 2) parse sid + max
+	
+	// args := splitArg(arg)
+	// switch len(args) {
+	// case 1:
+	// 	sid = args[0]
+	// case 2:
+	// 	sid = args[0]
+	// 	max = parseSize(args[1])
+	// default:
+	// 	return fmt.Errorf("processUnsub Parse Error: '%s'", arg)
+	// }
+
+	var sid string
+	max := 1
+
+	// FIXME: This drops the performance
+	// start := -1
+	// for i, b := range arg {
+	// 	switch b {
+	// 	case ' ', '\t':
+	// 		if start >= 0 {
+	// 			// args = append(args, arg[start:i])
+	// 			sid = string(arg[start:i])
+	// 			start = -1
+	// 			break
+	// 		}
+	// 	default:
+	// 		if start < 0 {
+	// 			start = i
+	// 		}
+	// 	}
+	// }
 
 	// Indicate activity.
 	c.cache.subs += 1
@@ -958,7 +982,7 @@ func (c *client) processUnsub(arg []byte) error {
 	ok := false
 
 	c.mu.Lock()
-	if sub, ok = c.subs[string(sid)]; ok {
+	if sub, ok = c.subs[sid]; ok {
 		if max > 0 {
 			sub.max = int64(max)
 		} else {
