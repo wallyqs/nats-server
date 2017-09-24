@@ -334,7 +334,6 @@ func (c *client) parse(buf []byte) error {
 					c.argBuf = nil
 				} else {
 					arg = buf[c.as : i-c.drop]
-					// arg = append(arg, buf[c.as : i-c.drop]...)
 				}
 				if err := c.processUnsub(arg); err != nil {
 					return err
