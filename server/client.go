@@ -3,7 +3,6 @@
 package server
 
 import (
-	"bufio"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -95,7 +94,7 @@ type client struct {
 	start time.Time
 	nc    net.Conn
 	ncs   string
-	bw    *bufio.Writer
+	bw    *bufioWriter
 	srv   *Server
 	subs  map[string]*subscription
 	perms *permissions
@@ -189,7 +188,7 @@ func init() {
 func (c *client) initClient() {
 	s := c.srv
 	c.cid = atomic.AddUint64(&s.gcid, 1)
-	c.bw = bufio.NewWriterSize(c.nc, startBufSize)
+	c.bw = NewBufioWriterSize(c.nc, startBufSize)
 	c.subs = make(map[string]*subscription)
 	c.debug = (atomic.LoadInt32(&c.srv.logging.debug) != 0)
 	c.trace = (atomic.LoadInt32(&c.srv.logging.trace) != 0)
@@ -343,11 +342,11 @@ func (c *client) readLoop() {
 					sz := cp.bw.Available()
 					// Check for expansion opportunity.
 					if wfc > 2 && sz <= maxBufSize/2 {
-						cp.bw = bufio.NewWriterSize(cp.nc, sz*2)
+						cp.bw = NewBufioWriterSize(cp.nc, sz*2)
 					}
 					// Check for shrinking opportunity.
 					if wfc == 0 && sz >= minBufSize*2 {
-						cp.bw = bufio.NewWriterSize(cp.nc, sz/2)
+						cp.bw = NewBufioWriterSize(cp.nc, sz/2)
 					}
 				}
 			}
@@ -673,26 +672,26 @@ func (c *client) processMsgArgs(arg []byte) error {
 	// FIXME: Usage of c.pa.szb here causes the buffer to escape
 	// ../server/client.go:638:45: leaking param: arg
 	// ../server/client.go:638:45: 	from args (array-element-equals) at ../server/client.go:651:13
-	// ../server/client.go:638:45: 	from c.parseState.pa.szb (dot-equals) at ../server/client.go:669:12	
-	// switch n {
-	// case 3:
-	// 	c.pa.reply = nil
-	// 	c.pa.szb = args[2]
-	// 	c.pa.size = parseSize(args[2])
-	// case 4:
-	// 	c.pa.reply = args[2]
-	// 	c.pa.szb = args[3]
-	// 	c.pa.size = parseSize(args[3])
-	// default:
-	// 	return fmt.Errorf("processMsgArgs Parse Error: '%s'", string(arg))
-	// }
-	// if c.pa.size < 0 {
-	// 	return fmt.Errorf("processMsgArgs Bad or Missing Size: '%s'", string(arg))
-	// }
+	// ../server/client.go:638:45: 	from c.parseState.pa.szb (dot-equals) at ../server/client.go:669:12
+	switch n {
+	case 3:
+		c.pa.reply = nil
+		c.pa.szb = args[2]
+		c.pa.size = parseSize(args[2])
+	case 4:
+		c.pa.reply = args[2]
+		c.pa.szb = args[3]
+		c.pa.size = parseSize(args[3])
+	default:
+		return fmt.Errorf("processMsgArgs Parse Error: '%s'", string(arg))
+	}
+	if c.pa.size < 0 {
+		return fmt.Errorf("processMsgArgs Bad or Missing Size: '%s'", string(arg))
+	}
 
-	// // Common ones processed after check for arg length
-	// c.pa.subject = args[0]
-	// c.pa.sid = args[1]
+	// Common ones processed after check for arg length
+	c.pa.subject = args[0]
+	c.pa.sid = args[1]
 
 	return nil
 }
@@ -1181,20 +1180,19 @@ func (c *client) deliverMsg(sub *subscription, mh, msg []byte) {
 		client.nc.SetWriteDeadline(time.Now().Add(client.srv.getOpts().WriteDeadline))
 		deadlineSet = true
 	}
-	var err error
 
 	// Deliver to the client.
 	// FIXME: These use interfaces internally so it makes
 	// the passed buffer escape.
-	// _, err := client.bw.Write(mh)
-	// if err != nil {
-	// 	goto writeErr
-	// }
+	_, err := client.bw.Write(mh)
+	if err != nil {
+		goto writeErr
+	}
 
-	// _, err = client.bw.Write(msg)
-	// if err != nil {
-	// 	goto writeErr
-	// }
+	_, err = client.bw.Write(msg)
+	if err != nil {
+		goto writeErr
+	}
 
 	if c.trace {
 		client.traceOutOp(string(mh[:len(mh)-LEN_CR_LF]), nil)
@@ -1209,7 +1207,7 @@ func (c *client) deliverMsg(sub *subscription, mh, msg []byte) {
 	c.pcd[client] = needFlush
 	return
 
-// writeErr:
+writeErr:
 	if deadlineSet {
 		client.nc.SetWriteDeadline(time.Time{})
 	}

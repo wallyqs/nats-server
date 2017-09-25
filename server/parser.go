@@ -524,8 +524,7 @@ func (c *client) parse(buf []byte) error {
 					i = c.as + c.pa.size - 1
 				} else {
 					// arg = buf[c.as : i-c.drop]
-					bbb := buf[c.as : i-c.drop]
-					if err := c.processMsgArgs(bbb); err != nil {
+					if err := c.processMsgArgs(buf[c.as : i-c.drop]); err != nil {
 						return err
 					}
 					c.drop, c.as, c.state = 0, i+1, MSG_PAYLOAD

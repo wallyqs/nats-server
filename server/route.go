@@ -3,7 +3,6 @@
 package server
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
@@ -390,7 +389,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 		}
 
 		// Rewrap bw
-		c.bw = bufio.NewWriterSize(c.nc, startBufSize)
+		c.bw = NewBufioWriterSize(c.nc, startBufSize)
 	}
 
 	// Do final client initialization
