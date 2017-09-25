@@ -645,6 +645,10 @@ func (c *client) processMsgArgs(arg []byte) error {
 	if c.trace {
 		c.traceInOp("MSG", nil)
 	}
+	c.pa.subject = nil
+	c.pa.reply = nil
+	c.pa.szb = nil
+	c.pa.sid = nil
 
 	// Unroll splitArgs to avoid runtime/heap issues
 	n := 0
@@ -654,11 +658,11 @@ func (c *client) processMsgArgs(arg []byte) error {
 		switch b {
 		case ' ', '\t':
 			if start >= 0 {
-				// args[n] = arg[start:i]
-				view := arg[start:i]
-				buf := make([]byte, len(view))
-				copy(buf, view)
-				args[n] = buf
+				args[n] = arg[start:i]
+				// view := arg[start:i]
+				// buf := make([]byte, len(view))
+				// copy(buf, view)
+				// args[n] = buf
 				n++
 				start = -1
 			}
@@ -669,11 +673,11 @@ func (c *client) processMsgArgs(arg []byte) error {
 		}
 	}
 	if start >= 0 {
-		// args[n] = arg[start:]
-		view := arg[start:]
-		buf := make([]byte, len(view))
-		copy(buf, view)
-		args[n] = buf
+		args[n] = arg[start:]
+		// view := arg[start:]
+		// buf := make([]byte, len(view))
+		// copy(buf, view)
+		// args[n] = buf
 		n++
 	}
 
@@ -684,11 +688,11 @@ func (c *client) processMsgArgs(arg []byte) error {
 	switch n {
 	case 3:
 		c.pa.reply = nil
-		c.pa.szb = args[2]
+		c.pa.szb = append(c.pa.szb, args[2]...)
 		c.pa.size = parseSize(args[2])
 	case 4:
-		c.pa.reply = args[2]
-		c.pa.szb = args[3]
+		c.pa.reply = append(c.pa.reply, args[2]...)
+		c.pa.szb = append(c.pa.szb, args[3]...)
 		c.pa.size = parseSize(args[3])
 	default:
 		return fmt.Errorf("processMsgArgs Parse Error: '%s'", string(arg))
@@ -698,8 +702,8 @@ func (c *client) processMsgArgs(arg []byte) error {
 	}
 
 	// Common ones processed after check for arg length
-	c.pa.subject = args[0]
-	c.pa.sid = args[1]
+	c.pa.subject = append(c.pa.subject, args[0]...)
+	c.pa.sid = append(c.pa.sid, args[1]...)
 
 	return nil
 }
@@ -708,6 +712,10 @@ func (c *client) processPub(arg []byte) error {
 	if c.trace {
 		c.traceInOp("PUB", arg)
 	}
+	// Reset these
+	c.pa.subject = nil
+	c.pa.reply = nil
+	c.pa.szb = nil
 
 	// Unroll splitArgs to avoid runtime/heap issues
 	n := 0
@@ -717,11 +725,11 @@ func (c *client) processPub(arg []byte) error {
 		switch b {
 		case ' ', '\t':
 			if start >= 0 {
-				// args[n] = arg[start:i]
-				view := arg[start:i]
-				buf := make([]byte, len(view))
-				copy(buf, view)
-				args[n] = buf
+				args[n] = arg[start:i]
+				// view := arg[start:i]
+				// buf := make([]byte, len(view))
+				// copy(buf, view)
+				// args[n] = buf
 				n++
 				start = -1
 			}
@@ -732,26 +740,26 @@ func (c *client) processPub(arg []byte) error {
 		}
 	}
 	if start >= 0 {
-		// args[n] = arg[start:]
-		view := arg[start:]
-		buf := make([]byte, len(view))
-		copy(buf, view)
-		args[n] = buf
+		args[n] = arg[start:]
+		// view := arg[start:]
+		// buf := make([]byte, len(view))
+		// copy(buf, view)
+		// args[n] = buf
 		n++
 	}
 
 	switch n {
 	case 2:
 		// NOTE: Should these be copies?
-		c.pa.subject = args[0]
+		c.pa.subject = append(c.pa.subject, args[0]...)
 		c.pa.reply = nil
 		c.pa.size = parseSize(args[1])
-		c.pa.szb = args[1]
+		c.pa.szb = append(c.pa.szb, args[1]...)
 	case 3:
-		c.pa.subject = args[0]
-		c.pa.reply = args[1]
+		c.pa.subject = append(c.pa.subject, args[0]...)
+		c.pa.reply = append(c.pa.reply, args[1]...)
 		c.pa.size = parseSize(args[2])
-		c.pa.szb = args[2]
+		c.pa.szb = append(c.pa.szb, args[2]...)
 	default:
 		return fmt.Errorf("processPub Parse Error: '%s'", string(arg))
 	}
