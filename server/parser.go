@@ -451,19 +451,26 @@ func (c *client) parse(buf []byte) error {
 			case '\r':
 				c.drop = 1
 			case '\n':
-				var arg []byte
+				// var arg []byte
 				if c.argBuf != nil {
-					arg = c.argBuf
+					// arg = c.argBuf
+					if err := c.processConnect(c.argBuf); err != nil {
+						return err
+					}
+					c.drop, c.state = 0, OP_START
+					// Reset notion on authSet
+					authSet = c.isAuthTimerSet()
+
 					c.argBuf = nil
 				} else {
-					arg = buf[c.as : i-c.drop]
+					// arg = buf[c.as : i-c.drop]
+					if err := c.processConnect(buf[c.as : i-c.drop]); err != nil {
+						return err
+					}
+					c.drop, c.state = 0, OP_START
+					// Reset notion on authSet
+					authSet = c.isAuthTimerSet()
 				}
-				if err := c.processConnect(arg); err != nil {
-					return err
-				}
-				c.drop, c.state = 0, OP_START
-				// Reset notion on authSet
-				authSet = c.isAuthTimerSet()
 			default:
 				if c.argBuf != nil {
 					c.argBuf = append(c.argBuf, b)
@@ -517,7 +524,8 @@ func (c *client) parse(buf []byte) error {
 					i = c.as + c.pa.size - 1
 				} else {
 					// arg = buf[c.as : i-c.drop]
-					if err := c.processMsgArgs(buf[c.as : i-c.drop]); err != nil {
+					bbb := buf[c.as : i-c.drop]
+					if err := c.processMsgArgs(bbb); err != nil {
 						return err
 					}
 					c.drop, c.as, c.state = 0, i+1, MSG_PAYLOAD
@@ -566,17 +574,21 @@ func (c *client) parse(buf []byte) error {
 			case '\r':
 				c.drop = 1
 			case '\n':
-				var arg []byte
+				// var arg []byte
 				if c.argBuf != nil {
-					arg = c.argBuf
+					// arg = c.argBuf
+					if err := c.processInfo(c.argBuf); err != nil {
+						return err
+					}
+					c.drop, c.as, c.state = 0, i+1, OP_START
 					c.argBuf = nil
 				} else {
-					arg = buf[c.as : i-c.drop]
+					// arg = buf[c.as : i-c.drop]
+					if err := c.processInfo(buf[c.as : i-c.drop]); err != nil {
+						return err
+					}
+					c.drop, c.as, c.state = 0, i+1, OP_START
 				}
-				if err := c.processInfo(arg); err != nil {
-					return err
-				}
-				c.drop, c.as, c.state = 0, i+1, OP_START
 			default:
 				if c.argBuf != nil {
 					c.argBuf = append(c.argBuf, b)
@@ -731,7 +743,7 @@ func protoSnippet(start int, buf []byte) string {
 	if stop > bufSize {
 		stop = bufSize - 1
 	}
-	return fmt.Sprintf("%q", buf[start:stop])
+	return fmt.Sprintf("%q", string(buf[start:stop]))
 }
 
 // clonePubArg is used when the split buffer scenario has the pubArg in the existing read buffer, but

@@ -414,7 +414,9 @@ func (c *client) traceOp(format, op string, arg []byte) {
 // Process the information messages from Clients and other Routes.
 func (c *client) processInfo(arg []byte) error {
 	info := Info{}
-	if err := json.Unmarshal(arg, &info); err != nil {
+	aarg := make([]byte, len(arg))
+	copy(aarg, arg)
+	if err := json.Unmarshal(aarg, &info); err != nil {
 		return err
 	}
 	if c.typ == ROUTER {
@@ -453,12 +455,17 @@ func (c *client) processConnect(arg []byte) error {
 	typ := c.typ
 	r := c.route
 	srv := c.srv
+
+	// copy to prevent escaping
+	aarg := make([]byte, len(arg))
+	copy(aarg, arg)
+
 	// Moved unmarshalling of clients' Options under the lock.
 	// The client has already been added to the server map, so it is possible
 	// that other routines lookup the client, and access its options under
 	// the client's lock, so unmarshalling the options outside of the lock
 	// would cause data RACEs.
-	if err := json.Unmarshal(arg, &c.opts); err != nil {
+	if err := json.Unmarshal(aarg, &c.opts); err != nil {
 		c.mu.Unlock()
 		return err
 	}
@@ -637,7 +644,7 @@ func (c *client) processPong() {
 
 func (c *client) processMsgArgs(arg []byte) error {
 	if c.trace {
-		c.traceInOp("MSG", arg)
+		c.traceInOp("MSG", nil)
 	}
 
 	// Unroll splitArgs to avoid runtime/heap issues
@@ -667,25 +674,25 @@ func (c *client) processMsgArgs(arg []byte) error {
 	// ../server/client.go:638:45: leaking param: arg
 	// ../server/client.go:638:45: 	from args (array-element-equals) at ../server/client.go:651:13
 	// ../server/client.go:638:45: 	from c.parseState.pa.szb (dot-equals) at ../server/client.go:669:12	
-	switch n {
-	case 3:
-		c.pa.reply = nil
-		c.pa.szb = args[2]
-		c.pa.size = parseSize(args[2])
-	case 4:
-		c.pa.reply = args[2]
-		c.pa.szb = args[3]
-		c.pa.size = parseSize(args[3])
-	default:
-		return fmt.Errorf("processMsgArgs Parse Error: '%s'", string(arg))
-	}
-	if c.pa.size < 0 {
-		return fmt.Errorf("processMsgArgs Bad or Missing Size: '%s'", string(arg))
-	}
+	// switch n {
+	// case 3:
+	// 	c.pa.reply = nil
+	// 	c.pa.szb = args[2]
+	// 	c.pa.size = parseSize(args[2])
+	// case 4:
+	// 	c.pa.reply = args[2]
+	// 	c.pa.szb = args[3]
+	// 	c.pa.size = parseSize(args[3])
+	// default:
+	// 	return fmt.Errorf("processMsgArgs Parse Error: '%s'", string(arg))
+	// }
+	// if c.pa.size < 0 {
+	// 	return fmt.Errorf("processMsgArgs Bad or Missing Size: '%s'", string(arg))
+	// }
 
-	// Common ones processed after check for arg length
-	c.pa.subject = args[0]
-	c.pa.sid = args[1]
+	// // Common ones processed after check for arg length
+	// c.pa.subject = args[0]
+	// c.pa.sid = args[1]
 
 	return nil
 }
@@ -718,22 +725,22 @@ func (c *client) processPub(arg []byte) error {
 		n++
 	}
 
-	switch n {
-	case 2:
-		c.pa.subject = args[0]
-		c.pa.reply = nil
-		c.pa.size = parseSize(args[1])
-		c.pa.szb = args[1]
-	case 3:
-		c.pa.subject = args[0]
-		c.pa.reply = args[1]
-		c.pa.size = parseSize(args[2])
-		c.pa.szb = args[2]
-	default:
-		return fmt.Errorf("processPub Parse Error: '%s'", arg)
-	}
+	// switch n {
+	// case 2:
+	// 	c.pa.subject = args[0]
+	// 	c.pa.reply = nil
+	// 	c.pa.size = parseSize(args[1])
+	// 	c.pa.szb = args[1]
+	// case 3:
+	// 	c.pa.subject = args[0]
+	// 	c.pa.reply = args[1]
+	// 	c.pa.size = parseSize(args[2])
+	// 	c.pa.szb = args[2]
+	// default:
+	// 	return fmt.Errorf("processPub Parse Error: '%s'", arg)
+	// }
 	if c.pa.size < 0 {
-		return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
+		return fmt.Errorf("processPub Bad or Missing Size: '%s'", string(arg))
 	}
 	maxPayload := atomic.LoadInt64(&c.mpay)
 	if maxPayload > 0 && int64(c.pa.size) > maxPayload {
@@ -1174,17 +1181,20 @@ func (c *client) deliverMsg(sub *subscription, mh, msg []byte) {
 		client.nc.SetWriteDeadline(time.Now().Add(client.srv.getOpts().WriteDeadline))
 		deadlineSet = true
 	}
+	var err error
 
 	// Deliver to the client.
-	_, err := client.bw.Write(mh)
-	if err != nil {
-		goto writeErr
-	}
+	// FIXME: These use interfaces internally so it makes
+	// the passed buffer escape.
+	// _, err := client.bw.Write(mh)
+	// if err != nil {
+	// 	goto writeErr
+	// }
 
-	_, err = client.bw.Write(msg)
-	if err != nil {
-		goto writeErr
-	}
+	// _, err = client.bw.Write(msg)
+	// if err != nil {
+	// 	goto writeErr
+	// }
 
 	if c.trace {
 		client.traceOutOp(string(mh[:len(mh)-LEN_CR_LF]), nil)
@@ -1199,7 +1209,7 @@ func (c *client) deliverMsg(sub *subscription, mh, msg []byte) {
 	c.pcd[client] = needFlush
 	return
 
-writeErr:
+// writeErr:
 	if deadlineSet {
 		client.nc.SetWriteDeadline(time.Time{})
 	}
