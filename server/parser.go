@@ -711,6 +711,8 @@ func (c *client) parse(buf []byte) error {
 			if lrem > c.pa.size+LEN_CR_LF {
 				goto parseErr
 			}
+
+			// NOTE: Too large for stack
 			c.msgBuf = make([]byte, lrem, c.pa.size+LEN_CR_LF)
 			copy(c.msgBuf, buf[c.as:])
 		} else {

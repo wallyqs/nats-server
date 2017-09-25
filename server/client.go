@@ -654,7 +654,11 @@ func (c *client) processMsgArgs(arg []byte) error {
 		switch b {
 		case ' ', '\t':
 			if start >= 0 {
-				args[n] = arg[start:i]
+				// args[n] = arg[start:i]
+				view := arg[start:i]
+				buf := make([]byte, len(view))
+				copy(buf, view)
+				args[n] = buf
 				n++
 				start = -1
 			}
@@ -665,7 +669,11 @@ func (c *client) processMsgArgs(arg []byte) error {
 		}
 	}
 	if start >= 0 {
-		args[n] = arg[start:]
+		// args[n] = arg[start:]
+		view := arg[start:]
+		buf := make([]byte, len(view))
+		copy(buf, view)
+		args[n] = buf
 		n++
 	}
 
@@ -709,7 +717,11 @@ func (c *client) processPub(arg []byte) error {
 		switch b {
 		case ' ', '\t':
 			if start >= 0 {
-				args[n] = arg[start:i]
+				// args[n] = arg[start:i]
+				view := arg[start:i]
+				buf := make([]byte, len(view))
+				copy(buf, view)
+				args[n] = buf
 				n++
 				start = -1
 			}
@@ -720,12 +732,17 @@ func (c *client) processPub(arg []byte) error {
 		}
 	}
 	if start >= 0 {
-		args[n] = arg[start:]
+		// args[n] = arg[start:]
+		view := arg[start:]
+		buf := make([]byte, len(view))
+		copy(buf, view)
+		args[n] = buf
 		n++
 	}
 
 	switch n {
 	case 2:
+		// NOTE: Should these be copies?
 		c.pa.subject = args[0]
 		c.pa.reply = nil
 		c.pa.size = parseSize(args[1])
@@ -736,7 +753,7 @@ func (c *client) processPub(arg []byte) error {
 		c.pa.size = parseSize(args[2])
 		c.pa.szb = args[2]
 	default:
-		return fmt.Errorf("processPub Parse Error: '%s'", arg)
+		return fmt.Errorf("processPub Parse Error: '%s'", string(arg))
 	}
 	if c.pa.size < 0 {
 		return fmt.Errorf("processPub Bad or Missing Size: '%s'", string(arg))
@@ -1103,6 +1120,8 @@ func (c *client) processUnsub(arg []byte) error {
 	return nil
 }
 
+// NOTE: this is inlined
+// ../server/client.go:1389:20: inlining call to (*client).msgHeader...
 func (c *client) msgHeader(mh []byte, sub *subscription) []byte {
 	mh = append(mh, sub.sid...)
 	mh = append(mh, ' ')
@@ -1328,13 +1347,14 @@ func (c *client) processMsg(msg []byte) {
 		return
 	}
 
-	// Scratch buffer..
+	// Scratch buffer.. does not escape.
+	// ../server/client.go:1332:16: (*client).processMsg c.msgb does not escape
 	msgh := c.msgb[:len(msgHeadProto)]
 
 	// msg header
 	msgh = append(msgh, c.pa.subject...)
 	msgh = append(msgh, ' ')
-	si := len(msgh)
+	// si := len(msgh)
 
 	isRoute := c.typ == ROUTER
 
@@ -1342,13 +1362,13 @@ func (c *client) processMsg(msg []byte) {
 	// since they are sent direct via L2 semantics. If the match is a queue
 	// subscription, we will return from here regardless if we find a sub.
 	if isRoute {
-		if sub, ok := srv.routeSidQueueSubscriber(c.pa.sid); ok {
-			if sub != nil {
-				mh := c.msgHeader(msgh[:si], sub)
-				c.deliverMsg(sub, mh, msg)
-			}
-			return
-		}
+		// if sub, ok := srv.routeSidQueueSubscriber(c.pa.sid); ok {
+		// 	if sub != nil {
+		// 		mh := c.msgHeader(msgh[:si], sub)
+		// 		c.deliverMsg(sub, mh, msg)
+		// 	}
+		// 	return
+		// }
 	}
 
 	// Used to only send normal subscriptions once across a given route.
@@ -1386,8 +1406,8 @@ func (c *client) processMsg(msg []byte) {
 			sub.client.mu.Unlock()
 		}
 		// Normal delivery
-		mh := c.msgHeader(msgh[:si], sub)
-		c.deliverMsg(sub, mh, msg)
+		// mh := c.msgHeader(msgh[:si], sub)
+		// c.deliverMsg(sub, mh, msg)
 	}
 
 	// Now process any queue subs we have if not a route
@@ -1403,8 +1423,8 @@ func (c *client) processMsg(msg []byte) {
 			index := c.cache.prand.Intn(len(qsubs))
 			sub := qsubs[index]
 			if sub != nil {
-				mh := c.msgHeader(msgh[:si], sub)
-				c.deliverMsg(sub, mh, msg)
+				// mh := c.msgHeader(msgh[:si], sub)
+				// c.deliverMsg(sub, mh, msg)
 			}
 		}
 	}
