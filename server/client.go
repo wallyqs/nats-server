@@ -642,7 +642,7 @@ func (c *client) processMsgArgs(arg []byte) error {
 
 	// Unroll splitArgs to avoid runtime/heap issues
 	n := 0
-	args := protoArgs{}
+	args := [MAX_MSG_ARGS][]byte{}
 	start := -1
 	for i, b := range arg {
 		switch b {
@@ -697,7 +697,7 @@ func (c *client) processPub(arg []byte) error {
 	start := -1
 	for i, b := range arg {
 		switch b {
-		case ' ', '\t', '\r', '\n':
+		case ' ', '\t':
 			if start >= 0 {
 				args = append(args, arg[start:i])
 				start = -1
@@ -870,9 +870,7 @@ func (c *client) processPub(arg []byte) error {
 	// return fmt.Errorf("processPub Parse Error: '%s'", arg)
 }
 
-type protoArgs [MAX_MSG_ARGS][]byte
-
-func splitArg(arg []byte, args *protoArgs) int {
+func splitArg(arg []byte, args *[MAX_MSG_ARGS][]byte) int {
 	var n, i, l, start int
 	var b byte
 	start = -1
@@ -913,7 +911,7 @@ func (c *client) processSub(argo []byte) (err error) {
 	arg := make([]byte, len(argo))
 	copy(arg, argo)
 
-	args := protoArgs{}
+	args := [MAX_MSG_ARGS][]byte{}
 	n := splitArg(arg, &args)
 	sub := &subscription{client: c}
 	switch n {
@@ -1002,7 +1000,7 @@ func (c *client) unsubscribe(sub *subscription) {
 func (c *client) processUnsub(arg []byte) error {
 	c.traceInOp("UNSUB", arg)
 
-	args := protoArgs{}
+	args := [MAX_MSG_ARGS][]byte{}
 	n := splitArg(arg, &args)
 
 	var sid []byte
