@@ -1362,7 +1362,7 @@ func (c *client) processMsg(msg []byte) {
 	// msg header
 	msgh = append(msgh, c.pa.subject...)
 	msgh = append(msgh, ' ')
-	// si := len(msgh)
+	si := len(msgh)
 
 	isRoute := c.typ == ROUTER
 
@@ -1370,13 +1370,13 @@ func (c *client) processMsg(msg []byte) {
 	// since they are sent direct via L2 semantics. If the match is a queue
 	// subscription, we will return from here regardless if we find a sub.
 	if isRoute {
-		// if sub, ok := srv.routeSidQueueSubscriber(c.pa.sid); ok {
-		// 	if sub != nil {
-		// 		mh := c.msgHeader(msgh[:si], sub)
-		// 		c.deliverMsg(sub, mh, msg)
-		// 	}
-		// 	return
-		// }
+		if sub, ok := srv.routeSidQueueSubscriber(c.pa.sid); ok {
+			if sub != nil {
+				mh := c.msgHeader(msgh[:si], sub)
+				c.deliverMsg(sub, mh, msg)
+			}
+			return
+		}
 	}
 
 	// Used to only send normal subscriptions once across a given route.
@@ -1414,8 +1414,8 @@ func (c *client) processMsg(msg []byte) {
 			sub.client.mu.Unlock()
 		}
 		// Normal delivery
-		// mh := c.msgHeader(msgh[:si], sub)
-		// c.deliverMsg(sub, mh, msg)
+		mh := c.msgHeader(msgh[:si], sub)
+		c.deliverMsg(sub, mh, msg)
 	}
 
 	// Now process any queue subs we have if not a route
@@ -1431,8 +1431,8 @@ func (c *client) processMsg(msg []byte) {
 			index := c.cache.prand.Intn(len(qsubs))
 			sub := qsubs[index]
 			if sub != nil {
-				// mh := c.msgHeader(msgh[:si], sub)
-				// c.deliverMsg(sub, mh, msg)
+				mh := c.msgHeader(msgh[:si], sub)
+				c.deliverMsg(sub, mh, msg)
 			}
 		}
 	}
