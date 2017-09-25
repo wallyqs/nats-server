@@ -913,8 +913,29 @@ func (c *client) processSub(argo []byte) (err error) {
 	arg := make([]byte, len(argo))
 	copy(arg, argo)
 
-	args := [MAX_MSG_ARGS][]byte{}
-	n := splitArg(arg, &args)
+	// Tokenize line
+	n := 0
+	args := [3][]byte{}
+	start := -1
+	for i := 0; i < len(arg); i++ {
+		b := arg[i]
+		if b == ' ' || b == '\t' {
+			if start >= 0 {
+				args[n] = arg[start:i]
+				start = -1
+				n++
+			}
+		} else {
+			if start < 0 {
+				start = i
+			}
+		}
+	}
+	if start >= 0 {
+		args[n] = arg[start:]
+		n++
+	}
+
 	sub := &subscription{client: c}
 	switch n {
 	case 2:
@@ -1002,8 +1023,28 @@ func (c *client) unsubscribe(sub *subscription) {
 func (c *client) processUnsub(arg []byte) error {
 	c.traceInOp("UNSUB", arg)
 
-	args := [MAX_MSG_ARGS][]byte{}
-	n := splitArg(arg, &args)
+	// splitArg
+	n := 0
+	start := -1
+	args := [2][]byte{}
+	for i := 0; i < len(arg); i++ {
+		b := arg[i]
+		if b == ' ' || b == '\t' {
+			if start >= 0 {
+				args[n] = arg[start:i]
+				start = -1
+				n++
+			}
+		} else {
+			if start < 0 {
+				start = i
+			}
+		}
+	}
+	if start >= 0 {
+		args[n] = arg[start:]
+		n++
+	}
 
 	var sid []byte
 	max := -1
