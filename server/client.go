@@ -724,20 +724,20 @@ func (c *client) processPub(arg []byte) error {
 		n++
 	}
 
-	// switch n {
-	// case 2:
-	// 	c.pa.subject = args[0]
-	// 	c.pa.reply = nil
-	// 	c.pa.size = parseSize(args[1])
-	// 	c.pa.szb = args[1]
-	// case 3:
-	// 	c.pa.subject = args[0]
-	// 	c.pa.reply = args[1]
-	// 	c.pa.size = parseSize(args[2])
-	// 	c.pa.szb = args[2]
-	// default:
-	// 	return fmt.Errorf("processPub Parse Error: '%s'", arg)
-	// }
+	switch n {
+	case 2:
+		c.pa.subject = args[0]
+		c.pa.reply = nil
+		c.pa.size = parseSize(args[1])
+		c.pa.szb = args[1]
+	case 3:
+		c.pa.subject = args[0]
+		c.pa.reply = args[1]
+		c.pa.size = parseSize(args[2])
+		c.pa.szb = args[2]
+	default:
+		return fmt.Errorf("processPub Parse Error: '%s'", arg)
+	}
 	if c.pa.size < 0 {
 		return fmt.Errorf("processPub Bad or Missing Size: '%s'", string(arg))
 	}
