@@ -815,28 +815,37 @@ func (c *client) processPub(arg []byte) error {
 	return fmt.Errorf("processPub Parse Error: '%s'", arg)
 }
 
-func splitArg(arg []byte) [][]byte {
-	// FIXME: escapes to heap
-	a := [MAX_MSG_ARGS][]byte{}
-	args := a[:0]
-	start := -1
-	for i, b := range arg {
-		switch b {
-		case ' ', '\t', '\r', '\n':
-			if start >= 0 {
-				args = append(args, arg[start:i])
-				start = -1
-			}
-		default:
-			if start < 0 {
-				start = i
-			}
+type protoArgs [MAX_MSG_ARGS][]byte
+
+func splitArg(arg []byte, args *protoArgs) int {
+	var n, i, l, start int
+	var b byte
+	start = -1
+	l = len(arg)
+loop:
+	b = arg[i]
+	if b == ' ' || b == '\t' {
+		if start >= 0 {
+			args[n] = arg[start:i]
+			start = -1
+			n++
+		}
+	} else {
+		if start < 0 {
+			start = i
 		}
 	}
-	if start >= 0 {
-		args = append(args, arg[start:])
+	i++
+	if i < l {
+		goto loop
 	}
-	return args
+
+	if start >= 0 {
+		args[n] = arg[start:]
+		n++
+	}
+
+	return n
 }
 
 func (c *client) processSub(argo []byte) (err error) {
@@ -848,9 +857,11 @@ func (c *client) processSub(argo []byte) (err error) {
 	// Copy so we do not reference a potentially large buffer
 	arg := make([]byte, len(argo))
 	copy(arg, argo)
-	args := splitArg(arg)
+
+	args := protoArgs{}
+	n := splitArg(arg, &args)
 	sub := &subscription{client: c}
-	switch len(args) {
+	switch n {
 	case 2:
 		sub.subject = args[0]
 		sub.queue = nil
@@ -935,42 +946,21 @@ func (c *client) unsubscribe(sub *subscription) {
 
 func (c *client) processUnsub(arg []byte) error {
 	c.traceInOp("UNSUB", arg)
-	// splitArg(arg)
 
-	// 1) parse sid
-	// 2) parse sid + max
-	
-	// args := splitArg(arg)
-	// switch len(args) {
-	// case 1:
-	// 	sid = args[0]
-	// case 2:
-	// 	sid = args[0]
-	// 	max = parseSize(args[1])
-	// default:
-	// 	return fmt.Errorf("processUnsub Parse Error: '%s'", arg)
-	// }
+	args := protoArgs{}
+	n := splitArg(arg, &args)
 
-	var sid string
-	max := 1
-
-	// FIXME: This drops the performance
-	// start := -1
-	// for i, b := range arg {
-	// 	switch b {
-	// 	case ' ', '\t':
-	// 		if start >= 0 {
-	// 			// args = append(args, arg[start:i])
-	// 			sid = string(arg[start:i])
-	// 			start = -1
-	// 			break
-	// 		}
-	// 	default:
-	// 		if start < 0 {
-	// 			start = i
-	// 		}
-	// 	}
-	// }
+	var sid []byte
+	max := -1
+	switch n {
+	case 1:
+		sid = args[0]
+	case 2:
+		sid = args[0]
+		max = parseSize(args[1])
+	default:
+		return fmt.Errorf("processUnsub Parse Error: '%s'", arg)
+	}
 
 	// Indicate activity.
 	c.cache.subs += 1
@@ -982,7 +972,7 @@ func (c *client) processUnsub(arg []byte) error {
 	ok := false
 
 	c.mu.Lock()
-	if sub, ok = c.subs[sid]; ok {
+	if sub, ok = c.subs[string(sid)]; ok {
 		if max > 0 {
 			sub.max = int64(max)
 		} else {
