@@ -641,14 +641,15 @@ func (c *client) processMsgArgs(arg []byte) error {
 	}
 
 	// Unroll splitArgs to avoid runtime/heap issues
-	a := [MAX_MSG_ARGS][]byte{}
-	args := a[:0]
+	n := 0
+	args := protoArgs{}
 	start := -1
 	for i, b := range arg {
 		switch b {
-		case ' ', '\t', '\r', '\n':
+		case ' ', '\t':
 			if start >= 0 {
-				args = append(args, arg[start:i])
+				args[n] = arg[start:i]
+				n++
 				start = -1
 			}
 		default:
@@ -658,10 +659,11 @@ func (c *client) processMsgArgs(arg []byte) error {
 		}
 	}
 	if start >= 0 {
-		args = append(args, arg[start:])
+		args[n] = arg[start:]
+		n++
 	}
 
-	switch len(args) {
+	switch n {
 	case 3:
 		c.pa.reply = nil
 		c.pa.szb = args[2]
