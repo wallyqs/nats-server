@@ -692,14 +692,15 @@ func (c *client) processPub(arg []byte) error {
 	}
 
 	// Unroll splitArgs to avoid runtime/heap issues
-	a := [MAX_PUB_ARGS][]byte{}
-	args := a[:0]
+	n := 0
+	args := [MAX_PUB_ARGS][]byte{}
 	start := -1
 	for i, b := range arg {
 		switch b {
 		case ' ', '\t':
 			if start >= 0 {
-				args = append(args, arg[start:i])
+				args[n] = arg[start:i]
+				n++
 				start = -1
 			}
 		default:
@@ -709,10 +710,11 @@ func (c *client) processPub(arg []byte) error {
 		}
 	}
 	if start >= 0 {
-		args = append(args, arg[start:])
+		args[n] = arg[start:]
+		n++
 	}
 
-	switch len(args) {
+	switch n {
 	case 2:
 		c.pa.subject = args[0]
 		c.pa.reply = nil
