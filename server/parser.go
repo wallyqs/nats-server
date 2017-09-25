@@ -214,16 +214,23 @@ func (c *client) parse(buf []byte) error {
 			case '\n':
 				if c.msgBuf != nil {
 					c.msgBuf = append(c.msgBuf, b)
+					// strict check for proto
+					if len(c.msgBuf) != c.pa.size+LEN_CR_LF {
+						goto parseErr
+					}
+					c.processMsg(c.msgBuf)
+					c.argBuf, c.msgBuf = nil, nil
+					c.drop, c.as, c.state = 0, i+1, OP_START
 				} else {
-					c.msgBuf = buf[c.as : i+1]
+					bbb := buf[c.as : i+1]
+					// strict check for proto
+					if len(bbb) != c.pa.size+LEN_CR_LF {
+						goto parseErr
+					}
+					c.processMsg(bbb)
+					c.argBuf, c.msgBuf = nil, nil
+					c.drop, c.as, c.state = 0, i+1, OP_START
 				}
-				// strict check for proto
-				if len(c.msgBuf) != c.pa.size+LEN_CR_LF {
-					goto parseErr
-				}
-				c.processMsg(c.msgBuf)
-				c.argBuf, c.msgBuf = nil, nil
-				c.drop, c.as, c.state = 0, i+1, OP_START
 			default:
 				if c.msgBuf != nil {
 					c.msgBuf = append(c.msgBuf, b)
@@ -328,17 +335,22 @@ func (c *client) parse(buf []byte) error {
 			case '\r':
 				c.drop = 1
 			case '\n':
-				var arg []byte
+				// var arg []byte
 				if c.argBuf != nil {
-					arg = c.argBuf
+					// arg = c.argBuf
+					// arg := buf[c.as : i-c.drop]
+					if err := c.processUnsub(c.argBuf); err != nil {
+						c.argBuf = nil
+						return err
+					}
+					c.drop, c.as, c.state = 0, i+1, OP_START
 					c.argBuf = nil
 				} else {
-					arg = buf[c.as : i-c.drop]
+					if err := c.processUnsub(buf[c.as : i-c.drop]); err != nil {
+						return err
+					}
+					c.drop, c.as, c.state = 0, i+1, OP_START
 				}
-				if err := c.processUnsub(arg); err != nil {
-					return err
-				}
-				c.drop, c.as, c.state = 0, i+1, OP_START
 			default:
 				if c.argBuf != nil {
 					c.argBuf = append(c.argBuf, b)
@@ -491,21 +503,30 @@ func (c *client) parse(buf []byte) error {
 			case '\r':
 				c.drop = 1
 			case '\n':
-				var arg []byte
+				// var arg []byte
 				if c.argBuf != nil {
-					arg = c.argBuf
-				} else {
-					arg = buf[c.as : i-c.drop]
-				}
-				if err := c.processMsgArgs(arg); err != nil {
-					return err
-				}
-				c.drop, c.as, c.state = 0, i+1, MSG_PAYLOAD
+					// arg = c.argBuf
+					if err := c.processMsgArgs(c.argBuf); err != nil {
+						return err
+					}
+					c.drop, c.as, c.state = 0, i+1, MSG_PAYLOAD
 
-				// jump ahead with the index. If this overruns
-				// what is left we fall out and process split
-				// buffer.
-				i = c.as + c.pa.size - 1
+					// jump ahead with the index. If this overruns
+					// what is left we fall out and process split
+					// buffer.
+					i = c.as + c.pa.size - 1
+				} else {
+					// arg = buf[c.as : i-c.drop]
+					if err := c.processMsgArgs(buf[c.as : i-c.drop]); err != nil {
+						return err
+					}
+					c.drop, c.as, c.state = 0, i+1, MSG_PAYLOAD
+
+					// jump ahead with the index. If this overruns
+					// what is left we fall out and process split
+					// buffer.
+					i = c.as + c.pa.size - 1
+				}
 			default:
 				if c.argBuf != nil {
 					c.argBuf = append(c.argBuf, b)

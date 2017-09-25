@@ -663,6 +663,10 @@ func (c *client) processMsgArgs(arg []byte) error {
 		n++
 	}
 
+	// FIXME: Usage of c.pa.szb here causes the buffer to escape
+	// ../server/client.go:638:45: leaking param: arg
+	// ../server/client.go:638:45: 	from args (array-element-equals) at ../server/client.go:651:13
+	// ../server/client.go:638:45: 	from c.parseState.pa.szb (dot-equals) at ../server/client.go:669:12	
 	switch n {
 	case 3:
 		c.pa.reply = nil
@@ -673,10 +677,10 @@ func (c *client) processMsgArgs(arg []byte) error {
 		c.pa.szb = args[3]
 		c.pa.size = parseSize(args[3])
 	default:
-		return fmt.Errorf("processMsgArgs Parse Error: '%s'", arg)
+		return fmt.Errorf("processMsgArgs Parse Error: '%s'", string(arg))
 	}
 	if c.pa.size < 0 {
-		return fmt.Errorf("processMsgArgs Bad or Missing Size: '%s'", arg)
+		return fmt.Errorf("processMsgArgs Bad or Missing Size: '%s'", string(arg))
 	}
 
 	// Common ones processed after check for arg length
@@ -1055,7 +1059,7 @@ func (c *client) processUnsub(arg []byte) error {
 		sid = args[0]
 		max = parseSize(args[1])
 	default:
-		return fmt.Errorf("processUnsub Parse Error: '%s'", arg)
+		return fmt.Errorf("processUnsub Parse Error: '%s'", string(arg))
 	}
 
 	// Indicate activity.
