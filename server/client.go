@@ -645,11 +645,6 @@ func (c *client) processMsgArgs(arg []byte) error {
 	if c.trace {
 		c.traceInOp("MSG", nil)
 	}
-	c.pa.subject = nil
-	c.pa.reply = nil
-	c.pa.szb = nil
-	c.pa.sid = nil
-
 	// Unroll splitArgs to avoid runtime/heap issues
 	n := 0
 	args := [MAX_MSG_ARGS][]byte{}
@@ -659,10 +654,6 @@ func (c *client) processMsgArgs(arg []byte) error {
 		case ' ', '\t':
 			if start >= 0 {
 				args[n] = arg[start:i]
-				// view := arg[start:i]
-				// buf := make([]byte, len(view))
-				// copy(buf, view)
-				// args[n] = buf
 				n++
 				start = -1
 			}
@@ -674,10 +665,6 @@ func (c *client) processMsgArgs(arg []byte) error {
 	}
 	if start >= 0 {
 		args[n] = arg[start:]
-		// view := arg[start:]
-		// buf := make([]byte, len(view))
-		// copy(buf, view)
-		// args[n] = buf
 		n++
 	}
 
