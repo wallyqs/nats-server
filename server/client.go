@@ -709,10 +709,6 @@ func (c *client) processPub(arg []byte) error {
 	var b byte
 	var start, end, i, j, k int
 	var maxPayload int64
-
-	if c.trace {
-		c.traceInOp("PUB", arg)
-	}
 	end = len(arg) - 1
 	maxPayload = atomic.LoadInt64(&c.mpay)
 
