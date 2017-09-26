@@ -719,189 +719,137 @@ func (c *client) processPub(arg []byte) error {
 	}
 
 	// Unroll splitArgs to avoid runtime/heap issues
-	n := 0
-	args := [MAX_PUB_ARGS][]byte{}
-	start := -1
-	for i, b := range arg {
-		switch b {
-		case ' ', '\t':
-			if start >= 0 {
-				args[n] = arg[start:i]
-				n++
-				start = -1
+	var b byte
+	var start, end, i, j, k int
+	var maxPayload int64
+
+	if c.trace {
+		c.traceInOp("PUB", arg)
+	}
+	end = len(arg) - 1
+	maxPayload = atomic.LoadInt64(&c.mpay)
+
+	// Skip all whitespace before the subject in case there is any.
+	b = arg[0]
+	if b == ' ' || b == '\t' {
+		i = 1
+		for ; i < end; i++ {
+			b = arg[i]
+			if b != ' ' && b != '\t' {
+				break
 			}
-		default:
-			if start < 0 {
-				start = i
+		}
+		start = i
+	} else {
+		// Already checked first byte that it is not
+		// whitespace so we can offset by one.
+		i = 1
+	}
+
+	// Move position until end of subject.
+	for ; i < end; i++ {
+		b = arg[i]
+		if b == ' ' || b == '\t' {
+			subject := c.pa.subjectb[:0]
+			c.pa.subject = append(subject, arg[start:i]...)
+			break
+		}
+	}
+
+	// Check for invalid subject if in pedantic mode
+	if c.opts.Pedantic && !IsValidLiteralSubject(string(c.pa.subject)) {
+		c.sendErr("Invalid Subject")
+		return nil
+	}
+
+	// Go backwards skipping all whitespace until finding
+	// the start of payload size in the protocol line.
+	b = arg[end]
+	if b == ' ' || b == '\t' {
+		for ; end > i; end-- {
+			b = arg[end]
+			if b != ' ' && b != '\t' {
+				break
 			}
 		}
 	}
-	if start >= 0 {
-		args[n] = arg[start:]
-		n++
+
+	// Move backwards until gathering all bytes for the payload size.
+	for j = end - 1; ; j-- {
+		if i == j {
+			// There is no reply inbox and there were no spaces
+			// in between so we just gather size and we're done,
+			// e.g. PUB hello 5\r\n
+			szb := c.pa.szbb[:0]
+			c.pa.szb = append(szb, arg[j+1:end+1]...)
+			c.pa.size = parseSize(c.pa.szb)
+			if c.pa.size < 0 {
+				return fmt.Errorf("processPub Bad or Missing Size: '%s'", string(arg))
+			}
+			if maxPayload > 0 && int64(c.pa.size) > maxPayload {
+				c.maxPayloadViolation(c.pa.size, maxPayload)
+				return ErrMaxPayload
+			}
+
+			return nil
+		}
+
+		b = arg[j]
+		if b == ' ' || b == '\t' {
+			// We'll only get here if there is a either a reply
+			// or extra whitespace before the payload size,
+			// e.g. PUB hello world 5\r\n
+			szb := c.pa.szbb[:0]
+			c.pa.szb = append(szb, arg[j+1:end+1]...)
+			c.pa.size = parseSize(c.pa.szb)
+			if c.pa.size < 0 {
+				return fmt.Errorf("processPub Bad or Missing Size: '%s'", string(arg))
+			}
+			if maxPayload > 0 && int64(c.pa.size) > maxPayload {
+				c.maxPayloadViolation(c.pa.size, maxPayload)
+				return ErrMaxPayload
+			}
+
+			// Attempt fast path to get reply for the most common case,
+			// which is to have a single space after the subject and before
+			// the payload size.  We can skip traversing the bytes of the reply,
+			// since already know the boundaries of the reply.
+			if arg[i+1] != ' ' && arg[j-1] != ' ' {
+				reply := c.pa.replyb[:0]
+				c.pa.reply = append(reply, arg[i+1:j]...)
+				return nil
+			}
+
+			break
+		}
 	}
 
-	switch n {
-	case 2:
-		subject := c.pa.subjectb[:0]
-		szb := c.pa.szbb[:0]
-		c.pa.subject = append(subject, args[0]...)
-		c.pa.reply = nil
-		c.pa.size = parseSize(args[1])
-		c.pa.szb = append(szb, args[1]...)
-	case 3:
-		subject := c.pa.subjectb[:0]
-		reply := c.pa.replyb[:0]
-		szb := c.pa.szbb[:0]
-		c.pa.subject = append(subject, args[0]...)
-		c.pa.reply = append(reply, args[1]...)
-		c.pa.size = parseSize(args[2])
-		c.pa.szb = append(szb, args[2]...)
-	default:
-		return fmt.Errorf("processPub Parse Error: '%s'", string(arg))
+	// Continue going backward until finding the boundaries
+	// of the reply subject in case there is one.
+	for k = j - 1; k > i; k-- {
+		b = arg[k]
+		if b != ' ' && b != '\t' {
+			// Move from after subject and find the start position
+			// from the reply inbox.
+			l := i + 1
+			for ; l < k; l++ {
+				b = arg[l]
+				if b != ' ' && b != '\t' {
+					reply := c.pa.replyb[:0]
+					c.pa.reply = append(reply, arg[l:k+1]...)
+					return nil
+				}
+			}
+			return nil
+		}
 	}
-	if c.pa.size < 0 {
-		return fmt.Errorf("processPub Bad or Missing Size: '%s'", string(arg))
-	}
-	maxPayload := atomic.LoadInt64(&c.mpay)
-	if maxPayload > 0 && int64(c.pa.size) > maxPayload {
-		c.maxPayloadViolation(c.pa.size, maxPayload)
-		return ErrMaxPayload
+	if k == i {
+		// In case it was only extra whitespace between payload size
+		// and the subject, then nothing else to do.
+		return nil
 	}
 
-	if c.opts.Pedantic && !IsValidLiteralSubject(string(c.pa.subject)) {
-		c.sendErr("Invalid Subject")
-	}
-	return nil
-
-	// var b byte
-	// var start, end, i, j, k int
-	// var maxPayload int64
-
-	// if c.trace {
-	// 	c.traceInOp("PUB", arg)
-	// }
-	// end = len(arg) - 1
-	// maxPayload = atomic.LoadInt64(&c.mpay)
-
-	// // Skip all whitespace before the subject in case there is any.
-	// b = arg[0]
-	// if b == ' ' || b == '\t' {
-	// 	i = 1
-	// 	for ; i < end; i++ {
-	// 		b = arg[i]
-	// 		if b != ' ' && b != '\t' {
-	// 			break
-	// 		}
-	// 	}
-	// 	start = i
-	// } else {
-	// 	// Already checked first byte that it is not
-	// 	// whitespace so we can offset by one.
-	// 	i = 1
-	// }
-
-	// // Move position until end of subject.
-	// for ; i < end; i++ {
-	// 	b = arg[i]
-	// 	if b == ' ' || b == '\t' {
-	// 		c.pa.subject = arg[start:i]
-	// 		break
-	// 	}
-	// }
-
-	// // Check for invalid subject if in pedantic mode
-	// if c.opts.Pedantic && !IsValidLiteralSubject(string(c.pa.subject)) {
-	// 	c.sendErr("Invalid Subject")
-	// 	return nil
-	// }
-
-	// // Go backwards skipping all whitespace until finding
-	// // the start of payload size in the protocol line.
-	// b = arg[end]
-	// if b == ' ' || b == '\t' {
-	// 	for ; end > i; end-- {
-	// 		b = arg[end]
-	// 		if b != ' ' && b != '\t' {
-	// 			break
-	// 		}
-	// 	}
-	// }
-
-	// // Move backwards until gathering all bytes for the payload size.
-	// for j = end - 1; ; j-- {
-	// 	if i == j {
-	// 		// There is no reply inbox and there were no spaces
-	// 		// in between so we just gather size and we're done,
-	// 		// e.g. PUB hello 5\r\n
-	// 		size := arg[j+1 : end+1]
-	// 		c.pa.szb = size
-	// 		c.pa.size = parseSize(size)
-	// 		if c.pa.size < 0 {
-	// 			return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
-	// 		}
-	// 		if maxPayload > 0 && int64(c.pa.size) > maxPayload {
-	// 			c.maxPayloadViolation(c.pa.size, maxPayload)
-	// 			return ErrMaxPayload
-	// 		}
-
-	// 		return nil
-	// 	}
-
-	// 	b = arg[j]
-	// 	if b == ' ' || b == '\t' {
-	// 		// We'll only get here if there is a either a reply
-	// 		// or extra whitespace before the payload size,
-	// 		// e.g. PUB hello world 5\r\n
-	// 		size := arg[j+1 : end+1]
-	// 		c.pa.szb = size
-	// 		c.pa.size = parseSize(size)
-	// 		if c.pa.size < 0 {
-	// 			return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
-	// 		}
-	// 		if maxPayload > 0 && int64(c.pa.size) > maxPayload {
-	// 			c.maxPayloadViolation(c.pa.size, maxPayload)
-	// 			return ErrMaxPayload
-	// 		}
-
-	// 		// Attempt fast path to get reply for the most common case,
-	// 		// which is to have a single space after the subject and before
-	// 		// the payload size.  We can skip traversing the bytes of the reply,
-	// 		// since already know the boundaries of the reply.
-	// 		if arg[i+1] != ' ' && arg[j-1] != ' ' {
-	// 			c.pa.reply = arg[i+1 : j]
-	// 			return nil
-	// 		}
-
-	// 		break
-	// 	}
-	// }
-
-	// // Continue going backward until finding the boundaries
-	// // of the reply subject in case there is one.
-	// for k = j - 1; k > i; k-- {
-	// 	b = arg[k]
-	// 	if b != ' ' && b != '\t' {
-	// 		// Move from after subject and find the start position
-	// 		// from the reply inbox.
-	// 		l := i + 1
-	// 		for ; l < k; l++ {
-	// 			b = arg[l]
-	// 			if b != ' ' && b != '\t' {
-	// 				c.pa.reply = arg[l : k+1]
-	// 				return nil
-	// 			}
-	// 		}
-	// 		return nil
-	// 	}
-	// }
-	// if k == i {
-	// 	// In case it was only extra whitespace between payload size
-	// 	// and the subject, then nothing else to do.
-	// 	return nil
-	// }
-
-	// return fmt.Errorf("processPub Parse Error: '%s'", arg)
+	return fmt.Errorf("processPub Parse Error: '%s'", string(arg))
 }
 
 func splitArg(arg []byte, args *[MAX_MSG_ARGS][]byte) int {
