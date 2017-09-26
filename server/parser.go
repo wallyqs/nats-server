@@ -10,6 +10,13 @@ type pubArg struct {
 	sid     []byte
 	szb     []byte
 	size    int
+
+	// Set of buffers to copy bytes gathered from
+	// the read loop on the stack onto the heap.
+	subjectb [128]byte
+	replyb   [64]byte
+	sidb     [7]byte
+	szbb     [7]byte
 }
 
 type parseState struct {
