@@ -342,10 +342,7 @@ func (c *client) parse(buf []byte) error {
 			case '\r':
 				c.drop = 1
 			case '\n':
-				// var arg []byte
 				if c.argBuf != nil {
-					// arg = c.argBuf
-					// arg := buf[c.as : i-c.drop]
 					if err := c.processUnsub(c.argBuf); err != nil {
 						c.argBuf = nil
 						return err
@@ -458,9 +455,7 @@ func (c *client) parse(buf []byte) error {
 			case '\r':
 				c.drop = 1
 			case '\n':
-				// var arg []byte
 				if c.argBuf != nil {
-					// arg = c.argBuf
 					if err := c.processConnect(c.argBuf); err != nil {
 						return err
 					}
@@ -470,7 +465,6 @@ func (c *client) parse(buf []byte) error {
 
 					c.argBuf = nil
 				} else {
-					// arg = buf[c.as : i-c.drop]
 					if err := c.processConnect(buf[c.as : i-c.drop]); err != nil {
 						return err
 					}
@@ -517,9 +511,7 @@ func (c *client) parse(buf []byte) error {
 			case '\r':
 				c.drop = 1
 			case '\n':
-				// var arg []byte
 				if c.argBuf != nil {
-					// arg = c.argBuf
 					if err := c.processMsgArgs(c.argBuf); err != nil {
 						return err
 					}
@@ -530,7 +522,6 @@ func (c *client) parse(buf []byte) error {
 					// buffer.
 					i = c.as + c.pa.size - 1
 				} else {
-					// arg = buf[c.as : i-c.drop]
 					if err := c.processMsgArgs(buf[c.as : i-c.drop]); err != nil {
 						return err
 					}
