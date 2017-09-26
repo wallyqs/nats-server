@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bufio"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -94,7 +95,7 @@ type client struct {
 	start time.Time
 	nc    net.Conn
 	ncs   string
-	bw    *bufioWriter
+	bw    *bufio.Writer
 	srv   *Server
 	subs  map[string]*subscription
 	perms *permissions
@@ -188,7 +189,7 @@ func init() {
 func (c *client) initClient() {
 	s := c.srv
 	c.cid = atomic.AddUint64(&s.gcid, 1)
-	c.bw = NewBufioWriterSize(c.nc, startBufSize)
+	c.bw = bufio.NewWriterSize(c.nc, startBufSize)
 	c.subs = make(map[string]*subscription)
 	c.debug = (atomic.LoadInt32(&c.srv.logging.debug) != 0)
 	c.trace = (atomic.LoadInt32(&c.srv.logging.trace) != 0)
@@ -342,11 +343,11 @@ func (c *client) readLoop() {
 					sz := cp.bw.Available()
 					// Check for expansion opportunity.
 					if wfc > 2 && sz <= maxBufSize/2 {
-						cp.bw = NewBufioWriterSize(cp.nc, sz*2)
+						cp.bw = bufio.NewWriterSize(cp.nc, sz*2)
 					}
 					// Check for shrinking opportunity.
 					if wfc == 0 && sz >= minBufSize*2 {
-						cp.bw = NewBufioWriterSize(cp.nc, sz/2)
+						cp.bw = bufio.NewWriterSize(cp.nc, sz/2)
 					}
 				}
 			}
@@ -1137,8 +1138,6 @@ func (c *client) deliverMsg(sub *subscription, mh, msg []byte) {
 	}
 
 	// Deliver to the client.
-	// FIXME: These use interfaces internally so it makes
-	// the passed buffer escape.
 	_, err := client.bw.Write(mh)
 	if err != nil {
 		goto writeErr
@@ -1288,7 +1287,8 @@ func (c *client) processMsg(msg []byte) {
 	msgh := c.msgb[:len(msgHeadProto)]
 
 	// msg header
-	msgh = append(msgh, c.pa.subject...)
+	// msgh = append(msgh, c.pa.subject...)
+	msgh = append(msgh, c.pa.subject[:]...)
 	msgh = append(msgh, ' ')
 	si := len(msgh)
 

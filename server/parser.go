@@ -229,12 +229,13 @@ func (c *client) parse(buf []byte) error {
 					c.argBuf, c.msgBuf = nil, nil
 					c.drop, c.as, c.state = 0, i+1, OP_START
 				} else {
-					bbb := buf[c.as : i+1]
+					// bbb := buf[c.as : i+1]
+					c.msgBuf = append(c.msgBuf, buf[c.as : i+1]...)
 					// strict check for proto
-					if len(bbb) != c.pa.size+LEN_CR_LF {
+					if len(c.msgBuf) != c.pa.size+LEN_CR_LF {
 						goto parseErr
 					}
-					c.processMsg(bbb)
+					c.processMsg(c.msgBuf)
 					c.argBuf, c.msgBuf = nil, nil
 					c.drop, c.as, c.state = 0, i+1, OP_START
 				}

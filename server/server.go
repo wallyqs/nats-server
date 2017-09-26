@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bufio"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
@@ -731,7 +732,7 @@ func (s *Server) createClient(conn net.Conn) *client {
 
 	if tlsRequired {
 		// Rewrap bw
-		c.bw = NewBufioWriterSize(c.nc, startBufSize)
+		c.bw = bufio.NewWriterSize(c.nc, startBufSize)
 	}
 
 	// Do final client initialization
