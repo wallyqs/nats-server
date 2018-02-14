@@ -80,7 +80,7 @@ const (
 	DEFAULT_ROUTE_RECONNECT = 1 * time.Second
 
 	// DEFAULT_ROUTE_DIAL Route dial timeout.
-	DEFAULT_ROUTE_DIAL = 1 * time.Second
+	DEFAULT_ROUTE_DIAL = 5 * time.Second
 
 	// PROTO_SNIPPET_SIZE is the default size of proto to print on parse errors.
 	PROTO_SNIPPET_SIZE = 32
