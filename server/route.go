@@ -274,6 +274,12 @@ func (s *Server) forwardNewRouteInfoToKnownServers(info *Info) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	routes := make([]string, 0)
+	for _, rt := range s.opts.Routes {
+		routes = append(routes, rt.Host)
+	}
+	info.Routes = routes
+
 	b, _ := json.Marshal(info)
 	infoJSON := []byte(fmt.Sprintf(InfoProto, b))
 

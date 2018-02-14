@@ -24,23 +24,28 @@ import (
 	"github.com/nats-io/gnatsd/util"
 )
 
-// Info is the information sent to clients to help them understand information
-// about this server.
+// Info is the information sent to clients to help them understand
+// information about this server.
 type Info struct {
-	ID                string   `json:"server_id"`
-	Version           string   `json:"version"`
-	GoVersion         string   `json:"go"`
-	Host              string   `json:"host"`
-	Port              int      `json:"port"`
-	AuthRequired      bool     `json:"auth_required"`
-	SSLRequired       bool     `json:"ssl_required"` // DEPRECATED: ssl json used for older clients
-	TLSRequired       bool     `json:"tls_required"`
-	TLSVerify         bool     `json:"tls_verify"`
-	MaxPayload        int      `json:"max_payload"`
-	IP                string   `json:"ip,omitempty"`
-	ClientConnectURLs []string `json:"connect_urls,omitempty"` // Contains URLs a client can connect to.
+	ID           string `json:"server_id"`
+	Version      string `json:"version"`
+	GoVersion    string `json:"go"`
+	Host         string `json:"host"`
+	Port         int    `json:"port"`
+	AuthRequired bool   `json:"auth_required"`
+	SSLRequired  bool   `json:"ssl_required"` // DEPRECATED: ssl json used for older clients
+	TLSRequired  bool   `json:"tls_required"`
+	TLSVerify    bool   `json:"tls_verify"`
+	MaxPayload   int    `json:"max_payload"`
+	IP           string `json:"ip,omitempty"`
 
-	// Used internally for quick look-ups.
+	// ClientConnectURLs contains URLs a client can connect to.
+	ClientConnectURLs []string `json:"connect_urls,omitempty"`
+
+	// Routes is the list of unresolved routes configuration.
+	Routes []string `json:"routes,omitempty"`
+
+	// clientConnectURLs is used internally for quick look-ups.
 	clientConnectURLs map[string]struct{}
 }
 
