@@ -273,3 +273,47 @@ func TestIncludes(t *testing.T) {
 		t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", m, ex)
 	}
 }
+
+func TestJSONCompat(t *testing.T) {
+	m, err := ParseFile("sample.json")
+	if err != nil {
+		t.Fatalf("Received err: %v\n", err)
+	}
+	ex := map[string]interface{}{
+		"port":      float64(4223),
+		"http_port": float64(8223),
+		"cluster": map[string]interface{}{
+			"port": float64(6223),
+			"tls": map[string]interface{}{
+				"cert_file": "./certs/server-cert.pem",
+			},
+		},
+		"authorization": map[string]interface{}{
+			"timeout": float64(5),
+			"users": []interface{}{
+				map[string]interface{}{
+					"user": "user1",
+					"pass": "user1secret",
+				},
+				map[string]interface{}{
+					"user": "user2",
+					"pass": "user2secret",
+					"permissions": map[string]interface{}{
+						"pub": []interface{}{"hello.*"},
+						"sub": []interface{}{"hello.world"},
+					},
+				},
+			},
+			"default_permissions": map[string]interface{}{
+				"pub": []interface{}{"SANDBOX.*"},
+				"sub": []interface{}{"PUBLIC.>"},
+			},
+		},
+		"tls": map[string]interface{}{
+			"cert_file": "./certs/server-cert.pem",
+		},
+	}
+	if !reflect.DeepEqual(m, ex) {
+		t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", m, ex)
+	}
+}

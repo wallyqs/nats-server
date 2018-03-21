@@ -26,6 +26,7 @@ package conf
 // see parse_test.go for more examples.
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -69,6 +70,24 @@ func ParseFile(fp string) (map[string]interface{}, error) {
 	data, err := ioutil.ReadFile(fp)
 	if err != nil {
 		return nil, fmt.Errorf("error opening config file: %v", err)
+	}
+
+	// Special case: if first character is a bracket this would
+	// not be valid gnatsd conf syntax but rather than failing we
+	// treat the config as JSON.
+	//
+	// When using JSON as the configuration format, a lot of the
+	// syntax sugar from the config format is disabled so features
+	// such as include directives and variable expansions do not
+	// work and have to declared explicitly instead.
+	//
+	if len(data) > 0 && data[0] == '{' {
+		mapping := make(map[string]interface{})
+		err := json.Unmarshal(data, &mapping)
+		if err != nil {
+			return nil, err
+		}
+		return mapping, nil
 	}
 
 	p, err := parse(string(data), filepath.Dir(fp))

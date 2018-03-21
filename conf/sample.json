@@ -1,0 +1,28 @@
+{
+  "http_port": 8223,
+  "port": 4223,
+  "cluster": {
+      "port": 6223,
+      "tls": {
+	  "cert_file": "./certs/server-cert.pem"
+      }
+  },
+  "authorization": {
+      "timeout": 5,
+      "users": [
+	  { "user": "user1", "pass": "user1secret" },
+	  { "user": "user2", "pass": "user2secret", "permissions": {
+	      "pub": ["hello.*"],
+	      "sub": ["hello.world"]
+	    }
+	  }
+      ],
+      "default_permissions": {
+	  "pub": ["SANDBOX.*"],
+	  "sub": ["PUBLIC.>"]
+      }
+  },
+  "tls": {
+      "cert_file": "./certs/server-cert.pem"
+  }
+}
