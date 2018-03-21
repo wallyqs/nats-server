@@ -218,7 +218,11 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "client_advertise":
 			o.ClientAdvertise = v.(string)
 		case "port":
-			o.Port = int(v.(int64))
+			port, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			o.Port = port
 		case "host", "net":
 			o.Host = v.(string)
 		case "debug":
@@ -265,9 +269,17 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			o.HTTPHost = hp.host
 			o.HTTPSPort = hp.port
 		case "http_port", "monitor_port":
-			o.HTTPPort = int(v.(int64))
+			port, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			o.HTTPPort = port
 		case "https_port":
-			o.HTTPSPort = int(v.(int64))
+			port, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			o.HTTPSPort = port
 		case "cluster":
 			cm := v.(map[string]interface{})
 			if err := parseCluster(cm, o); err != nil {
@@ -282,13 +294,29 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "pidfile", "pid_file":
 			o.PidFile = v.(string)
 		case "prof_port":
-			o.ProfPort = int(v.(int64))
+			port, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			o.ProfPort = port
 		case "max_control_line":
-			o.MaxControlLine = int(v.(int64))
+			value, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			o.MaxControlLine = value
 		case "max_payload":
-			o.MaxPayload = int(v.(int64))
+			payload, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			o.MaxPayload = payload
 		case "max_connections", "max_conn":
-			o.MaxConn = int(v.(int64))
+			value, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			o.MaxConn = value
 		case "ping_interval":
 			o.PingInterval = time.Duration(int(v.(int64))) * time.Second
 		case "ping_max":
@@ -314,7 +342,11 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			} else {
 				// Backward compatible with old type, assume this is the
 				// number of seconds.
-				o.WriteDeadline = time.Duration(v.(int64)) * time.Second
+				val, err := parseInt(v)
+				if err != nil {
+					return err
+				}
+				o.WriteDeadline = time.Duration(val) * time.Second
 				fmt.Printf("WARNING: write_deadline should be converted to a duration\n")
 			}
 		}
@@ -361,7 +393,11 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 			opts.Cluster.Host = hp.host
 			opts.Cluster.Port = hp.port
 		case "port":
-			opts.Cluster.Port = int(mv.(int64))
+			port, err := parseInt(mv)
+			if err != nil {
+				return err
+			}
+			opts.Cluster.Port = port
 		case "host", "net":
 			opts.Cluster.Host = mv.(string)
 		case "authorization":
@@ -550,6 +586,18 @@ func parseSubjects(v interface{}) ([]string, error) {
 		return nil, fmt.Errorf("Expected subject permissions to be a subject, or array of subjects, got %T", v)
 	}
 	return checkSubjectArray(subjects)
+}
+
+// parseInt is a function that takes the
+func parseInt(v interface{}) (int, error) {
+	switch vv := v.(type) {
+	case int64:
+		return int(vv), nil
+	case float64:
+		return int(vv), nil
+	default:
+		return -1, fmt.Errorf("Expected valid number in the configuration, got %T", v)
+	}
 }
 
 // Helper function to validate subjects, etc for account permissioning.
