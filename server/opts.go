@@ -94,6 +94,9 @@ type Options struct {
 
 	CustomClientAuthentication Authentication `json:"-"`
 	CustomRouterAuthentication Authentication `json:"-"`
+
+	// CheckConfig enables pedantic configuration file syntax checks.
+	CheckConfig bool `json:"-"`
 }
 
 // Clone performs a deep copy of the Options struct, returning a new clone
@@ -1075,6 +1078,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.IntVar(&opts.HTTPSPort, "https_port", 0, "HTTPS Port for /varz, /connz endpoints.")
 	fs.StringVar(&configFile, "c", "", "Configuration file.")
 	fs.StringVar(&configFile, "config", "", "Configuration file.")
+	fs.BoolVar(&opts.CheckConfig, "t", false, "Check configuration and exit.")
 	fs.StringVar(&signal, "sl", "", "Send signal to gnatsd process (stop, quit, reopen, reload)")
 	fs.StringVar(&signal, "signal", "", "Send signal to gnatsd process (stop, quit, reopen, reload)")
 	fs.StringVar(&opts.PidFile, "P", "", "File to store process pid.")
@@ -1157,12 +1161,18 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 		// This will update the options with values from the config file.
 		if err := opts.ProcessConfigFile(configFile); err != nil {
 			return nil, err
+		} else if opts.CheckConfig {
+			fmt.Fprintf(os.Stderr, "gnatsd: the configuration file %s syntax is ok\n", configFile)
+			os.Exit(0)
 		}
+
 		// Call this again to override config file options with options from command line.
 		// Note: We don't need to check error here since if there was an error, it would
 		// have been caught the first time this function was called (after setting up the
 		// flags).
 		fs.Parse(args)
+	} else if opts.CheckConfig {
+		return nil, fmt.Errorf("gnatsd: must specify [-c, --config] option to check configuration file syntax")
 	}
 
 	// Special handling of some flags
