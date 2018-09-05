@@ -50,6 +50,7 @@ type ClusterOpts struct {
 // Options block for gnatsd server.
 type Options struct {
 	ConfigFile       string        `json:"-"`
+	CheckConfig      bool          `json:"-"`
 	Host             string        `json:"addr"`
 	Port             int           `json:"port"`
 	ClientAdvertise  string        `json:"-"`
@@ -328,6 +329,12 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				// number of seconds.
 				o.WriteDeadline = time.Duration(v.(int64)) * time.Second
 				fmt.Printf("WARNING: write_deadline should be converted to a duration\n")
+			}
+		default:
+			// In case have enabled pedantic config check then abort
+			// and report the error.
+			if o.CheckConfig {
+				return fmt.Errorf("invalid config directive %q", k)
 			}
 		}
 	}
@@ -1075,6 +1082,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.IntVar(&opts.HTTPSPort, "https_port", 0, "HTTPS Port for /varz, /connz endpoints.")
 	fs.StringVar(&configFile, "c", "", "Configuration file.")
 	fs.StringVar(&configFile, "config", "", "Configuration file.")
+	fs.BoolVar(&opts.CheckConfig, "t", false, "Check configuration and exit.")
 	fs.StringVar(&signal, "sl", "", "Send signal to gnatsd process (stop, quit, reopen, reload)")
 	fs.StringVar(&signal, "signal", "", "Send signal to gnatsd process (stop, quit, reopen, reload)")
 	fs.StringVar(&opts.PidFile, "P", "", "File to store process pid.")

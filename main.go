@@ -31,6 +31,7 @@ Server Options:
     -m, --http_port <port>           Use port for http monitoring
     -ms,--https_port <port>          Use port for https monitoring
     -c, --config <file>              Configuration file
+    -t, --test                       Test configuration and exit
     -sl,--signal <signal>[=<pid>]    Send signal to gnatsd process (stop, quit, reopen, reload)
         --client_advertise <string>  Client URL to advertise to other servers
 
