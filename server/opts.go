@@ -213,6 +213,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		return err
 	}
 
+	var ok bool
 	for k, v := range m {
 		switch strings.ToLower(k) {
 		case "listen":
@@ -223,19 +224,22 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			o.Host = hp.host
 			o.Port = hp.port
 		case "client_advertise":
-			o.ClientAdvertise = v.(string)
+			o.ClientAdvertise, ok = v.(string)
 		case "port":
-			o.Port = int(v.(int64))
+			var port int64
+			port, ok = v.(int64)
+			o.Port = int(port)
 		case "host", "net":
-			o.Host = v.(string)
+			o.Host, ok = v.(string)
 		case "debug":
-			o.Debug = v.(bool)
+			o.Debug, ok = v.(bool)
 		case "trace":
-			o.Trace = v.(bool)
+			o.Trace, ok = v.(bool)
 		case "logtime":
-			o.Logtime = v.(bool)
+			o.Logtime, ok = v.(bool)
 		case "authorization":
-			am := v.(map[string]interface{})
+			var am map[string]interface{}
+			am, ok = v.(map[string]interface{})
 			auth, err := parseAuthorization(am)
 			if err != nil {
 				return err
@@ -272,20 +276,24 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			o.HTTPHost = hp.host
 			o.HTTPSPort = hp.port
 		case "http_port", "monitor_port":
-			o.HTTPPort = int(v.(int64))
+			var port int64
+			port, ok = v.(int64)
+			o.HTTPPort = int(port)
 		case "https_port":
-			o.HTTPSPort = int(v.(int64))
+			var port int64
+			port, ok = v.(int64)
+			o.HTTPSPort = int(port)
 		case "cluster":
 			cm := v.(map[string]interface{})
 			if err := parseCluster(cm, o); err != nil {
 				return err
 			}
 		case "logfile", "log_file":
-			o.LogFile = v.(string)
+			o.LogFile, ok = v.(string)
 		case "syslog":
-			o.Syslog = v.(bool)
+			o.Syslog, ok = v.(bool)
 		case "remote_syslog":
-			o.RemoteSyslog = v.(string)
+			o.RemoteSyslog, ok = v.(string)
 		case "pidfile", "pid_file":
 			o.PidFile = v.(string)
 		case "ports_file_dir":
@@ -336,6 +344,10 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			if o.CheckConfig {
 				return fmt.Errorf("invalid config directive %q", k)
 			}
+		}
+
+		if !ok {
+			return fmt.Errorf("invalid value for %q directive", k)
 		}
 	}
 	return nil
