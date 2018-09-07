@@ -451,6 +451,21 @@ cluster {
 `,
 			errors.New(`Invalid value for "connect_retries" directive in clustering config`),
 		},
+		// 		{
+		// 			"should not complain when tls config is empty",
+		// 			`
+		// tls {
+		// }
+		// `,
+		// 			nil,
+		// 		},
+		{
+			"should complain when tls is of an invalid type",
+			`
+tls = false
+`,
+			errors.New(`Invalid value for "tls" directive in config`),
+		},
 	}
 
 	for _, test := range tests {
@@ -657,15 +672,6 @@ cluster {
 			errors.New(`Invalid value for "tls" directive in clustering config`),
 		},
 		{
-			"should complain when clustering tls are of an invalid type",
-			`
-cluster {
-  tls = []
-}
-`,
-			errors.New(`Invalid value for "tls" directive in clustering config`),
-		},
-		{
 			"should complain when clustering advertise is of an invalid type",
 			`
 cluster {
@@ -692,7 +698,13 @@ cluster {
 `,
 			errors.New(`Invalid value for "connect_retries" directive in clustering config`),
 		},
-
+		{
+			"should complain when tls is of an invalid type",
+			`
+tls = false
+`,
+			errors.New(`Invalid value for "tls" directive in config`),
+		},
 	}
 
 	for _, test := range tests {
