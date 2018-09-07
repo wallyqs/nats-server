@@ -466,6 +466,33 @@ tls = false
 `,
 			errors.New(`Invalid value for "tls" directive in config`),
 		},
+		{
+			"should complain when timeout is of an invalid type in tls config",
+			`
+tls {
+  timeout = false
+}
+`,
+			errors.New(`Invalid value for "timeout" directive in TLS config`),
+		},
+		{
+			"should complain when cert_file is of an invalid type in tls config",
+			`
+tls {
+  cert_file = []
+}
+`,
+			errors.New(`error parsing tls config, expected 'cert_file' to be filename`),
+		},
+		{
+			"should complain when cipher_suites are of an invalid type in tls config",
+			`
+tls {
+  cipher_suites = [false]
+}
+`,
+			errors.New(`Invalid value for cipher in TLS 'cipher_suites' config`),
+		},
 	}
 
 	for _, test := range tests {
@@ -704,6 +731,33 @@ cluster {
 tls = false
 `,
 			errors.New(`Invalid value for "tls" directive in config`),
+		},
+		{
+			"should not complain when timeout is of an invalid type in tls config",
+			`
+tls {
+  timeout = false
+}
+`,
+			errors.New(`error parsing X509 certificate/key pair: open : no such file or directory`),
+		},
+		{
+			"should complain when cert_file is of an invalid type in tls config",
+			`
+tls {
+  cert_file = []
+}
+`,
+			errors.New(`error parsing tls config, expected 'cert_file' to be filename`),
+		},
+		{
+			"should complain when cipher_suites are of an invalid type in tls config",
+			`
+tls {
+  cipher_suites = [false]
+}
+`,
+			errors.New(`Invalid value for cipher in TLS 'cipher_suites' config`),
 		},
 	}
 

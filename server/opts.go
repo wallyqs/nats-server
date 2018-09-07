@@ -214,6 +214,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	}
 
 	var ok bool
+	pedantic := o.CheckConfig
 	for k, v := range m {
 		switch strings.ToLower(k) {
 		case "listen":
@@ -241,7 +242,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "authorization":
 			var am map[string]interface{}
 			am, ok = v.(map[string]interface{})
-			auth, err := parseAuthorization(am, o.CheckConfig)
+			auth, err := parseAuthorization(am, pedantic)
 			if err != nil {
 				return err
 			}
@@ -333,7 +334,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			if !ok {
 				return fmt.Errorf("Invalid value for %q directive in config", k)
 			}
-			tc, err := parseTLS(tlsm)
+			tc, err := parseTLS(tlsm, pedantic)
 			if err != nil {
 				return err
 			}
@@ -362,7 +363,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		default:
 			// In case have enabled pedantic config check then abort
 			// and report the error.
-			if o.CheckConfig {
+			if pedantic {
 				return fmt.Errorf("Invalid config directive %q", k)
 			} else {
 				// Allow adding unsupported options but report errors
@@ -472,7 +473,7 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 			if !ok {
 				return fmt.Errorf("Invalid value for %q directive in clustering config", mk)
 			}
-			tc, err := parseTLS(tlsm)
+			tc, err := parseTLS(tlsm, pedantic)
 			if err != nil {
 				return err
 			}
@@ -760,7 +761,6 @@ func PrintTLSHelpAndDie() {
 }
 
 func parseCipher(cipherName string) (uint16, error) {
-
 	cipher, exists := cipherMap[cipherName]
 	if !exists {
 		return 0, fmt.Errorf("Unrecognized cipher %s", cipherName)
@@ -778,7 +778,7 @@ func parseCurvePreferences(curveName string) (tls.CurveID, error) {
 }
 
 // Helper function to parse TLS configs.
-func parseTLS(tlsm map[string]interface{}) (*TLSConfigOpts, error) {
+func parseTLS(tlsm map[string]interface{}, pedantic bool) (*TLSConfigOpts, error) {
 	tc := TLSConfigOpts{}
 	for mk, mv := range tlsm {
 		switch strings.ToLower(mk) {
@@ -807,13 +807,20 @@ func parseTLS(tlsm map[string]interface{}) (*TLSConfigOpts, error) {
 			}
 			tc.Verify = verify
 		case "cipher_suites":
-			ra := mv.([]interface{})
+			ra, ok := mv.([]interface{})
+			if !ok {
+				return nil, fmt.Errorf("Invalid value for %q directive in TLS config", mk)
+			}
 			if len(ra) == 0 {
 				return nil, fmt.Errorf("error parsing tls config, 'cipher_suites' cannot be empty")
 			}
 			tc.Ciphers = make([]uint16, 0, len(ra))
 			for _, r := range ra {
-				cipher, err := parseCipher(r.(string))
+				c, ok := r.(string)
+				if !ok {
+					return nil, fmt.Errorf("Invalid value for cipher in TLS 'cipher_suites' config")
+				}
+				cipher, err := parseCipher(c)
 				if err != nil {
 					return nil, err
 				}
@@ -839,6 +846,12 @@ func parseTLS(tlsm map[string]interface{}) (*TLSConfigOpts, error) {
 				at = float64(mv.(int64))
 			case float64:
 				at = mv.(float64)
+			default:
+				// To be backwards compatible, we only error when doing pedantic check and
+				// continue to use the default in case an invalid type is used.
+				if pedantic {
+					return nil, fmt.Errorf("Invalid value for %q directive in TLS config", mk)
+				}
 			}
 			tc.Timeout = at
 		default:
