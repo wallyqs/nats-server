@@ -195,7 +195,7 @@ Common Options:
 
 Typically you configure the NATS server using a configuration file, an example of which is shown below. See also the [server configuration file](http://nats.io/documentation/server/gnatsd-config/) documentation for details on the configuration language.
 
-```
+```hcl
 listen: localhost:4242 # host/port to listen for client connections
 
 http: localhost:8222 # HTTP monitoring port
@@ -333,7 +333,7 @@ gnatsd -p 4222 -cluster nats://localhost:4248
 
 Alternatively, you could use a configuration file, let's call it `seed.conf`, with a content similar to this:
 
-```
+```hcl
 # Cluster Seed Node
 
 listen: 127.0.0.1:4222
@@ -361,7 +361,7 @@ This will produce an output similar to:
 
 It is also possible to specify the hostname and port independently. At least the port is required. If you leave the hostname off it will bind to all the interfaces ('0.0.0.0').
 
-```
+```hcl
 cluster {
   host: 127.0.0.1
   port: 4248
@@ -475,7 +475,7 @@ nats://S3Cr3T0k3n!@localhost:4222
 
 You can also enable single-user authentication and set the credentials in the server configuration file as follows:
 
-```
+```hcl
 authorization {
   user:     derek
   password: T0pS3cr3t
@@ -485,7 +485,7 @@ authorization {
 
 Or, if you chose to use a token:
 
-```
+```hcl
 authorization {
   # You can generate the token using /util/mkpasswd.go
   token:   $2a$11$pBwUBpza8vdJ7tWZcP5GRO13qRgh4dwNn8g67k5i/41yIKBp.sHke
@@ -505,7 +505,7 @@ bcrypt hash: $2a$11$bXz1Mi5xM.rRUnYRT0Vb2el6sSzVrqA0DJKdt.5Itj1C1K4HT9FDG // ser
 
 You can enable multi-user authentication using a NATS server configuration file that defines user credentials (`user` and `password`), and optionally `permissions`, for two or more users. Multi-user authentication leverages [variables](#variables).
 
-```
+```hcl
 authorization {
   users = [
     {user: value or $VARIABLE, password: value or $VARIABLE}
@@ -517,7 +517,7 @@ authorization {
 
 For example:
 
-```
+```hcl
 authorization {
   PASS: abcdefghijklmnopqrstuvwxwz0123456789
   users = [
@@ -536,7 +536,7 @@ Each permission grant is an object with two fields: what subject(s) the authenti
 
 You set permissions by creating an entry inside of the `authorization` configuration block that conforms to the following syntax:
 
-```
+```hcl
 authorization {
   PERMISSION_NAME = {
     publish = "singleton" or ["array", ...]
@@ -547,7 +547,7 @@ authorization {
 
 Here is an example authorization configuration that defines three users, two of whom are assigned explicit permissions.
 
-```
+```hcl
 authorization {
   ADMIN = {
     publish = ">"
@@ -611,7 +611,7 @@ Generating self signed certs and intermediary certificate authorities is beyond 
 
 The server **requires** a certificate and private key. Optionally the server can require that clients need to present certificates, and the server can be configured with a CA authority to verify the client certificates.
 
-```
+```hcl
 # Simple TLS config file
 
 listen: 127.0.0.1:4443
@@ -631,7 +631,7 @@ authorization {
 
 If requiring client certificates as well, simply change the TLS section as follows.
 
-```
+```hcl
 tls {
   cert_file: "./configs/certs/server-cert.pem"
   key_file:  "./configs/certs/server-key.pem"
@@ -642,7 +642,7 @@ tls {
 
 When setting up clusters, all servers in the cluster, if using TLS, will both verify the connecting endpoints and the server responses. So certificates are checked in both directions. Certificates can be configured only for the server's cluster identity, keeping client and server certificates separate from cluster formation.
 
-```
+```hcl
 cluster {
   listen: 127.0.0.1:4244
 
@@ -713,7 +713,8 @@ bcrypt hash: $2a$11$3kIDaCxw.Glsl1.u5nKa6eUnNDLV5HV9tIuUp7EHhMt6Nm9myW1aS
 ```
 
 Add into the server configuration file's authorization section.
-```
+
+```hcl
   authorization {
     user: derek
     password: $2a$11$3kIDaCxw.Glsl1.u5nKa6eUnNDLV5HV9tIuUp7EHhMt6Nm9myW1aS
