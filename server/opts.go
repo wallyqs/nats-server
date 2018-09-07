@@ -855,6 +855,8 @@ func parseTLS(tlsm map[string]interface{}, pedantic bool) (*TLSConfigOpts, error
 			}
 			tc.Timeout = at
 		default:
+			// NOTE: This fails regardless of pedantic config checks being enabled or not
+			// to be backwards compatible.
 			return nil, fmt.Errorf("error parsing tls config, unknown field [%q]", mk)
 		}
 	}

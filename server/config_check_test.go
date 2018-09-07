@@ -493,6 +493,15 @@ tls {
 `,
 			errors.New(`Invalid value for cipher in TLS 'cipher_suites' config`),
 		},
+		{
+			"should complain of unknown fields within TLS config",
+			`
+tls {
+  foo = "bar"
+}
+`,
+			errors.New(`error parsing tls config, unknown field ["foo"]`),
+		},
 	}
 
 	for _, test := range tests {
@@ -758,6 +767,15 @@ tls {
 }
 `,
 			errors.New(`Invalid value for cipher in TLS 'cipher_suites' config`),
+		},
+		{
+			"should complain of unknown fields within TLS config",
+			`
+tls {
+  foo = "bar"
+}
+`,
+			errors.New(`error parsing tls config, unknown field ["foo"]`),
 		},
 	}
 
