@@ -358,7 +358,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			// In case have enabled pedantic config check then abort
 			// and report the error.
 			if o.CheckConfig {
-				return fmt.Errorf("invalid config directive %q", k)
+				return fmt.Errorf("Invalid config directive %q", k)
 			} else {
 				// Allow adding unsupported options but report errors
 				// when invalid values are used.
@@ -367,7 +367,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		}
 
 		if !ok {
-			return fmt.Errorf("invalid value for %q directive", k)
+			return fmt.Errorf("Invalid value for %q directive", k)
 		}
 	}
 	return nil
@@ -496,7 +496,7 @@ func parseAuthorization(am map[string]interface{}, pedantic bool) (*authorizatio
 				ok = true
 				auth.timeout = vv
 			default:
-				return nil, fmt.Errorf("invalid value for %q directive within authorization config", mk)
+				return nil, fmt.Errorf("Invalid value for %q directive within authorization config", mk)
 			}
 		case "users":
 			users, err := parseUsers(mv, pedantic)

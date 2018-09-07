@@ -32,54 +32,57 @@ func TestConfigPedanticCheck(t *testing.T) {
 		config string
 		err    error
 	}{
+		////////////////////////////////////////////////////////////////
+		//                    Server Options    	              //
+		////////////////////////////////////////////////////////////////		
 		{
 			"should complain if unsupported option is used at top level",
 			`
 monitor = "127.0.0.1:4442"
 `,
-			errors.New(`invalid config directive "monitor"`),
+			errors.New(`Invalid config directive "monitor"`),
 		},
 		{
 			"should complain when invalid value is used for 'port'",
 			`
 port = "4222"
 `,
-			errors.New(`invalid value for "port" directive`),
+			errors.New(`Invalid value for "port" directive`),
 		},
 		{
 			"should complain when invalid value is used for 'client_advertise'",
 			`
 client_advertise = 4222
 `,
-			errors.New(`invalid value for "client_advertise" directive`),
+			errors.New(`Invalid value for "client_advertise" directive`),
 		},
 		{
 			"should complain when invalid value is used for 'host'",
 			`
 host = true
 `,
-			errors.New(`invalid value for "host" directive`),
+			errors.New(`Invalid value for "host" directive`),
 		},
 		{
 			"should complain when invalid value is used for 'host'",
 			`
 host = 4222
 `,
-			errors.New(`invalid value for "host" directive`),
+			errors.New(`Invalid value for "host" directive`),
 		},
 		{
 			"should complain when invalid value is used for 'debug'",
 			`
 debug = "true"
 `,
-			errors.New(`invalid value for "debug" directive`),
+			errors.New(`Invalid value for "debug" directive`),
 		},
 		{
 			"should complain when invalid value is used for 'trace'",
 			`
 trace = 4222
 `,
-			errors.New(`invalid value for "trace" directive`),
+			errors.New(`Invalid value for "trace" directive`),
 		},
 		{
 			"should complain when string value is used for 'logtime'",
@@ -88,6 +91,9 @@ logtime = "true"
 `,
 			errors.New(`invalid value for "logtime" directive`),
 		},
+		////////////////////////////////////////////////////////////////
+		//                    Authorization checks    	              //
+		////////////////////////////////////////////////////////////////
 		{
 			"should not complain when 'authorization' block is empty",
 			`
@@ -102,7 +108,7 @@ authorization {}
 port = 4222
 authorization = "hello.world"
 `,
-			errors.New(`invalid value for "authorization" directive`),
+			errors.New(`Invalid value for "authorization" directive`),
 		},
 		{
 			"should complain when invalid type is used for authorization user",
@@ -110,7 +116,7 @@ authorization = "hello.world"
 authorization = { 
   user = 12345
 }`,
-			errors.New(`invalid value for "user" directive within authorization config`),
+			errors.New(`Invalid value for "user" directive within authorization config`),
 		},
 		{
 			"should complain when invalid type is used for authorization pass",
@@ -119,7 +125,7 @@ authorization = {
   pass = 67890
 }
 `,
-			errors.New(`invalid value for "pass" directive within authorization config`),
+			errors.New(`Invalid value for "pass" directive within authorization config`),
 		},
 		{
 			"should complain when invalid type is used for authorization token",
@@ -128,7 +134,7 @@ authorization = {
   token = 12345
 }
 `,
-			errors.New(`invalid value for "token" directive within authorization config`),
+			errors.New(`Invalid value for "token" directive within authorization config`),
 		},
 		{
 			"should complain when invalid type is used for authorization timeout",
@@ -137,7 +143,7 @@ authorization = {
   timeout = "12345"
 }
 `,
-			errors.New(`invalid value for "timeout" directive within authorization config`),
+			errors.New(`Invalid value for "timeout" directive within authorization config`),
 		},
 		{
 			"should not complain when int type is used for authorization timeout",
@@ -165,7 +171,7 @@ authorization = {
   user = "hello"
 }
 `,
-			errors.New(`invalid value for "timeout" directive within authorization config`),
+			errors.New(`Invalid value for "timeout" directive within authorization config`),
 		},
 		{
 			"should complain when authorization users have invalid options",
@@ -174,7 +180,7 @@ authorization = {
   foo = "bar"
 }
 `,
-			errors.New(`invalid config directive "foo" within authorization config`),
+			errors.New(`Invalid config directive "foo" within authorization config`),
 		},
 		{
 			"should complain when authorization users are of invalid types",
@@ -302,7 +308,26 @@ default_permissions = {
   subscribe = ["_SANDBOX.>"]
 }
 `,
-			errors.New(`invalid config directive "default_permissions"`),
+			errors.New(`Invalid config directive "default_permissions"`),
+		},
+		////////////////////////////////////////////////////////////////
+		//                    Clustering          	              //
+		////////////////////////////////////////////////////////////////
+		{
+			"should complain when clustering config includes unsupported options",
+			`
+cluster {
+  foo = "bar"
+}
+`,
+			nil,
+		},
+		{
+			"should complain when clustering config has a wrong value type",
+			`
+cluster = []
+`,
+			errors.New(`Invalid value for "cluster" directive`),
 		},
 	}
 
@@ -352,7 +377,7 @@ authorization = {
   user = "hello"
 }
 `,
-			errors.New(`invalid value for "timeout" directive within authorization config`),
+			errors.New(`Invalid value for "timeout" directive within authorization config`),
 		},
 		{
 			"should complain when authorization users are of invalid types",
@@ -407,8 +432,26 @@ default_permissions = {
   publish = ["_SANDBOX.>"]
   subscribe = ["_SANDBOX.>"]
 }
+clustering {
+}
 `,
 			nil,
+		},
+		{
+			"should not complain when clustering config includes unsupported options",
+			`
+cluster {
+  foo = "bar"
+}
+`,
+			nil,
+		},
+		{
+			"should complain when clustering config has a wrong value type",
+			`
+cluster = []
+`,
+			errors.New(`Invalid value for "cluster" directive`),
 		},
 	}
 
