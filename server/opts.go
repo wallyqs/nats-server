@@ -330,7 +330,8 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			o.MaxPingsOut = int(v.(int64))
 			ok = true
 		case "tls":
-			tlsm, ok := v.(map[string]interface{})
+			var tlsm map[string]interface{}
+			tlsm, ok = v.(map[string]interface{})
 			if !ok {
 				return fmt.Errorf("Invalid value for %q directive in config", k)
 			}
