@@ -240,7 +240,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "authorization":
 			var am map[string]interface{}
 			am, ok = v.(map[string]interface{})
-			auth, err := parseAuthorization(am)
+			auth, err := parseAuthorization(am, o.CheckConfig)
 			if err != nil {
 				return err
 			}
@@ -333,6 +333,8 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				}
 				o.WriteDeadline = dur
 			} else {
+				// TODO: Pedantic config check mode make this an error instead.
+
 				// Backward compatible with old type, assume this is the
 				// number of seconds.
 				o.WriteDeadline = time.Duration(v.(int64)) * time.Second
@@ -343,6 +345,10 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			// and report the error.
 			if o.CheckConfig {
 				return fmt.Errorf("invalid config directive %q", k)
+			} else {
+				// Allow adding unsupported options but report errors
+				// when invalid values are used.
+				ok = true
 			}
 		}
 
@@ -397,7 +403,7 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 			opts.Cluster.Host = mv.(string)
 		case "authorization":
 			am := mv.(map[string]interface{})
-			auth, err := parseAuthorization(am)
+			auth, err := parseAuthorization(am, opts.CheckConfig)
 			if err != nil {
 				return err
 			}
@@ -456,33 +462,39 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 }
 
 // Helper function to parse Authorization configs.
-func parseAuthorization(am map[string]interface{}) (*authorization, error) {
+func parseAuthorization(am map[string]interface{}, pedantic bool) (*authorization, error) {
 	auth := &authorization{}
+	var ok bool
 	for mk, mv := range am {
 		switch strings.ToLower(mk) {
 		case "user", "username":
-			auth.user = mv.(string)
+			auth.user, ok = mv.(string)
 		case "pass", "password":
-			auth.pass = mv.(string)
+			auth.pass, ok = mv.(string)
 		case "token":
-			auth.token = mv.(string)
+			auth.token, ok = mv.(string)
 		case "timeout":
-			at := float64(1)
-			switch mv.(type) {
+			switch vv := mv.(type) {
 			case int64:
-				at = float64(mv.(int64))
+				ok = true
+				auth.timeout = float64(vv)
 			case float64:
-				at = mv.(float64)
+				ok = true
+				auth.timeout = vv
+			default:
+				return nil, fmt.Errorf("invalid value for %q directive within authorization config", mk)
 			}
-			auth.timeout = at
 		case "users":
-			users, err := parseUsers(mv)
+			users, err := parseUsers(mv, pedantic)
 			if err != nil {
 				return nil, err
 			}
+			ok = true
 			auth.users = users
+
 		case "default_permission", "default_permissions", "permissions":
-			pm, ok := mv.(map[string]interface{})
+			var pm map[string]interface{}
+			pm, ok = mv.(map[string]interface{})
 			if !ok {
 				return nil, fmt.Errorf("Expected default permissions to be a map/struct, got %+v", mv)
 			}
@@ -491,6 +503,17 @@ func parseAuthorization(am map[string]interface{}) (*authorization, error) {
 				return nil, err
 			}
 			auth.defaultPermissions = permissions
+		default:
+			// Allow adding unsupported options unless pedantic config check enabled,
+			// but still report errors when invalid values are used.
+			if !pedantic {
+				ok = true
+			} else {
+				return nil, fmt.Errorf("invalid config directive %q within authorization config", mk)
+			}
+		}
+		if !ok {
+			return nil, fmt.Errorf("invalid value for %q directive within authorization config", mk)
 		}
 
 		// Now check for permission defaults with multiple users, etc.
@@ -507,7 +530,7 @@ func parseAuthorization(am map[string]interface{}) (*authorization, error) {
 }
 
 // Helper function to parse multiple users array with optional permissions.
-func parseUsers(mv interface{}) ([]*User, error) {
+func parseUsers(mv interface{}, pedantic bool) ([]*User, error) {
 	// Make sure we have an array
 	uv, ok := mv.([]interface{})
 	if !ok {
@@ -524,9 +547,15 @@ func parseUsers(mv interface{}) ([]*User, error) {
 		for k, v := range um {
 			switch strings.ToLower(k) {
 			case "user", "username":
-				user.Username = v.(string)
+				user.Username, ok = v.(string)
+				if !ok {
+					return nil, fmt.Errorf("Invalid value for %q within user authorization config", k)
+				}
 			case "pass", "password":
-				user.Password = v.(string)
+				user.Password, ok = v.(string)
+				if !ok {
+					return nil, fmt.Errorf("Invalid value for %q within user authorization config", k)
+				}
 			case "permission", "permissions", "authorization":
 				pm, ok := v.(map[string]interface{})
 				if !ok {
@@ -537,8 +566,13 @@ func parseUsers(mv interface{}) ([]*User, error) {
 					return nil, err
 				}
 				user.Permissions = permissions
+			default:
+				if pedantic {
+					return nil, fmt.Errorf("Invalid config directive %q within user authorization config", k)
+				}
 			}
 		}
+
 		// Check to make sure we have at least username and password
 		if user.Username == "" || user.Password == "" {
 			return nil, fmt.Errorf("User entry requires a user and a password")
@@ -569,7 +603,8 @@ func parseUserPermissions(pm map[string]interface{}) (*Permissions, error) {
 			}
 			p.Subscribe = perms
 		default:
-			return nil, fmt.Errorf("Unknown field %s parsing permissions", k)
+			// NOTE: Error is reported even if not in pedantic mode
+			return nil, fmt.Errorf("Unknown field %q parsing permissions", k)
 		}
 	}
 	return p, nil
