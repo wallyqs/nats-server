@@ -424,6 +424,33 @@ cluster {
 `,
 			errors.New(`Invalid value for "tls" directive in clustering config`),
 		},
+		{
+			"should complain when clustering advertise is of an invalid type",
+			`
+cluster {
+  cluster_advertise = []
+}
+`,
+			errors.New(`Invalid value for "cluster_advertise" directive in clustering config`),
+		},
+		{
+			"should complain when clustering no advertise is of an invalid type",
+			`
+cluster {
+  no_advertise = []
+}
+`,
+			errors.New(`Invalid value for "no_advertise" directive in clustering config`),
+		},
+		{
+			"should complain when clustering connect_retries are of an invalid type",
+			`
+cluster {
+  connect_retries = false
+}
+`,
+			errors.New(`Invalid value for "connect_retries" directive in clustering config`),
+		},
 	}
 
 	for _, test := range tests {
@@ -629,6 +656,43 @@ cluster {
 `,
 			errors.New(`Invalid value for "tls" directive in clustering config`),
 		},
+		{
+			"should complain when clustering tls are of an invalid type",
+			`
+cluster {
+  tls = []
+}
+`,
+			errors.New(`Invalid value for "tls" directive in clustering config`),
+		},
+		{
+			"should complain when clustering advertise is of an invalid type",
+			`
+cluster {
+  cluster_advertise = []
+}
+`,
+			errors.New(`Invalid value for "cluster_advertise" directive in clustering config`),
+		},
+		{
+			"should complain when clustering no advertise is of an invalid type",
+			`
+cluster {
+  no_advertise = []
+}
+`,
+			errors.New(`Invalid value for "no_advertise" directive in clustering config`),
+		},
+		{
+			"should complain when clustering connect_retries are of an invalid type",
+			`
+cluster {
+  connect_retries = false
+}
+`,
+			errors.New(`Invalid value for "connect_retries" directive in clustering config`),
+		},
+
 	}
 
 	for _, test := range tests {
