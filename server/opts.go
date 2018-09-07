@@ -287,11 +287,14 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			port, ok = v.(int64)
 			o.HTTPSPort = int(port)
 		case "cluster":
-			cm := v.(map[string]interface{})
+			var cm map[string]interface{}
+			cm, ok = v.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("Invalid value for %q directive", k)
+			}
 			if err := parseCluster(cm, o); err != nil {
 				return err
 			}
-			ok = true
 		case "logfile", "log_file":
 			o.LogFile, ok = v.(string)
 		case "syslog":
@@ -402,9 +405,11 @@ func parseListen(v interface{}) (*hostPort, error) {
 
 // parseCluster will parse the cluster config.
 func parseCluster(cm map[string]interface{}, opts *Options) error {
+	pedantic := opts.CheckConfig
 	for mk, mv := range cm {
 		switch strings.ToLower(mk) {
 		case "listen":
+			// TODO: Enable pedantic check here for when using an invalid type
 			hp, err := parseListen(mv)
 			if err != nil {
 				return err
@@ -412,12 +417,20 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 			opts.Cluster.Host = hp.host
 			opts.Cluster.Port = hp.port
 		case "port":
-			opts.Cluster.Port = int(mv.(int64))
+			port, ok := mv.(int64)
+			if !ok {
+				return fmt.Errorf("Invalid value for %q directive in clustering config", mk)
+			}
+			opts.Cluster.Port = int(port)
 		case "host", "net":
-			opts.Cluster.Host = mv.(string)
+			host, ok := mv.(string)
+			if !ok {
+				return fmt.Errorf("Invalid value for %q directive in clustering config", mk)
+			}
+			opts.Cluster.Host = host
 		case "authorization":
 			am := mv.(map[string]interface{})
-			auth, err := parseAuthorization(am, opts.CheckConfig)
+			auth, err := parseAuthorization(am, pedantic)
 			if err != nil {
 				return err
 			}
@@ -439,7 +452,10 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 				}
 			}
 		case "routes":
-			ra := mv.([]interface{})
+			ra, ok := mv.([]interface{})
+			if !ok {
+				return fmt.Errorf("Invalid value for %q directive in clustering config", mk)
+			}
 			opts.Routes = make([]*url.URL, 0, len(ra))
 			for _, r := range ra {
 				routeURL := r.(string)
@@ -450,7 +466,10 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 				opts.Routes = append(opts.Routes, url)
 			}
 		case "tls":
-			tlsm := mv.(map[string]interface{})
+			tlsm, ok := mv.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("Invalid value for %q directive in clustering config", mk)
+			}
 			tc, err := parseTLS(tlsm)
 			if err != nil {
 				return err
@@ -465,11 +484,27 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 			opts.Cluster.TLSConfig.RootCAs = opts.Cluster.TLSConfig.ClientCAs
 			opts.Cluster.TLSTimeout = tc.Timeout
 		case "cluster_advertise", "advertise":
-			opts.Cluster.Advertise = mv.(string)
+			v, ok := mv.(string)
+			if !ok {
+				return fmt.Errorf("Invalid value for %q directive in clustering config", mk)
+			}
+			opts.Cluster.Advertise = v
 		case "no_advertise":
-			opts.Cluster.NoAdvertise = mv.(bool)
+			v, ok := mv.(bool)
+			if !ok {
+				return fmt.Errorf("Invalid value for %q directive in clustering config", mk)
+			}
+			opts.Cluster.NoAdvertise = v
 		case "connect_retries":
-			opts.Cluster.ConnectRetries = int(mv.(int64))
+			v, ok := mv.(int64)
+			if !ok {
+				return fmt.Errorf("Invalid value for %q directive in clustering config", mk)
+			}
+			opts.Cluster.ConnectRetries = int(v)
+		default:
+			if pedantic {
+				return fmt.Errorf("Invalid config directive %q within clustering config", mk)
+			}
 		}
 	}
 	return nil
@@ -523,11 +558,11 @@ func parseAuthorization(am map[string]interface{}, pedantic bool) (*authorizatio
 			if !pedantic {
 				ok = true
 			} else {
-				return nil, fmt.Errorf("invalid config directive %q within authorization config", mk)
+				return nil, fmt.Errorf("Invalid config directive %q within authorization config", mk)
 			}
 		}
 		if !ok {
-			return nil, fmt.Errorf("invalid value for %q directive within authorization config", mk)
+			return nil, fmt.Errorf("Invalid value for %q directive within authorization config", mk)
 		}
 
 		// Now check for permission defaults with multiple users, etc.

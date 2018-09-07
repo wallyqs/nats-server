@@ -34,7 +34,7 @@ func TestConfigPedanticCheck(t *testing.T) {
 	}{
 		////////////////////////////////////////////////////////////////
 		//                    Server Options    	              //
-		////////////////////////////////////////////////////////////////		
+		////////////////////////////////////////////////////////////////
 		{
 			"should complain if unsupported option is used at top level",
 			`
@@ -89,7 +89,7 @@ trace = 4222
 			`
 logtime = "true"
 `,
-			errors.New(`invalid value for "logtime" directive`),
+			errors.New(`Invalid value for "logtime" directive`),
 		},
 		////////////////////////////////////////////////////////////////
 		//                    Authorization checks    	              //
@@ -320,7 +320,7 @@ cluster {
   foo = "bar"
 }
 `,
-			nil,
+			errors.New(`Invalid config directive "foo" within clustering config`),
 		},
 		{
 			"should complain when clustering config has a wrong value type",
@@ -328,6 +328,101 @@ cluster {
 cluster = []
 `,
 			errors.New(`Invalid value for "cluster" directive`),
+		},
+		// 		{
+		// 			"should complain when clustering listen is of invalid type",
+		// 			`
+		// cluster {
+		//   listen = true
+		// }
+		// `,
+		// 			errors.New(`Invalid value for "listen" directive`),
+		// 		},
+		{
+			"should complain when clustering authorization config includes unsupported options",
+			`
+cluster {
+  authorization {
+    foo = "bar"
+  }
+}
+`,
+			errors.New(`Invalid config directive "foo" within authorization config`),
+		},
+		{
+			"should complain when clustering authorization users config includes unsupported options",
+			`
+cluster {
+  authorization {
+    users = [ 
+      { user: "hello", pass: "world", token: "secret" }
+    ]
+  }
+}
+`,
+			errors.New(`Invalid config directive "token" within user authorization config`),
+		},
+		{
+			"should not complain when clustering authorization users config includes unsupported options",
+			`
+cluster {
+  authorization {
+    user: "hello"
+    pass: "world"
+    foo: "secret"
+  }
+}
+`,
+			errors.New(`Invalid config directive "foo" within authorization config`),
+		},
+		{
+			"should complain when clustering authorization users config is defined",
+			`
+cluster {
+  authorization {
+    users = [ 
+      { user: "hello", pass: "world" }
+    ]
+  }
+}
+`,
+			errors.New(`Cluster authorization does not allow multiple users`),
+		},
+		{
+			"should complain when clustering port is of an invalid type",
+			`
+cluster {
+  port = true
+}
+`,
+			errors.New(`Invalid value for "port" directive in clustering config`),
+		},
+		{
+			"should complain when clustering host is of an invalid type",
+			`
+cluster {
+  host = false
+}
+`,
+			errors.New(`Invalid value for "host" directive in clustering config`),
+		},
+		{
+			"should complain when clustering routes are of an invalid type",
+			`
+cluster {
+  routes = {}
+}
+`,
+			errors.New(`Invalid value for "routes" directive in clustering config`),
+		},
+		{
+			"should complain when clustering tls are of an invalid type",
+			`
+cluster {
+  tls = []
+}
+`,
+			errors.New(`Invalid value for "tls" directive in clustering config`),
 		},
 	}
 
@@ -452,6 +547,87 @@ cluster {
 cluster = []
 `,
 			errors.New(`Invalid value for "cluster" directive`),
+		},
+		{
+			"should not complain when clustering authorization config includes unsupported options",
+			`
+cluster {
+  authorization {
+    foo = "bar"
+  }
+}
+`,
+			nil,
+		},
+		{
+			"should not complain when clustering authorization config is empty",
+			`
+cluster {
+}
+`,
+			nil,
+		},
+		{
+			"should not complain when clustering authorization users config includes unsupported options",
+			`
+cluster {
+  authorization {
+    user: "hello"
+    pass: "world"
+    token: "secret"
+  }
+}
+`,
+			nil,
+		},
+		{
+			"should complain when clustering authorization users config is defined",
+			`
+cluster {
+  authorization {
+    users = [ 
+      { user: "hello", pass: "world" }
+    ]
+  }
+}
+`,
+			errors.New(`Cluster authorization does not allow multiple users`),
+		},
+		{
+			"should complain when clustering port is of an invalid type",
+			`
+cluster {
+  port = true
+}
+`,
+			errors.New(`Invalid value for "port" directive in clustering config`),
+		},
+		{
+			"should complain when clustering host is of an invalid type",
+			`
+cluster {
+  host = false
+}
+`,
+			errors.New(`Invalid value for "host" directive in clustering config`),
+		},
+		{
+			"should complain when clustering routes are of an invalid type",
+			`
+cluster {
+  routes = {}
+}
+`,
+			errors.New(`Invalid value for "routes" directive in clustering config`),
+		},
+		{
+			"should complain when clustering tls are of an invalid type",
+			`
+cluster {
+  tls = []
+}
+`,
+			errors.New(`Invalid value for "tls" directive in clustering config`),
 		},
 	}
 
