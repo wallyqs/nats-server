@@ -221,6 +221,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			if err != nil {
 				return err
 			}
+			ok = true
 			o.Host = hp.host
 			o.Port = hp.port
 		case "client_advertise":
@@ -268,6 +269,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			}
 			o.HTTPHost = hp.host
 			o.HTTPPort = hp.port
+			ok = true
 		case "https":
 			hp, err := parseListen(v)
 			if err != nil {
@@ -275,6 +277,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			}
 			o.HTTPHost = hp.host
 			o.HTTPSPort = hp.port
+			ok = true
 		case "http_port", "monitor_port":
 			var port int64
 			port, ok = v.(int64)
@@ -288,6 +291,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			if err := parseCluster(cm, o); err != nil {
 				return err
 			}
+			ok = true
 		case "logfile", "log_file":
 			o.LogFile, ok = v.(string)
 		case "syslog":
@@ -295,27 +299,35 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "remote_syslog":
 			o.RemoteSyslog, ok = v.(string)
 		case "pidfile", "pid_file":
-			o.PidFile = v.(string)
+			o.PidFile, ok = v.(string)
 		case "ports_file_dir":
-			o.PortsFileDir = v.(string)
+			o.PortsFileDir, ok = v.(string)
 		case "prof_port":
 			o.ProfPort = int(v.(int64))
+			ok = true
 		case "max_control_line":
 			o.MaxControlLine = int(v.(int64))
+			ok = true
 		case "max_payload":
 			o.MaxPayload = int(v.(int64))
+			ok = true
 		case "max_pending":
-			o.MaxPending = v.(int64)
+			o.MaxPending, ok = v.(int64)
 		case "max_connections", "max_conn":
 			o.MaxConn = int(v.(int64))
+			ok = true
 		case "max_subscriptions", "max_subs":
 			o.MaxSubs = int(v.(int64))
+			ok = true
 		case "ping_interval":
 			o.PingInterval = time.Duration(int(v.(int64))) * time.Second
+			ok = true
 		case "ping_max":
 			o.MaxPingsOut = int(v.(int64))
+			ok = true
 		case "tls":
-			tlsm := v.(map[string]interface{})
+			var tlsm map[string]interface{}
+			tlsm, ok = v.(map[string]interface{})
 			tc, err := parseTLS(tlsm)
 			if err != nil {
 				return err
@@ -325,7 +337,8 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			}
 			o.TLSTimeout = tc.Timeout
 		case "write_deadline":
-			wd, ok := v.(string)
+			var wd string
+			wd, ok = v.(string)
 			if ok {
 				dur, err := time.ParseDuration(wd)
 				if err != nil {
@@ -333,7 +346,8 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				}
 				o.WriteDeadline = dur
 			} else {
-				// TODO: Pedantic config check mode make this an error instead.
+				// TODO: Pedantic config check mode should make this an error instead.
+				ok = true
 
 				// Backward compatible with old type, assume this is the
 				// number of seconds.
