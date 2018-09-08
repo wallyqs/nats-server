@@ -238,7 +238,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			o.Logtime = v.(bool)
 		case "authorization":
 			am := v.(map[string]interface{})
-			auth, err := parseAuthorization(am)
+			auth, err := parseAuthorization(am, pedantic)
 			if err != nil {
 				return err
 			}
@@ -334,7 +334,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			}
 		default:
 			if pedantic {
-				return &unknownConfigFieldErr{k}
+				return &unknownConfigFieldErr{field: k}
 			}
 		}
 	}
@@ -370,6 +370,7 @@ func parseListen(v interface{}) (*hostPort, error) {
 
 // parseCluster will parse the cluster config.
 func parseCluster(cm map[string]interface{}, opts *Options) error {
+	pedantic := opts.CheckConfig
 	for mk, mv := range cm {
 		switch strings.ToLower(mk) {
 		case "listen":
@@ -385,7 +386,7 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 			opts.Cluster.Host = mv.(string)
 		case "authorization":
 			am := mv.(map[string]interface{})
-			auth, err := parseAuthorization(am)
+			auth, err := parseAuthorization(am, pedantic)
 			if err != nil {
 				return err
 			}
@@ -438,13 +439,17 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 			opts.Cluster.NoAdvertise = mv.(bool)
 		case "connect_retries":
 			opts.Cluster.ConnectRetries = int(mv.(int64))
+		default:
+			if pedantic {
+				return &unknownConfigFieldErr{field: mk, section: "cluster"}
+			}
 		}
 	}
 	return nil
 }
 
 // Helper function to parse Authorization configs.
-func parseAuthorization(am map[string]interface{}) (*authorization, error) {
+func parseAuthorization(am map[string]interface{}, pedantic bool) (*authorization, error) {
 	auth := &authorization{}
 	for mk, mv := range am {
 		switch strings.ToLower(mk) {
@@ -464,7 +469,7 @@ func parseAuthorization(am map[string]interface{}) (*authorization, error) {
 			}
 			auth.timeout = at
 		case "users":
-			users, err := parseUsers(mv)
+			users, err := parseUsers(mv, pedantic)
 			if err != nil {
 				return nil, err
 			}
@@ -479,6 +484,10 @@ func parseAuthorization(am map[string]interface{}) (*authorization, error) {
 				return nil, err
 			}
 			auth.defaultPermissions = permissions
+		default:
+			if pedantic {
+				return nil, &unknownConfigFieldErr{field: mk, section: "authorization"}
+			}
 		}
 
 		// Now check for permission defaults with multiple users, etc.
@@ -495,7 +504,7 @@ func parseAuthorization(am map[string]interface{}) (*authorization, error) {
 }
 
 // Helper function to parse multiple users array with optional permissions.
-func parseUsers(mv interface{}) ([]*User, error) {
+func parseUsers(mv interface{}, pedantic bool) ([]*User, error) {
 	// Make sure we have an array
 	uv, ok := mv.([]interface{})
 	if !ok {
@@ -525,6 +534,10 @@ func parseUsers(mv interface{}) ([]*User, error) {
 					return nil, err
 				}
 				user.Permissions = permissions
+			default:
+				if pedantic {
+					return nil, &unknownConfigFieldErr{field: k, section: "user authorization"}
+				}
 			}
 		}
 		// Check to make sure we have at least username and password

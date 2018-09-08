@@ -54,9 +54,14 @@ var (
 )
 
 type unknownConfigFieldErr struct {
-	field string
+	field   string
+	section string
 }
 
 func (e *unknownConfigFieldErr) Error() string {
-	return fmt.Sprintf("Unknown field %q", e.field)
+	msg := fmt.Sprintf("Unknown field %q", e.field)
+	if e.section != "" {
+		return msg + fmt.Sprintf(" within %s config", e.section)
+	}
+	return msg
 }
