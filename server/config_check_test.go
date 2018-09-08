@@ -81,6 +81,18 @@ authorization = {
 			pedanticErr: errors.New(`Unknown field "token" within user authorization config`),
 		},
 		{
+			name: "when user authorization permissions config has unknown fields",
+			config: `
+authorization {
+  permissions {
+    hello = "world"
+  }
+}
+`,
+			defaultErr:  errors.New(`Unknown field hello parsing permissions`),
+			pedanticErr: errors.New(`Unknown field hello parsing permissions`),
+		},
+		{
 			name: "when user authorization permissions config is empty",
 			config: `
 authorization = {
@@ -158,9 +170,33 @@ cluster = {
   }
 }
 `,
-			// Backwards compatibility: also report error by default
+			// Backwards compatibility: also report error by default even if pedantic checks disabled.
 			defaultErr:  errors.New(`Unknown field hello parsing permissions`),
 			pedanticErr: errors.New(`Unknown field hello parsing permissions`),
+		},
+		{
+			name: "when unknown option is in tls config",
+			config: `
+tls = {
+  hello = "world"
+}
+`,
+			// Backwards compatibility: also report error by default even if pedantic checks disabled.
+			defaultErr:  errors.New(`error parsing tls config, unknown field ["hello"]`),
+			pedanticErr: errors.New(`error parsing tls config, unknown field ["hello"]`),
+		},
+		{
+			name: "when unknown option is in cluster tls config",
+			config: `
+cluster {
+  tls = {
+    foo = "bar"
+  }
+}
+`,
+			// Backwards compatibility: also report error by default even if pedantic checks disabled.
+			defaultErr:  errors.New(`error parsing tls config, unknown field ["foo"]`),
+			pedanticErr: errors.New(`error parsing tls config, unknown field ["foo"]`),
 		},
 	}
 

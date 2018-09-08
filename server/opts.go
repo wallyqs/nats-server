@@ -576,7 +576,7 @@ func parseUserPermissions(pm map[string]interface{}) (*Permissions, error) {
 	return p, nil
 }
 
-// Tope level parser for authorization configurations.
+// Top level parser for authorization configurations.
 func parseVariablePermissions(v interface{}) (*SubjectPermission, error) {
 	switch v.(type) {
 	case map[string]interface{}:
