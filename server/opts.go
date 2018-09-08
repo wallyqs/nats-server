@@ -214,6 +214,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		return err
 	}
 
+	pedantic := o.CheckConfig
 	for k, v := range m {
 		switch strings.ToLower(k) {
 		case "listen":
@@ -330,6 +331,10 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				// number of seconds.
 				o.WriteDeadline = time.Duration(v.(int64)) * time.Second
 				fmt.Printf("WARNING: write_deadline should be converted to a duration\n")
+			}
+		default:
+			if pedantic {
+				return &unknownConfigFieldErr{k}
 			}
 		}
 	}

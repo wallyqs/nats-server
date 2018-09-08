@@ -13,7 +13,10 @@
 
 package server
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrConnectionClosed represents an error condition on a closed connection.
@@ -49,3 +52,11 @@ var (
 	// attempted to connect to the route listen port.
 	ErrClientConnectedToRoutePort = errors.New("Attempted To Connect To Route Port")
 )
+
+type unknownConfigFieldErr struct {
+	field string
+}
+
+func (e *unknownConfigFieldErr) Error() string {
+	return fmt.Sprintf("Unknown field %q", e.field)
+}
