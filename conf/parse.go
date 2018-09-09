@@ -78,6 +78,19 @@ func ParseFile(fp string) (map[string]interface{}, error) {
 	return p.mapping, nil
 }
 
+type token struct {
+	item  item
+	value interface{}
+}
+
+func (t *token) Value() interface{} {
+	return t.value
+}
+
+func (t *token) Line() int {
+	return t.item.line
+}
+
 func parse(data, fp string) (p *parser, err error) {
 	p = &parser{
 		mapping: make(map[string]interface{}),
@@ -145,9 +158,11 @@ func (p *parser) processItem(it item) error {
 		newCtx := make(map[string]interface{})
 		p.pushContext(newCtx)
 	case itemMapEnd:
-		p.setValue(p.popContext())
+		// Creates the full map
+		p.setValue(&token{it, p.popContext()})
 	case itemString:
-		p.setValue(it.val) // FIXME(dlc) sanitize string?
+		// FIXME(dlc) sanitize string?
+		p.setValue(&token{it, it.val})
 	case itemInteger:
 		lastDigit := 0
 		for _, r := range it.val {
@@ -169,19 +184,19 @@ func (p *parser) processItem(it item) error {
 		suffix := strings.ToLower(strings.TrimSpace(it.val[lastDigit:]))
 		switch suffix {
 		case "":
-			p.setValue(num)
+			p.setValue(&token{it, num})
 		case "k":
-			p.setValue(num * 1000)
+			p.setValue(&token{it, num * 1000})
 		case "kb":
-			p.setValue(num * 1024)
+			p.setValue(&token{it, num * 1024})
 		case "m":
-			p.setValue(num * 1000 * 1000)
+			p.setValue(&token{it, num * 1000 * 1000})
 		case "mb":
-			p.setValue(num * 1024 * 1024)
+			p.setValue(&token{it, num * 1024 * 1024})
 		case "g":
-			p.setValue(num * 1000 * 1000 * 1000)
+			p.setValue(&token{it, num * 1000 * 1000 * 1000})
 		case "gb":
-			p.setValue(num * 1024 * 1024 * 1024)
+			p.setValue(&token{it, num * 1024 * 1024 * 1024})
 		}
 	case itemFloat:
 		num, err := strconv.ParseFloat(it.val, 64)
@@ -196,9 +211,9 @@ func (p *parser) processItem(it item) error {
 	case itemBool:
 		switch strings.ToLower(it.val) {
 		case "true", "yes", "on":
-			p.setValue(true)
+			p.setValue(&token{it, true})
 		case "false", "no", "off":
-			p.setValue(false)
+			p.setValue(&token{it, false})
 		default:
 			return fmt.Errorf("Expected boolean value, but got '%s'.", it.val)
 		}
@@ -208,17 +223,17 @@ func (p *parser) processItem(it item) error {
 			return fmt.Errorf(
 				"Expected Zulu formatted DateTime, but got '%s'.", it.val)
 		}
-		p.setValue(dt)
+		p.setValue(&token{it, dt})
 	case itemArrayStart:
 		var array = make([]interface{}, 0)
 		p.pushContext(array)
 	case itemArrayEnd:
 		array := p.ctx
 		p.popContext()
-		p.setValue(array)
+		p.setValue(&token{it, array})
 	case itemVariable:
 		if value, ok := p.lookupVariable(it.val); ok {
-			p.setValue(value)
+			p.setValue(&token{it, value})
 		} else {
 			return fmt.Errorf("Variable reference for '%s' on line %d can not be found.",
 				it.val, it.line)
