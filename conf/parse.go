@@ -51,13 +51,16 @@ type parser struct {
 
 	// The config file path, empty by default.
 	fp string
+
+	// pedantic reports error when configuration is not correct.
+	pedantic bool
 }
 
 // Parse will return a map of keys to interface{}, although concrete types
 // underly them. The values supported are string, bool, int64, float64, DateTime.
 // Arrays and nested Maps are also supported.
 func Parse(data string) (map[string]interface{}, error) {
-	p, err := parse(data, "")
+	p, err := parse(data, "", false)
 	if err != nil {
 		return nil, err
 	}
@@ -71,10 +74,24 @@ func ParseFile(fp string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("error opening config file: %v", err)
 	}
 
-	p, err := parse(string(data), filepath.Dir(fp))
+	p, err := parse(string(data), filepath.Dir(fp), false)
 	if err != nil {
 		return nil, err
 	}
+	return p.mapping, nil
+}
+
+func ParseFileWithChecks(fp string) (map[string]interface{}, error) {
+	data, err := ioutil.ReadFile(fp)
+	if err != nil {
+		return nil, fmt.Errorf("error opening config file: %v", err)
+	}
+
+	p, err := parse(string(data), filepath.Dir(fp), true)
+	if err != nil {
+		return nil, err
+	}
+
 	return p.mapping, nil
 }
 
@@ -91,13 +108,14 @@ func (t *token) Line() int {
 	return t.item.line
 }
 
-func parse(data, fp string) (p *parser, err error) {
+func parse(data, fp string, pedantic bool) (p *parser, err error) {
 	p = &parser{
-		mapping: make(map[string]interface{}),
-		lx:      lex(data),
-		ctxs:    make([]interface{}, 0, 4),
-		keys:    make([]string, 0, 4),
-		fp:      fp,
+		mapping:  make(map[string]interface{}),
+		lx:       lex(data),
+		ctxs:     make([]interface{}, 0, 4),
+		keys:     make([]string, 0, 4),
+		fp:       fp,
+		pedantic: pedantic,
 	}
 	p.pushContext(p.mapping)
 
@@ -149,6 +167,7 @@ func (p *parser) popKey() string {
 }
 
 func (p *parser) processItem(it item) error {
+	var v interface{}
 	switch it.typ {
 	case itemError:
 		return fmt.Errorf("Parse error on line %d: '%s'", it.line, it.val)
@@ -158,11 +177,23 @@ func (p *parser) processItem(it item) error {
 		newCtx := make(map[string]interface{})
 		p.pushContext(newCtx)
 	case itemMapEnd:
+		if p.pedantic {
+			v = &token{it, p.popContext()}
+		} else {
+			v = p.popContext()
+		}
+
 		// Creates the full map
-		p.setValue(&token{it, p.popContext()})
+		p.setValue(v)
 	case itemString:
+		if p.pedantic {
+			v = &token{it, it.val}
+		} else {
+			v = it.val
+		}
+
 		// FIXME(dlc) sanitize string?
-		p.setValue(&token{it, it.val})
+		p.setValue(v)
 	case itemInteger:
 		lastDigit := 0
 		for _, r := range it.val {
@@ -182,21 +213,28 @@ func (p *parser) processItem(it item) error {
 		}
 		// Process a suffix
 		suffix := strings.ToLower(strings.TrimSpace(it.val[lastDigit:]))
+
 		switch suffix {
 		case "":
-			p.setValue(&token{it, num})
+			v = num
 		case "k":
-			p.setValue(&token{it, num * 1000})
+			v = num * 1000
 		case "kb":
-			p.setValue(&token{it, num * 1024})
+			v = num * 1024
 		case "m":
-			p.setValue(&token{it, num * 1000 * 1000})
+			v = num * 1000 * 1000
 		case "mb":
-			p.setValue(&token{it, num * 1024 * 1024})
+			v = num * 1024 * 1024
 		case "g":
-			p.setValue(&token{it, num * 1000 * 1000 * 1000})
+			v = num * 1000 * 1000 * 1000
 		case "gb":
-			p.setValue(&token{it, num * 1024 * 1024 * 1024})
+			v = num * 1024 * 1024 * 1024
+		}
+
+		if p.pedantic {
+			p.setValue(&token{it, v})
+		} else {
+			p.setValue(v)
 		}
 	case itemFloat:
 		num, err := strconv.ParseFloat(it.val, 64)
@@ -207,15 +245,27 @@ func (p *parser) processItem(it item) error {
 			}
 			return fmt.Errorf("Expected float, but got '%s'.", it.val)
 		}
-		p.setValue(num)
+		if p.pedantic {
+			v = token{it, num}
+		} else {
+			v = num
+		}
+		p.setValue(v)
 	case itemBool:
 		switch strings.ToLower(it.val) {
 		case "true", "yes", "on":
-			p.setValue(&token{it, true})
+			// p.setValue(&token{it, true})
+			v = true
 		case "false", "no", "off":
-			p.setValue(&token{it, false})
+			// p.setValue(&token{it, false})
+			v = false
 		default:
 			return fmt.Errorf("Expected boolean value, but got '%s'.", it.val)
+		}
+		if p.pedantic {
+			p.setValue(&token{it, v})
+		} else {
+			p.setValue(v)
 		}
 	case itemDatetime:
 		dt, err := time.Parse("2006-01-02T15:04:05Z", it.val)
@@ -223,17 +273,29 @@ func (p *parser) processItem(it item) error {
 			return fmt.Errorf(
 				"Expected Zulu formatted DateTime, but got '%s'.", it.val)
 		}
-		p.setValue(&token{it, dt})
+		if p.pedantic {
+			p.setValue(&token{it, dt})
+		} else {
+			p.setValue(dt)
+		}
 	case itemArrayStart:
 		var array = make([]interface{}, 0)
 		p.pushContext(array)
 	case itemArrayEnd:
 		array := p.ctx
 		p.popContext()
-		p.setValue(&token{it, array})
+		if p.pedantic {
+			p.setValue(&token{it, array})
+		} else {
+			p.setValue(array)
+		}
 	case itemVariable:
 		if value, ok := p.lookupVariable(it.val); ok {
-			p.setValue(&token{it, value})
+			if p.pedantic {
+				p.setValue(&token{it, value})
+			} else {
+				p.setValue(value)
+			}
 		} else {
 			return fmt.Errorf("Variable reference for '%s' on line %d can not be found.",
 				it.val, it.line)

@@ -228,15 +228,24 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		return nil
 	}
 
-	m, err := conf.ParseFile(configFile)
-	if err != nil {
-		return err
-	}
-
 	var (
+		m        map[string]interface{}
 		tk       token
 		pedantic bool = o.CheckConfig
+		err      error
 	)
+
+	if pedantic {
+		m, err = conf.ParseFileWithChecks(configFile)
+		if err != nil {
+			return err
+		}
+	} else {
+		m, err = conf.ParseFile(configFile)
+		if err != nil {
+			return err
+		}
+	}
 	for k, v := range m {
 		if pedantic {
 			// When pedantic checks are enabled then need to unwrap
