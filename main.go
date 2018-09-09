@@ -88,6 +88,9 @@ func main() {
 		server.PrintTLSHelpAndDie)
 	if err != nil {
 		server.PrintAndDie(err.Error())
+	} else if opts.CheckConfig {
+		fmt.Fprintf(os.Stderr, "nats-server: configuration file %s test is successful\n", opts.ConfigFile)
+		os.Exit(0)
 	}
 
 	// Create the server with appropriate options.

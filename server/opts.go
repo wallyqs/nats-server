@@ -1180,8 +1180,8 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 		if err := opts.ProcessConfigFile(configFile); err != nil {
 			return nil, err
 		} else if opts.CheckConfig {
-			fmt.Fprintf(os.Stderr, "gnatsd: the configuration file %s syntax is ok\n", configFile)
-			os.Exit(0)
+			// Report configuration file syntax test was successful and exit.
+			return opts, nil
 		}
 
 		// Call this again to override config file options with options from command line.
