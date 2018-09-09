@@ -234,22 +234,19 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		pedantic bool = o.CheckConfig
 		err      error
 	)
-
 	if pedantic {
 		m, err = conf.ParseFileWithChecks(configFile)
-		if err != nil {
-			return err
-		}
 	} else {
 		m, err = conf.ParseFile(configFile)
-		if err != nil {
-			return err
-		}
 	}
+	if err != nil {
+		return err
+	}
+
 	for k, v := range m {
+		// When pedantic checks are enabled then need to unwrap
+		// to get the value along with reported error line.
 		if pedantic {
-			// When pedantic checks are enabled then need to unwrap
-			// to get the value along with reported error line.
 			tk = v.(token)
 			v = tk.Value()
 		}
@@ -275,8 +272,12 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "logtime":
 			o.Logtime = v.(bool)
 		case "authorization":
-			am := v.(map[string]interface{})
-			auth, err := parseAuthorization(am, pedantic)
+			var auth *authorization
+			if pedantic {
+				auth, err = parseAuthorization(tk, o)
+			} else {
+				auth, err = parseAuthorization(v, o)
+			}
 			if err != nil {
 				return err
 			}
@@ -375,7 +376,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				return &unknownConfigFieldErr{
 					field:      k,
 					token:      tk,
-					configFile: configFile,
+					configFile: o.ConfigFile,
 				}
 			}
 		}
@@ -427,8 +428,7 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 		case "host", "net":
 			opts.Cluster.Host = mv.(string)
 		case "authorization":
-			am := mv.(map[string]interface{})
-			auth, err := parseAuthorization(am, pedantic)
+			auth, err := parseAuthorization(mv, opts)
 			if err != nil {
 				return err
 			}
@@ -491,9 +491,26 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 }
 
 // Helper function to parse Authorization configs.
-func parseAuthorization(am map[string]interface{}, pedantic bool) (*authorization, error) {
-	auth := &authorization{}
+func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
+	var (
+		am       map[string]interface{}
+		tk       token
+		pedantic bool           = opts.CheckConfig
+		auth     *authorization = &authorization{}
+	)
+
+	// Unwrap value first if pedantic config check enabled.
+	if pedantic {
+		mtk := v.(token)
+		v = mtk.Value()
+	}
+	am = v.(map[string]interface{})
 	for mk, mv := range am {
+		if pedantic {
+			tk = mv.(token)
+			mv = tk.Value()
+		}
+
 		switch strings.ToLower(mk) {
 		case "user", "username":
 			auth.user = mv.(string)
@@ -511,7 +528,15 @@ func parseAuthorization(am map[string]interface{}, pedantic bool) (*authorizatio
 			}
 			auth.timeout = at
 		case "users":
-			users, err := parseUsers(mv, pedantic)
+			var (
+				users []*User
+				err   error
+			)
+			if pedantic {
+				users, err = parseUsers(tk, opts)
+			} else {
+				users, err = parseUsers(mv, opts)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -528,7 +553,11 @@ func parseAuthorization(am map[string]interface{}, pedantic bool) (*authorizatio
 			auth.defaultPermissions = permissions
 		default:
 			if pedantic {
-				return nil, &unknownConfigFieldErr{field: mk}
+				return nil, &unknownConfigFieldErr{
+					field:      mk,
+					token:      tk,
+					configFile: opts.ConfigFile,
+				}
 			}
 		}
 
@@ -546,14 +575,28 @@ func parseAuthorization(am map[string]interface{}, pedantic bool) (*authorizatio
 }
 
 // Helper function to parse multiple users array with optional permissions.
-func parseUsers(mv interface{}, pedantic bool) ([]*User, error) {
+func parseUsers(mv interface{}, opts *Options) ([]*User, error) {
+	var (
+		tk       token
+		pedantic bool    = opts.CheckConfig
+		users    []*User = []*User{}
+	)
+	if pedantic {
+		mtk := mv.(token)
+		mv = mtk.Value()
+	}
+
 	// Make sure we have an array
 	uv, ok := mv.([]interface{})
 	if !ok {
 		return nil, fmt.Errorf("Expected users field to be an array, got %v", mv)
 	}
-	users := []*User{}
 	for _, u := range uv {
+		if pedantic {
+			tk = u.(token)
+			u = tk.Value()
+		}
+
 		// Check its a map/struct
 		um, ok := u.(map[string]interface{})
 		if !ok {
@@ -561,6 +604,12 @@ func parseUsers(mv interface{}, pedantic bool) ([]*User, error) {
 		}
 		user := &User{}
 		for k, v := range um {
+			// Also needs to unwrap first
+			if pedantic {
+				tk = v.(token)
+				v = tk.Value()
+			}
+
 			switch strings.ToLower(k) {
 			case "user", "username":
 				user.Username = v.(string)
@@ -578,7 +627,11 @@ func parseUsers(mv interface{}, pedantic bool) ([]*User, error) {
 				user.Permissions = permissions
 			default:
 				if pedantic {
-					return nil, &unknownConfigFieldErr{field: k}
+					return nil, &unknownConfigFieldErr{
+						field:      k,
+						token:      tk,
+						configFile: opts.ConfigFile,
+					}
 				}
 			}
 		}

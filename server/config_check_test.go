@@ -40,8 +40,8 @@ func TestConfigCheck(t *testing.T) {
 		{
 			name: "when unknown field is used at top level",
 			config: `
-                        monitor = "127.0.0.1:4442"
-                        `,
+                monitor = "127.0.0.1:4442"
+                `,
 			defaultErr:  nil,
 			pedanticErr: errors.New(`unknown field "monitor"`),
 			errorLine:   2,
@@ -49,15 +49,15 @@ func TestConfigCheck(t *testing.T) {
 		{
 			name: "when default permissions are used at top level",
 			config: `
-			"default_permissions" {
-			  publish = ["_SANDBOX.>"]
-			  subscribe = ["_SANDBOX.>"]
-			}
-   		        `,
+		"default_permissions" {
+		  publish = ["_SANDBOX.>"]
+		  subscribe = ["_SANDBOX.>"]
+		}
+   		`,
 			defaultErr:  nil,
 			pedanticErr: errors.New(`unknown field "default_permissions"`),
 
-			// note: line is 5 because it is where the map definition ends.
+			// NOTE: line number is '5' because it is where the map definition ends.
 			errorLine: 5,
 		},
 		{
@@ -69,28 +69,50 @@ func TestConfigCheck(t *testing.T) {
 			defaultErr:  nil,
 			pedanticErr: nil,
 		},
-		// 		{
-		// 			name: "when authorization config has unknown fields",
-		// 			config: `
-		// authorization = {
-		//   foo = "bar"
-		// }
-		// `,
-		// 			defaultErr:  nil,
-		// 			pedanticErr: errors.New(`Unknown field "foo" within authorization config`),
-		// 		},
-		// 		{
-		// 			name: "when user authorization config has unknown fields",
-		// 			config: `
-		// authorization = {
-		//   users = [
-		//     { user = "foo", pass = "bar", token = "quux" }
-		//   ]
-		// }
-		// `,
-		// 			defaultErr:  nil,
-		// 			pedanticErr: errors.New(`Unknown field "token" within user authorization config`),
-		// 		},
+		{
+			name: "when authorization config has unknown fields",
+			config: `
+		authorization = {
+		  foo = "bar"
+		}
+		`,
+			defaultErr:  nil,
+			pedanticErr: errors.New(`unknown field "foo"`),
+			errorLine:   3,
+		},
+		{
+			name: "when authorization config has unknown fields",
+			config: `
+                port = 4222
+
+		authorization = {
+                  user = "hello"
+                  foo = "bar"
+		  password = "world"
+		}
+
+		`,
+			defaultErr:  nil,
+			pedanticErr: errors.New(`unknown field "foo"`),
+			errorLine:   6,
+		},
+		{
+			name: "when user authorization config has unknown fields",
+			config: `
+		authorization = {
+		  users = [
+		    { 
+                      user = "foo"
+                      pass = "bar"
+                      token = "quux"
+                    }
+		  ]
+		}
+		`,
+			defaultErr:  nil,
+			pedanticErr: errors.New(`unknown field "token"`),
+			errorLine:   7,
+		},
 		// 		{
 		// 			name: "when user authorization permissions config has unknown fields",
 		// 			config: `
