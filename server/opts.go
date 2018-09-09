@@ -233,32 +233,40 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		return err
 	}
 
-	pedantic := o.CheckConfig
-	for k, t := range m {
-		v := t.(token)
+	var (
+		tk       token
+		pedantic bool = o.CheckConfig
+	)
+	for k, v := range m {
+		if pedantic {
+			// When pedantic checks are enabled then need to unwrap
+			// to get the value along with reported error line.
+			tk = v.(token)
+			v = tk.Value()
+		}
 
 		switch strings.ToLower(k) {
 		case "listen":
-			hp, err := parseListen(v.Value())
+			hp, err := parseListen(v)
 			if err != nil {
 				return err
 			}
 			o.Host = hp.host
 			o.Port = hp.port
 		case "client_advertise":
-			o.ClientAdvertise = v.Value().(string)
+			o.ClientAdvertise = v.(string)
 		case "port":
-			o.Port = int(v.Value().(int64))
+			o.Port = int(v.(int64))
 		case "host", "net":
-			o.Host = v.Value().(string)
+			o.Host = v.(string)
 		case "debug":
-			o.Debug = v.Value().(bool)
+			o.Debug = v.(bool)
 		case "trace":
-			o.Trace = v.Value().(bool)
+			o.Trace = v.(bool)
 		case "logtime":
-			o.Logtime = v.Value().(bool)
+			o.Logtime = v.(bool)
 		case "authorization":
-			am := v.Value().(map[string]interface{})
+			am := v.(map[string]interface{})
 			auth, err := parseAuthorization(am, pedantic)
 			if err != nil {
 				return err
@@ -281,56 +289,56 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				o.Users = auth.users
 			}
 		case "http":
-			hp, err := parseListen(v.Value())
+			hp, err := parseListen(v)
 			if err != nil {
 				return err
 			}
 			o.HTTPHost = hp.host
 			o.HTTPPort = hp.port
 		case "https":
-			hp, err := parseListen(v.Value())
+			hp, err := parseListen(v)
 			if err != nil {
 				return err
 			}
 			o.HTTPHost = hp.host
 			o.HTTPSPort = hp.port
 		case "http_port", "monitor_port":
-			o.HTTPPort = int(v.Value().(int64))
+			o.HTTPPort = int(v.(int64))
 		case "https_port":
-			o.HTTPSPort = int(v.Value().(int64))
+			o.HTTPSPort = int(v.(int64))
 		case "cluster":
-			cm := v.Value().(map[string]interface{})
+			cm := v.(map[string]interface{})
 			if err := parseCluster(cm, o); err != nil {
 				return err
 			}
 		case "logfile", "log_file":
-			o.LogFile = v.Value().(string)
+			o.LogFile = v.(string)
 		case "syslog":
-			o.Syslog = v.Value().(bool)
+			o.Syslog = v.(bool)
 		case "remote_syslog":
-			o.RemoteSyslog = v.Value().(string)
+			o.RemoteSyslog = v.(string)
 		case "pidfile", "pid_file":
-			o.PidFile = v.Value().(string)
+			o.PidFile = v.(string)
 		case "ports_file_dir":
-			o.PortsFileDir = v.Value().(string)
+			o.PortsFileDir = v.(string)
 		case "prof_port":
-			o.ProfPort = int(v.Value().(int64))
+			o.ProfPort = int(v.(int64))
 		case "max_control_line":
-			o.MaxControlLine = int(v.Value().(int64))
+			o.MaxControlLine = int(v.(int64))
 		case "max_payload":
-			o.MaxPayload = int(v.Value().(int64))
+			o.MaxPayload = int(v.(int64))
 		case "max_pending":
-			o.MaxPending = v.Value().(int64)
+			o.MaxPending = v.(int64)
 		case "max_connections", "max_conn":
-			o.MaxConn = int(v.Value().(int64))
+			o.MaxConn = int(v.(int64))
 		case "max_subscriptions", "max_subs":
-			o.MaxSubs = int(v.Value().(int64))
+			o.MaxSubs = int(v.(int64))
 		case "ping_interval":
-			o.PingInterval = time.Duration(int(v.Value().(int64))) * time.Second
+			o.PingInterval = time.Duration(int(v.(int64))) * time.Second
 		case "ping_max":
-			o.MaxPingsOut = int(v.Value().(int64))
+			o.MaxPingsOut = int(v.(int64))
 		case "tls":
-			tlsm := v.Value().(map[string]interface{})
+			tlsm := v.(map[string]interface{})
 			tc, err := parseTLS(tlsm)
 			if err != nil {
 				return err
@@ -340,7 +348,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			}
 			o.TLSTimeout = tc.Timeout
 		case "write_deadline":
-			wd, ok := v.Value().(string)
+			wd, ok := v.(string)
 			if ok {
 				dur, err := time.ParseDuration(wd)
 				if err != nil {
@@ -350,14 +358,14 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			} else {
 				// Backward compatible with old type, assume this is the
 				// number of seconds.
-				o.WriteDeadline = time.Duration(v.Value().(int64)) * time.Second
+				o.WriteDeadline = time.Duration(v.(int64)) * time.Second
 				fmt.Printf("WARNING: write_deadline should be converted to a duration\n")
 			}
 		default:
 			if pedantic {
 				return &unknownConfigFieldErr{
 					field:      k,
-					token:      v,
+					token:      tk,
 					configFile: configFile,
 				}
 			}
