@@ -15,7 +15,6 @@ package server
 
 import (
 	"errors"
-	"fmt"
 )
 
 var (
@@ -52,16 +51,3 @@ var (
 	// attempted to connect to the route listen port.
 	ErrClientConnectedToRoutePort = errors.New("Attempted To Connect To Route Port")
 )
-
-type unknownConfigFieldErr struct {
-	field   string
-	section string
-}
-
-func (e *unknownConfigFieldErr) Error() string {
-	msg := fmt.Sprintf("Unknown field %q", e.field)
-	if e.section != "" {
-		return msg + fmt.Sprintf(" within %s config", e.section)
-	}
-	return msg
-}

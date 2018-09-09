@@ -179,6 +179,25 @@ e.g.
 Available cipher suites include:
 `
 
+type token interface {
+	Value() interface{}
+	Line() int
+}
+
+type unknownConfigFieldErr struct {
+	field      string
+	token      token
+	configFile string
+}
+
+func (e *unknownConfigFieldErr) Error() string {
+	msg := fmt.Sprintf("unknown field %q", e.field)
+	if e.token != nil {
+		return msg + fmt.Sprintf(" in %s:%d", e.configFile, e.token.Line())
+	}
+	return msg
+}
+
 // ProcessConfigFile processes a configuration file.
 // FIXME(dlc): Hacky
 func ProcessConfigFile(configFile string) (*Options, error) {
@@ -215,29 +234,31 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	}
 
 	pedantic := o.CheckConfig
-	for k, v := range m {
+	for k, t := range m {
+		v := t.(token)
+
 		switch strings.ToLower(k) {
 		case "listen":
-			hp, err := parseListen(v)
+			hp, err := parseListen(v.Value())
 			if err != nil {
 				return err
 			}
 			o.Host = hp.host
 			o.Port = hp.port
 		case "client_advertise":
-			o.ClientAdvertise = v.(string)
+			o.ClientAdvertise = v.Value().(string)
 		case "port":
-			o.Port = int(v.(int64))
+			o.Port = int(v.Value().(int64))
 		case "host", "net":
-			o.Host = v.(string)
+			o.Host = v.Value().(string)
 		case "debug":
-			o.Debug = v.(bool)
+			o.Debug = v.Value().(bool)
 		case "trace":
-			o.Trace = v.(bool)
+			o.Trace = v.Value().(bool)
 		case "logtime":
-			o.Logtime = v.(bool)
+			o.Logtime = v.Value().(bool)
 		case "authorization":
-			am := v.(map[string]interface{})
+			am := v.Value().(map[string]interface{})
 			auth, err := parseAuthorization(am, pedantic)
 			if err != nil {
 				return err
@@ -260,56 +281,56 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				o.Users = auth.users
 			}
 		case "http":
-			hp, err := parseListen(v)
+			hp, err := parseListen(v.Value())
 			if err != nil {
 				return err
 			}
 			o.HTTPHost = hp.host
 			o.HTTPPort = hp.port
 		case "https":
-			hp, err := parseListen(v)
+			hp, err := parseListen(v.Value())
 			if err != nil {
 				return err
 			}
 			o.HTTPHost = hp.host
 			o.HTTPSPort = hp.port
 		case "http_port", "monitor_port":
-			o.HTTPPort = int(v.(int64))
+			o.HTTPPort = int(v.Value().(int64))
 		case "https_port":
-			o.HTTPSPort = int(v.(int64))
+			o.HTTPSPort = int(v.Value().(int64))
 		case "cluster":
-			cm := v.(map[string]interface{})
+			cm := v.Value().(map[string]interface{})
 			if err := parseCluster(cm, o); err != nil {
 				return err
 			}
 		case "logfile", "log_file":
-			o.LogFile = v.(string)
+			o.LogFile = v.Value().(string)
 		case "syslog":
-			o.Syslog = v.(bool)
+			o.Syslog = v.Value().(bool)
 		case "remote_syslog":
-			o.RemoteSyslog = v.(string)
+			o.RemoteSyslog = v.Value().(string)
 		case "pidfile", "pid_file":
-			o.PidFile = v.(string)
+			o.PidFile = v.Value().(string)
 		case "ports_file_dir":
-			o.PortsFileDir = v.(string)
+			o.PortsFileDir = v.Value().(string)
 		case "prof_port":
-			o.ProfPort = int(v.(int64))
+			o.ProfPort = int(v.Value().(int64))
 		case "max_control_line":
-			o.MaxControlLine = int(v.(int64))
+			o.MaxControlLine = int(v.Value().(int64))
 		case "max_payload":
-			o.MaxPayload = int(v.(int64))
+			o.MaxPayload = int(v.Value().(int64))
 		case "max_pending":
-			o.MaxPending = v.(int64)
+			o.MaxPending = v.Value().(int64)
 		case "max_connections", "max_conn":
-			o.MaxConn = int(v.(int64))
+			o.MaxConn = int(v.Value().(int64))
 		case "max_subscriptions", "max_subs":
-			o.MaxSubs = int(v.(int64))
+			o.MaxSubs = int(v.Value().(int64))
 		case "ping_interval":
-			o.PingInterval = time.Duration(int(v.(int64))) * time.Second
+			o.PingInterval = time.Duration(int(v.Value().(int64))) * time.Second
 		case "ping_max":
-			o.MaxPingsOut = int(v.(int64))
+			o.MaxPingsOut = int(v.Value().(int64))
 		case "tls":
-			tlsm := v.(map[string]interface{})
+			tlsm := v.Value().(map[string]interface{})
 			tc, err := parseTLS(tlsm)
 			if err != nil {
 				return err
@@ -319,7 +340,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			}
 			o.TLSTimeout = tc.Timeout
 		case "write_deadline":
-			wd, ok := v.(string)
+			wd, ok := v.Value().(string)
 			if ok {
 				dur, err := time.ParseDuration(wd)
 				if err != nil {
@@ -329,12 +350,16 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			} else {
 				// Backward compatible with old type, assume this is the
 				// number of seconds.
-				o.WriteDeadline = time.Duration(v.(int64)) * time.Second
+				o.WriteDeadline = time.Duration(v.Value().(int64)) * time.Second
 				fmt.Printf("WARNING: write_deadline should be converted to a duration\n")
 			}
 		default:
 			if pedantic {
-				return &unknownConfigFieldErr{field: k}
+				return &unknownConfigFieldErr{
+					field:      k,
+					token:      v,
+					configFile: configFile,
+				}
 			}
 		}
 	}
@@ -441,7 +466,7 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 			opts.Cluster.ConnectRetries = int(mv.(int64))
 		default:
 			if pedantic {
-				return &unknownConfigFieldErr{field: mk, section: "cluster"}
+				return &unknownConfigFieldErr{field: mk}
 			}
 		}
 	}
@@ -486,7 +511,7 @@ func parseAuthorization(am map[string]interface{}, pedantic bool) (*authorizatio
 			auth.defaultPermissions = permissions
 		default:
 			if pedantic {
-				return nil, &unknownConfigFieldErr{field: mk, section: "authorization"}
+				return nil, &unknownConfigFieldErr{field: mk}
 			}
 		}
 
@@ -536,7 +561,7 @@ func parseUsers(mv interface{}, pedantic bool) ([]*User, error) {
 				user.Permissions = permissions
 			default:
 				if pedantic {
-					return nil, &unknownConfigFieldErr{field: k, section: "user authorization"}
+					return nil, &unknownConfigFieldErr{field: k}
 				}
 			}
 		}
