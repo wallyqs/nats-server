@@ -634,7 +634,7 @@ func parseUsers(mv interface{}, opts *Options) ([]*User, error) {
 		return nil, fmt.Errorf("Expected users field to be an array, got %v", mv)
 	}
 	for _, u := range uv {
-		tk, u = unwrapValue(u)
+		_, u = unwrapValue(u)
 
 		// Check its a map/struct
 		um, ok := u.(map[string]interface{})
