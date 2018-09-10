@@ -208,6 +208,18 @@ func ProcessConfigFile(configFile string) (*Options, error) {
 	return opts, nil
 }
 
+// unwrapValue can be used to get the token and value from an item
+// to be able to report the line number in case of an incorrect
+// configuration.
+func unwrapValue(v interface{}) (token, interface{}) {
+	switch tk := v.(type) {
+	case token:
+		return tk, tk.Value()
+	default:
+		return nil, v
+	}
+}
+
 // ProcessConfigFile updates the Options structure with options
 // present in the given configuration file.
 // This version is convenient if one wants to set some default
@@ -242,15 +254,10 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	if err != nil {
 		return err
 	}
-
 	for k, v := range m {
 		// When pedantic checks are enabled then need to unwrap
 		// to get the value along with reported error line.
-		if pedantic {
-			tk = v.(token)
-			v = tk.Value()
-		}
-
+		tk, v = unwrapValue(v)
 		switch strings.ToLower(k) {
 		case "listen":
 			hp, err := parseListen(v)
@@ -430,20 +437,11 @@ func parseCluster(v interface{}, opts *Options) error {
 		tk       token
 		pedantic bool = opts.CheckConfig
 	)
-
-	// Unwrap token value if line check is required.
-	if pedantic {
-		ctk := v.(token)
-		v = ctk.Value()
-	}
+	_, v = unwrapValue(v)
 	cm = v.(map[string]interface{})
 	for mk, mv := range cm {
 		// Again, unwrap token value if line check is required.
-		if pedantic {
-			tk = mv.(token)
-			mv = tk.Value()
-		}
-
+		tk, mv = unwrapValue(mv)
 		switch strings.ToLower(mk) {
 		case "listen":
 			hp, err := parseListen(mv)
@@ -548,17 +546,10 @@ func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
 	)
 
 	// Unwrap value first if pedantic config check enabled.
-	if pedantic {
-		mtk := v.(token)
-		v = mtk.Value()
-	}
+	_, v = unwrapValue(v)
 	am = v.(map[string]interface{})
 	for mk, mv := range am {
-		if pedantic {
-			tk = mv.(token)
-			mv = tk.Value()
-		}
-
+		tk, mv = unwrapValue(mv)
 		switch strings.ToLower(mk) {
 		case "user", "username":
 			auth.user = mv.(string)
@@ -633,10 +624,7 @@ func parseUsers(mv interface{}, opts *Options) ([]*User, error) {
 		pedantic bool    = opts.CheckConfig
 		users    []*User = []*User{}
 	)
-	if pedantic {
-		mtk := mv.(token)
-		mv = mtk.Value()
-	}
+	_, mv = unwrapValue(mv)
 
 	// Make sure we have an array
 	uv, ok := mv.([]interface{})
@@ -644,10 +632,7 @@ func parseUsers(mv interface{}, opts *Options) ([]*User, error) {
 		return nil, fmt.Errorf("Expected users field to be an array, got %v", mv)
 	}
 	for _, u := range uv {
-		if pedantic {
-			tk = u.(token)
-			u = tk.Value()
-		}
+		tk, u = unwrapValue(u)
 
 		// Check its a map/struct
 		um, ok := u.(map[string]interface{})
@@ -657,10 +642,7 @@ func parseUsers(mv interface{}, opts *Options) ([]*User, error) {
 		user := &User{}
 		for k, v := range um {
 			// Also needs to unwrap first
-			if pedantic {
-				tk = v.(token)
-				v = tk.Value()
-			}
+			tk, v = unwrapValue(v)
 
 			switch strings.ToLower(k) {
 			case "user", "username":
@@ -707,19 +689,13 @@ func parseUserPermissions(mv interface{}, opts *Options) (*Permissions, error) {
 		pedantic bool         = opts.CheckConfig
 		p        *Permissions = &Permissions{}
 	)
-	if pedantic {
-		pmtk := mv.(token)
-		mv = pmtk.Value()
-	}
+	_, mv = unwrapValue(mv)
 	pm, ok := mv.(map[string]interface{})
 	if !ok {
 		return nil, fmt.Errorf("Expected permissions to be a map/struct, got %+v", mv)
 	}
 	for k, v := range pm {
-		if pedantic {
-			tk = v.(token)
-			v = tk.Value()
-		}
+		tk, v = unwrapValue(v)
 
 		switch strings.ToLower(k) {
 		// For routes:
@@ -758,20 +734,16 @@ func parseVariablePermissions(v interface{}, opts *Options) (*SubjectPermission,
 	switch vv := v.(type) {
 	case map[string]interface{}:
 		// New style with allow and/or deny properties.
-		// v.(map[string]interface{})
 		return parseSubjectPermission(vv, opts)
 	default:
 		// Old style
-		return parseOldPermissionStyle(v, opts)
+		return parseOldPermissionStyle(v)
 	}
 }
 
 // Helper function to parse subject singeltons and/or arrays
-func parseSubjects(v interface{}, opts *Options) ([]string, error) {
-	var (
-		subjects []string
-		pedantic bool = opts.CheckConfig
-	)
+func parseSubjects(v interface{}) ([]string, error) {
+	var subjects []string
 	switch vv := v.(type) {
 	case string:
 		subjects = append(subjects, vv)
@@ -779,10 +751,7 @@ func parseSubjects(v interface{}, opts *Options) ([]string, error) {
 		subjects = vv
 	case []interface{}:
 		for _, i := range vv {
-			if pedantic {
-				itk := i.(token)
-				i = itk.Value()
-			}
+			_, i = unwrapValue(i)
 
 			subject, ok := i.(string)
 			if !ok {
@@ -800,8 +769,8 @@ func parseSubjects(v interface{}, opts *Options) ([]string, error) {
 }
 
 // Helper function to parse old style authorization configs.
-func parseOldPermissionStyle(v interface{}, opts *Options) (*SubjectPermission, error) {
-	subjects, err := parseSubjects(v, opts)
+func parseOldPermissionStyle(v interface{}) (*SubjectPermission, error) {
+	subjects, err := parseSubjects(v)
 	if err != nil {
 		return nil, err
 	}
@@ -810,7 +779,6 @@ func parseOldPermissionStyle(v interface{}, opts *Options) (*SubjectPermission, 
 
 // Helper function to parse new style authorization into a SubjectPermission with Allow and Deny.
 func parseSubjectPermission(v interface{}, opts *Options) (*SubjectPermission, error) {
-	// m map[string]interface{}
 	m := v.(map[string]interface{})
 	if len(m) == 0 {
 		return nil, nil
@@ -819,13 +787,13 @@ func parseSubjectPermission(v interface{}, opts *Options) (*SubjectPermission, e
 	for k, v := range m {
 		switch strings.ToLower(k) {
 		case "allow":
-			subjects, err := parseSubjects(v, opts)
+			subjects, err := parseSubjects(v)
 			if err != nil {
 				return nil, err
 			}
 			p.Allow = subjects
 		case "deny":
-			subjects, err := parseSubjects(v, opts)
+			subjects, err := parseSubjects(v)
 			if err != nil {
 				return nil, err
 			}
@@ -885,16 +853,10 @@ func parseTLS(v interface{}, opts *Options) (*TLSConfigOpts, error) {
 		tc       TLSConfigOpts = TLSConfigOpts{}
 		pedantic bool          = opts.CheckConfig
 	)
-	if pedantic {
-		mtk := v.(token)
-		v = mtk.Value()
-	}
+	_, v = unwrapValue(v)
 	tlsm = v.(map[string]interface{})
 	for mk, mv := range tlsm {
-		if pedantic {
-			tk = mv.(token)
-			mv = tk.Value()
-		}
+		tk, mv = unwrapValue(mv)
 		switch strings.ToLower(mk) {
 		case "cert_file":
 			certFile, ok := mv.(string)

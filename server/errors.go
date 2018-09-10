@@ -13,9 +13,7 @@
 
 package server
 
-import (
-	"errors"
-)
+import "errors"
 
 var (
 	// ErrConnectionClosed represents an error condition on a closed connection.

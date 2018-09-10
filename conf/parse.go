@@ -184,7 +184,6 @@ func (p *parser) processItem(it item) error {
 		newCtx := make(map[string]interface{})
 		p.pushContext(newCtx)
 	case itemMapEnd:
-		// Creates the full map
 		setValue(it, p.popContext())
 	case itemString:
 		// FIXME(dlc) sanitize string?
