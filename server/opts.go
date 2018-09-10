@@ -488,6 +488,7 @@ func parseCluster(v interface{}, opts *Options) error {
 			ra := mv.([]interface{})
 			opts.Routes = make([]*url.URL, 0, len(ra))
 			for _, r := range ra {
+				_, r = unwrapValue(r)
 				routeURL := r.(string)
 				url, err := url.Parse(routeURL)
 				if err != nil {

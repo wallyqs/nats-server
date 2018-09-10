@@ -332,6 +332,21 @@ func TestConfigCheck(t *testing.T) {
 			pedanticErr: errors.New(`unknown field "foo"`),
 			errorLine:   4,
 		},
+		{
+			name: "when unknown option is in cluster config with defined routes",
+			config: `
+		cluster {
+                  port = 6222
+                  routes = [
+                    nats://127.0.0.1:6222
+                  ]
+                  peers = []
+		}
+		`,
+			defaultErr:  nil,
+			pedanticErr: errors.New(`unknown field "peers"`),
+			errorLine:   7,
+		},
 	}
 
 	checkConfig := func(config string, pedantic bool) error {
