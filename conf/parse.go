@@ -278,7 +278,15 @@ func (p *parser) processItem(it item) error {
 				it.val, it.line)
 		}
 	case itemInclude:
-		m, err := ParseFile(filepath.Join(p.fp, it.val))
+		var (
+			m   map[string]interface{}
+			err error
+		)
+		if p.pedantic {
+			m, err = ParseFileWithChecks(filepath.Join(p.fp, it.val))
+		} else {
+			m, err = ParseFile(filepath.Join(p.fp, it.val))
+		}
 		if err != nil {
 			return fmt.Errorf("Error parsing include file '%s', %v.", it.val, err)
 		}
