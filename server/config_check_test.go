@@ -129,6 +129,42 @@ func TestConfigCheck(t *testing.T) {
 			errorLine:   5,
 		},
 		{
+			name: "when user authorization permissions config has unknown fields within allow or deny",
+			config: `
+		authorization {
+		  permissions {
+		    subscribe = {
+                      allow = ["hello", "world"]
+                      deny = ["foo", "bar"]
+                      denied = "_INBOX.>"
+                    }
+		    publish = {}
+		  }
+		}
+		`,
+			defaultErr:  errors.New(`Unknown field name "denied" parsing subject permissions, only 'allow' or 'deny' are permitted`),
+			pedanticErr: errors.New(`unknown field "denied"`),
+			errorLine:   7,
+		},
+		{
+			name: "when user authorization permissions config has unknown fields within allow or deny",
+			config: `
+		authorization {
+		  permissions {
+		    publish = {
+                      allow = ["hello", "world"]
+                      deny = ["foo", "bar"]
+                      allowed = "_INBOX.>"
+                    }
+		    subscribe = {}
+		  }
+		}
+		`,
+			defaultErr:  errors.New(`Unknown field name "allowed" parsing subject permissions, only 'allow' or 'deny' are permitted`),
+			pedanticErr: errors.New(`unknown field "allowed"`),
+			errorLine:   7,
+		},
+		{
 			name: "when user authorization permissions config has unknown fields using arrays",
 			config: `
                 authorization {

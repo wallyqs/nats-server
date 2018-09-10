@@ -784,7 +784,9 @@ func parseSubjectPermission(v interface{}, opts *Options) (*SubjectPermission, e
 		return nil, nil
 	}
 	p := &SubjectPermission{}
+	pedantic := opts.CheckConfig
 	for k, v := range m {
+		tk, v := unwrapValue(v)
 		switch strings.ToLower(k) {
 		case "allow":
 			subjects, err := parseSubjects(v)
@@ -799,6 +801,13 @@ func parseSubjectPermission(v interface{}, opts *Options) (*SubjectPermission, e
 			}
 			p.Deny = subjects
 		default:
+			if pedantic {
+				return nil, &unknownConfigFieldErr{
+					field:      k,
+					token:      tk,
+					configFile: opts.ConfigFile,
+				}
+			}
 			return nil, fmt.Errorf("Unknown field name %q parsing subject permissions, only 'allow' or 'deny' are permitted", k)
 		}
 	}
