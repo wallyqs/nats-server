@@ -726,13 +726,15 @@ func parseUserPermissions(mv interface{}, opts *Options) (*Permissions, error) {
 		// Import is Publish
 		// Export is Subscribe
 		case "pub", "publish", "import":
-			perms, err := parseVariablePermissions(v)
+			perms, err := parseVariablePermissions(v, opts)
+
 			if err != nil {
 				return nil, err
 			}
 			p.Publish = perms
 		case "sub", "subscribe", "export":
-			perms, err := parseVariablePermissions(v)
+			perms, err := parseVariablePermissions(v, opts)
+
 			if err != nil {
 				return nil, err
 			}
@@ -752,27 +754,36 @@ func parseUserPermissions(mv interface{}, opts *Options) (*Permissions, error) {
 }
 
 // Top level parser for authorization configurations.
-func parseVariablePermissions(v interface{}) (*SubjectPermission, error) {
-	switch v.(type) {
+func parseVariablePermissions(v interface{}, opts *Options) (*SubjectPermission, error) {
+	switch vv := v.(type) {
 	case map[string]interface{}:
 		// New style with allow and/or deny properties.
-		return parseSubjectPermission(v.(map[string]interface{}))
+		// v.(map[string]interface{})
+		return parseSubjectPermission(vv, opts)
 	default:
 		// Old style
-		return parseOldPermissionStyle(v)
+		return parseOldPermissionStyle(v, opts)
 	}
 }
 
 // Helper function to parse subject singeltons and/or arrays
-func parseSubjects(v interface{}) ([]string, error) {
-	var subjects []string
-	switch v.(type) {
+func parseSubjects(v interface{}, opts *Options) ([]string, error) {
+	var (
+		subjects []string
+		pedantic bool = opts.CheckConfig
+	)
+	switch vv := v.(type) {
 	case string:
-		subjects = append(subjects, v.(string))
+		subjects = append(subjects, vv)
 	case []string:
-		subjects = v.([]string)
+		subjects = vv
 	case []interface{}:
-		for _, i := range v.([]interface{}) {
+		for _, i := range vv {
+			if pedantic {
+				itk := i.(token)
+				i = itk.Value()
+			}
+
 			subject, ok := i.(string)
 			if !ok {
 				return nil, fmt.Errorf("Subject in permissions array cannot be cast to string")
@@ -789,8 +800,8 @@ func parseSubjects(v interface{}) ([]string, error) {
 }
 
 // Helper function to parse old style authorization configs.
-func parseOldPermissionStyle(v interface{}) (*SubjectPermission, error) {
-	subjects, err := parseSubjects(v)
+func parseOldPermissionStyle(v interface{}, opts *Options) (*SubjectPermission, error) {
+	subjects, err := parseSubjects(v, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -798,23 +809,23 @@ func parseOldPermissionStyle(v interface{}) (*SubjectPermission, error) {
 }
 
 // Helper function to parse new style authorization into a SubjectPermission with Allow and Deny.
-func parseSubjectPermission(m map[string]interface{}) (*SubjectPermission, error) {
+func parseSubjectPermission(v interface{}, opts *Options) (*SubjectPermission, error) {
+	// m map[string]interface{}
+	m := v.(map[string]interface{})
 	if len(m) == 0 {
 		return nil, nil
 	}
-
 	p := &SubjectPermission{}
-
 	for k, v := range m {
 		switch strings.ToLower(k) {
 		case "allow":
-			subjects, err := parseSubjects(v)
+			subjects, err := parseSubjects(v, opts)
 			if err != nil {
 				return nil, err
 			}
 			p.Allow = subjects
 		case "deny":
-			subjects, err := parseSubjects(v)
+			subjects, err := parseSubjects(v, opts)
 			if err != nil {
 				return nil, err
 			}

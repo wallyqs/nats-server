@@ -129,6 +129,52 @@ func TestConfigCheck(t *testing.T) {
 			errorLine:   5,
 		},
 		{
+			name: "when user authorization permissions config has unknown fields using arrays",
+			config: `
+                authorization {
+
+		 default_permissions { 
+		   subscribe = ["a"]
+		   publish = ["b"]
+		   inboxes = ["c"]
+		 }
+
+		 users = [
+		   {
+		     user = "foo"
+		     pass = "bar"
+		   }
+		  ]
+	        }                       
+		`,
+			defaultErr:  errors.New(`Unknown field inboxes parsing permissions`),
+			pedanticErr: errors.New(`unknown field "inboxes"`),
+			errorLine:   7,
+		},
+		{
+			name: "when user authorization permissions config has unknown fields using strings",
+			config: `
+                authorization {
+
+		 default_permissions { 
+		   subscribe = "a"
+		   requests = "b"
+		   publish = "c"
+		 }
+
+		 users = [
+		   {
+		     user = "foo"
+		     pass = "bar"
+		   }
+		  ]
+	        }                       
+		`,
+			defaultErr:  errors.New(`Unknown field requests parsing permissions`),
+			pedanticErr: errors.New(`unknown field "requests"`),
+			errorLine:   6,
+		},
+		{
 			name: "when user authorization permissions config is empty",
 			config: `
 		authorization = {
