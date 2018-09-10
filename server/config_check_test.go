@@ -143,73 +143,88 @@ func TestConfigCheck(t *testing.T) {
 			defaultErr:  nil,
 			pedanticErr: nil,
 		},
-		// 		{
-		// 			name: "when unknown permissions are included in config",
-		// 			config: `
-		// authorization = {
-		//   users = [
-		//     {
-		//       user = "foo", pass = "bar", permissions {
-		//         inboxes = true
-		//       }
-		//     }
-		//   ]
-		// }
-		// `,
-		// 			defaultErr:  errors.New(`Unknown field inboxes parsing permissions`),
-		// 			pedanticErr: errors.New(`Unknown field inboxes parsing permissions`),
-		// 		},
-		// 		{
-		// 			name: "when clustering config is empty",
-		// 			config: `
-		// cluster = {
-		// }
-		// `,
+		{
+			name: "when unknown permissions are included in config",
+			config: `
+		authorization = {
+		  users = [
+		    {
+		      user = "foo", pass = "bar", permissions {
+		        inboxes = true
+		      }
+		    }
+		  ]
+		}
+		`,
+			defaultErr:  errors.New(`Unknown field inboxes parsing permissions`),
+			pedanticErr: errors.New(`unknown field "inboxes"`),
+			errorLine:   6,
+		},
+		{
+			name: "when clustering config is empty",
+			config: `
+		cluster = {
+		}
+		`,
 
-		// 			defaultErr:  nil,
-		// 			pedanticErr: nil,
-		// 		},
-		// 		{
-		// 			name: "when unknown option is in clustering config",
-		// 			config: `
-		// cluster = {
-		//   foo = "bar"
-		// }
-		// `,
+			defaultErr:  nil,
+			pedanticErr: nil,
+		},
+		{
+			name: "when unknown option is in clustering config",
+			config: `
+                # NATS Server Configuration
+                port = 4222
 
-		// 			defaultErr:  nil,
-		// 			pedanticErr: errors.New(`Unknown field "foo" within cluster config`),
-		// 		},
-		// 		{
-		// 			name: "when unknown option is in clustering authorization config",
-		// 			config: `
-		// cluster = {
-		//   authorization {
-		//     foo = "bar"
-		//   }
-		// }
-		// `,
+		cluster = {
 
-		// 			defaultErr:  nil,
-		// 			pedanticErr: errors.New(`Unknown field "foo" within authorization config`),
-		// 		},
-		// 		{
-		// 			name: "when unknown option is in clustering authorization permissions config",
-		// 			config: `
-		// cluster = {
-		//   authorization {
-		//     user = "foo"
-		//     pass = "bar"
-		//     permissions = {
-		//       hello = "world"
-		//     }
-		//   }
-		// }
-		// `,
-		// 			// Backwards compatibility: also report error by default even if pedantic checks disabled.
-		// 			defaultErr:  errors.New(`Unknown field hello parsing permissions`),
-		// 			pedanticErr: errors.New(`Unknown field hello parsing permissions`),
-		// 		},
+                  port = 6222
+
+		  foo = "bar"
+
+                  authorization {
+                    user = "hello"
+                    pass = "world"
+                  }
+
+		}
+		`,
+
+			defaultErr:  nil,
+			pedanticErr: errors.New(`unknown field "foo"`),
+			errorLine:   9,
+		},
+		{
+			name: "when unknown option is in clustering authorization config",
+			config: `
+		cluster = {
+		  authorization {
+		    foo = "bar"
+		  }
+		}
+		`,
+
+			defaultErr:  nil,
+			pedanticErr: errors.New(`unknown field "foo"`),
+			errorLine:   4,
+		},
+		{
+			name: "when unknown option is in clustering authorization permissions config",
+			config: `
+		cluster = {
+		  authorization {
+		    user = "foo"
+		    pass = "bar"
+		    permissions = {
+		      hello = "world"
+		    }
+		  }
+		}
+		`,
+			defaultErr:  errors.New(`Unknown field hello parsing permissions`),
+			pedanticErr: errors.New(`unknown field "hello"`),
+			errorLine:   7,
+		},
 		// 		{
 		// 			name: "when unknown option is in tls config",
 		// 			config: `

@@ -317,8 +317,13 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "https_port":
 			o.HTTPSPort = int(v.(int64))
 		case "cluster":
-			cm := v.(map[string]interface{})
-			if err := parseCluster(cm, o); err != nil {
+			var err error
+			if pedantic {
+				err = parseCluster(tk, o)
+			} else {
+				err = parseCluster(v, o)
+			}
+			if err != nil {
 				return err
 			}
 		case "logfile", "log_file":
@@ -412,9 +417,26 @@ func parseListen(v interface{}) (*hostPort, error) {
 }
 
 // parseCluster will parse the cluster config.
-func parseCluster(cm map[string]interface{}, opts *Options) error {
-	pedantic := opts.CheckConfig
+func parseCluster(v interface{}, opts *Options) error {
+	var (
+		cm       map[string]interface{}
+		tk       token
+		pedantic bool = opts.CheckConfig
+	)
+
+	// Unwrap token value if line check is required.
+	if pedantic {
+		ctk := v.(token)
+		v = ctk.Value()
+	}
+	cm = v.(map[string]interface{})
 	for mk, mv := range cm {
+		// Again, unwrap token value if line check is required.
+		if pedantic {
+			tk = mv.(token)
+			mv = tk.Value()
+		}
+
 		switch strings.ToLower(mk) {
 		case "listen":
 			hp, err := parseListen(mv)
@@ -428,7 +450,15 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 		case "host", "net":
 			opts.Cluster.Host = mv.(string)
 		case "authorization":
-			auth, err := parseAuthorization(mv, opts)
+			var (
+				auth *authorization
+				err  error
+			)
+			if pedantic {
+				auth, err = parseAuthorization(tk, opts)
+			} else {
+				auth, err = parseAuthorization(mv, opts)
+			}
 			if err != nil {
 				return err
 			}
@@ -483,7 +513,11 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 			opts.Cluster.ConnectRetries = int(mv.(int64))
 		default:
 			if pedantic {
-				return &unknownConfigFieldErr{field: mk}
+				return &unknownConfigFieldErr{
+					field:      mk,
+					token:      tk,
+					configFile: opts.ConfigFile,
+				}
 			}
 		}
 	}
