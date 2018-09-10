@@ -225,30 +225,31 @@ func TestConfigCheck(t *testing.T) {
 			pedanticErr: errors.New(`unknown field "hello"`),
 			errorLine:   7,
 		},
-		// 		{
-		// 			name: "when unknown option is in tls config",
-		// 			config: `
-		// tls = {
-		//   hello = "world"
-		// }
-		// `,
-		// 			// Backwards compatibility: also report error by default even if pedantic checks disabled.
-		// 			defaultErr:  errors.New(`error parsing tls config, unknown field ["hello"]`),
-		// 			pedanticErr: errors.New(`error parsing tls config, unknown field ["hello"]`),
-		// 		},
-		// 		{
-		// 			name: "when unknown option is in cluster tls config",
-		// 			config: `
-		// cluster {
-		//   tls = {
-		//     foo = "bar"
-		//   }
-		// }
-		// `,
-		// 			// Backwards compatibility: also report error by default even if pedantic checks disabled.
-		// 			defaultErr:  errors.New(`error parsing tls config, unknown field ["foo"]`),
-		// 			pedanticErr: errors.New(`error parsing tls config, unknown field ["foo"]`),
-		// 		},
+		{
+			name: "when unknown option is in tls config",
+			config: `
+		tls = {
+		  hello = "world"
+		}
+		`,
+			defaultErr:  errors.New(`error parsing tls config, unknown field ["hello"]`),
+			pedanticErr: errors.New(`unknown field "hello"`),
+			errorLine:   3,
+		},
+		{
+			name: "when unknown option is in cluster tls config",
+			config: `
+		cluster {
+		  tls = {
+		    foo = "bar"
+		  }
+		}
+		`,
+			// Backwards compatibility: also report error by default even if pedantic checks disabled.
+			defaultErr:  errors.New(`error parsing tls config, unknown field ["foo"]`),
+			pedanticErr: errors.New(`unknown field "foo"`),
+			errorLine:   4,
+		},
 	}
 
 	checkConfig := func(config string, pedantic bool) error {

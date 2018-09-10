@@ -353,8 +353,15 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "ping_max":
 			o.MaxPingsOut = int(v.(int64))
 		case "tls":
-			tlsm := v.(map[string]interface{})
-			tc, err := parseTLS(tlsm)
+			var (
+				tc  *TLSConfigOpts
+				err error
+			)
+			if pedantic {
+				tc, err = parseTLS(tk, o)
+			} else {
+				tc, err = parseTLS(v, o)
+			}
 			if err != nil {
 				return err
 			}
@@ -491,8 +498,15 @@ func parseCluster(v interface{}, opts *Options) error {
 				opts.Routes = append(opts.Routes, url)
 			}
 		case "tls":
-			tlsm := mv.(map[string]interface{})
-			tc, err := parseTLS(tlsm)
+			var (
+				tc  *TLSConfigOpts
+				err error
+			)
+			if pedantic {
+				tc, err = parseTLS(tk, opts)
+			} else {
+				tc, err = parseTLS(mv, opts)
+			}
 			if err != nil {
 				return err
 			}
@@ -730,9 +744,8 @@ func parseUserPermissions(mv interface{}, opts *Options) (*Permissions, error) {
 					token:      tk,
 					configFile: opts.ConfigFile,
 				}
-			} else {
-				return nil, fmt.Errorf("Unknown field %s parsing permissions", k)
 			}
+			return nil, fmt.Errorf("Unknown field %s parsing permissions", k)
 		}
 	}
 	return p, nil
@@ -837,7 +850,6 @@ func PrintTLSHelpAndDie() {
 }
 
 func parseCipher(cipherName string) (uint16, error) {
-
 	cipher, exists := cipherMap[cipherName]
 	if !exists {
 		return 0, fmt.Errorf("Unrecognized cipher %s", cipherName)
@@ -855,9 +867,23 @@ func parseCurvePreferences(curveName string) (tls.CurveID, error) {
 }
 
 // Helper function to parse TLS configs.
-func parseTLS(tlsm map[string]interface{}) (*TLSConfigOpts, error) {
-	tc := TLSConfigOpts{}
+func parseTLS(v interface{}, opts *Options) (*TLSConfigOpts, error) {
+	var (
+		tlsm     map[string]interface{}
+		tk       token
+		tc       TLSConfigOpts = TLSConfigOpts{}
+		pedantic bool          = opts.CheckConfig
+	)
+	if pedantic {
+		mtk := v.(token)
+		v = mtk.Value()
+	}
+	tlsm = v.(map[string]interface{})
 	for mk, mv := range tlsm {
+		if pedantic {
+			tk = mv.(token)
+			mv = tk.Value()
+		}
 		switch strings.ToLower(mk) {
 		case "cert_file":
 			certFile, ok := mv.(string)
@@ -919,6 +945,14 @@ func parseTLS(tlsm map[string]interface{}) (*TLSConfigOpts, error) {
 			}
 			tc.Timeout = at
 		default:
+			if pedantic {
+				return nil, &unknownConfigFieldErr{
+					field:      mk,
+					token:      tk,
+					configFile: opts.ConfigFile,
+				}
+			}
+
 			return nil, fmt.Errorf("error parsing tls config, unknown field [%q]", mk)
 		}
 	}
