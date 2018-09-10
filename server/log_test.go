@@ -14,6 +14,7 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -58,6 +59,9 @@ func TestSetLogger(t *testing.T) {
 	expectedStr = "This is a Trace"
 	server.Tracef(expectedStr)
 	dl.checkContent(t, expectedStr)
+	expectedStr = "This is a Warning"
+	server.Tracef(expectedStr)
+	dl.checkContent(t, expectedStr)
 
 	// Make sure that we can reset to fal
 	server.SetLogger(dl, false, false)
@@ -94,6 +98,11 @@ func (l *DummyLogger) Noticef(format string, v ...interface{}) {
 	l.msg = fmt.Sprintf(format, v...)
 }
 func (l *DummyLogger) Errorf(format string, v ...interface{}) {
+	l.Lock()
+	defer l.Unlock()
+	l.msg = fmt.Sprintf(format, v...)
+}
+func (l *DummyLogger) Warnf(format string, v ...interface{}) {
 	l.Lock()
 	defer l.Unlock()
 	l.msg = fmt.Sprintf(format, v...)
@@ -172,4 +181,54 @@ func TestReOpenLogFile(t *testing.T) {
 	if strings.HasSuffix(string(buf), "New message") {
 		t.Fatalf("New message was not appended after file was re-opened, got: %v", string(buf))
 	}
+}
+
+func TestNoPasswordsFromConnectTrace(t *testing.T) {
+	opts := DefaultOptions()
+	opts.NoLog = false
+	opts.Trace = true
+	opts.Username = "derek"
+	opts.Password = "s3cr3t"
+
+	s := &Server{opts: opts}
+	dl := &DummyLogger{}
+	s.SetLogger(dl, false, true)
+
+	_ = s.logging.logger.(*DummyLogger)
+	if s.logging.trace != 1 {
+		t.Fatalf("Expected trace 1, received value %d\n", s.logging.trace)
+	}
+	defer s.SetLogger(nil, false, false)
+
+	c, _, _ := newClientForServer(s)
+
+	connectOp := []byte("CONNECT {\"user\":\"derek\",\"pass\":\"s3cr3t\"}\r\n")
+	err := c.parse(connectOp)
+	if err != nil {
+		t.Fatalf("Received error: %v\n", err)
+	}
+
+	dl.Lock()
+	hasPass := strings.Contains(dl.msg, "s3cr3t")
+	dl.Unlock()
+
+	if hasPass {
+		t.Fatalf("Password detected in log output: %s", dl.msg)
+	}
+}
+
+func TestRemovePassFromTrace(t *testing.T) {
+	pass := []byte("s3cr3t")
+	check := func(r []byte) {
+		t.Helper()
+		if bytes.Contains(r, pass) {
+			t.Fatalf("Found password in %q", r)
+		}
+	}
+	check(removePassFromTrace([]byte("CONNECT {\"user\":\"derek\",\"pass\":\"s3cr3t\"}\r\n")))
+	check(removePassFromTrace([]byte("CONNECT {\"user\":\"derek\",\"pass\":  \"s3cr3t\"}\r\n")))
+	check(removePassFromTrace([]byte("CONNECT {\"user\":\"derek\",\"pass\":    \"s3cr3t\"     }\r\n")))
+	check(removePassFromTrace([]byte("CONNECT {\"password\":\"s3cr3t\",}\r\n")))
+	check(removePassFromTrace([]byte("CONNECT {pass:s3cr3t\r\n")))
+	check(removePassFromTrace([]byte("CONNECT {pass:s3cr3t ,   password =  s3cr3t}")))
 }

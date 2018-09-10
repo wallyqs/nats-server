@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/nats-io/gnatsd/conf"
+	"github.com/nats-io/nkeys"
 )
 
 // ClusterOpts are options for clusters.
@@ -59,6 +60,7 @@ type Options struct {
 	Logtime          bool          `json:"-"`
 	MaxConn          int           `json:"max_connections"`
 	MaxSubs          int           `json:"max_subscriptions,omitempty"`
+	Nkeys            []*NkeyUser   `json:"-"`
 	Users            []*User       `json:"-"`
 	Username         string        `json:"-"`
 	Password         string        `json:"-"`
@@ -113,6 +115,13 @@ func (o *Options) Clone() *Options {
 			clone.Users[i] = user.clone()
 		}
 	}
+	if o.Nkeys != nil {
+		clone.Nkeys = make([]*NkeyUser, len(o.Nkeys))
+		for i, nkey := range o.Nkeys {
+			clone.Nkeys[i] = nkey.clone()
+		}
+	}
+
 	if o.Routes != nil {
 		clone.Routes = make([]*url.URL, len(o.Routes))
 		for i, route := range o.Routes {
@@ -136,7 +145,8 @@ type authorization struct {
 	user  string
 	pass  string
 	token string
-	// Multiple Users
+	// Multiple Nkeys/Users
+	nkeys              []*NkeyUser
 	users              []*User
 	timeout            float64
 	defaultPermissions *Permissions
@@ -306,6 +316,10 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 					return fmt.Errorf("Can not have a token and a users array")
 				}
 				o.Users = auth.users
+			}
+			// Check for nkeys
+			if auth.nkeys != nil {
+				o.Nkeys = auth.nkeys
 			}
 		case "http":
 			hp, err := parseListen(v)
@@ -573,16 +587,19 @@ func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
 			var (
 				users []*User
 				err   error
+				nkeys []*NkeyUser
 			)
 			if pedantic {
-				users, err = parseUsers(tk, opts)
+				nkeys, users, err = parseUsers(tk, opts)
 			} else {
-				users, err = parseUsers(mv, opts)
+				nkeys, users, err = parseUsers(mv, opts)
 			}
+			// nkeys, users, err := parseUsers(mv)
 			if err != nil {
 				return nil, err
 			}
 			auth.users = users
+			auth.nkeys = nkeys
 		case "default_permission", "default_permissions", "permissions":
 			var (
 				permissions *Permissions
@@ -621,18 +638,18 @@ func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
 }
 
 // Helper function to parse multiple users array with optional permissions.
-func parseUsers(mv interface{}, opts *Options) ([]*User, error) {
+func parseUsers(mv interface{}, opts *Options) ([]*NkeyUser, []*User, error) {
 	var (
 		tk       token
 		pedantic bool    = opts.CheckConfig
 		users    []*User = []*User{}
+		keys     []*NkeyUser
 	)
 	_, mv = unwrapValue(mv)
-
 	// Make sure we have an array
 	uv, ok := mv.([]interface{})
 	if !ok {
-		return nil, fmt.Errorf("Expected users field to be an array, got %v", mv)
+		return nil, nil, fmt.Errorf("Expected users field to be an array, got %v", mv)
 	}
 	for _, u := range uv {
 		_, u = unwrapValue(u)
@@ -640,35 +657,43 @@ func parseUsers(mv interface{}, opts *Options) ([]*User, error) {
 		// Check its a map/struct
 		um, ok := u.(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("Expected user entry to be a map/struct, got %v", u)
+			return nil, nil, fmt.Errorf("Expected user entry to be a map/struct, got %v", u)
 		}
-		user := &User{}
+		var (
+			perms *Permissions
+			err   error
+			user  *User     = &User{}
+			nkey  *NkeyUser = &NkeyUser{}
+		)
 		for k, v := range um {
 			// Also needs to unwrap first
 			tk, v = unwrapValue(v)
 
 			switch strings.ToLower(k) {
+			case "nkey":
+				nkey.Nkey = v.(string)
 			case "user", "username":
 				user.Username = v.(string)
 			case "pass", "password":
 				user.Password = v.(string)
 			case "permission", "permissions", "authorization":
-				var (
-					permissions *Permissions
-					err         error
-				)
 				if pedantic {
-					permissions, err = parseUserPermissions(tk, opts)
+					perms, err = parseUserPermissions(tk, opts)
 				} else {
-					permissions, err = parseUserPermissions(v, opts)
+					perms, err = parseUserPermissions(v, opts)
 				}
+				// pm, ok := v.(map[string]interface{})
+				// if !ok {
+				// 	return nil, nil, fmt.Errorf("Expected user permissions to be a map/struct, got %+v", v)
+				// }
+				// perms, err = parseUserPermissions(pm)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
-				user.Permissions = permissions
+				user.Permissions = perms
 			default:
 				if pedantic && tk != nil && !tk.IsUsedVariable() {
-					return nil, &unknownConfigFieldErr{
+					return nil, nil, &unknownConfigFieldErr{
 						field:      k,
 						token:      tk,
 						configFile: tk.SourceFile(),
@@ -676,13 +701,34 @@ func parseUsers(mv interface{}, opts *Options) ([]*User, error) {
 				}
 			}
 		}
-		// Check to make sure we have at least username and password
-		if user.Username == "" || user.Password == "" {
-			return nil, fmt.Errorf("User entry requires a user and a password")
+		// Place perms if we have them.
+		if perms != nil {
+			// nkey takes precedent.
+			if nkey.Nkey != "" {
+				nkey.Permissions = perms
+			} else {
+				user.Permissions = perms
+			}
 		}
-		users = append(users, user)
+
+		// Check to make sure we have at least username and password if defined.
+		if nkey.Nkey == "" && (user.Username == "" || user.Password == "") {
+			return nil, nil, fmt.Errorf("User entry requires a user and a password")
+		} else if nkey.Nkey != "" {
+			// Make sure the nkey a proper public nkey for a user..
+			if !nkeys.IsValidPublicUserKey(nkey.Nkey) {
+				return nil, nil, fmt.Errorf("Not a valid public nkey for a user")
+			}
+			// If we have user or password defined here that is an error.
+			if user.Username != "" || user.Password != "" {
+				return nil, nil, fmt.Errorf("Nkey users do not take usernames or passwords")
+			}
+			keys = append(keys, nkey)
+		} else {
+			users = append(users, user)
+		}
 	}
-	return users, nil
+	return keys, users, nil
 }
 
 // Helper function to parse user/account permissions
