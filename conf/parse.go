@@ -322,7 +322,6 @@ func (p *parser) lookupVariable(varReference string) (interface{}, bool) {
 		// Process if it is a map context
 		if m, ok := ctx.(map[string]interface{}); ok {
 			if v, ok := m[varReference]; ok {
-				// fmt.Println(" variable found ", varReference, reflect.TypeOf(v), v)
 				return v, ok
 			}
 		}
