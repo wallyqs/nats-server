@@ -900,6 +900,7 @@ func parseTLS(v interface{}, opts *Options) (*TLSConfigOpts, error) {
 			}
 			tc.Ciphers = make([]uint16, 0, len(ra))
 			for _, r := range ra {
+				_, r = unwrapValue(r)
 				cipher, err := parseCipher(r.(string))
 				if err != nil {
 					return nil, err
@@ -913,6 +914,7 @@ func parseTLS(v interface{}, opts *Options) (*TLSConfigOpts, error) {
 			}
 			tc.CurvePreferences = make([]tls.CurveID, 0, len(ra))
 			for _, r := range ra {
+				_, r = unwrapValue(r)
 				cps, err := parseCurvePreferences(r.(string))
 				if err != nil {
 					return nil, err

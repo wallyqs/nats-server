@@ -333,6 +333,37 @@ func TestConfigCheck(t *testing.T) {
 			errorLine:   4,
 		},
 		{
+			name: "when using cipher suites in the TLS config",
+			config: `
+		tls = {
+		    cipher_suites: [
+			"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+			"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+		    ]
+                    preferences = []
+		}
+		`,
+			defaultErr:  errors.New(`error parsing tls config, unknown field ["preferences"]`),
+			pedanticErr: errors.New(`unknown field "preferences"`),
+			errorLine:   7,
+		},
+		{
+			name: "when using curve preferences in the TLS config",
+			config: `
+		tls = {
+		    curve_preferences: [
+			"CurveP256",
+			"CurveP384",
+			"CurveP521"
+		    ]
+                    suites = []
+		}
+		`,
+			defaultErr:  errors.New(`error parsing tls config, unknown field ["suites"]`),
+			pedanticErr: errors.New(`unknown field "suites"`),
+			errorLine:   8,
+		},
+		{
 			name: "when unknown option is in cluster config with defined routes",
 			config: `
 		cluster {
