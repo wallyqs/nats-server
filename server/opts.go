@@ -542,11 +542,15 @@ func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
 			}
 			auth.users = users
 		case "default_permission", "default_permissions", "permissions":
-			pm, ok := mv.(map[string]interface{})
-			if !ok {
-				return nil, fmt.Errorf("Expected default permissions to be a map/struct, got %+v", mv)
+			var (
+				permissions *Permissions
+				err         error
+			)
+			if pedantic {
+				permissions, err = parseUserPermissions(tk, opts)
+			} else {
+				permissions, err = parseUserPermissions(mv, opts)
 			}
-			permissions, err := parseUserPermissions(pm)
 			if err != nil {
 				return nil, err
 			}
@@ -616,11 +620,15 @@ func parseUsers(mv interface{}, opts *Options) ([]*User, error) {
 			case "pass", "password":
 				user.Password = v.(string)
 			case "permission", "permissions", "authorization":
-				pm, ok := v.(map[string]interface{})
-				if !ok {
-					return nil, fmt.Errorf("Expected user permissions to be a map/struct, got %+v", v)
+				var (
+					permissions *Permissions
+					err         error
+				)
+				if pedantic {
+					permissions, err = parseUserPermissions(tk, opts)
+				} else {
+					permissions, err = parseUserPermissions(v, opts)
 				}
-				permissions, err := parseUserPermissions(pm)
 				if err != nil {
 					return nil, err
 				}
@@ -645,9 +653,26 @@ func parseUsers(mv interface{}, opts *Options) ([]*User, error) {
 }
 
 // Helper function to parse user/account permissions
-func parseUserPermissions(pm map[string]interface{}) (*Permissions, error) {
-	p := &Permissions{}
+func parseUserPermissions(mv interface{}, opts *Options) (*Permissions, error) {
+	var (
+		tk       token
+		pedantic bool         = opts.CheckConfig
+		p        *Permissions = &Permissions{}
+	)
+	if pedantic {
+		pmtk := mv.(token)
+		mv = pmtk.Value()
+	}
+	pm, ok := mv.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("Expected permissions to be a map/struct, got %+v", mv)
+	}
 	for k, v := range pm {
+		if pedantic {
+			tk = v.(token)
+			v = tk.Value()
+		}
+
 		switch strings.ToLower(k) {
 		// For routes:
 		// Import is Publish
@@ -665,7 +690,15 @@ func parseUserPermissions(pm map[string]interface{}) (*Permissions, error) {
 			}
 			p.Subscribe = perms
 		default:
-			return nil, fmt.Errorf("Unknown field %s parsing permissions", k)
+			if pedantic {
+				return nil, &unknownConfigFieldErr{
+					field:      k,
+					token:      tk,
+					configFile: opts.ConfigFile,
+				}
+			} else {
+				return nil, fmt.Errorf("Unknown field %s parsing permissions", k)
+			}
 		}
 	}
 	return p, nil

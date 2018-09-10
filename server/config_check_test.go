@@ -113,33 +113,36 @@ func TestConfigCheck(t *testing.T) {
 			pedanticErr: errors.New(`unknown field "token"`),
 			errorLine:   7,
 		},
-		// 		{
-		// 			name: "when user authorization permissions config has unknown fields",
-		// 			config: `
-		// authorization {
-		//   permissions {
-		//     hello = "world"
-		//   }
-		// }
-		// `,
-		// 			defaultErr:  errors.New(`Unknown field hello parsing permissions`),
-		// 			pedanticErr: errors.New(`Unknown field hello parsing permissions`),
-		// 		},
-		// 		{
-		// 			name: "when user authorization permissions config is empty",
-		// 			config: `
-		// authorization = {
-		//   users = [
-		//     {
-		//       user = "foo", pass = "bar", permissions = {
-		//       }
-		//     }
-		//   ]
-		// }
-		// `,
-		// 			defaultErr:  nil,
-		// 			pedanticErr: nil,
-		// 		},
+		{
+			name: "when user authorization permissions config has unknown fields",
+			config: `
+		authorization {
+		  permissions {
+		    subscribe = {}
+		    inboxes = {}
+		    publish = {}
+		  }
+		}
+		`,
+			defaultErr:  errors.New(`Unknown field inboxes parsing permissions`),
+			pedanticErr: errors.New(`unknown field "inboxes"`),
+			errorLine:   5,
+		},
+		{
+			name: "when user authorization permissions config is empty",
+			config: `
+		authorization = {
+		  users = [
+		    {
+		      user = "foo", pass = "bar", permissions = {
+		      }
+		    }
+		  ]
+		}
+		`,
+			defaultErr:  nil,
+			pedanticErr: nil,
+		},
 		// 		{
 		// 			name: "when unknown permissions are included in config",
 		// 			config: `
