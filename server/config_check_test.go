@@ -347,6 +347,74 @@ func TestConfigCheck(t *testing.T) {
 			pedanticErr: errors.New(`unknown field "peers"`),
 			errorLine:   7,
 		},
+		{
+			name: "when used as variable in authorization block it should not be considered as unknown field",
+			config: `
+		# listen:   127.0.0.1:-1
+		listen:   127.0.0.1:4222
+
+		authorization {
+		  # Superuser can do anything.
+		  super_user = {
+		    publish = ">"
+		    subscribe = ">"
+		  }
+
+		  # Can do requests on foo or bar, and subscribe to anything
+		  # that is a response to an _INBOX.
+		  #
+		  # Notice that authorization filters can be singletons or arrays.
+		  req_pub_user = {
+		    publish = ["req.foo", "req.bar"]
+		    subscribe = "_INBOX.>"
+		  }
+
+		  # Setup a default user that can subscribe to anything, but has
+		  # no publish capabilities.
+		  default_user = {
+		    subscribe = "PUBLIC.>"
+		  }
+
+		  unused = "hello"
+
+		  # Default permissions if none presented. e.g. susan below.
+		  default_permissions: $default_user
+
+		  # Users listed with persmissions.
+		  users = [
+		    {user: alice, password: foo, permissions: $super_user}
+		    {user: bob,   password: bar, permissions: $req_pub_user}
+		    {user: susan, password: baz}
+		  ]
+		}
+		`,
+			defaultErr:  nil,
+			pedanticErr: errors.New(`unknown field "unused"`),
+			errorLine:   27,
+		},
+		{
+			name: "when used as variable in top level config it should not be considered as unknown field",
+			config: `
+                monitoring_port = 8222
+
+                http_port = $monitoring_port
+
+                port = 4222
+		`,
+			defaultErr:  nil,
+			pedanticErr: nil,
+		},
+		{
+			name: "when used as variable in cluster config it should not be considered as unknown field",
+			config: `
+                cluster {
+                  clustering_port = 6222
+                  port = $clustering_port
+                }
+ 		`,
+			defaultErr:  nil,
+			pedanticErr: nil,
+		},
 	}
 
 	checkConfig := func(config string, pedantic bool) error {

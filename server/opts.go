@@ -182,6 +182,7 @@ Available cipher suites include:
 type token interface {
 	Value() interface{}
 	Line() int
+	IsUsedVariable() bool
 }
 
 type unknownConfigFieldErr struct {
@@ -391,7 +392,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				fmt.Printf("WARNING: write_deadline should be converted to a duration\n")
 			}
 		default:
-			if pedantic {
+			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return &unknownConfigFieldErr{
 					field:      k,
 					token:      tk,
@@ -525,7 +526,7 @@ func parseCluster(v interface{}, opts *Options) error {
 		case "connect_retries":
 			opts.Cluster.ConnectRetries = int(mv.(int64))
 		default:
-			if pedantic {
+			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return &unknownConfigFieldErr{
 					field:      mk,
 					token:      tk,
@@ -596,7 +597,7 @@ func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
 			}
 			auth.defaultPermissions = permissions
 		default:
-			if pedantic {
+			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return nil, &unknownConfigFieldErr{
 					field:      mk,
 					token:      tk,
@@ -665,7 +666,7 @@ func parseUsers(mv interface{}, opts *Options) ([]*User, error) {
 				}
 				user.Permissions = permissions
 			default:
-				if pedantic {
+				if pedantic && tk != nil && !tk.IsUsedVariable() {
 					return nil, &unknownConfigFieldErr{
 						field:      k,
 						token:      tk,
@@ -717,7 +718,7 @@ func parseUserPermissions(mv interface{}, opts *Options) (*Permissions, error) {
 			}
 			p.Subscribe = perms
 		default:
-			if pedantic {
+			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return nil, &unknownConfigFieldErr{
 					field:      k,
 					token:      tk,
@@ -802,7 +803,7 @@ func parseSubjectPermission(v interface{}, opts *Options) (*SubjectPermission, e
 			}
 			p.Deny = subjects
 		default:
-			if pedantic {
+			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return nil, &unknownConfigFieldErr{
 					field:      k,
 					token:      tk,
@@ -928,7 +929,7 @@ func parseTLS(v interface{}, opts *Options) (*TLSConfigOpts, error) {
 			}
 			tc.Timeout = at
 		default:
-			if pedantic {
+			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return nil, &unknownConfigFieldErr{
 					field:      mk,
 					token:      tk,

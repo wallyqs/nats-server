@@ -96,8 +96,9 @@ func ParseFileWithChecks(fp string) (map[string]interface{}, error) {
 }
 
 type token struct {
-	item  item
-	value interface{}
+	item         item
+	value        interface{}
+	usedVariable bool
 }
 
 func (t *token) Value() interface{} {
@@ -106,6 +107,10 @@ func (t *token) Value() interface{} {
 
 func (t *token) Line() int {
 	return t.item.line
+}
+
+func (t *token) IsUsedVariable() bool {
+	return t.usedVariable
 }
 
 func parse(data, fp string, pedantic bool) (p *parser, err error) {
@@ -169,7 +174,7 @@ func (p *parser) popKey() string {
 func (p *parser) processItem(it item) error {
 	setValue := func(it item, v interface{}) {
 		if p.pedantic {
-			p.setValue(&token{it, v})
+			p.setValue(&token{it, v, false})
 		} else {
 			p.setValue(v)
 		}
@@ -260,7 +265,14 @@ func (p *parser) processItem(it item) error {
 		setValue(it, array)
 	case itemVariable:
 		if value, ok := p.lookupVariable(it.val); ok {
-			setValue(it, value)
+			switch tk := value.(type) {
+			case *token:
+				// Mark that the variable was used.
+				tk.usedVariable = true
+				p.setValue(tk)
+			default:
+				p.setValue(value)
+			}
 		} else {
 			return fmt.Errorf("Variable reference for '%s' on line %d can not be found.",
 				it.val, it.line)
@@ -302,6 +314,7 @@ func (p *parser) lookupVariable(varReference string) (interface{}, bool) {
 		// Process if it is a map context
 		if m, ok := ctx.(map[string]interface{}); ok {
 			if v, ok := m[varReference]; ok {
+				// fmt.Println(" variable found ", varReference, reflect.TypeOf(v), v)
 				return v, ok
 			}
 		}
