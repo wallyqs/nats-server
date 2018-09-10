@@ -74,7 +74,7 @@ func ParseFile(fp string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("error opening config file: %v", err)
 	}
 
-	p, err := parse(string(data), filepath.Dir(fp), false)
+	p, err := parse(string(data), fp, false)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func ParseFileWithChecks(fp string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("error opening config file: %v", err)
 	}
 
-	p, err := parse(string(data), filepath.Dir(fp), true)
+	p, err := parse(string(data), fp, true)
 	if err != nil {
 		return nil, err
 	}
@@ -99,6 +99,7 @@ type token struct {
 	item         item
 	value        interface{}
 	usedVariable bool
+	sourceFile   string
 }
 
 func (t *token) Value() interface{} {
@@ -113,13 +114,17 @@ func (t *token) IsUsedVariable() bool {
 	return t.usedVariable
 }
 
+func (t *token) SourceFile() string {
+	return t.sourceFile
+}
+
 func parse(data, fp string, pedantic bool) (p *parser, err error) {
 	p = &parser{
 		mapping:  make(map[string]interface{}),
 		lx:       lex(data),
 		ctxs:     make([]interface{}, 0, 4),
 		keys:     make([]string, 0, 4),
-		fp:       fp,
+		fp:       filepath.Dir(fp),
 		pedantic: pedantic,
 	}
 	p.pushContext(p.mapping)
@@ -129,7 +134,7 @@ func parse(data, fp string, pedantic bool) (p *parser, err error) {
 		if it.typ == itemEOF {
 			break
 		}
-		if err := p.processItem(it); err != nil {
+		if err := p.processItem(it, fp); err != nil {
 			return nil, err
 		}
 	}
@@ -171,10 +176,10 @@ func (p *parser) popKey() string {
 	return last
 }
 
-func (p *parser) processItem(it item) error {
+func (p *parser) processItem(it item, fp string) error {
 	setValue := func(it item, v interface{}) {
 		if p.pedantic {
-			p.setValue(&token{it, v, false})
+			p.setValue(&token{it, v, false, fp})
 		} else {
 			p.setValue(v)
 		}

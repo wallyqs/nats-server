@@ -494,3 +494,26 @@ func TestConfigCheck(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigCheckIncludes(t *testing.T) {
+	// Check happy path first using pedantic mode.
+	opts := &Options{
+		CheckConfig: true,
+	}
+	err := opts.ProcessConfigFile("./configs/include_conf_check_a.conf")
+	if err != nil {
+		t.Errorf("Unexpected error processing include files with configuration check enabled: %s", err)
+	}
+
+	opts = &Options{
+		CheckConfig: true,
+	}
+	err = opts.ProcessConfigFile("./configs/include_bad_conf_check_a.conf")
+	if err == nil {
+		t.Errorf("Expected error processing include files with configuration check enabled: %s", err)
+	}
+	expectedErr := errors.New(`unknown field "monitoring_port" in configs/include_bad_conf_check_b.conf:2`)
+	if err != nil && expectedErr != nil && err.Error() != expectedErr.Error() {
+		t.Errorf("Expected %q, got %q", expectedErr.Error(), err.Error())
+	}
+}

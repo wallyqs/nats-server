@@ -183,6 +183,7 @@ type token interface {
 	Value() interface{}
 	Line() int
 	IsUsedVariable() bool
+	SourceFile() string
 }
 
 type unknownConfigFieldErr struct {
@@ -396,7 +397,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				return &unknownConfigFieldErr{
 					field:      k,
 					token:      tk,
-					configFile: o.ConfigFile,
+					configFile: tk.SourceFile(),
 				}
 			}
 		}
@@ -530,7 +531,7 @@ func parseCluster(v interface{}, opts *Options) error {
 				return &unknownConfigFieldErr{
 					field:      mk,
 					token:      tk,
-					configFile: opts.ConfigFile,
+					configFile: tk.SourceFile(),
 				}
 			}
 		}
@@ -601,7 +602,7 @@ func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
 				return nil, &unknownConfigFieldErr{
 					field:      mk,
 					token:      tk,
-					configFile: opts.ConfigFile,
+					configFile: tk.SourceFile(),
 				}
 			}
 		}
@@ -670,7 +671,7 @@ func parseUsers(mv interface{}, opts *Options) ([]*User, error) {
 					return nil, &unknownConfigFieldErr{
 						field:      k,
 						token:      tk,
-						configFile: opts.ConfigFile,
+						configFile: tk.SourceFile(),
 					}
 				}
 			}
@@ -722,7 +723,7 @@ func parseUserPermissions(mv interface{}, opts *Options) (*Permissions, error) {
 				return nil, &unknownConfigFieldErr{
 					field:      k,
 					token:      tk,
-					configFile: opts.ConfigFile,
+					configFile: tk.SourceFile(),
 				}
 			}
 			return nil, fmt.Errorf("Unknown field %s parsing permissions", k)
@@ -807,7 +808,7 @@ func parseSubjectPermission(v interface{}, opts *Options) (*SubjectPermission, e
 				return nil, &unknownConfigFieldErr{
 					field:      k,
 					token:      tk,
-					configFile: opts.ConfigFile,
+					configFile: tk.SourceFile(),
 				}
 			}
 			return nil, fmt.Errorf("Unknown field name %q parsing subject permissions, only 'allow' or 'deny' are permitted", k)
@@ -935,7 +936,7 @@ func parseTLS(v interface{}, opts *Options) (*TLSConfigOpts, error) {
 				return nil, &unknownConfigFieldErr{
 					field:      mk,
 					token:      tk,
-					configFile: opts.ConfigFile,
+					configFile: tk.SourceFile(),
 				}
 			}
 
