@@ -167,7 +167,14 @@ func (p *parser) popKey() string {
 }
 
 func (p *parser) processItem(it item) error {
-	var v interface{}
+	setValue := func(it item, v interface{}) {
+		if p.pedantic {
+			p.setValue(&token{it, v})
+		} else {
+			p.setValue(v)
+		}
+	}
+
 	switch it.typ {
 	case itemError:
 		return fmt.Errorf("Parse error on line %d: '%s'", it.line, it.val)
@@ -177,23 +184,11 @@ func (p *parser) processItem(it item) error {
 		newCtx := make(map[string]interface{})
 		p.pushContext(newCtx)
 	case itemMapEnd:
-		if p.pedantic {
-			v = &token{it, p.popContext()}
-		} else {
-			v = p.popContext()
-		}
-
 		// Creates the full map
-		p.setValue(v)
+		setValue(it, p.popContext())
 	case itemString:
-		if p.pedantic {
-			v = &token{it, it.val}
-		} else {
-			v = it.val
-		}
-
 		// FIXME(dlc) sanitize string?
-		p.setValue(v)
+		setValue(it, it.val)
 	case itemInteger:
 		lastDigit := 0
 		for _, r := range it.val {
@@ -216,25 +211,19 @@ func (p *parser) processItem(it item) error {
 
 		switch suffix {
 		case "":
-			v = num
+			setValue(it, num)
 		case "k":
-			v = num * 1000
+			setValue(it, num*1000)
 		case "kb":
-			v = num * 1024
+			setValue(it, num*1024)
 		case "m":
-			v = num * 1000 * 1000
+			setValue(it, num*1000*1000)
 		case "mb":
-			v = num * 1024 * 1024
+			setValue(it, num*1024*1024)
 		case "g":
-			v = num * 1000 * 1000 * 1000
+			setValue(it, num*1000*1000*1000)
 		case "gb":
-			v = num * 1024 * 1024 * 1024
-		}
-
-		if p.pedantic {
-			p.setValue(&token{it, v})
-		} else {
-			p.setValue(v)
+			setValue(it, num*1024*1024*1024)
 		}
 	case itemFloat:
 		num, err := strconv.ParseFloat(it.val, 64)
@@ -245,57 +234,34 @@ func (p *parser) processItem(it item) error {
 			}
 			return fmt.Errorf("Expected float, but got '%s'.", it.val)
 		}
-		if p.pedantic {
-			v = token{it, num}
-		} else {
-			v = num
-		}
-		p.setValue(v)
+		setValue(it, num)
 	case itemBool:
 		switch strings.ToLower(it.val) {
 		case "true", "yes", "on":
-			// p.setValue(&token{it, true})
-			v = true
+			setValue(it, true)
 		case "false", "no", "off":
-			// p.setValue(&token{it, false})
-			v = false
+			setValue(it, false)
 		default:
 			return fmt.Errorf("Expected boolean value, but got '%s'.", it.val)
 		}
-		if p.pedantic {
-			p.setValue(&token{it, v})
-		} else {
-			p.setValue(v)
-		}
+
 	case itemDatetime:
 		dt, err := time.Parse("2006-01-02T15:04:05Z", it.val)
 		if err != nil {
 			return fmt.Errorf(
 				"Expected Zulu formatted DateTime, but got '%s'.", it.val)
 		}
-		if p.pedantic {
-			p.setValue(&token{it, dt})
-		} else {
-			p.setValue(dt)
-		}
+		setValue(it, dt)
 	case itemArrayStart:
 		var array = make([]interface{}, 0)
 		p.pushContext(array)
 	case itemArrayEnd:
 		array := p.ctx
 		p.popContext()
-		if p.pedantic {
-			p.setValue(&token{it, array})
-		} else {
-			p.setValue(array)
-		}
+		setValue(it, array)
 	case itemVariable:
 		if value, ok := p.lookupVariable(it.val); ok {
-			if p.pedantic {
-				p.setValue(&token{it, value})
-			} else {
-				p.setValue(value)
-			}
+			setValue(it, value)
 		} else {
 			return fmt.Errorf("Variable reference for '%s' on line %d can not be found.",
 				it.val, it.line)
