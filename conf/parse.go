@@ -81,6 +81,8 @@ func ParseFile(fp string) (map[string]interface{}, error) {
 	return p.mapping, nil
 }
 
+// ParseFileWithChecks opens a file and parses the content
+// including metadata such as error line and unused variables.
 func ParseFileWithChecks(fp string) (map[string]interface{}, error) {
 	data, err := ioutil.ReadFile(fp)
 	if err != nil {

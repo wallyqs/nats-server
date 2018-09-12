@@ -254,22 +254,23 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 
 	var (
 		m        map[string]interface{}
-		tk       token
+		item     token
 		pedantic bool = o.CheckConfig
 		err      error
 	)
-	if pedantic {
-		m, err = conf.ParseFileWithChecks(configFile)
-	} else {
-		m, err = conf.ParseFile(configFile)
-	}
+
+	// Pedantic reporting is optional but we always parse
+	// including the context from the tokens.
+	m, err = conf.ParseFileWithChecks(configFile)
 	if err != nil {
 		return err
 	}
+
 	for k, v := range m {
-		// When pedantic checks are enabled then need to unwrap
-		// to get the value along with reported error line.
-		tk, v = unwrapValue(v)
+		// Need to unwrap to get the value of the token
+		// along with reported error line and other info.
+		item, v = unwrapValue(v)
+
 		switch strings.ToLower(k) {
 		case "listen":
 			hp, err := parseListen(v)
@@ -292,11 +293,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			o.Logtime = v.(bool)
 		case "authorization":
 			var auth *authorization
-			if pedantic {
-				auth, err = parseAuthorization(tk, o)
-			} else {
-				auth, err = parseAuthorization(v, o)
-			}
+			auth, err = parseAuthorization(item, o)
 			if err != nil {
 				return err
 			}
@@ -341,11 +338,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			o.HTTPSPort = int(v.(int64))
 		case "cluster":
 			var err error
-			if pedantic {
-				err = parseCluster(tk, o)
-			} else {
-				err = parseCluster(v, o)
-			}
+			err = parseCluster(item, o)
 			if err != nil {
 				return err
 			}
@@ -380,11 +373,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				tc  *TLSConfigOpts
 				err error
 			)
-			if pedantic {
-				tc, err = parseTLS(tk, o)
-			} else {
-				tc, err = parseTLS(v, o)
-			}
+			tc, err = parseTLS(item, o)
 			if err != nil {
 				return err
 			}
@@ -407,11 +396,11 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				fmt.Printf("WARNING: write_deadline should be converted to a duration\n")
 			}
 		default:
-			if pedantic && tk != nil && !tk.IsUsedVariable() {
+			if pedantic && !item.IsUsedVariable() {
 				return &unknownConfigFieldErr{
 					field:      k,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					token:      item,
+					configFile: item.SourceFile(),
 				}
 			}
 		}
@@ -447,17 +436,18 @@ func parseListen(v interface{}) (*hostPort, error) {
 }
 
 // parseCluster will parse the cluster config.
-func parseCluster(v interface{}, opts *Options) error {
+func parseCluster(i token, opts *Options) error {
 	var (
 		cm       map[string]interface{}
-		tk       token
+		item     token
 		pedantic bool = opts.CheckConfig
 	)
-	_, v = unwrapValue(v)
+	v := i.Value()
 	cm = v.(map[string]interface{})
 	for mk, mv := range cm {
 		// Again, unwrap token value if line check is required.
-		tk, mv = unwrapValue(mv)
+		item, mv = unwrapValue(mv)
+
 		switch strings.ToLower(mk) {
 		case "listen":
 			hp, err := parseListen(mv)
@@ -475,11 +465,7 @@ func parseCluster(v interface{}, opts *Options) error {
 				auth *authorization
 				err  error
 			)
-			if pedantic {
-				auth, err = parseAuthorization(tk, opts)
-			} else {
-				auth, err = parseAuthorization(mv, opts)
-			}
+			auth, err = parseAuthorization(item, opts)
 			if err != nil {
 				return err
 			}
@@ -489,6 +475,7 @@ func parseCluster(v interface{}, opts *Options) error {
 			opts.Cluster.Username = auth.user
 			opts.Cluster.Password = auth.pass
 			opts.Cluster.AuthTimeout = auth.timeout
+
 			// Do not set permissions if they were specified in top-level cluster block.
 			if auth.defaultPermissions != nil && opts.Cluster.Permissions == nil {
 				setClusterPermissions(&opts.Cluster, auth.defaultPermissions)
@@ -510,11 +497,7 @@ func parseCluster(v interface{}, opts *Options) error {
 				tc  *TLSConfigOpts
 				err error
 			)
-			if pedantic {
-				tc, err = parseTLS(tk, opts)
-			} else {
-				tc, err = parseTLS(mv, opts)
-			}
+			tc, err = parseTLS(item, opts)
 			if err != nil {
 				return err
 			}
@@ -534,22 +517,18 @@ func parseCluster(v interface{}, opts *Options) error {
 		case "connect_retries":
 			opts.Cluster.ConnectRetries = int(mv.(int64))
 		case "permissions":
-			pm, ok := mv.(map[string]interface{})
-			if !ok {
-				return fmt.Errorf("Expected permissions to be a map/struct, got %+v", mv)
-			}
-			perms, err := parseUserPermissions(pm, opts)
+			perms, err := parseUserPermissions(item, opts)
 			if err != nil {
 				return err
 			}
 			// This will possibly override permissions that were define in auth block
 			setClusterPermissions(&opts.Cluster, perms)
 		default:
-			if pedantic && tk != nil && !tk.IsUsedVariable() {
+			if pedantic && !item.IsUsedVariable() {
 				return &unknownConfigFieldErr{
 					field:      mk,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					token:      item,
+					configFile: item.SourceFile(),
 				}
 			}
 		}
@@ -572,19 +551,19 @@ func setClusterPermissions(opts *ClusterOpts, perms *Permissions) {
 }
 
 // Helper function to parse Authorization configs.
-func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
+func parseAuthorization(i token, opts *Options) (*authorization, error) {
 	var (
 		am       map[string]interface{}
-		tk       token
+		item     token
 		pedantic bool           = opts.CheckConfig
 		auth     *authorization = &authorization{}
 	)
 
 	// Unwrap value first if pedantic config check enabled.
-	_, v = unwrapValue(v)
+	v := i.Value()
 	am = v.(map[string]interface{})
 	for mk, mv := range am {
-		tk, mv = unwrapValue(mv)
+		item, mv = unwrapValue(mv)
 		switch strings.ToLower(mk) {
 		case "user", "username":
 			auth.user = mv.(string)
@@ -607,11 +586,7 @@ func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
 				err   error
 				nkeys []*NkeyUser
 			)
-			if pedantic {
-				nkeys, users, err = parseUsers(tk, opts)
-			} else {
-				nkeys, users, err = parseUsers(mv, opts)
-			}
+			nkeys, users, err = parseUsers(item, opts)
 			if err != nil {
 				return nil, err
 			}
@@ -622,21 +597,17 @@ func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
 				permissions *Permissions
 				err         error
 			)
-			if pedantic {
-				permissions, err = parseUserPermissions(tk, opts)
-			} else {
-				permissions, err = parseUserPermissions(mv, opts)
-			}
+			permissions, err = parseUserPermissions(item, opts)
 			if err != nil {
 				return nil, err
 			}
 			auth.defaultPermissions = permissions
 		default:
-			if pedantic && tk != nil && !tk.IsUsedVariable() {
+			if pedantic && !item.IsUsedVariable() {
 				return nil, &unknownConfigFieldErr{
 					field:      mk,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					token:      item,
+					configFile: item.SourceFile(),
 				}
 			}
 		}
@@ -655,14 +626,14 @@ func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
 }
 
 // Helper function to parse multiple users array with optional permissions.
-func parseUsers(mv interface{}, opts *Options) ([]*NkeyUser, []*User, error) {
+func parseUsers(i token, opts *Options) ([]*NkeyUser, []*User, error) {
 	var (
-		tk       token
+		item     token
 		pedantic bool    = opts.CheckConfig
 		users    []*User = []*User{}
 		keys     []*NkeyUser
 	)
-	_, mv = unwrapValue(mv)
+	mv := i.Value()
 
 	// Make sure we have an array
 	uv, ok := mv.([]interface{})
@@ -686,7 +657,7 @@ func parseUsers(mv interface{}, opts *Options) ([]*NkeyUser, []*User, error) {
 		)
 		for k, v := range um {
 			// Also needs to unwrap first
-			tk, v = unwrapValue(v)
+			item, v = unwrapValue(v)
 
 			switch strings.ToLower(k) {
 			case "nkey":
@@ -696,20 +667,16 @@ func parseUsers(mv interface{}, opts *Options) ([]*NkeyUser, []*User, error) {
 			case "pass", "password":
 				user.Password = v.(string)
 			case "permission", "permissions", "authorization":
-				if pedantic {
-					perms, err = parseUserPermissions(tk, opts)
-				} else {
-					perms, err = parseUserPermissions(v, opts)
-				}
+				perms, err = parseUserPermissions(item, opts)
 				if err != nil {
 					return nil, nil, err
 				}
 			default:
-				if pedantic && tk != nil && !tk.IsUsedVariable() {
+				if pedantic && !item.IsUsedVariable() {
 					return nil, nil, &unknownConfigFieldErr{
 						field:      k,
-						token:      tk,
-						configFile: tk.SourceFile(),
+						token:      item,
+						configFile: item.SourceFile(),
 					}
 				}
 			}
@@ -745,19 +712,19 @@ func parseUsers(mv interface{}, opts *Options) ([]*NkeyUser, []*User, error) {
 }
 
 // Helper function to parse user/account permissions
-func parseUserPermissions(mv interface{}, opts *Options) (*Permissions, error) {
+func parseUserPermissions(i token, opts *Options) (*Permissions, error) {
 	var (
-		tk       token
+		item     token
 		pedantic bool         = opts.CheckConfig
 		p        *Permissions = &Permissions{}
 	)
-	_, mv = unwrapValue(mv)
+	mv := i.Value()
 	pm, ok := mv.(map[string]interface{})
 	if !ok {
 		return nil, fmt.Errorf("Expected permissions to be a map/struct, got %+v", mv)
 	}
 	for k, v := range pm {
-		tk, v = unwrapValue(v)
+		item, v = unwrapValue(v)
 
 		switch strings.ToLower(k) {
 		// For routes:
@@ -778,11 +745,11 @@ func parseUserPermissions(mv interface{}, opts *Options) (*Permissions, error) {
 			}
 			p.Subscribe = perms
 		default:
-			if pedantic && tk != nil && !tk.IsUsedVariable() {
+			if pedantic && !item.IsUsedVariable() {
 				return nil, &unknownConfigFieldErr{
 					field:      k,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					token:      item,
+					configFile: item.SourceFile(),
 				}
 			}
 			return nil, fmt.Errorf("Unknown field %s parsing permissions", k)
@@ -848,7 +815,7 @@ func parseSubjectPermission(v interface{}, opts *Options) (*SubjectPermission, e
 	p := &SubjectPermission{}
 	pedantic := opts.CheckConfig
 	for k, v := range m {
-		tk, v := unwrapValue(v)
+		item, v := unwrapValue(v)
 		switch strings.ToLower(k) {
 		case "allow":
 			subjects, err := parseSubjects(v)
@@ -863,11 +830,11 @@ func parseSubjectPermission(v interface{}, opts *Options) (*SubjectPermission, e
 			}
 			p.Deny = subjects
 		default:
-			if pedantic && tk != nil && !tk.IsUsedVariable() {
+			if pedantic && !item.IsUsedVariable() {
 				return nil, &unknownConfigFieldErr{
 					field:      k,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					token:      item,
+					configFile: item.SourceFile(),
 				}
 			}
 			return nil, fmt.Errorf("Unknown field name %q parsing subject permissions, only 'allow' or 'deny' are permitted", k)
@@ -917,17 +884,17 @@ func parseCurvePreferences(curveName string) (tls.CurveID, error) {
 }
 
 // Helper function to parse TLS configs.
-func parseTLS(v interface{}, opts *Options) (*TLSConfigOpts, error) {
+func parseTLS(i token, opts *Options) (*TLSConfigOpts, error) {
 	var (
 		tlsm     map[string]interface{}
-		tk       token
+		item     token
 		tc       TLSConfigOpts = TLSConfigOpts{}
 		pedantic bool          = opts.CheckConfig
 	)
-	_, v = unwrapValue(v)
+	v := i.Value()
 	tlsm = v.(map[string]interface{})
 	for mk, mv := range tlsm {
-		tk, mv = unwrapValue(mv)
+		item, mv = unwrapValue(mv)
 		switch strings.ToLower(mk) {
 		case "cert_file":
 			certFile, ok := mv.(string)
@@ -991,11 +958,11 @@ func parseTLS(v interface{}, opts *Options) (*TLSConfigOpts, error) {
 			}
 			tc.Timeout = at
 		default:
-			if pedantic && tk != nil && !tk.IsUsedVariable() {
+			if pedantic && !item.IsUsedVariable() {
 				return nil, &unknownConfigFieldErr{
 					field:      mk,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					token:      item,
+					configFile: item.SourceFile(),
 				}
 			}
 
