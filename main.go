@@ -16,9 +16,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
 
 	"github.com/nats-io/gnatsd/server"
+	"github.com/perlin-network/life/exec"
 )
 
 var usageStr = `
@@ -76,6 +78,21 @@ func usage() {
 	os.Exit(0)
 }
 
+// Resolver defines imports for WebAssembly modules ran in Life.
+type Resolver struct {
+	tempRet0 int64
+}
+
+// ResolveFunc defines a set of import functions that may be called within a WebAssembly module.
+func (r *Resolver) ResolveFunc(module, field string) exec.FunctionImport {
+	return nil
+}
+
+// ResolveGlobal defines a set of global variables for use within a WebAssembly module.
+func (r *Resolver) ResolveGlobal(module, field string) int64 {
+	return 0
+}
+
 func main() {
 	// Create a FlagSet and sets the usage
 	fs := flag.NewFlagSet("nats-server", flag.ExitOnError)
@@ -98,6 +115,28 @@ func main() {
 
 	// Configure the logger based on the flags
 	s.ConfigureLogger()
+
+	// Load WASM modules...
+	input, err := ioutil.ReadFile("/tmp/number.wasm")
+	if err != nil {
+		server.PrintAndDie(err.Error())
+	}
+	vm, err := exec.NewVirtualMachine(input, exec.VMConfig{
+		EnableJIT:          false,
+		DefaultMemoryPages: 128,
+		DefaultTableSize:   65536,
+	}, new(Resolver))
+	if err != nil {
+		server.PrintAndDie(err.Error())
+	}
+
+	// Only run the first WebAssembly module.
+	ret, err := vm.Run(0)
+	if err != nil {
+		vm.PrintStackTrace()
+		server.PrintAndDie(err.Error())
+	}
+	s.Debugf("Preloading WASM Modules result: %+v", ret)
 
 	// Start things up. Block here until done.
 	if err := server.Run(s); err != nil {
