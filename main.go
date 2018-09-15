@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"time"
 
 	"github.com/nats-io/gnatsd/server"
 	"github.com/perlin-network/life/exec"
@@ -81,10 +82,38 @@ func usage() {
 // Resolver defines imports for WebAssembly modules ran in Life.
 type Resolver struct {
 	tempRet0 int64
+
+	nats *server.Server
 }
 
 // ResolveFunc defines a set of import functions that may be called within a WebAssembly module.
 func (r *Resolver) ResolveFunc(module, field string) exec.FunctionImport {
+	switch module {
+	case "env":
+		switch field {
+		case "__nats_log":
+			return func(vm *exec.VirtualMachine) int64 {
+				// Parameters, required to be able to now size of the args.
+				ptr := int(uint32(vm.GetCurrentFrame().Locals[0]))
+				msgLen := int(uint32(vm.GetCurrentFrame().Locals[1]))
+				subject := vm.Memory[ptr : ptr+msgLen]
+
+				ptr = int(uint32(vm.GetCurrentFrame().Locals[2]))
+				msgLen = int(uint32(vm.GetCurrentFrame().Locals[3]))
+				msg := vm.Memory[ptr : ptr+msgLen]
+
+				// Function called in WASM causes this log:
+				r.nats.Tracef("WASM: %s(%q, %q)", field, string(subject), string(msg))
+
+				return 0
+			}
+
+		default:
+			panic(fmt.Errorf("unknown import resolved: %s", field))
+		}
+	default:
+		panic(fmt.Errorf("unknown module: %s", module))
+	}
 	return nil
 }
 
@@ -116,27 +145,39 @@ func main() {
 	// Configure the logger based on the flags
 	s.ConfigureLogger()
 
-	// Load WASM modules...
-	input, err := ioutil.ReadFile("/tmp/number.wasm")
-	if err != nil {
-		server.PrintAndDie(err.Error())
-	}
-	vm, err := exec.NewVirtualMachine(input, exec.VMConfig{
-		EnableJIT:          false,
-		DefaultMemoryPages: 128,
-		DefaultTableSize:   65536,
-	}, new(Resolver))
-	if err != nil {
-		server.PrintAndDie(err.Error())
-	}
+	go func() {
+		// Run WASM modules...
+		input, err := ioutil.ReadFile("/tmp/wasm_demo.wasm")
+		if err != nil {
+			server.PrintAndDie(err.Error())
+		}
+		resolver := &Resolver{
+			nats: s,
+		}
 
-	// Only run the first WebAssembly module.
-	ret, err := vm.Run(0)
-	if err != nil {
-		vm.PrintStackTrace()
-		server.PrintAndDie(err.Error())
-	}
-	s.Debugf("Preloading WASM Modules result: %+v", ret)
+		for range time.NewTicker(1 * time.Second).C {
+			s.Debugf("Running WASM Modules...")
+			vm, err := exec.NewVirtualMachine(input, exec.VMConfig{
+				EnableJIT:          false,
+				DefaultMemoryPages: 128,
+				DefaultTableSize:   65536,
+			}, resolver)
+			if err != nil {
+				server.PrintAndDie(err.Error())
+			}
+
+			moduleID, ok := vm.GetFunctionExport("nats_module_main")
+			if ok {
+				// Only run the first WebAssembly module.
+				ret, err := vm.Run(moduleID)
+				if err != nil {
+					vm.PrintStackTrace()
+					server.PrintAndDie(err.Error())
+				}
+				s.Debugf("WASM Module result: %v", ret)
+			}
+		}
+	}()
 
 	// Start things up. Block here until done.
 	if err := server.Run(s); err != nil {
