@@ -101,12 +101,16 @@ type lexer struct {
 	// Used for processing escapable substrings in double-quoted and raw strings
 	stringParts   []string
 	stringStateFn stateFn
+
+	// lpos is the start position of the current line.
+	lpos int
 }
 
 type item struct {
 	typ  itemType
 	val  string
 	line int
+	pos  int
 }
 
 func (lx *lexer) nextItem() item {
@@ -147,7 +151,11 @@ func (lx *lexer) pop() stateFn {
 }
 
 func (lx *lexer) emit(typ itemType) {
-	lx.items <- item{typ, strings.Join(lx.stringParts, "") + lx.input[lx.start:lx.pos], lx.line}
+	val := strings.Join(lx.stringParts, "") + lx.input[lx.start:lx.pos]
+
+	// Position of item relative from start of current line
+	pos := lx.pos - lx.lpos - len(val)
+	lx.items <- item{typ, val, lx.line, pos}
 	lx.start = lx.pos
 }
 
@@ -159,7 +167,10 @@ func (lx *lexer) emitString() {
 	} else {
 		finalString = lx.input[lx.start:lx.pos]
 	}
-	lx.items <- item{itemString, finalString, lx.line}
+	// Position of item relative from start of current line
+	pos := lx.pos - lx.lpos - len(finalString)
+	lx.items <- item{itemString, finalString, lx.line, pos}
+
 	lx.start = lx.pos
 }
 
@@ -186,9 +197,13 @@ func (lx *lexer) next() (r rune) {
 
 	if lx.input[lx.pos] == '\n' {
 		lx.line++
+
+		// Mark position of latest line.
+		lx.lpos = lx.pos
 	}
 	r, lx.width = utf8.DecodeRuneInString(lx.input[lx.pos:])
 	lx.pos += lx.width
+
 	return r
 }
 
@@ -221,10 +236,12 @@ func (lx *lexer) errorf(format string, values ...interface{}) stateFn {
 			values[i] = escapeSpecial(v)
 		}
 	}
+	pos := lx.pos - lx.lpos
 	lx.items <- item{
 		itemError,
 		fmt.Sprintf(format, values...),
 		lx.line,
+		pos,
 	}
 	return nil
 }
