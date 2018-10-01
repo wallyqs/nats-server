@@ -104,6 +104,9 @@ type lexer struct {
 
 	// lpos is the start position of the current line.
 	lpos int
+
+	// ipos is the start position of the line of the current item.
+	ipos int
 }
 
 type item struct {
@@ -153,10 +156,11 @@ func (lx *lexer) pop() stateFn {
 func (lx *lexer) emit(typ itemType) {
 	val := strings.Join(lx.stringParts, "") + lx.input[lx.start:lx.pos]
 
-	// Position of item relative from start of current line
-	pos := lx.pos - lx.lpos - len(val)
+	// Position of item in line where it started.
+	pos := lx.pos - lx.ipos - len(val)
 	lx.items <- item{typ, val, lx.line, pos}
 	lx.start = lx.pos
+	lx.ipos = lx.lpos
 }
 
 func (lx *lexer) emitString() {
@@ -167,11 +171,11 @@ func (lx *lexer) emitString() {
 	} else {
 		finalString = lx.input[lx.start:lx.pos]
 	}
-	// Position of item relative from start of current line
-	pos := lx.pos - lx.lpos - len(finalString)
+	// Position of string in line where it started.
+	pos := lx.pos - lx.ipos - len(finalString)
 	lx.items <- item{itemString, finalString, lx.line, pos}
-
 	lx.start = lx.pos
+	lx.ipos = lx.lpos
 }
 
 func (lx *lexer) addCurrentStringPart(offset int) {
@@ -198,7 +202,7 @@ func (lx *lexer) next() (r rune) {
 	if lx.input[lx.pos] == '\n' {
 		lx.line++
 
-		// Mark position of latest line.
+		// Mark start position of current line.
 		lx.lpos = lx.pos
 	}
 	r, lx.width = utf8.DecodeRuneInString(lx.input[lx.pos:])
@@ -210,6 +214,7 @@ func (lx *lexer) next() (r rune) {
 // ignore skips over the pending input before this point.
 func (lx *lexer) ignore() {
 	lx.start = lx.pos
+	lx.ipos = lx.lpos
 }
 
 // backup steps back one rune. Can be called only once per call of next.
@@ -236,6 +241,8 @@ func (lx *lexer) errorf(format string, values ...interface{}) stateFn {
 			values[i] = escapeSpecial(v)
 		}
 	}
+
+	// Position of error in current line.
 	pos := lx.pos - lx.lpos
 	lx.items <- item{
 		itemError,
@@ -1148,7 +1155,7 @@ func (itype itemType) String() string {
 }
 
 func (item item) String() string {
-	return fmt.Sprintf("(%s, '%s', %d)", item.typ.String(), item.val, item.line)
+	return fmt.Sprintf("(%s, '%s', %d, %d)", item.typ.String(), item.val, item.line, item.pos)
 }
 
 func escapeSpecial(c rune) string {

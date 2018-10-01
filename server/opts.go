@@ -208,7 +208,7 @@ type unknownConfigFieldErr struct {
 func (e *unknownConfigFieldErr) Error() string {
 	msg := fmt.Sprintf("unknown field %q", e.field)
 	if e.token != nil {
-		return msg + fmt.Sprintf(" in %s:%d:%d", e.configFile, e.token.Line(),e.token.Position())
+		return msg + fmt.Sprintf(" in %s:%d:%d", e.configFile, e.token.Line(), e.token.Position())
 	}
 	return msg
 }
