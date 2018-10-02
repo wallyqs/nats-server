@@ -270,25 +270,14 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	if configFile == "" {
 		return nil
 	}
-
-	var (
-		m        map[string]interface{}
-		tk       token
-		pedantic bool = o.CheckConfig
-		err      error
-	)
-	if pedantic {
-		m, err = conf.ParseFileWithChecks(configFile)
-	} else {
-		m, err = conf.ParseFile(configFile)
-	}
+	m, err := conf.ParseFileWithChecks(configFile)
 	if err != nil {
 		return err
 	}
 	for k, v := range m {
 		// When pedantic checks are enabled then need to unwrap
 		// to get the value along with reported error line.
-		tk, v = unwrapValue(v)
+		tk, v := unwrapValue(v)
 		switch strings.ToLower(k) {
 		case "listen":
 			hp, err := parseListen(v)
@@ -310,17 +299,12 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "logtime":
 			o.Logtime = v.(bool)
 		case "accounts":
-			err = parseAccounts(v, o)
+			err := parseAccounts(tk, o)
 			if err != nil {
 				return err
 			}
 		case "authorization":
-			var auth *authorization
-			if pedantic {
-				auth, err = parseAuthorization(tk, o)
-			} else {
-				auth, err = parseAuthorization(v, o)
-			}
+			auth, err := parseAuthorization(tk, o)
 			if err != nil {
 				return err
 			}
@@ -366,12 +350,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "https_port":
 			o.HTTPSPort = int(v.(int64))
 		case "cluster":
-			var err error
-			if pedantic {
-				err = parseCluster(tk, o)
-			} else {
-				err = parseCluster(v, o)
-			}
+			err := parseCluster(tk, o)
 			if err != nil {
 				return err
 			}
@@ -406,11 +385,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				tc  *TLSConfigOpts
 				err error
 			)
-			if pedantic {
-				tc, err = parseTLS(tk, o)
-			} else {
-				tc, err = parseTLS(v, o)
-			}
+			tc, err = parseTLS(tk, o)
 			if err != nil {
 				return err
 			}
@@ -433,6 +408,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				fmt.Printf("WARNING: write_deadline should be converted to a duration\n")
 			}
 		default:
+			pedantic := o.CheckConfig
 			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return &unknownConfigFieldErr{
 					field:      k,
@@ -497,15 +473,7 @@ func parseCluster(v interface{}, opts *Options) error {
 		case "host", "net":
 			opts.Cluster.Host = mv.(string)
 		case "authorization":
-			var (
-				auth *authorization
-				err  error
-			)
-			if pedantic {
-				auth, err = parseAuthorization(tk, opts)
-			} else {
-				auth, err = parseAuthorization(mv, opts)
-			}
+			auth, err := parseAuthorization(tk, opts)
 			if err != nil {
 				return err
 			}
@@ -548,11 +516,7 @@ func parseCluster(v interface{}, opts *Options) error {
 				tc  *TLSConfigOpts
 				err error
 			)
-			if pedantic {
-				tc, err = parseTLS(tk, opts)
-			} else {
-				tc, err = parseTLS(mv, opts)
-			}
+			tc, err = parseTLS(tk, opts)
 			if err != nil {
 				return err
 			}
@@ -642,11 +606,12 @@ func parseAccounts(v interface{}, opts *Options) error {
 		exportServices []*export
 	)
 	_, v = unwrapValue(v)
-	switch v.(type) {
+	switch vv := v.(type) {
 	// Simple array of account names.
 	case []interface{}, []string:
 		m := make(map[string]struct{}, len(v.([]interface{})))
-		for _, name := range v.([]interface{}) {
+		for _, n := range v.([]interface{}) {
+			_, name := unwrapValue(n)
 			ns := name.(string)
 			// Check for reserved names.
 			if isReservedAccount(ns) {
@@ -663,7 +628,7 @@ func parseAccounts(v interface{}, opts *Options) error {
 		// Track users across accounts, must be unique across
 		// accounts and nkeys vs users.
 		uorn := make(map[string]struct{})
-		for aname, mv := range v.(map[string]interface{}) {
+		for aname, mv := range vv {
 			_, amv := unwrapValue(mv)
 			// These should be maps.
 			mv, ok := amv.(map[string]interface{})
@@ -700,16 +665,7 @@ func parseAccounts(v interface{}, opts *Options) error {
 					exportStreams = append(exportStreams, streams...)
 					exportServices = append(exportServices, services...)
 				case "users":
-					var (
-						users []*User
-						err   error
-						nkeys []*NkeyUser
-					)
-					if pedantic {
-						nkeys, users, err = parseUsers(tk, opts)
-					} else {
-						nkeys, users, err = parseUsers(mv, opts)
-					}
+					nkeys, users, err := parseUsers(mv, opts)
 					if err != nil {
 						return err
 					}
@@ -1068,31 +1024,14 @@ func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
 			}
 			auth.timeout = at
 		case "users":
-			var (
-				users []*User
-				err   error
-				nkeys []*NkeyUser
-			)
-			if pedantic {
-				nkeys, users, err = parseUsers(tk, opts)
-			} else {
-				nkeys, users, err = parseUsers(mv, opts)
-			}
+			nkeys, users, err := parseUsers(tk, opts)
 			if err != nil {
 				return nil, err
 			}
 			auth.users = users
 			auth.nkeys = nkeys
 		case "default_permission", "default_permissions", "permissions":
-			var (
-				permissions *Permissions
-				err         error
-			)
-			if pedantic {
-				permissions, err = parseUserPermissions(tk, opts)
-			} else {
-				permissions, err = parseUserPermissions(mv, opts)
-			}
+			permissions, err := parseUserPermissions(tk, opts)
 			if err != nil {
 				return nil, err
 			}
@@ -1162,11 +1101,7 @@ func parseUsers(mv interface{}, opts *Options) ([]*NkeyUser, []*User, error) {
 			case "pass", "password":
 				user.Password = v.(string)
 			case "permission", "permissions", "authorization":
-				if pedantic {
-					perms, err = parseUserPermissions(tk, opts)
-				} else {
-					perms, err = parseUserPermissions(v, opts)
-				}
+				perms, err = parseUserPermissions(v, opts)
 				if err != nil {
 					return nil, nil, err
 				}
