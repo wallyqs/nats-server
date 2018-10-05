@@ -577,7 +577,6 @@ func TestConfigCheck(t *testing.T) {
 		}
 				`,
 			newDefaultErr: errors.New(`Expected map entries for accounts`),
-			pedanticErr:   errors.New(`Expected map entries for accounts`),
 			errorLine:     4,
 			errorPos:      3,
 		},
@@ -592,9 +591,34 @@ func TestConfigCheck(t *testing.T) {
 		}
 				`,
 			newDefaultErr: errors.New(`"$G" is a Reserved Account`),
-			pedanticErr:   errors.New(`"$G" is a Reserved Account`),
 			errorLine:     4,
 			errorPos:      3,
+		},
+		{
+			name: "when accounts block uses an invalid public key",
+			config: `
+		accounts {
+                  synadia = {
+                    nkey = "invalid"
+                  }
+		}
+				`,
+			newDefaultErr: errors.New(`Not a valid public nkey for an account: "invalid"`),
+			errorLine:     4,
+			errorPos:      21,
+		},
+		{
+			name: "when accounts block uses an invalid public key",
+			config: `
+		accounts {
+                  synadia = {
+                    nkey = "invalid"
+                  }
+		}
+				`,
+			newDefaultErr: errors.New(`Not a valid public nkey for an account: "invalid"`),
+			errorLine:     4,
+			errorPos:      21,
 		},
 	}
 
@@ -623,7 +647,15 @@ func TestConfigCheck(t *testing.T) {
 
 			t.Run("with pedantic check enabled", func(t *testing.T) {
 				err := checkConfig(conf, true)
-				expectedErr := test.pedanticErr
+				var expectedErr error
+
+				// New default errors also include source of error
+				// like an error reported when running with pedantic flag.
+				if test.newDefaultErr != nil {
+					expectedErr = test.newDefaultErr
+				} else if test.pedanticErr != nil {
+					expectedErr = test.pedanticErr
+				}
 
 				if err != nil && expectedErr != nil {
 					msg := fmt.Sprintf("%s:%d:%d: %s", conf, test.errorLine, test.errorPos, expectedErr.Error())
@@ -635,7 +667,7 @@ func TestConfigCheck(t *testing.T) {
 					}
 				}
 
-				checkErr(t, err, test.pedanticErr)
+				checkErr(t, err, expectedErr)
 			})
 
 			t.Run("with pedantic check disabled", func(t *testing.T) {

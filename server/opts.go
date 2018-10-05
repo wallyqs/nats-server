@@ -657,7 +657,7 @@ func parseAccounts(v interface{}, opts *Options) error {
 				case "nkey":
 					nk, ok := mv.(string)
 					if !ok || !nkeys.IsValidPublicAccountKey(nk) {
-						return fmt.Errorf("Not a valid public nkey for an account: %q", v)
+						return &configErr{tk, fmt.Sprintf("Not a valid public nkey for an account: %q", mv)}
 					}
 					acc.Nkey = nk
 				case "imports":
