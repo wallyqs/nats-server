@@ -40,8 +40,11 @@ func TestConfigCheck(t *testing.T) {
 		// errorPos is the position of the error.
 		errorPos int
 
-		// warning errors also include a reason optionally
+		// warning errors also include a reason optionally.
 		reason string
+
+		// newDefaultErr is a configuration error that includes source of error.
+		newDefaultErr error
 	}{
 		{
 			name: "when unknown field is used at top level",
@@ -491,6 +494,108 @@ func TestConfigCheck(t *testing.T) {
 			errorPos:    5,
 			reason:      `setting "permissions" within cluster authorization block is deprecated`,
 		},
+		/////////////////////
+		// ACCOUNTS	   //
+		/////////////////////
+		{
+			name: "when accounts block is correctly configured",
+			config: `
+		http_port = 8222
+
+		accounts {
+
+		  #
+		  # synadia > nats.io, cncf
+		  #
+		  synadia {
+		    # SAADJL5XAEM6BDYSWDTGVILJVY54CQXZM5ZLG4FRUAKB62HWRTPNSGXOHA
+		    nkey = "AC5GRL36RQV7MJ2GT6WQSCKDKJKYTK4T2LGLWJ2SEJKRDHFOQQWGGFQL"
+
+		    users [
+		      {
+		        # SUAEL6RU3BSDAFKOHNTEOK5Q6FTM5FTAMWVIKBET6FHPO4JRII3CYELVNM
+		        nkey = "UCARKS2E3KVB7YORL2DG34XLT7PUCOL2SVM7YXV6ETHLW6Z46UUJ2VZ3"
+		      }
+		    ]
+
+		    exports = [
+		      { service: "synadia.requests", accounts: [nats, cncf] }
+		    ]
+		  }
+
+		  #
+		  # nats < synadia
+		  #
+		  nats {
+		    # SUAJTM55JH4BNYDA22DMDZJSRBRKVDGSLYK2HDIOCM3LPWCDXIDV5Q4CIE
+		    nkey = "ADRZ42QBM7SXQDXXTSVWT2WLLFYOQGAFC4TO6WOAXHEKQHIXR4HFYJDS"
+
+		    users [
+		      {
+		        # SUADZTYQAKTY5NQM7XRB5XR3C24M6ROGZLBZ6P5HJJSSOFUGC5YXOOECOM
+		        nkey = "UD6AYQSOIN2IN5OGC6VQZCR4H3UFMIOXSW6NNS6N53CLJA4PB56CEJJI"
+		      }
+		    ]
+
+		    imports = [
+		      # This account has to send requests to 'nats.requests' subject
+		      { service: { account: "synadia", subject: "synadia.requests" }, to: "nats.requests" }
+		    ]
+		  }
+
+		  #
+		  # cncf < synadia
+		  #
+		  cncf {
+		    # SAAFHDZX7SGZ2SWHPS22JRPPK5WX44NPLNXQHR5C5RIF6QRI3U65VFY6C4
+		    nkey = "AD4YRVUJF2KASKPGRMNXTYKIYSCB3IHHB4Y2ME6B2PDIV5QJ23C2ZRIT"
+
+		    users [
+		      {
+		        # SUAKINP3Z2BPUXWOFSW2FZC7TFJCMMU7DHKP2C62IJQUDASOCDSTDTRMJQ
+		        nkey = "UB57IEMPG4KOTPFV5A66QKE2HZ3XBXFHVRCCVMJEWKECMVN2HSH3VTSJ"
+		      }
+		    ]
+
+		    imports = [
+		      # This account has to send requests to 'synadia.requests' subject
+		      { service: { account: "synadia", subject: "synadia.requests" } }
+		    ]
+		  }
+		}
+				`,
+			defaultErr:  nil,
+			pedanticErr: nil,
+		},
+		{
+			name: "when accounts block has unknown fields",
+			config: `
+		http_port = 8222
+
+		accounts {
+                  foo = "bar"
+		}
+				`,
+			newDefaultErr: errors.New(`Expected map entries for accounts`),
+			pedanticErr:   errors.New(`Expected map entries for accounts`),
+			errorLine:     4,
+			errorPos:      3,
+		},
+		{
+			name: "when accounts block defines a global account",
+			config: `
+		http_port = 8222
+
+		accounts {
+                  $G = {
+                  }
+		}
+				`,
+			newDefaultErr: errors.New(`"$G" is a Reserved Account`),
+			pedanticErr:   errors.New(`"$G" is a Reserved Account`),
+			errorLine:     4,
+			errorPos:      3,
+		},
 	}
 
 	checkConfig := func(config string, pedantic bool) error {
@@ -519,6 +624,7 @@ func TestConfigCheck(t *testing.T) {
 			t.Run("with pedantic check enabled", func(t *testing.T) {
 				err := checkConfig(conf, true)
 				expectedErr := test.pedanticErr
+
 				if err != nil && expectedErr != nil {
 					msg := fmt.Sprintf("%s:%d:%d: %s", conf, test.errorLine, test.errorPos, expectedErr.Error())
 					if test.reason != "" {
@@ -528,16 +634,28 @@ func TestConfigCheck(t *testing.T) {
 						t.Errorf("Expected %q, got %q", msg, err.Error())
 					}
 				}
+
 				checkErr(t, err, test.pedanticErr)
 			})
 
 			t.Run("with pedantic check disabled", func(t *testing.T) {
 				err := checkConfig(conf, false)
-				expectedErr := test.defaultErr
-				if err != nil && expectedErr != nil && err.Error() != expectedErr.Error() {
-					t.Errorf("Expected %q, got %q", expectedErr.Error(), err.Error())
+
+				// Gradually move to all errors including source of the error.
+				if err != nil && test.newDefaultErr != nil {
+					expectedErr := test.newDefaultErr
+					source := fmt.Sprintf("%s:%d:%d", conf, test.errorLine, test.errorPos)
+					expectedMsg := fmt.Sprintf("%s: %s", source, expectedErr.Error())
+					if err.Error() != expectedMsg {
+						t.Errorf("\nExpected: \n%q, \ngot: \n%q", expectedMsg, err.Error())
+					}
+				} else if err != nil && test.defaultErr != nil {
+					expectedErr := test.defaultErr
+					if err != nil && expectedErr != nil && err.Error() != expectedErr.Error() {
+						t.Errorf("Expected: \n%q, \ngot: \n%q", expectedErr.Error(), err.Error())
+					}
+					checkErr(t, err, test.defaultErr)
 				}
-				checkErr(t, err, test.defaultErr)
 			})
 		})
 	}
@@ -562,6 +680,6 @@ func TestConfigCheckIncludes(t *testing.T) {
 	}
 	expectedErr := errors.New(`configs/include_bad_conf_check_b.conf:10:19: unknown field "monitoring_port"`)
 	if err != nil && expectedErr != nil && err.Error() != expectedErr.Error() {
-		t.Errorf("Expected %q, got %q", expectedErr.Error(), err.Error())
+		t.Errorf("Expected: \n%q, got\n: %q", expectedErr.Error(), err.Error())
 	}
 }

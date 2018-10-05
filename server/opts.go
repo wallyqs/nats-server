@@ -199,34 +199,41 @@ type token interface {
 	Position() int
 }
 
+// configErr is a configuration error.
+type configErr struct {
+	token  token
+	reason string
+}
+
+func (e *configErr) Source() string {
+	return fmt.Sprintf("%s:%d:%d", e.token.SourceFile(), e.token.Line(), e.token.Position())
+}
+
+func (e *configErr) Error() string {
+	if e.token != nil {
+		return fmt.Sprintf("%s: %s", e.Source(), e.reason)
+	}
+	return e.reason
+}
+
+// unknownConfigFieldErr is an error reported in pedantic mode.
 type unknownConfigFieldErr struct {
-	field      string
-	token      token
-	configFile string
+	configErr
+	field string
 }
 
 func (e *unknownConfigFieldErr) Error() string {
-	msg := fmt.Sprintf("unknown field %q", e.field)
-	if e.token != nil {
-		return fmt.Sprintf("%s:%d:%d: %s", e.configFile, e.token.Line(), e.token.Position(), msg)
-	}
-	return msg
+	return fmt.Sprintf("%s: unknown field %q", e.Source(), e.field)
 }
 
+// configWarningErr is an error reported in pedantic mode.
 type configWarningErr struct {
-	field      string
-	token      token
-	configFile string
-	reason     string
+	configErr
+	field string
 }
 
 func (e *configWarningErr) Error() string {
-	msg := fmt.Sprintf("invalid use of field %q", e.field)
-	if e.token != nil {
-		msg = fmt.Sprintf("%s:%d:%d: %s", e.configFile, e.token.Line(), e.token.Position(), msg)
-	}
-	msg += ": " + e.reason
-	return msg
+	return fmt.Sprintf("%s: invalid use of field %q: %s", e.Source(), e.field, e.reason)
 }
 
 // ProcessConfigFile processes a configuration file.
@@ -411,9 +418,10 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			pedantic := o.CheckConfig
 			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return &unknownConfigFieldErr{
-					field:      k,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					field: k,
+					configErr: configErr{
+						token: tk,
+					},
 				}
 			}
 		}
@@ -487,10 +495,11 @@ func parseCluster(v interface{}, opts *Options) error {
 			if auth.defaultPermissions != nil {
 				if pedantic {
 					return &configWarningErr{
-						field:      mk,
-						token:      tk,
-						reason:     `setting "permissions" within cluster authorization block is deprecated`,
-						configFile: tk.SourceFile(),
+						field: mk,
+						configErr: configErr{
+							token:  tk,
+							reason: `setting "permissions" within cluster authorization block is deprecated`,
+						},
 					}
 				}
 
@@ -545,9 +554,10 @@ func parseCluster(v interface{}, opts *Options) error {
 		default:
 			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return &unknownConfigFieldErr{
-					field:      mk,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
 				}
 			}
 		}
@@ -605,7 +615,7 @@ func parseAccounts(v interface{}, opts *Options) error {
 		exportStreams  []*export
 		exportServices []*export
 	)
-	_, v = unwrapValue(v)
+	tk, v := unwrapValue(v)
 	switch vv := v.(type) {
 	// Simple array of account names.
 	case []interface{}, []string:
@@ -615,7 +625,7 @@ func parseAccounts(v interface{}, opts *Options) error {
 			ns := name.(string)
 			// Check for reserved names.
 			if isReservedAccount(ns) {
-				return fmt.Errorf("%q is a Reserved Account", ns)
+				return &configErr{tk, fmt.Sprintf("%q is a Reserved Account", ns)}
 			}
 			if _, ok := m[ns]; ok {
 				return fmt.Errorf("Duplicate Account Entry: %s", ns)
@@ -633,10 +643,10 @@ func parseAccounts(v interface{}, opts *Options) error {
 			// These should be maps.
 			mv, ok := amv.(map[string]interface{})
 			if !ok {
-				return fmt.Errorf("Expected map entries for accounts")
+				return &configErr{tk, "Expected map entries for accounts"}
 			}
 			if isReservedAccount(aname) {
-				return fmt.Errorf("%q is a Reserved Account", aname)
+				return &configErr{tk, fmt.Sprintf("%q is a Reserved Account", aname)}
 			}
 			acc := &Account{Name: aname}
 			opts.Accounts = append(opts.Accounts, acc)
@@ -689,9 +699,10 @@ func parseAccounts(v interface{}, opts *Options) error {
 				default:
 					if pedantic && tk != nil && !tk.IsUsedVariable() {
 						return &unknownConfigFieldErr{
-							field:      k,
-							token:      tk,
-							configFile: tk.SourceFile(),
+							field: k,
+							configErr: configErr{
+								token: tk,
+							},
 						}
 					}
 				}
@@ -845,9 +856,10 @@ func parseAccount(v map[string]interface{}, pedantic bool) (string, string, erro
 		default:
 			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return "", "", &unknownConfigFieldErr{
-					field:      mk,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
 				}
 			}
 		}
@@ -907,9 +919,10 @@ func parseExportStreamOrService(v map[string]interface{}, pedantic bool) (*expor
 		default:
 			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return nil, nil, &unknownConfigFieldErr{
-					field:      mk,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
 				}
 			}
 			return nil, nil, fmt.Errorf("Unknown field %q parsing export service or stream", mk)
@@ -981,9 +994,10 @@ func parseImportStreamOrService(v map[string]interface{}, pedantic bool) (*impor
 		default:
 			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return nil, nil, &unknownConfigFieldErr{
-					field:      mk,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
 				}
 			}
 			return nil, nil, fmt.Errorf("Unknown field %q parsing import service or stream", mk)
@@ -1039,9 +1053,10 @@ func parseAuthorization(v interface{}, opts *Options) (*authorization, error) {
 		default:
 			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return nil, &unknownConfigFieldErr{
-					field:      mk,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
 				}
 			}
 		}
@@ -1108,9 +1123,10 @@ func parseUsers(mv interface{}, opts *Options) ([]*NkeyUser, []*User, error) {
 			default:
 				if pedantic && tk != nil && !tk.IsUsedVariable() {
 					return nil, nil, &unknownConfigFieldErr{
-						field:      k,
-						token:      tk,
-						configFile: tk.SourceFile(),
+						field: k,
+						configErr: configErr{
+							token: tk,
+						},
 					}
 				}
 			}
@@ -1181,9 +1197,10 @@ func parseUserPermissions(mv interface{}, opts *Options) (*Permissions, error) {
 		default:
 			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return nil, &unknownConfigFieldErr{
-					field:      k,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					field: k,
+					configErr: configErr{
+						token: tk,
+					},
 				}
 			}
 			return nil, fmt.Errorf("Unknown field %s parsing permissions", k)
@@ -1266,9 +1283,10 @@ func parseSubjectPermission(v interface{}, opts *Options) (*SubjectPermission, e
 		default:
 			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return nil, &unknownConfigFieldErr{
-					field:      k,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					field: k,
+					configErr: configErr{
+						token: tk,
+					},
 				}
 			}
 			return nil, fmt.Errorf("Unknown field name %q parsing subject permissions, only 'allow' or 'deny' are permitted", k)
@@ -1394,9 +1412,10 @@ func parseTLS(v interface{}, opts *Options) (*TLSConfigOpts, error) {
 		default:
 			if pedantic && tk != nil && !tk.IsUsedVariable() {
 				return nil, &unknownConfigFieldErr{
-					field:      mk,
-					token:      tk,
-					configFile: tk.SourceFile(),
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
 				}
 			}
 
