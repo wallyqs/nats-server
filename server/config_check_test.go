@@ -608,17 +608,220 @@ func TestConfigCheck(t *testing.T) {
 			errorPos:      21,
 		},
 		{
-			name: "when accounts block uses an invalid public key",
+			name: "when accounts list includes reserved account",
 			config: `
-		accounts {
-                  synadia = {
-                    nkey = "invalid"
-                  }
-		}
+                port = 4222
+
+		accounts = [foo, bar, "$G"]
+
+                http_port = 8222
 				`,
-			newDefaultErr: errors.New(`Not a valid public nkey for an account: "invalid"`),
+			newDefaultErr: errors.New(`"$G" is a Reserved Account`),
 			errorLine:     4,
+			errorPos:      3,
+		},
+		{
+			name: "when accounts list includes a dupe entry",
+			config: `
+                port = 4222
+
+		accounts = [foo, bar, bar]
+
+                http_port = 8222
+				`,
+			newDefaultErr: errors.New(`Duplicate Account Entry: bar`),
+			errorLine:     4,
+			errorPos:      3,
+		},
+		{
+			name: "when accounts block includes a dupe user",
+			config: `
+                port = 4222
+
+		accounts = {
+                  nats {
+                    users = [
+                      { user: "foo",   pass: "bar" },
+                      { user: "hello", pass: "world" },
+                      { user: "foo",   pass: "bar" }
+                    ]
+                  }
+                }
+
+                http_port = 8222
+				`,
+			newDefaultErr: errors.New(`Duplicate user "foo" detected`),
+			errorLine:     6,
 			errorPos:      21,
+		},
+		{
+			name: "when accounts block includes a dupe nkey",
+			config: `
+                port = 4222
+
+		accounts = {
+                  nats {
+                    users = [
+                      { nkey = "UB57IEMPG4KOTPFV5A66QKE2HZ3XBXFHVRCCVMJEWKECMVN2HSH3VTSJ" },
+                      { nkey = "UB57IEMPG4KOTPFV5A66QKE2HZ3XBXFHVRCCVMJEWKECMVN2HSH3VTSJ" },
+                      { nkey = "UB57IEMPG4KOTPFV5A66QKE2HZ3XBXFHVRCCVMJEWKECMVN2HSH3VTSJ" }
+                    ]
+                  }
+                }
+
+                http_port = 8222
+				`,
+			newDefaultErr: errors.New(`Duplicate nkey "UB57IEMPG4KOTPFV5A66QKE2HZ3XBXFHVRCCVMJEWKECMVN2HSH3VTSJ" detected`),
+			errorLine:     6,
+			errorPos:      21,
+		},
+		{
+			name: "when accounts block imports are not a list",
+			config: `
+                port = 4222
+
+		accounts = {
+                  nats {
+                    imports = true
+                  }
+                }
+
+                http_port = 8222
+				`,
+			newDefaultErr: errors.New(`Imports should be an array, got bool`),
+			errorLine:     6,
+			errorPos:      21,
+		},
+		{
+			name: "when accounts block exports are not a list",
+			config: `
+                port = 4222
+
+		accounts = {
+                  nats {
+                    exports = true
+                  }
+                }
+
+                http_port = 8222
+				`,
+			newDefaultErr: errors.New(`Exports should be an array, got bool`),
+			errorLine:     6,
+			errorPos:      21,
+		},
+		{
+			name: "when accounts block imports items are not a map",
+			config: `
+                port = 4222
+
+		accounts = {
+                  nats {
+                    imports = [
+                      false
+                    ]
+                  }
+                }
+
+                http_port = 8222
+				`,
+			newDefaultErr: errors.New(`Import Items should be a map with type entry, got bool`),
+			errorLine:     7,
+			errorPos:      23,
+		},
+		{
+			name: "when accounts block export items are not a map",
+			config: `
+                port = 4222
+
+		accounts = {
+                  nats {
+                    exports = [
+                      false
+                    ]
+                  }
+                }
+
+                http_port = 8222
+				`,
+			newDefaultErr: errors.New(`Export Items should be a map with type entry, got bool`),
+			errorLine:     7,
+			errorPos:      23,
+		},
+		{
+			name: "when accounts exports has a stream name that is not a string",
+			config: `
+                port = 4222
+
+		accounts = {
+                  nats {
+                    exports = [
+                      {
+                        stream: false
+                      }
+                    ]
+                  }
+                }
+
+                http_port = 8222
+				`,
+			newDefaultErr: errors.New(`Expected stream name to be string, got bool`),
+			errorLine:     8,
+			errorPos:      25,
+		},
+		{
+			name: "when accounts exports has a service name that is not a string",
+			config: `
+		accounts = {
+                  nats {
+                    exports = [
+                      {
+                        service: false
+                      }
+                    ]
+                  }
+                }
+				`,
+			newDefaultErr: errors.New(`Expected service name to be string, got bool`),
+			errorLine:     6,
+			errorPos:      25,
+		},
+		{
+			name: "when accounts imports stream without name",
+			config: `
+                port = 4222
+
+		accounts = {
+                  nats {
+                    imports = [
+                      { stream: { }}
+                    ]
+                  }
+                }
+
+                http_port = 8222
+				`,
+			newDefaultErr: errors.New(`Expect an account name and a subject`),
+			errorLine:     7,
+			errorPos:      25,
+		},
+		{
+			name: "when accounts imports service without name",
+			config: `
+                port = 4222
+
+		accounts = {
+                  nats {
+                    imports = [
+                      { service: { }}
+                    ]
+                  }
+                }
+
+                http_port = 8222
+				`,
+			newDefaultErr: errors.New(`Expect an account name and a subject`),
+			errorLine:     7,
+			errorPos:      25,
 		},
 	}
 
