@@ -293,7 +293,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "listen":
 			hp, err := parseListen(v)
 			if err != nil {
-				return err
+				return &configErr{tk, err.Error()}
 			}
 			o.Host = hp.host
 			o.Port = hp.port
@@ -345,14 +345,14 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "http":
 			hp, err := parseListen(v)
 			if err != nil {
-				return err
+				return &configErr{tk, err.Error()}
 			}
 			o.HTTPHost = hp.host
 			o.HTTPPort = hp.port
 		case "https":
 			hp, err := parseListen(v)
 			if err != nil {
-				return err
+				return &configErr{tk, err.Error()}
 			}
 			o.HTTPHost = hp.host
 			o.HTTPSPort = hp.port
@@ -392,16 +392,12 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		case "ping_max":
 			o.MaxPingsOut = int(v.(int64))
 		case "tls":
-			var (
-				tc  *TLSConfigOpts
-				err error
-			)
-			tc, err = parseTLS(tk, o)
+			tc, err := parseTLS(tk, o)
 			if err != nil {
 				return err
 			}
 			if o.TLSConfig, err = GenTLSConfig(tc); err != nil {
-				return err
+				return &configErr{tk, err.Error()}
 			}
 			o.TLSTimeout = tc.Timeout
 		case "write_deadline":
@@ -409,7 +405,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			if ok {
 				dur, err := time.ParseDuration(wd)
 				if err != nil {
-					return fmt.Errorf("error parsing write_deadline: %v", err)
+					return &configErr{tk, fmt.Sprintf("error parsing write_deadline: %v", err)}
 				}
 				o.WriteDeadline = dur
 			} else {
@@ -476,7 +472,7 @@ func parseCluster(v interface{}, opts *Options) error {
 		case "listen":
 			hp, err := parseListen(mv)
 			if err != nil {
-				return err
+				return &configErr{tk, err.Error()}
 			}
 			opts.Cluster.Host = hp.host
 			opts.Cluster.Port = hp.port
@@ -490,7 +486,7 @@ func parseCluster(v interface{}, opts *Options) error {
 				return err
 			}
 			if auth.users != nil {
-				return fmt.Errorf("Cluster authorization does not allow multiple users")
+				return &configErr{tk, fmt.Sprintf("Cluster authorization does not allow multiple users")}
 			}
 			opts.Cluster.Username = auth.user
 			opts.Cluster.Password = auth.pass
@@ -516,25 +512,21 @@ func parseCluster(v interface{}, opts *Options) error {
 			ra := mv.([]interface{})
 			opts.Routes = make([]*url.URL, 0, len(ra))
 			for _, r := range ra {
-				_, r = unwrapValue(r)
+				tk, r := unwrapValue(r)
 				routeURL := r.(string)
 				url, err := url.Parse(routeURL)
 				if err != nil {
-					return fmt.Errorf("error parsing route url [%q]", routeURL)
+					return &configErr{tk, fmt.Sprintf("error parsing route url [%q]", routeURL)}
 				}
 				opts.Routes = append(opts.Routes, url)
 			}
 		case "tls":
-			var (
-				tc  *TLSConfigOpts
-				err error
-			)
-			tc, err = parseTLS(tk, opts)
+			tc, err := parseTLS(tk, opts)
 			if err != nil {
 				return err
 			}
 			if opts.Cluster.TLSConfig, err = GenTLSConfig(tc); err != nil {
-				return err
+				return &configErr{tk, err.Error()}
 			}
 			// For clusters, we will force strict verification. We also act
 			// as both client and server, so will mirror the rootCA to the
@@ -1153,15 +1145,15 @@ func parseUsers(mv interface{}, opts *Options) ([]*NkeyUser, []*User, error) {
 
 		// Check to make sure we have at least username and password if defined.
 		if nkey.Nkey == "" && (user.Username == "" || user.Password == "") {
-			return nil, nil, fmt.Errorf("User entry requires a user and a password")
+			return nil, nil, &configErr{tk, fmt.Sprintf("User entry requires a user and a password")}
 		} else if nkey.Nkey != "" {
 			// Make sure the nkey a proper public nkey for a user..
 			if !nkeys.IsValidPublicUserKey(nkey.Nkey) {
-				return nil, nil, fmt.Errorf("Not a valid public nkey for a user")
+				return nil, nil, &configErr{tk, fmt.Sprintf("Not a valid public nkey for a user")}
 			}
 			// If we have user or password defined here that is an error.
 			if user.Username != "" || user.Password != "" {
-				return nil, nil, fmt.Errorf("Nkey users do not take usernames or passwords")
+				return nil, nil, &configErr{tk, fmt.Sprintf("Nkey users do not take usernames or passwords")}
 			}
 			keys = append(keys, nkey)
 		} else {
@@ -1348,65 +1340,63 @@ func parseCurvePreferences(curveName string) (tls.CurveID, error) {
 // Helper function to parse TLS configs.
 func parseTLS(v interface{}, opts *Options) (*TLSConfigOpts, error) {
 	var (
-		tlsm     map[string]interface{}
-		tk       token
-		tc       TLSConfigOpts = TLSConfigOpts{}
-		pedantic bool          = opts.CheckConfig
+		tlsm map[string]interface{}
+		tc   TLSConfigOpts = TLSConfigOpts{}
 	)
 	_, v = unwrapValue(v)
 	tlsm = v.(map[string]interface{})
 	for mk, mv := range tlsm {
-		tk, mv = unwrapValue(mv)
+		tk, mv := unwrapValue(mv)
 		switch strings.ToLower(mk) {
 		case "cert_file":
 			certFile, ok := mv.(string)
 			if !ok {
-				return nil, fmt.Errorf("error parsing tls config, expected 'cert_file' to be filename")
+				return nil, &configErr{tk, fmt.Sprintf("error parsing tls config, expected 'cert_file' to be filename")}
 			}
 			tc.CertFile = certFile
 		case "key_file":
 			keyFile, ok := mv.(string)
 			if !ok {
-				return nil, fmt.Errorf("error parsing tls config, expected 'key_file' to be filename")
+				return nil, &configErr{tk, fmt.Sprintf("error parsing tls config, expected 'key_file' to be filename")}
 			}
 			tc.KeyFile = keyFile
 		case "ca_file":
 			caFile, ok := mv.(string)
 			if !ok {
-				return nil, fmt.Errorf("error parsing tls config, expected 'ca_file' to be filename")
+				return nil, &configErr{tk, fmt.Sprintf("error parsing tls config, expected 'ca_file' to be filename")}
 			}
 			tc.CaFile = caFile
 		case "verify":
 			verify, ok := mv.(bool)
 			if !ok {
-				return nil, fmt.Errorf("error parsing tls config, expected 'verify' to be a boolean")
+				return nil, &configErr{tk, fmt.Sprintf("error parsing tls config, expected 'verify' to be a boolean")}
 			}
 			tc.Verify = verify
 		case "cipher_suites":
 			ra := mv.([]interface{})
 			if len(ra) == 0 {
-				return nil, fmt.Errorf("error parsing tls config, 'cipher_suites' cannot be empty")
+				return nil, &configErr{tk, fmt.Sprintf("error parsing tls config, 'cipher_suites' cannot be empty")}
 			}
 			tc.Ciphers = make([]uint16, 0, len(ra))
 			for _, r := range ra {
-				_, r = unwrapValue(r)
+				tk, r := unwrapValue(r)
 				cipher, err := parseCipher(r.(string))
 				if err != nil {
-					return nil, err
+					return nil, &configErr{tk, err.Error()}
 				}
 				tc.Ciphers = append(tc.Ciphers, cipher)
 			}
 		case "curve_preferences":
 			ra := mv.([]interface{})
 			if len(ra) == 0 {
-				return nil, fmt.Errorf("error parsing tls config, 'curve_preferences' cannot be empty")
+				return nil, &configErr{tk, fmt.Sprintf("error parsing tls config, 'curve_preferences' cannot be empty")}
 			}
 			tc.CurvePreferences = make([]tls.CurveID, 0, len(ra))
 			for _, r := range ra {
-				_, r = unwrapValue(r)
+				tk, r := unwrapValue(r)
 				cps, err := parseCurvePreferences(r.(string))
 				if err != nil {
-					return nil, err
+					return nil, &configErr{tk, err.Error()}
 				}
 				tc.CurvePreferences = append(tc.CurvePreferences, cps)
 			}
@@ -1420,16 +1410,7 @@ func parseTLS(v interface{}, opts *Options) (*TLSConfigOpts, error) {
 			}
 			tc.Timeout = at
 		default:
-			if pedantic && tk != nil && !tk.IsUsedVariable() {
-				return nil, &unknownConfigFieldErr{
-					field: mk,
-					configErr: configErr{
-						token: tk,
-					},
-				}
-			}
-
-			return nil, fmt.Errorf("error parsing tls config, unknown field [%q]", mk)
+			return nil, &configErr{tk, fmt.Sprintf("error parsing tls config, unknown field [%q]", mk)}
 		}
 	}
 
