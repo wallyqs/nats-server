@@ -311,24 +311,6 @@ func TestConfigCheck(t *testing.T) {
 			errorPos:    7,
 		},
 		{
-			name: "when unknown option is in clustering authorization permissions config",
-			config: `
-		cluster = {
-		  authorization {
-		    user = "foo"
-		    pass = "bar"
-		    permissions = {
-		      hello = "world"
-		    }
-		  }
-		}
-		`,
-			defaultErr:  errors.New(`Unknown field hello parsing permissions`),
-			pedanticErr: errors.New(`unknown field "hello"`),
-			errorLine:   7,
-			errorPos:    9,
-		},
-		{
 			name: "when unknown option is in tls config",
 			config: `
 		tls = {
@@ -681,8 +663,8 @@ func TestConfigCheck(t *testing.T) {
 		}
 				`,
 			newDefaultErr: errors.New(`Expected map entries for accounts`),
-			errorLine:     4,
-			errorPos:      3,
+			errorLine:     5,
+			errorPos:      19,
 		},
 		{
 			name: "when accounts block defines a global account",
@@ -695,8 +677,8 @@ func TestConfigCheck(t *testing.T) {
 		}
 				`,
 			newDefaultErr: errors.New(`"$G" is a Reserved Account`),
-			errorLine:     4,
-			errorPos:      3,
+			errorLine:     5,
+			errorPos:      19,
 		},
 		{
 			name: "when accounts block uses an invalid public key",
@@ -722,7 +704,7 @@ func TestConfigCheck(t *testing.T) {
 				`,
 			newDefaultErr: errors.New(`"$G" is a Reserved Account`),
 			errorLine:     4,
-			errorPos:      3,
+			errorPos:      26,
 		},
 		{
 			name: "when accounts list includes a dupe entry",
@@ -735,7 +717,7 @@ func TestConfigCheck(t *testing.T) {
 				`,
 			newDefaultErr: errors.New(`Duplicate Account Entry: bar`),
 			errorLine:     4,
-			errorPos:      3,
+			errorPos:      25,
 		},
 		{
 			name: "when accounts block includes a dupe user",
@@ -755,27 +737,6 @@ func TestConfigCheck(t *testing.T) {
                 http_port = 8222
 				`,
 			newDefaultErr: errors.New(`Duplicate user "foo" detected`),
-			errorLine:     6,
-			errorPos:      21,
-		},
-		{
-			name: "when accounts block includes a dupe nkey",
-			config: `
-                port = 4222
-
-		accounts = {
-                  nats {
-                    users = [
-                      { nkey = "UB57IEMPG4KOTPFV5A66QKE2HZ3XBXFHVRCCVMJEWKECMVN2HSH3VTSJ" },
-                      { nkey = "UB57IEMPG4KOTPFV5A66QKE2HZ3XBXFHVRCCVMJEWKECMVN2HSH3VTSJ" },
-                      { nkey = "UB57IEMPG4KOTPFV5A66QKE2HZ3XBXFHVRCCVMJEWKECMVN2HSH3VTSJ" }
-                    ]
-                  }
-                }
-
-                http_port = 8222
-				`,
-			newDefaultErr: errors.New(`Duplicate nkey "UB57IEMPG4KOTPFV5A66QKE2HZ3XBXFHVRCCVMJEWKECMVN2HSH3VTSJ" detected`),
 			errorLine:     6,
 			errorPos:      21,
 		},
@@ -1092,56 +1053,14 @@ func TestConfigCheck(t *testing.T) {
 		cluster {
                   routes = [
                     "0.0.0.0:XXXX"
-                    "0.0.0.0:YYYY"
-                    "0.0.0.0:ZZZZ"
+                    # "0.0.0.0:YYYY"
+                    # "0.0.0.0:ZZZZ"
                   ]
 		}
 		`,
 			newDefaultErr: errors.New(`error parsing route url ["0.0.0.0:XXXX"]`),
 			errorLine:     4,
 			errorPos:      22,
-		},
-		{
-			name: "when setting invalid permissions within cluster authorization block",
-			config: `
-		cluster {
-		  authorization {
-		    permissions = {
-		      publish = { 
-                        allow = [false, "foo", "bar"] 
-                      }
-		    }
-		  }
-
-		  # permissions = {
-		  #   publish = { deny = ["foo", "bar"] }
-		  # }
-		}
-		`,
-			newDefaultErr: errors.New(`Subject in permissions array cannot be cast to string`),
-			errorLine:     6,
-			errorPos:      34,
-		},
-		{
-			name: "when setting invalid permissions within cluster authorization block",
-			config: `
-		cluster {
-		  authorization {
-		    # permissions = {
-		    #   publish = { 
-                    #     allow = [false, "foo", "bar"] 
-                    #   }
-		    # }
-		  }
-
-		  permissions = {
-		    publish = { deny = [false, "foo", "bar"] }
-		  }
-		}
-		`,
-			newDefaultErr: errors.New(`Subject in permissions array cannot be cast to string`),
-			errorLine:     12,
-			errorPos:      27,
 		},
 		{
 			name: "when setting invalid TLS config within cluster block",
@@ -1197,8 +1116,9 @@ func TestConfigCheck(t *testing.T) {
 					if test.reason != "" {
 						msg += ": " + test.reason
 					}
+					msg += "\n"
 					if err.Error() != msg {
-						t.Errorf("Expected %q, got %q", msg, err.Error())
+						t.Errorf("Expected:\n%q\ngot:\n%q", msg, err.Error())
 					}
 				}
 
@@ -1212,7 +1132,7 @@ func TestConfigCheck(t *testing.T) {
 				if err != nil && test.newDefaultErr != nil {
 					expectedErr := test.newDefaultErr
 					source := fmt.Sprintf("%s:%d:%d", conf, test.errorLine, test.errorPos)
-					expectedMsg := fmt.Sprintf("%s: %s", source, expectedErr.Error())
+					expectedMsg := fmt.Sprintf("%s: %s\n", source, expectedErr.Error())
 					if err.Error() != expectedMsg {
 						t.Errorf("\nExpected: \n%q, \ngot: \n%q", expectedMsg, err.Error())
 					}
@@ -1245,7 +1165,7 @@ func TestConfigCheckIncludes(t *testing.T) {
 	if err == nil {
 		t.Errorf("Expected error processing include files with configuration check enabled: %v", err)
 	}
-	expectedErr := errors.New(`configs/include_bad_conf_check_b.conf:10:19: unknown field "monitoring_port"`)
+	expectedErr := errors.New(`configs/include_bad_conf_check_b.conf:10:19: unknown field "monitoring_port"` + "\n")
 	if err != nil && expectedErr != nil && err.Error() != expectedErr.Error() {
 		t.Errorf("Expected: \n%q, got\n: %q", expectedErr.Error(), err.Error())
 	}

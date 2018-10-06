@@ -122,7 +122,6 @@ type processConfigErr struct {
 // Error returns the collection of errors separated by new lines,
 // warnings appear first then hard errors.
 func (e *processConfigErr) Error() string {
-	// FIXME: Sort by line number?
 	var msg string
 	for _, err := range e.Warnings() {
 		msg += err.Error() + "\n"
