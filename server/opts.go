@@ -191,55 +191,6 @@ e.g.
 Available cipher suites include:
 `
 
-type token interface {
-	Value() interface{}
-	Line() int
-	IsUsedVariable() bool
-	SourceFile() string
-	Position() int
-}
-
-// configErr is a configuration error.
-type configErr struct {
-	token  token
-	reason string
-}
-
-// Source reports the location of a configuration error.
-func (e *configErr) Source() string {
-	return fmt.Sprintf("%s:%d:%d", e.token.SourceFile(), e.token.Line(), e.token.Position())
-}
-
-// Error reports the location and reason from a configuration error.
-func (e *configErr) Error() string {
-	if e.token != nil {
-		return fmt.Sprintf("%s: %s", e.Source(), e.reason)
-	}
-	return e.reason
-}
-
-// unknownConfigFieldErr is an error reported in pedantic mode.
-type unknownConfigFieldErr struct {
-	configErr
-	field string
-}
-
-// Error reports that an unknown field was in the configuration.
-func (e *unknownConfigFieldErr) Error() string {
-	return fmt.Sprintf("%s: unknown field %q", e.Source(), e.field)
-}
-
-// configWarningErr is an error reported in pedantic mode.
-type configWarningErr struct {
-	configErr
-	field string
-}
-
-// Error reports a configuration warning.
-func (e *configWarningErr) Error() string {
-	return fmt.Sprintf("%s: invalid use of field %q: %s", e.Source(), e.field, e.reason)
-}
-
 // ProcessConfigFile processes a configuration file.
 // FIXME(dlc): A bit hacky
 func ProcessConfigFile(configFile string) (*Options, error) {
@@ -248,6 +199,15 @@ func ProcessConfigFile(configFile string) (*Options, error) {
 		return nil, err
 	}
 	return opts, nil
+}
+
+// token is an item parsed from the configuration.
+type token interface {
+	Value() interface{}
+	Line() int
+	IsUsedVariable() bool
+	SourceFile() string
+	Position() int
 }
 
 // unwrapValue can be used to get the token and value from an item
