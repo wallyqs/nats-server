@@ -823,6 +823,141 @@ func TestConfigCheck(t *testing.T) {
 			errorLine:     7,
 			errorPos:      25,
 		},
+		{
+			name: "when user authorization config has both token and users",
+			config: `
+		authorization = {
+                 token = "s3cr3t"
+		  users = [
+		    {
+		      user = "foo"
+		      pass = "bar"
+		    }
+		  ]
+		}
+		`,
+			newDefaultErr: errors.New(`Can not have a token and a users array`),
+			errorLine:     2,
+			errorPos:      3,
+		},
+		{
+			name: "when user authorization config has both token and user",
+			config: `
+		authorization = {
+  	          user = "foo"
+		  pass = "bar"
+		  users = [
+		    {
+		      user = "foo"
+		      pass = "bar"
+		    }
+		  ]
+		}
+		`,
+			newDefaultErr: errors.New(`Can not have a single user/pass and a users array`),
+			errorLine:     2,
+			errorPos:      3,
+		},
+		{
+			name: "when user authorization config has users not as a list",
+			config: `
+		authorization = {
+		  users = false
+		}
+		`,
+			newDefaultErr: errors.New(`Expected users field to be an array, got false`),
+			errorLine:     3,
+			errorPos:      5,
+		},
+		{
+			name: "when user authorization config has users not as a map",
+			config: `
+		authorization = {
+		  users = [false]
+		}
+		`,
+			newDefaultErr: errors.New(`Expected user entry to be a map/struct, got false`),
+			errorLine:     3,
+			errorPos:      14,
+		},
+		{
+			name: "when user authorization config has permissions not as a map",
+			config: `
+		authorization = {
+		  users = [{user: hello, pass: world}]
+                  permissions = false
+		}
+		`,
+			newDefaultErr: errors.New(`Expected permissions to be a map/struct, got false`),
+			errorLine:     4,
+			errorPos:      19,
+		},
+		{
+			name: "when user authorization permissions config has invalid fields within allow",
+			config: `
+		authorization {
+		  permissions {
+		    publish = {
+		      allow = [false, "hello", "world"]
+		      deny = ["foo", "bar"]
+		    }
+		    subscribe = {}
+		  }
+		}
+		`,
+			newDefaultErr: errors.New(`Subject in permissions array cannot be cast to string`),
+			errorLine:     5,
+			errorPos:      18,
+		},
+		{
+			name: "when user authorization permissions config has invalid fields within deny",
+			config: `
+		authorization {
+		  permissions {
+		    publish = {
+		      allow = ["hello", "world"]
+		      deny = [true, "foo", "bar"]
+		    }
+		    subscribe = {}
+		  }
+		}
+		`,
+			newDefaultErr: errors.New(`Subject in permissions array cannot be cast to string`),
+			errorLine:     6,
+			errorPos:      17,
+		},
+		{
+			name: "when user authorization permissions config has invalid type",
+			config: `
+		authorization {
+		  permissions {
+		    publish = {
+		      allow = false
+		    }
+		    subscribe = {}
+		  }
+		}
+		`,
+			newDefaultErr: errors.New(`Expected subject permissions to be a subject, or array of subjects, got bool`),
+			errorLine:     5,
+			errorPos:      9,
+		},
+		{
+			name: "when user authorization permissions subject is invalid",
+			config: `
+		authorization {
+		  permissions {
+		    publish = {
+		      allow = ["foo..bar"]
+		    }
+		    subscribe = {}
+		  }
+		}
+		`,
+			newDefaultErr: errors.New(`Subject "foo..bar" is not a valid subject`),
+			errorLine:     5,
+			errorPos:      9,
+		},
 	}
 
 	checkConfig := func(config string, pedantic bool) error {

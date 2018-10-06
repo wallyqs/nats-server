@@ -205,10 +205,12 @@ type configErr struct {
 	reason string
 }
 
+// Source reports the location of a configuration error.
 func (e *configErr) Source() string {
 	return fmt.Sprintf("%s:%d:%d", e.token.SourceFile(), e.token.Line(), e.token.Position())
 }
 
+// Error reports the location and reason from a configuration error.
 func (e *configErr) Error() string {
 	if e.token != nil {
 		return fmt.Sprintf("%s: %s", e.Source(), e.reason)
@@ -222,6 +224,7 @@ type unknownConfigFieldErr struct {
 	field string
 }
 
+// Error reports that an unknown field was in the configuration.
 func (e *unknownConfigFieldErr) Error() string {
 	return fmt.Sprintf("%s: unknown field %q", e.Source(), e.field)
 }
@@ -232,6 +235,7 @@ type configWarningErr struct {
 	field string
 }
 
+// Error reports a configuration warning.
 func (e *configWarningErr) Error() string {
 	return fmt.Sprintf("%s: invalid use of field %q: %s", e.Source(), e.field, e.reason)
 }
@@ -319,16 +323,16 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			o.Password = auth.pass
 			o.Authorization = auth.token
 			if (auth.user != "" || auth.pass != "") && auth.token != "" {
-				return fmt.Errorf("Cannot have a user/pass and token")
+				return &configErr{tk, fmt.Sprintf("Cannot have a user/pass and token")}
 			}
 			o.AuthTimeout = auth.timeout
 			// Check for multiple users defined
 			if auth.users != nil {
 				if auth.user != "" {
-					return fmt.Errorf("Can not have a single user/pass and a users array")
+					return &configErr{tk, fmt.Sprintf("Can not have a single user/pass and a users array")}
 				}
 				if auth.token != "" {
-					return fmt.Errorf("Can not have a token and a users array")
+					return &configErr{tk, fmt.Sprintf("Can not have a token and a users array")}
 				}
 				// Users may have been added from Accounts parsing, so do an append here
 				o.Users = append(o.Users, auth.users...)
@@ -1088,20 +1092,20 @@ func parseUsers(mv interface{}, opts *Options) ([]*NkeyUser, []*User, error) {
 		users    []*User = []*User{}
 		keys     []*NkeyUser
 	)
-	_, mv = unwrapValue(mv)
+	tk, mv = unwrapValue(mv)
 
 	// Make sure we have an array
 	uv, ok := mv.([]interface{})
 	if !ok {
-		return nil, nil, fmt.Errorf("Expected users field to be an array, got %v", mv)
+		return nil, nil, &configErr{tk, fmt.Sprintf("Expected users field to be an array, got %v", mv)}
 	}
 	for _, u := range uv {
-		_, u = unwrapValue(u)
+		tk, u = unwrapValue(u)
 
 		// Check its a map/struct
 		um, ok := u.(map[string]interface{})
 		if !ok {
-			return nil, nil, fmt.Errorf("Expected user entry to be a map/struct, got %v", u)
+			return nil, nil, &configErr{tk, fmt.Sprintf("Expected user entry to be a map/struct, got %v", u)}
 		}
 
 		var (
@@ -1122,7 +1126,7 @@ func parseUsers(mv interface{}, opts *Options) ([]*NkeyUser, []*User, error) {
 			case "pass", "password":
 				user.Password = v.(string)
 			case "permission", "permissions", "authorization":
-				perms, err = parseUserPermissions(v, opts)
+				perms, err = parseUserPermissions(tk, opts)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -1174,10 +1178,10 @@ func parseUserPermissions(mv interface{}, opts *Options) (*Permissions, error) {
 		pedantic bool         = opts.CheckConfig
 		p        *Permissions = &Permissions{}
 	)
-	_, mv = unwrapValue(mv)
+	tk, mv = unwrapValue(mv)
 	pm, ok := mv.(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf("Expected permissions to be a map/struct, got %+v", mv)
+		return nil, &configErr{tk, fmt.Sprintf("Expected permissions to be a map/struct, got %+v", mv)}
 	}
 	for k, v := range pm {
 		tk, v = unwrapValue(v)
@@ -1188,14 +1192,12 @@ func parseUserPermissions(mv interface{}, opts *Options) (*Permissions, error) {
 		// Export is Subscribe
 		case "pub", "publish", "import":
 			perms, err := parseVariablePermissions(v, opts)
-
 			if err != nil {
 				return nil, err
 			}
 			p.Publish = perms
 		case "sub", "subscribe", "export":
 			perms, err := parseVariablePermissions(v, opts)
-
 			if err != nil {
 				return nil, err
 			}
@@ -1229,6 +1231,8 @@ func parseVariablePermissions(v interface{}, opts *Options) (*SubjectPermission,
 
 // Helper function to parse subject singeltons and/or arrays
 func parseSubjects(v interface{}) ([]string, error) {
+	tk, v := unwrapValue(v)
+
 	var subjects []string
 	switch vv := v.(type) {
 	case string:
@@ -1237,19 +1241,19 @@ func parseSubjects(v interface{}) ([]string, error) {
 		subjects = vv
 	case []interface{}:
 		for _, i := range vv {
-			_, i = unwrapValue(i)
+			tk, i := unwrapValue(i)
 
 			subject, ok := i.(string)
 			if !ok {
-				return nil, fmt.Errorf("Subject in permissions array cannot be cast to string")
+				return nil, &configErr{tk, fmt.Sprintf("Subject in permissions array cannot be cast to string")}
 			}
 			subjects = append(subjects, subject)
 		}
 	default:
-		return nil, fmt.Errorf("Expected subject permissions to be a subject, or array of subjects, got %T", v)
+		return nil, &configErr{tk, fmt.Sprintf("Expected subject permissions to be a subject, or array of subjects, got %T", v)}
 	}
 	if err := checkSubjectArray(subjects); err != nil {
-		return nil, err
+		return nil, &configErr{tk, err.Error()}
 	}
 	return subjects, nil
 }
@@ -1272,16 +1276,16 @@ func parseSubjectPermission(v interface{}, opts *Options) (*SubjectPermission, e
 	p := &SubjectPermission{}
 	pedantic := opts.CheckConfig
 	for k, v := range m {
-		tk, v := unwrapValue(v)
+		tk, _ := unwrapValue(v)
 		switch strings.ToLower(k) {
 		case "allow":
-			subjects, err := parseSubjects(v)
+			subjects, err := parseSubjects(tk)
 			if err != nil {
 				return nil, err
 			}
 			p.Allow = subjects
 		case "deny":
-			subjects, err := parseSubjects(v)
+			subjects, err := parseSubjects(tk)
 			if err != nil {
 				return nil, err
 			}
