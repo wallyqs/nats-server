@@ -196,6 +196,11 @@ Available cipher suites include:
 func ProcessConfigFile(configFile string) (*Options, error) {
 	opts := &Options{}
 	if err := opts.ProcessConfigFile(configFile); err != nil {
+		// If only warnings then continue and return the options.
+		if cerr, ok := err.(*processConfigErr); ok && len(cerr.Errors()) == 0 {
+			return opts, nil
+		}
+
 		return nil, err
 	}
 	return opts, nil
@@ -250,8 +255,6 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	warnings := make([]error, 0)
 
 	for k, v := range m {
-		// When pedantic checks are enabled then need to unwrap
-		// to get the value along with reported error line.
 		tk, v := unwrapValue(v)
 		switch strings.ToLower(k) {
 		case "listen":
@@ -407,15 +410,14 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				warnings = append(warnings, err)
 			}
 		default:
-			pedantic := o.CheckConfig
-			if pedantic && !tk.IsUsedVariable() {
+			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
 					field: k,
 					configErr: configErr{
 						token: tk,
 					},
 				}
-				warnings = append(warnings, err)
+				errors = append(errors, err)
 			}
 		}
 	}
@@ -465,7 +467,6 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 		return &configErr{tk, fmt.Sprintf("Expected map to define cluster, got %T", v)}
 	}
 
-	pedantic := opts.CheckConfig
 	for mk, mv := range cm {
 		// Again, unwrap token value if line check is required.
 		tk, mv = unwrapValue(mv)
@@ -499,16 +500,14 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 			opts.Cluster.AuthTimeout = auth.timeout
 
 			if auth.defaultPermissions != nil {
-				if pedantic {
-					err := &configWarningErr{
-						field: mk,
-						configErr: configErr{
-							token:  tk,
-							reason: `setting "permissions" within cluster authorization block is deprecated`,
-						},
-					}
-					*warnings = append(*warnings, err)
+				err := &configWarningErr{
+					field: mk,
+					configErr: configErr{
+						token:  tk,
+						reason: `setting "permissions" within cluster authorization block is deprecated`,
+					},
 				}
+				*warnings = append(*warnings, err)
 
 				// Do not set permissions if they were specified in top-level cluster block.
 				if opts.Cluster.Permissions == nil {
@@ -561,14 +560,14 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 			// This will possibly override permissions that were define in auth block
 			setClusterPermissions(&opts.Cluster, perms)
 		default:
-			if pedantic && !tk.IsUsedVariable() {
+			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
 					field: mk,
 					configErr: configErr{
 						token: tk,
 					},
 				}
-				*warnings = append(*warnings, err)
+				*errors = append(*errors, err)
 				continue
 			}
 		}
@@ -620,7 +619,6 @@ func isReservedAccount(name string) bool {
 // parseAccounts will parse the different accounts syntax.
 func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]error) error {
 	var (
-		pedantic       = opts.CheckConfig
 		importStreams  []*importStream
 		importServices []*importService
 		exportStreams  []*export
@@ -682,7 +680,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 					}
 					acc.Nkey = nk
 				case "imports":
-					streams, services, err := parseAccountImports(tk, acc, pedantic, errors, warnings)
+					streams, services, err := parseAccountImports(tk, acc, errors, warnings)
 					if err != nil {
 						*errors = append(*errors, err)
 						continue
@@ -690,7 +688,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 					importStreams = append(importStreams, streams...)
 					importServices = append(importServices, services...)
 				case "exports":
-					streams, services, err := parseAccountExports(tk, acc, pedantic, errors, warnings)
+					streams, services, err := parseAccountExports(tk, acc, errors, warnings)
 					if err != nil {
 						*errors = append(*errors, err)
 						continue
@@ -725,14 +723,14 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 					}
 					opts.Nkeys = append(opts.Nkeys, nkeys...)
 				default:
-					if pedantic && !tk.IsUsedVariable() {
+					if !tk.IsUsedVariable() {
 						err := &unknownConfigFieldErr{
 							field: k,
 							configErr: configErr{
 								token: tk,
 							},
 						}
-						*warnings = append(*warnings, err)
+						*errors = append(*errors, err)
 					}
 				}
 			}
@@ -823,7 +821,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 }
 
 // Parse the account imports
-func parseAccountExports(v interface{}, acc *Account, pedantic bool, errors, warnings *[]error) ([]*export, []*export, error) {
+func parseAccountExports(v interface{}, acc *Account, errors, warnings *[]error) ([]*export, []*export, error) {
 	// This should be an array of objects/maps.
 	tk, v := unwrapValue(v)
 	ims, ok := v.([]interface{})
@@ -836,7 +834,7 @@ func parseAccountExports(v interface{}, acc *Account, pedantic bool, errors, war
 
 	for _, v := range ims {
 		// Should have stream or service
-		stream, service, err := parseExportStreamOrService(v, pedantic, errors, warnings)
+		stream, service, err := parseExportStreamOrService(v, errors, warnings)
 		if err != nil {
 			*errors = append(*errors, err)
 			continue
@@ -854,7 +852,7 @@ func parseAccountExports(v interface{}, acc *Account, pedantic bool, errors, war
 }
 
 // Parse the account imports
-func parseAccountImports(v interface{}, acc *Account, pedantic bool, errors, warnings *[]error) ([]*importStream, []*importService, error) {
+func parseAccountImports(v interface{}, acc *Account, errors, warnings *[]error) ([]*importStream, []*importService, error) {
 	// This should be an array of objects/maps.
 	tk, v := unwrapValue(v)
 	ims, ok := v.([]interface{})
@@ -867,7 +865,7 @@ func parseAccountImports(v interface{}, acc *Account, pedantic bool, errors, war
 
 	for _, v := range ims {
 		// Should have stream or service
-		stream, service, err := parseImportStreamOrService(v, pedantic, errors, warnings)
+		stream, service, err := parseImportStreamOrService(v, errors, warnings)
 		if err != nil {
 			*errors = append(*errors, err)
 			continue
@@ -885,7 +883,7 @@ func parseAccountImports(v interface{}, acc *Account, pedantic bool, errors, war
 }
 
 // Helper to parse an embedded account description for imported services or streams.
-func parseAccount(v map[string]interface{}, pedantic bool, errors, warnings *[]error) (string, string, error) {
+func parseAccount(v map[string]interface{}, errors, warnings *[]error) (string, string, error) {
 	var accountName, subject string
 	for mk, mv := range v {
 		tk, mv := unwrapValue(mv)
@@ -895,14 +893,14 @@ func parseAccount(v map[string]interface{}, pedantic bool, errors, warnings *[]e
 		case "subject":
 			subject = mv.(string)
 		default:
-			if pedantic && !tk.IsUsedVariable() {
+			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
 					field: mk,
 					configErr: configErr{
 						token: tk,
 					},
 				}
-				*warnings = append(*warnings, err)
+				*errors = append(*errors, err)
 			}
 		}
 	}
@@ -915,7 +913,7 @@ func parseAccount(v map[string]interface{}, pedantic bool, errors, warnings *[]e
 //   {stream: "synadia.private.>", accounts: [cncf, natsio]}
 //   {service: "pub.request"} # No accounts means public.
 //   {service: "pub.special.request", accounts: [nats.io]}
-func parseExportStreamOrService(v interface{}, pedantic bool, errors, warnings *[]error) (*export, *export, error) {
+func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*export, *export, error) {
 	var (
 		curStream  *export
 		curService *export
@@ -973,14 +971,14 @@ func parseExportStreamOrService(v interface{}, pedantic bool, errors, warnings *
 				curService.accs = accounts
 			}
 		default:
-			if pedantic && !tk.IsUsedVariable() {
+			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
 					field: mk,
 					configErr: configErr{
 						token: tk,
 					},
 				}
-				*warnings = append(*warnings, err)
+				*errors = append(*errors, err)
 			}
 		}
 
@@ -993,7 +991,7 @@ func parseExportStreamOrService(v interface{}, pedantic bool, errors, warnings *
 //   {stream: {account: "synadia", subject:"public.synadia"}, prefix: "imports.synadia"}
 //   {stream: {account: "synadia", subject:"synadia.private.*"}}
 //   {service: {account: "synadia", subject: "pub.special.request"}, subject: "synadia.request"}
-func parseImportStreamOrService(v interface{}, pedantic bool, errors, warnings *[]error) (*importStream, *importService, error) {
+func parseImportStreamOrService(v interface{}, errors, warnings *[]error) (*importStream, *importService, error) {
 	var (
 		curStream  *importStream
 		curService *importService
@@ -1020,7 +1018,7 @@ func parseImportStreamOrService(v interface{}, pedantic bool, errors, warnings *
 				continue
 			}
 			// Make sure this is a map with account and subject
-			accountName, subject, err := parseAccount(ac, pedantic, errors, warnings)
+			accountName, subject, err := parseAccount(ac, errors, warnings)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -1047,7 +1045,7 @@ func parseImportStreamOrService(v interface{}, pedantic bool, errors, warnings *
 				continue
 			}
 			// Make sure this is a map with account and subject
-			accountName, subject, err := parseAccount(ac, pedantic, errors, warnings)
+			accountName, subject, err := parseAccount(ac, errors, warnings)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -1072,14 +1070,14 @@ func parseImportStreamOrService(v interface{}, pedantic bool, errors, warnings *
 				curService.to = to
 			}
 		default:
-			if pedantic && !tk.IsUsedVariable() {
+			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
 					field: mk,
 					configErr: configErr{
 						token: tk,
 					},
 				}
-				*warnings = append(*warnings, err)
+				*errors = append(*errors, err)
 			}
 		}
 
@@ -1090,13 +1088,11 @@ func parseImportStreamOrService(v interface{}, pedantic bool, errors, warnings *
 // Helper function to parse Authorization configs.
 func parseAuthorization(v interface{}, opts *Options, errors *[]error, warnings *[]error) (*authorization, error) {
 	var (
-		am       map[string]interface{}
-		tk       token
-		pedantic bool           = opts.CheckConfig
-		auth     *authorization = &authorization{}
+		am   map[string]interface{}
+		tk   token
+		auth *authorization = &authorization{}
 	)
 
-	// Unwrap value first if pedantic config check enabled.
 	_, v = unwrapValue(v)
 	am = v.(map[string]interface{})
 	for mk, mv := range am {
@@ -1133,16 +1129,16 @@ func parseAuthorization(v interface{}, opts *Options, errors *[]error, warnings 
 			}
 			auth.defaultPermissions = permissions
 		default:
-			if pedantic && !tk.IsUsedVariable() {
+			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
 					field: mk,
 					configErr: configErr{
 						token: tk,
 					},
 				}
-				*warnings = append(*warnings, err)
-				continue
+				*errors = append(*errors, err)
 			}
+			continue
 		}
 
 		// Now check for permission defaults with multiple users, etc.
@@ -1161,10 +1157,9 @@ func parseAuthorization(v interface{}, opts *Options, errors *[]error, warnings 
 // Helper function to parse multiple users array with optional permissions.
 func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]error) ([]*NkeyUser, []*User, error) {
 	var (
-		tk       token
-		pedantic bool    = opts.CheckConfig
-		users    []*User = []*User{}
-		keys     []*NkeyUser
+		tk    token
+		users []*User = []*User{}
+		keys  []*NkeyUser
 	)
 	tk, mv = unwrapValue(mv)
 
@@ -1208,14 +1203,14 @@ func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]erro
 					continue
 				}
 			default:
-				if pedantic && !tk.IsUsedVariable() {
+				if !tk.IsUsedVariable() {
 					err := &unknownConfigFieldErr{
 						field: k,
 						configErr: configErr{
 							token: tk,
 						},
 					}
-					*warnings = append(*warnings, err)
+					*errors = append(*errors, err)
 					continue
 				}
 			}
@@ -1253,9 +1248,8 @@ func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]erro
 // Helper function to parse user/account permissions
 func parseUserPermissions(mv interface{}, opts *Options, errors, warnings *[]error) (*Permissions, error) {
 	var (
-		tk       token
-		pedantic bool         = opts.CheckConfig
-		p        *Permissions = &Permissions{}
+		tk token
+		p  *Permissions = &Permissions{}
 	)
 	tk, mv = unwrapValue(mv)
 	pm, ok := mv.(map[string]interface{})
@@ -1284,14 +1278,14 @@ func parseUserPermissions(mv interface{}, opts *Options, errors, warnings *[]err
 			}
 			p.Subscribe = perms
 		default:
-			if pedantic && !tk.IsUsedVariable() {
+			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
 					field: k,
 					configErr: configErr{
 						token: tk,
 					},
 				}
-				*warnings = append(*warnings, err)
+				*errors = append(*errors, err)
 			}
 		}
 	}
@@ -1355,7 +1349,6 @@ func parseSubjectPermission(v interface{}, opts *Options, errors, warnings *[]er
 		return nil, nil
 	}
 	p := &SubjectPermission{}
-	pedantic := opts.CheckConfig
 	for k, v := range m {
 		tk, _ := unwrapValue(v)
 		switch strings.ToLower(k) {
@@ -1374,14 +1367,14 @@ func parseSubjectPermission(v interface{}, opts *Options, errors, warnings *[]er
 			}
 			p.Deny = subjects
 		default:
-			if pedantic && !tk.IsUsedVariable() {
+			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
 					field: k,
 					configErr: configErr{
 						token: tk,
 					},
 				}
-				*warnings = append(*warnings, err)
+				*errors = append(*errors, err)
 			}
 		}
 	}
