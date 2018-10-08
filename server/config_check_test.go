@@ -120,8 +120,7 @@ func TestConfigCheck(t *testing.T) {
 		  ]
 		}
 		`,
-			defaultErr:  nil,
-			pedanticErr: errors.New(`unknown field "token"`),
+			newDefaultErr: errors.New(`unknown field "token"`),
 			errorLine:   7,
 			errorPos:    9,
 		},
@@ -136,8 +135,7 @@ func TestConfigCheck(t *testing.T) {
 		  }
 		}
 		`,
-			defaultErr:  errors.New(`Unknown field inboxes parsing permissions`),
-			pedanticErr: errors.New(`unknown field "inboxes"`),
+			newDefaultErr:  errors.New(`Unknown field "inboxes" parsing permissions`),
 			errorLine:   5,
 			errorPos:    7,
 		},
@@ -155,8 +153,7 @@ func TestConfigCheck(t *testing.T) {
 		  }
 		}
 		`,
-			defaultErr:  errors.New(`Unknown field name "denied" parsing subject permissions, only 'allow' or 'deny' are permitted`),
-			pedanticErr: errors.New(`unknown field "denied"`),
+			newDefaultErr:  errors.New(`Unknown field name "denied" parsing subject permissions, only 'allow' or 'deny' are permitted`),
 			errorLine:   7,
 			errorPos:    9,
 		},
@@ -174,8 +171,7 @@ func TestConfigCheck(t *testing.T) {
 		  }
 		}
 		`,
-			defaultErr:  errors.New(`Unknown field name "allowed" parsing subject permissions, only 'allow' or 'deny' are permitted`),
-			pedanticErr: errors.New(`unknown field "allowed"`),
+			newDefaultErr:  errors.New(`Unknown field name "allowed" parsing subject permissions, only 'allow' or 'deny' are permitted`),
 			errorLine:   7,
 			errorPos:    9,
 		},
@@ -198,8 +194,7 @@ func TestConfigCheck(t *testing.T) {
 		  ]
 		}
 		`,
-			defaultErr:  errors.New(`Unknown field inboxes parsing permissions`),
-			pedanticErr: errors.New(`unknown field "inboxes"`),
+			newDefaultErr:  errors.New(`Unknown field "inboxes" parsing permissions`),
 			errorLine:   7,
 			errorPos:    6,
 		},
@@ -222,8 +217,7 @@ func TestConfigCheck(t *testing.T) {
 		  ]
 		}
 		`,
-			defaultErr:  errors.New(`Unknown field requests parsing permissions`),
-			pedanticErr: errors.New(`unknown field "requests"`),
+			newDefaultErr:  errors.New(`Unknown field "requests" parsing permissions`),
 			errorLine:   6,
 			errorPos:    6,
 		},
@@ -243,7 +237,7 @@ func TestConfigCheck(t *testing.T) {
 			pedanticErr: nil,
 		},
 		{
-			name: "when unknown permissions are included in config",
+			name: "when unknown permissions are included in user config",
 			config: `
 		authorization = {
 		  users = [
@@ -255,8 +249,7 @@ func TestConfigCheck(t *testing.T) {
 		  ]
 		}
 		`,
-			defaultErr:  errors.New(`Unknown field inboxes parsing permissions`),
-			pedanticErr: errors.New(`unknown field "inboxes"`),
+			newDefaultErr:  errors.New(`Unknown field "inboxes" parsing permissions`),
 			errorLine:   6,
 			errorPos:    11,
 		},

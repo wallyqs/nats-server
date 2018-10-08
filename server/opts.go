@@ -1279,12 +1279,7 @@ func parseUserPermissions(mv interface{}, opts *Options, errors, warnings *[]err
 			p.Subscribe = perms
 		default:
 			if !tk.IsUsedVariable() {
-				err := &unknownConfigFieldErr{
-					field: k,
-					configErr: configErr{
-						token: tk,
-					},
-				}
+				err := &configErr{tk, fmt.Sprintf("Unknown field %q parsing permissions", k)}
 				*errors = append(*errors, err)
 			}
 		}
@@ -1368,12 +1363,7 @@ func parseSubjectPermission(v interface{}, opts *Options, errors, warnings *[]er
 			p.Deny = subjects
 		default:
 			if !tk.IsUsedVariable() {
-				err := &unknownConfigFieldErr{
-					field: k,
-					configErr: configErr{
-						token: tk,
-					},
-				}
+				err := &configErr{tk, fmt.Sprintf("Unknown field name %q parsing subject permissions, only 'allow' or 'deny' are permitted", k)}
 				*errors = append(*errors, err)
 			}
 		}
