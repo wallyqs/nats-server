@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -1110,7 +1111,7 @@ func TestConfigCheck(t *testing.T) {
 }
 
 func TestConfigCheckIncludes(t *testing.T) {
-	// Check happy path first using pedantic mode.
+	// Check happy path first.
 	opts := &Options{
 		CheckConfig: true,
 	}
@@ -1129,5 +1130,48 @@ func TestConfigCheckIncludes(t *testing.T) {
 	expectedErr := errors.New(`configs/include_bad_conf_check_b.conf:10:19: unknown field "monitoring_port"` + "\n")
 	if err != nil && expectedErr != nil && err.Error() != expectedErr.Error() {
 		t.Errorf("Expected: \n%q, got\n: %q", expectedErr.Error(), err.Error())
+	}
+}
+
+func TestConfigCheckMultipleErrors(t *testing.T) {
+	opts := &Options{
+		CheckConfig: true,
+	}
+	err := opts.ProcessConfigFile("./configs/multiple_errors.conf")
+	if err == nil {
+		t.Errorf("Expected error processing config files with multiple errors check enabled: %v", err)
+	}
+	cerr, ok := err.(*processConfigErr)
+	if !ok {
+		t.Fatalf("Expected a configuration process error")
+	}
+	got := len(cerr.Warnings())
+	expected := 1
+	if got != expected {
+		t.Errorf("Expected a %d warning, got: %d", expected, got)
+	}
+	got = len(cerr.Errors())
+	expected = 7
+	if got != 7 {
+		t.Errorf("Expected a %d errors, got: %d", expected, got)
+	}
+
+	errMsg := err.Error()
+
+	errs := []string{
+		`./configs/multiple_errors.conf:12:1: invalid use of field "write_deadline": write_deadline should be converted to a duration`,
+		`./configs/multiple_errors.conf:2:1: Cannot have a user/pass and token`,
+		`./configs/multiple_errors.conf:10:1: unknown field "monitoring"`,
+		`./configs/multiple_errors.conf:67:3: Cluster authorization does not allow multiple users`,
+		`./configs/multiple_errors.conf:21:5: Not a valid public nkey for an account: "OC5GRL36RQV7MJ2GT6WQSCKDKJKYTK4T2LGLWJ2SEJKRDHFOQQWGGFQL"`,
+		`./configs/multiple_errors.conf:26:9: Not a valid public nkey for a user`,
+		`./configs/multiple_errors.conf:36:5: Not a valid public nkey for an account: "ODRZ42QBM7SXQDXXTSVWT2WLLFYOQGAFC4TO6WOAXHEKQHIXR4HFYJDS"`,
+		`./configs/multiple_errors.conf:41:9: Not a valid public nkey for a user`,
+	}
+	for _, msg := range errs {
+		found := strings.Contains(errMsg, msg)
+		if !found {
+			t.Errorf("Expected to find error %q", msg)
+		}
 	}
 }
