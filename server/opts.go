@@ -99,7 +99,7 @@ type Options struct {
 	CustomClientAuthentication Authentication `json:"-"`
 	CustomRouterAuthentication Authentication `json:"-"`
 
-	// CheckConfig enables pedantic configuration file syntax checks.
+	// CheckConfig configuration file syntax test was successful and exit.
 	CheckConfig bool `json:"-"`
 }
 
@@ -752,7 +752,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 	}
 	// Do stream exports
 	for _, stream := range exportStreams {
-		// Make array of accounts if applincable.
+		// Make array of accounts if applicable.
 		var accounts []*Account
 		for _, an := range stream.accs {
 			ta := am[an]
@@ -1904,8 +1904,18 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	// Parse config if given
 	if configFile != "" {
 		// This will update the options with values from the config file.
-		if err := opts.ProcessConfigFile(configFile); err != nil {
-			// Display all errors then exit.
+		err := opts.ProcessConfigFile(configFile)
+		if err != nil {
+			if opts.CheckConfig {
+				return nil, err
+			}
+
+			// If only warnings then can still continue.
+			if cerr, ok := err.(*processConfigErr); ok && len(cerr.Errors()) == 0 {
+				fmt.Fprint(os.Stderr, err)
+				return opts, nil
+			}
+
 			return nil, err
 		} else if opts.CheckConfig {
 			// Report configuration file syntax test was successful and exit.
