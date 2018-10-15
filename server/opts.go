@@ -16,6 +16,7 @@ package server
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -101,6 +102,12 @@ type Options struct {
 
 	// CheckConfig configuration file syntax test was successful and exit.
 	CheckConfig bool `json:"-"`
+
+	// ConfigKey
+	ConfigKey string `json:"-"`
+
+	// ConfigSigFile
+	ConfigSigFile string `json:"-"`
 }
 
 // Clone performs a deep copy of the Options struct, returning a new clone
@@ -246,6 +253,10 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	if configFile == "" {
 		return nil
 	}
+	if err := o.VerifyConfig(); err != nil {
+		return err
+	}
+	
 	m, err := conf.ParseFileWithChecks(configFile)
 	if err != nil {
 		return err
@@ -429,6 +440,43 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		}
 	}
 
+	return nil
+}
+
+func (o *Options) VerifyConfig() error {
+	if o.ConfigKey == "" || o.ConfigSigFile == "" {
+		return nil
+	}
+
+	key, err := ioutil.ReadFile(o.ConfigKey)
+	if err != nil {
+		return err
+	}
+
+	kp, err := nkeys.FromSeed(string(key))
+	if err != nil {
+		return err
+	}
+
+	sigfile, err := ioutil.ReadFile(o.ConfigSigFile)
+	if err != nil {
+		return err
+	}
+
+	sig, err := base64.StdEncoding.DecodeString(string(sigfile))
+	if err != nil {
+		return err
+	}
+
+	data, err := ioutil.ReadFile(o.ConfigFile)
+	if err != nil {
+		return err
+	}
+
+	err = kp.Verify(data, sig)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1823,6 +1871,10 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.IntVar(&opts.HTTPSPort, "https_port", 0, "HTTPS Port for /varz, /connz endpoints.")
 	fs.StringVar(&configFile, "c", "", "Configuration file.")
 	fs.StringVar(&configFile, "config", "", "Configuration file.")
+	fs.StringVar(&opts.ConfigKey, "key", "", "Server nkey used to verify config signatures.")
+	fs.StringVar(&opts.ConfigKey, "config_key", "", "Server nkey used to verify config signatures.")
+	fs.StringVar(&opts.ConfigSigFile, "sig", "", "Server nkey used to verify config signatures.")
+	fs.StringVar(&opts.ConfigSigFile, "config_sig", "", "File with signatures to verify configuration.")
 	fs.BoolVar(&opts.CheckConfig, "t", false, "Check configuration and exit.")
 	fs.StringVar(&signal, "sl", "", "Send signal to gnatsd process (stop, quit, reopen, reload)")
 	fs.StringVar(&signal, "signal", "", "Send signal to gnatsd process (stop, quit, reopen, reload)")
