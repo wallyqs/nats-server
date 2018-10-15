@@ -14,6 +14,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -24,6 +25,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -253,14 +255,14 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	if configFile == "" {
 		return nil
 	}
-	if err := o.VerifyConfig(); err != nil {
-		return err
-	}
-	
-	m, err := conf.ParseFileWithChecks(configFile)
+	m, includes, err := conf.ParseFileWithChecks(configFile)
 	if err != nil {
 		return err
 	}
+	if err := o.VerifyConfig(configFile, includes); err != nil {
+		return err
+	}
+
 	// Collect all errors and warnings and report them all together.
 	errors := make([]error, 0)
 	warnings := make([]error, 0)
@@ -443,7 +445,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	return nil
 }
 
-func (o *Options) VerifyConfig() error {
+func (o *Options) VerifyConfig(configFile string, includes []string) error {
 	if o.ConfigKey == "" || o.ConfigSigFile == "" {
 		return nil
 	}
@@ -462,21 +464,69 @@ func (o *Options) VerifyConfig() error {
 	if err != nil {
 		return err
 	}
-
-	sig, err := base64.StdEncoding.DecodeString(string(sigfile))
-	if err != nil {
-		return err
+	configPath := filepath.Dir(configFile)
+	verified := make(map[string]bool, 0)
+	for _, include := range includes {
+		verified[filepath.Join(configPath, include)] = false
 	}
 
-	data, err := ioutil.ReadFile(o.ConfigFile)
-	if err != nil {
-		return err
+	// Verify entries in the sigfile.
+	check := func(signature []byte, fname string) error {
+		sig, err := base64.StdEncoding.DecodeString(string(signature))
+		if err != nil {
+			return err
+		}
+
+		data, err := ioutil.ReadFile(fname)
+		if err != nil {
+			return err
+		}
+
+		err = kp.Verify(data, sig)
+		if err != nil {
+			return err
+		}
+		verified[fname] = true
+
+		return nil
 	}
 
-	err = kp.Verify(data, sig)
-	if err != nil {
-		return err
+	entries := bytes.Split(sigfile, []byte("\n"))
+	for _, entry := range entries {
+		if len(entry) > 1 && entry[0] == '#' {
+			// Allow commenting entries
+			continue
+		}
+
+		fields := bytes.Fields(entry)
+		if len(fields) == 0 {
+			// Skip line
+			continue
+		}
+
+		// Special case to verify only the main server config
+		// if no includes are present.
+		if len(fields) == 1 && len(includes) == 0 {
+			signature := fields[0]
+			if err := check(signature, string(configFile)); err != nil {
+				return err
+			}
+			return nil
+		} else if (len(fields) == 1 && len(includes) > 1) || len(fields) > 2 {
+			return fmt.Errorf("nats: invalid sigfile")
+		}
+		signature := fields[0]
+		fname := fields[1]
+		if err := check(signature, filepath.Join(configPath, string(fname))); err != nil {
+			return err
+		}
 	}
+	for k, isVerified := range verified {
+		if !isVerified {
+			return fmt.Errorf("nats: found included file without signature: %q", k)
+		}
+	}
+
 	return nil
 }
 
