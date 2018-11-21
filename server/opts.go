@@ -2088,9 +2088,31 @@ func processSignal(signal string) error {
 	} else if l > 2 {
 		return fmt.Errorf("invalid signal parameters: %v", commandAndPid[2:])
 	}
-	if err := ProcessSignal(Command(commandAndPid[0]), pid); err != nil {
+	cmd := Command(commandAndPid[0])
+	if err := ProcessSignal(cmd, pid); err != nil {
 		return err
 	}
+
+	switch cmd {
+	case commandLDMode:
+		// Wait for the main process to exit before exiting.
+		pidn, err := strconv.Atoi(pid)
+		if err != nil {
+			return errors.New("unable to resolve pid, try providing one")
+		}
+
+		for range time.NewTicker(1 * time.Second).C {
+			err = kill(pidn, 0)
+			if err != nil {
+				// Process not alive finally.
+				fmt.Println("gnatsd stopped running", err)
+				break
+			} else {
+				fmt.Println("gnatsd is still alive")
+			}
+		}
+	}
+
 	os.Exit(0)
 	return nil
 }
