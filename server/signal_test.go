@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/nats-io/gnatsd/logger"
+	"github.com/nats-io/go-nats"
 )
 
 func TestSignalToReOpenLogFile(t *testing.T) {
@@ -336,5 +337,152 @@ func TestProcessSignalLameDuckMode(t *testing.T) {
 
 	if !called {
 		t.Fatal("Expected kill to be called")
+	}
+}
+
+func TestProcessSignalTermDuringLameDuckMode(t *testing.T) {
+	logFile := "test.log"
+	defer os.Remove(logFile)
+	opts := &Options{
+		Host:             "127.0.0.1",
+		Port:             -1,
+		NoSigs:           false,
+		LogFile:          logFile,
+		LameDuckDuration: 2 * time.Second,
+		Debug:            true,
+		Trace:            true,
+		Logtime:          true,
+	}
+	s := RunServer(opts)
+	defer s.SetLogger(nil, false, false)
+	defer s.Shutdown()
+
+	fileLog := logger.NewFileLogger(s.opts.LogFile, s.opts.Logtime, s.opts.Debug, s.opts.Trace, true)
+	s.SetLogger(fileLog, s.opts.Debug, s.opts.Trace)
+
+	// Create single NATS Connection which will cause the server
+	// to delay the shutdown.
+	doneCh := make(chan struct{}, 0)
+	nc, err := nats.Connect(fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port),
+		nats.DisconnectHandler(func(*nats.Conn) {
+			close(doneCh)
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	// Trigger lame duck based shutdown.
+	go s.lameDuckMode()
+
+	// Wait for client to be disconnected.
+	select {
+	case <-doneCh:
+		break
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Timed out waiting for client to disconnect")
+	}
+
+	// Termination signal should not cause server to shutdown
+	// while in lame duck mode already.
+	syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+
+	// Wait for server shutdown due to lame duck shutdown.
+	timeoutCh := make(chan error, 0)
+	timer := time.AfterFunc(2*time.Second, func() {
+		timeoutCh <- errors.New("Timed out waiting for server shutdown")
+	})
+	for range time.NewTicker(1 * time.Millisecond).C {
+		select {
+		case err := <-timeoutCh:
+			t.Fatal(err)
+		default:
+		}
+
+		if !s.isRunning() {
+			timer.Stop()
+			break
+		}
+	}
+
+	buf, err := ioutil.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("Error reading file: %v", err)
+	}
+	expectedStr := `Trapped`
+	if !strings.Contains(string(buf), expectedStr) {
+		t.Fatalf("Expected log to contain %q, got %q", expectedStr, string(buf))
+	}
+}
+
+func TestProcessSignalTerm(t *testing.T) {
+	logFile := "test.log"
+	defer os.Remove(logFile)
+	opts := &Options{
+		Host:    "127.0.0.1",
+		Port:    -1,
+		NoSigs:  false,
+		LogFile: logFile,
+		Debug:   true,
+		Trace:   true,
+		Logtime: true,
+	}
+	s := RunServer(opts)
+	defer s.SetLogger(nil, false, false)
+	defer s.Shutdown()
+
+	fileLog := logger.NewFileLogger(s.opts.LogFile, s.opts.Logtime, s.opts.Debug, s.opts.Trace, true)
+	s.SetLogger(fileLog, s.opts.Debug, s.opts.Trace)
+
+	// Create single NATS Connection which will cause the server
+	// to delay the shutdown.
+	doneCh := make(chan struct{}, 0)
+	nc, err := nats.Connect(fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port),
+		nats.DisconnectHandler(func(*nats.Conn) {
+			close(doneCh)
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	// Send termination signal to process.
+	syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+
+	// Wait for client to be disconnected.
+	select {
+	case <-doneCh:
+		break
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Timed out waiting for client to disconnect")
+	}
+
+	// Wait for server shutdown due to lame duck shutdown.
+	timeoutCh := make(chan error, 0)
+	timer := time.AfterFunc(2*time.Second, func() {
+		timeoutCh <- errors.New("Timed out waiting for server shutdown")
+	})
+	for range time.NewTicker(1 * time.Millisecond).C {
+		select {
+		case err := <-timeoutCh:
+			t.Fatal(err)
+		default:
+		}
+
+		if !s.isRunning() {
+			timer.Stop()
+			break
+		}
+	}
+
+	buf, err := ioutil.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("Error reading file: %v", err)
+	}
+	expectedStr := `Server Exiting..`
+	if !strings.Contains(string(buf), expectedStr) {
+		t.Fatalf("Expected log to contain %q, got %q", expectedStr, string(buf))
 	}
 }
