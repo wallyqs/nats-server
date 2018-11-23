@@ -2119,9 +2119,22 @@ func processSignal(signal string) error {
 	} else if l > 2 {
 		return fmt.Errorf("invalid signal parameters: %v", commandAndPid[2:])
 	}
+	cmd := Command(commandAndPid[0])
 	if err := ProcessSignal(Command(commandAndPid[0]), pid); err != nil {
 		return err
 	}
+
+	// Optionally allow to wait for lame duck shutdown to complete.
+	switch cmd {
+	case commandLDMode:
+		v := os.Getenv("LAME_DUCK_DURATION")
+		secs, err := strconv.Atoi(v)
+		if err != nil {
+			return err
+		}
+		time.Sleep(time.Duration(secs) * time.Second)
+	}
+
 	os.Exit(0)
 	return nil
 }
