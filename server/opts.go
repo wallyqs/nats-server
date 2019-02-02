@@ -318,7 +318,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	if configFile == "" {
 		return nil
 	}
-	m, err := conf.ParseFileWithChecks(configFile)
+	m, err := conf.ParseFile(configFile)
 	if err != nil {
 		return err
 	}

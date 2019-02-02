@@ -324,7 +324,7 @@ authorization {
 `
 
 func TestIncludeVariablesWithChecks(t *testing.T) {
-	p, err := parse(varIncludedVariablesSample, "", true)
+	p, err := parse(varIncludedVariablesSample, "")
 	if err != nil {
 		t.Fatalf("Received err: %v\n", err)
 	}

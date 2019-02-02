@@ -54,16 +54,13 @@ type parser struct {
 
 	// The config file path, empty by default.
 	fp string
-
-	// pedantic reports error when configuration is not correct.
-	pedantic bool
 }
 
 // Parse will return a map of keys to interface{}, although concrete types
 // underly them. The values supported are string, bool, int64, float64, DateTime.
 // Arrays and nested Maps are also supported.
 func Parse(data string) (map[string]interface{}, error) {
-	p, err := parse(data, "", false)
+	p, err := parse(data, "")
 	if err != nil {
 		return nil, err
 	}
@@ -77,25 +74,10 @@ func ParseFile(fp string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("error opening config file: %v", err)
 	}
 
-	p, err := parse(string(data), fp, false)
+	p, err := parse(string(data), fp)
 	if err != nil {
 		return nil, err
 	}
-	return p.mapping, nil
-}
-
-// ParseFileWithChecks is equivalent to ParseFile but runs in pedantic mode.
-func ParseFileWithChecks(fp string) (map[string]interface{}, error) {
-	data, err := ioutil.ReadFile(fp)
-	if err != nil {
-		return nil, err
-	}
-
-	p, err := parse(string(data), fp, true)
-	if err != nil {
-		return nil, err
-	}
-
 	return p.mapping, nil
 }
 
@@ -126,15 +108,14 @@ func (t *token) Position() int {
 	return t.item.pos
 }
 
-func parse(data, fp string, pedantic bool) (p *parser, err error) {
+func parse(data, fp string) (p *parser, err error) {
 	p = &parser{
-		mapping:  make(map[string]interface{}),
-		lx:       lex(data),
-		ctxs:     make([]interface{}, 0, 4),
-		keys:     make([]string, 0, 4),
-		ikeys:    make([]item, 0, 4),
-		fp:       filepath.Dir(fp),
-		pedantic: pedantic,
+		mapping: make(map[string]interface{}),
+		lx:      lex(data),
+		ctxs:    make([]interface{}, 0, 4),
+		keys:    make([]string, 0, 4),
+		ikeys:   make([]item, 0, 4),
+		fp:      filepath.Dir(fp),
 	}
 	p.pushContext(p.mapping)
 
@@ -201,11 +182,7 @@ func (p *parser) popItemKey() item {
 
 func (p *parser) processItem(it item, fp string) error {
 	setValue := func(it item, v interface{}) {
-		if p.pedantic {
-			p.setValue(&token{it, v, false, fp})
-		} else {
-			p.setValue(v)
-		}
+		p.setValue(&token{it, v, false, fp})
 	}
 
 	switch it.typ {
@@ -216,10 +193,7 @@ func (p *parser) processItem(it item, fp string) error {
 		// we do this in order to be able to still support
 		// includes without many breaking changes.
 		p.pushKey(it.val)
-
-		if p.pedantic {
-			p.pushItemKey(it)
-		}
+		p.pushItemKey(it)
 	case itemMapStart:
 		newCtx := make(map[string]interface{})
 		p.pushContext(newCtx)
@@ -328,22 +302,16 @@ func (p *parser) processItem(it item, fp string) error {
 			m   map[string]interface{}
 			err error
 		)
-		if p.pedantic {
-			m, err = ParseFileWithChecks(filepath.Join(p.fp, it.val))
-		} else {
-			m, err = ParseFile(filepath.Join(p.fp, it.val))
-		}
+		m, err = ParseFile(filepath.Join(p.fp, it.val))
 		if err != nil {
 			return fmt.Errorf("error parsing include file '%s', %v", it.val, err)
 		}
 		for k, v := range m {
 			p.pushKey(k)
 
-			if p.pedantic {
-				switch tk := v.(type) {
-				case *token:
-					p.pushItemKey(tk.item)
-				}
+			switch tk := v.(type) {
+			case *token:
+				p.pushItemKey(tk.item)
 			}
 			p.setValue(v)
 		}
@@ -407,19 +375,16 @@ func (p *parser) setValue(val interface{}) {
 	if ctx, ok := p.ctx.(map[string]interface{}); ok {
 		key := p.popKey()
 
-		if p.pedantic {
-			// Change the position to the beginning of the key
-			// since more useful when reporting errors.
-			switch v := val.(type) {
-			case *token:
-				it := p.popItemKey()
-				v.item.pos = it.pos
-				v.item.line = it.line
-				ctx[key] = v
-			}
-		} else {
+		// Change the position to the beginning of the key
+		// since more useful when reporting errors.
+		switch v := val.(type) {
+		case *token:
+			it := p.popItemKey()
+			v.item.pos = it.pos
+			v.item.line = it.line
+
 			// FIXME(dlc), make sure to error if redefining same key?
-			ctx[key] = val
+			ctx[key] = v
 		}
 	}
 }
