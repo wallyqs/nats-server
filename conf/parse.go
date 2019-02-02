@@ -283,19 +283,15 @@ func (p *parser) processItem(it item, fp string) error {
 				it.val, it.line)
 		}
 
-		if p.pedantic {
-			switch tk := value.(type) {
-			case *token:
-				// Mark the looked up variable as used, and make
-				// the variable reference become handled as a token.
-				tk.usedVariable = true
-				p.setValue(&token{it, tk.Value(), false, fp})
-			default:
-				// Special case to add position context to bcrypt references.
-				p.setValue(&token{it, value, false, fp})
-			}
-		} else {
-			p.setValue(value)
+		switch tk := value.(type) {
+		case *token:
+			// Mark the looked up variable as used, and make
+			// the variable reference become handled as a token.
+			tk.usedVariable = true
+			p.setValue(&token{it, tk.Value(), false, fp})
+		default:
+			// Special case to add position context to bcrypt references.
+			p.setValue(&token{it, value, false, fp})
 		}
 	case itemInclude:
 		var (
