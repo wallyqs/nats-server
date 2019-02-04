@@ -203,8 +203,8 @@ type outbound struct {
 	pm  int64         // Total pending/queued messages.
 	sg  *sync.Cond    // Flusher conditional for signaling.
 	sgw bool          // Indicate flusher is waiting on condition wait.
-	wdl time.Duration // Snapshot fo write deadline.
-	mp  int64         // snapshot of max pending.
+	wdl time.Duration // Snapshot of write deadline.
+	mp  int64         // Snapshot of max pending.
 	fsp int           // Flush signals that are pending from readLoop's pcd.
 	lft time.Duration // Last flush time.
 }
