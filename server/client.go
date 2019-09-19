@@ -2534,7 +2534,13 @@ func (c *client) processInboundClientMsg(msg []byte) {
 			sl := &rl.M2
 			// Fill this in and send it off to the other side.
 			sl.AppName = c.opts.Name
-			sl.ServiceLatency = time.Since(sl.RequestStart) - rtt
+
+			// Adjust to zero in case of negative values.
+			svcLat := time.Since(sl.RequestStart) - rtt
+			if svcLat < 0 {
+				svcLat = 0
+			}
+			sl.ServiceLatency = svcLat
 			sl.NATSLatency.Responder = rtt
 			sl.TotalLatency = sl.ServiceLatency + rtt
 			lsub := remoteLatencySubjectForResponse(c.pa.subject)

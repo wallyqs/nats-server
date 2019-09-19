@@ -129,9 +129,12 @@ func checkServiceLatency(t *testing.T, sl server.ServiceLatency, start time.Time
 	if sl.NATSLatency.Responder == 0 {
 		t.Fatalf("Expected non-zero NATS Requestor latency")
 	}
+
 	// Make sure they add up
-	if sl.TotalLatency != sl.ServiceLatency+sl.NATSLatency.TotalTime() {
-		t.Fatalf("Numbers do not add up: %+v", sl)
+	got := sl.TotalLatency
+	expected := sl.ServiceLatency + sl.NATSLatency.TotalTime()
+	if got != expected {
+		t.Fatalf("Numbers do not add up: %+v,\ngot: %v\nexpected: %v", sl, got, expected)
 	}
 }
 
@@ -159,7 +162,7 @@ func TestServiceLatencySingleServerConnect(t *testing.T) {
 
 	// Requestor
 	nc2 := clientConnect(t, sc.clusters[0].opts[0], "bar")
-	defer nc.Close()
+	defer nc2.Close()
 
 	// Send the request.
 	start := time.Now()
@@ -210,7 +213,7 @@ func TestServiceLatencyRemoteConnect(t *testing.T) {
 
 	// Same Cluster Requestor
 	nc2 := clientConnect(t, sc.clusters[0].opts[2], "bar")
-	defer nc.Close()
+	defer nc2.Close()
 
 	// Send the request.
 	start := time.Now()
@@ -235,7 +238,7 @@ func TestServiceLatencyRemoteConnect(t *testing.T) {
 
 	// Gateway Requestor
 	nc2 = clientConnect(t, sc.clusters[1].opts[1], "bar")
-	defer nc.Close()
+	defer nc2.Close()
 
 	// Send the request.
 	start = time.Now()
@@ -284,7 +287,7 @@ func TestServiceLatencySampling(t *testing.T) {
 
 	// Same Cluster Requestor
 	nc2 := clientConnect(t, sc.clusters[0].opts[2], "bar")
-	defer nc.Close()
+	defer nc2.Close()
 
 	toSend := 1000
 	for i := 0; i < toSend; i++ {
@@ -323,7 +326,7 @@ func TestServiceLatencyWithName(t *testing.T) {
 	rsub, _ := nc.SubscribeSync("results")
 
 	nc2 := clientConnect(t, opts, "bar")
-	defer nc.Close()
+	defer nc2.Close()
 	nc2.Request("ngs.usage", []byte("1h"), time.Second)
 
 	var sl server.ServiceLatency
@@ -355,7 +358,7 @@ func TestServiceLatencyWithNameMultiServer(t *testing.T) {
 	rsub, _ := nc.SubscribeSync("results")
 
 	nc2 := clientConnect(t, sc.clusters[1].opts[1], "bar")
-	defer nc.Close()
+	defer nc2.Close()
 	nc2.Request("ngs.usage", []byte("1h"), time.Second)
 
 	var sl server.ServiceLatency
@@ -585,5 +588,123 @@ func TestServiceLatencyWithJWT(t *testing.T) {
 	_, err = rsub.NextMsg(100 * time.Millisecond)
 	if err == nil {
 		t.Fatalf("Did not expect to receive a latency metric")
+	}
+}
+
+func TestServiceLatencyAdjustNegativeLatencyValues(t *testing.T) {
+	sc := createSuperCluster(t, 3, 2)
+	defer sc.shutdown()
+
+	// Now add in new service export to FOO and have bar import
+	// that with tracking enabled.
+	sc.setupLatencyTracking(t, 100)
+
+	// Now we can setup and test, do single node only first.
+	// This is the service provider.
+	nc := clientConnect(t, sc.clusters[0].opts[0], "foo")
+	defer nc.Close()
+
+	// The service listener.
+	nc.Subscribe("ngs.usage.*", func(msg *nats.Msg) {
+		msg.Respond([]byte("22 msgs"))
+	})
+
+	// Listen for metrics
+	rsub, err := nc.SubscribeSync("results")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Requestor
+	nc2 := clientConnect(t, sc.clusters[0].opts[0], "bar")
+	defer nc2.Close()
+
+	// Send the request.
+	totalSamples := 50
+	for i := 0; i < totalSamples; i++ {
+		_, err := nc2.Request("ngs.usage", []byte("1h"), time.Second)
+		if err != nil {
+			t.Fatalf("Expected a response")
+		}
+	}
+
+	var sl server.ServiceLatency
+	for i := 0; i < totalSamples; i++ {
+		rmsg, err := rsub.NextMsg(time.Second)
+		if err != nil {
+			t.Fatalf("Expected to receive latency metric: %d, %s", i, err)
+		}
+		err = json.Unmarshal(rmsg.Data, &sl)
+		if err != nil {
+			t.Errorf("Unexpected error processing latency metric: %s", err)
+		}
+		if sl.ServiceLatency < 0 {
+			t.Errorf("Unexpected negative latency value: %v", sl)
+		}
+	}
+}
+
+func TestServiceLatencyRemoteConnectAdjustNegativeValues(t *testing.T) {
+	sc := createSuperCluster(t, 3, 2)
+	defer sc.shutdown()
+
+	// Now add in new service export to FOO and have bar import that with tracking enabled.
+	sc.setupLatencyTracking(t, 100)
+
+	// Now we can setup and test, do single node only first.
+	// This is the service provider.
+	nc := clientConnect(t, sc.clusters[0].opts[0], "foo")
+	defer nc.Close()
+
+	// The service listener.
+	// serviceTime := 25 * time.Millisecond
+	nc.Subscribe("ngs.usage.*", func(msg *nats.Msg) {
+		// time.Sleep(serviceTime)
+		msg.Respond([]byte("22 msgs"))
+	})
+
+	// Listen for metrics
+	rsub, _ := nc.SubscribeSync("results")
+
+	// Same Cluster Requestor
+	nc2 := clientConnect(t, sc.clusters[0].opts[2], "bar")
+	defer nc2.Close()
+
+	// Send the request.
+	totalSamples := 20
+	for i := 0; i < totalSamples; i++ {
+		_, err := nc2.Request("ngs.usage", []byte("1h"), time.Second)
+		if err != nil {
+			t.Fatalf("Expected a response")
+		}
+	}
+
+	// Gateway Requestor
+	nc2 = clientConnect(t, sc.clusters[1].opts[1], "bar")
+	defer nc2.Close()
+
+	for i := 0; i < totalSamples; i++ {
+		_, err := nc2.Request("ngs.usage", []byte("1h"), time.Second)
+		if err != nil {
+			t.Fatalf("Expected a response")
+		}
+	}
+
+	var sl server.ServiceLatency
+	for i := 0; i < totalSamples*2; i++ {
+		rmsg, err := rsub.NextMsg(time.Second)
+		if err != nil {
+			t.Fatalf("Expected to receive latency metric: %d, %s", i, err)
+		}
+		err = json.Unmarshal(rmsg.Data, &sl)
+		if err != nil {
+			t.Errorf("Unexpected error processing latency metric: %s", err)
+		}
+		if sl.ServiceLatency < 0 {
+			t.Fatalf("Unexpected negative service latency value: %v", sl)
+		}
+		if sl.NATSLatency.System < 0 {
+			t.Fatalf("Unexpected negative system latency value: %v", sl)
+		}
 	}
 }

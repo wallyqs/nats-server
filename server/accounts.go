@@ -608,7 +608,13 @@ type ServiceLatency struct {
 // Will use those to back into NATS latency.
 func (m1 *ServiceLatency) merge(m2 *ServiceLatency) {
 	m1.AppName = m2.AppName
-	m1.NATSLatency.System = m1.ServiceLatency - (m2.ServiceLatency + m2.NATSLatency.Responder)
+
+	// Adjust to zero in case of negative values.
+	sysLat := m1.ServiceLatency - (m2.ServiceLatency + m2.NATSLatency.Responder)
+	if sysLat < 0 {
+		sysLat = 0
+	}
+	m1.NATSLatency.System = sysLat
 	m1.ServiceLatency = m2.ServiceLatency
 	m1.NATSLatency.Responder = m2.NATSLatency.Responder
 }
@@ -644,10 +650,16 @@ func (a *Account) sendTrackingLatency(si *serviceImport, requestor, responder *c
 	// We will estimate time when request left the requestor by time we received
 	// and the client RTT for the requestor.
 	reqStart := time.Unix(0, si.ts-int64(reqClientRTT))
+
+	// Adjust to zero in case of negative latency.
+	svcLat := serviceRTT - respClientRTT
+	if svcLat < 0 {
+		svcLat = 0
+	}
 	sl := ServiceLatency{
 		AppName:        appName,
 		RequestStart:   reqStart,
-		ServiceLatency: serviceRTT - respClientRTT,
+		ServiceLatency: svcLat,
 		NATSLatency: NATSLatency{
 			Requestor: reqClientRTT,
 			Responder: respClientRTT,
