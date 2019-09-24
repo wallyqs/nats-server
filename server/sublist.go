@@ -125,7 +125,7 @@ func (s *Sublist) CacheEnabled() bool {
 	return atomic.LoadInt32(&s.cacheNum) != slNoCache
 }
 
-// Insert adds a subscription into the sublist
+// Insert adds a subscription into the sublist.
 func (s *Sublist) Insert(sub *subscription) error {
 	// copy the subject since we hold this and this might be part of a large byte slice.
 	subject := string(sub.subject)
