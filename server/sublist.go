@@ -16,6 +16,7 @@ package server
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -125,8 +126,10 @@ func (s *Sublist) CacheEnabled() bool {
 	return atomic.LoadInt32(&s.cacheNum) != slNoCache
 }
 
-// Insert adds a subscription into the sublist
+// Insert adds a subscription into the sublist.
 func (s *Sublist) Insert(sub *subscription) error {
+	fmt.Printf("=== SUB: %+v\n", sub)
+
 	// copy the subject since we hold this and this might be part of a large byte slice.
 	subject := string(sub.subject)
 	tsa := [32]string{}
@@ -202,6 +205,8 @@ func (s *Sublist) Insert(sub *subscription) error {
 			n.qsubs = make(map[string]map[*subscription]*subscription)
 		}
 		qname := string(sub.queue)
+		fmt.Println("QUEUE Subscription Registering....", qname, sub)
+
 		// This is a queue subscription
 		subs, ok := n.qsubs[qname]
 		if !ok {
@@ -305,6 +310,7 @@ var emptyResult = &SublistResult{}
 // Match will match all entries to the literal subject.
 // It will return a set of results for both normal and queue subscribers.
 func (s *Sublist) Match(subject string) *SublistResult {
+	fmt.Println("----- matching:", subject)
 	atomic.AddUint64(&s.matches, 1)
 
 	// Check cache first.
@@ -335,6 +341,7 @@ func (s *Sublist) Match(subject string) *SublistResult {
 
 	s.RLock()
 	matchLevel(s.root, tokens, result)
+	// fmt.Println(result.qsubs)
 	// Check for empty result.
 	if len(result.psubs) == 0 && len(result.qsubs) == 0 {
 		result = emptyResult
@@ -849,6 +856,7 @@ func IsValidLiteralSubject(subject string) bool {
 
 // Calls into the function isSubsetMatch()
 func subjectIsSubsetMatch(subject, test string) bool {
+	fmt.Println(";;;;;;;;;;;;;;;;;;;;;;;;;", subject, test)
 	tsa := [32]string{}
 	tts := tsa[:0]
 	start := 0
