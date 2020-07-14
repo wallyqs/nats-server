@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
+	"github.com/nats-io/nuid"
 )
 
 // FlagSnapshot captures the server options as specified by CLI flags at
@@ -313,10 +314,17 @@ func (c *clusterOption) Apply(s *Server) {
 	}
 	s.setRouteInfoHostPortAndIP()
 	s.mu.Unlock()
-	if c.newValue.Name != "" && c.newValue.Name != s.ClusterName() {
+
+	switch {
+	case c.newValue.Name == "" && s.ClusterName() != "":
+		// Generate a new one that gets renegotiated.
+		s.setClusterName(nuid.Next())
+	case c.newValue.Name != "" && c.newValue.Name != s.ClusterName():
+		// Use the new value from the config.
 		s.setClusterName(c.newValue.Name)
 	}
 	s.Noticef("Reloaded: cluster")
+
 	if tlsRequired && c.newValue.TLSConfig.InsecureSkipVerify {
 		s.Warnf(clusterTLSInsecureWarning)
 	}

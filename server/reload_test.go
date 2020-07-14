@@ -1787,6 +1787,75 @@ func TestConfigReloadClusterName(t *testing.T) {
 	}
 }
 
+func TestConfigReloadClusterNameRenegotiation(t *testing.T) {
+	s, _, conf := runReloadServerWithContent(t, []byte(`
+	listen: "0.0.0.0:-1"
+
+	cluster: {
+          listen: "0.0.0.0:-1"
+	}
+	`))
+	defer os.Remove(conf)
+	defer s.Shutdown()
+
+	got := s.ClusterName()
+	if got == "" {
+		t.Fatalf("Expected update clustername to be set dynamically")
+	}
+
+	// Update config with a new cluster name.
+	reloadUpdateConfig(t, s, conf, `
+        listen: "0.0.0.0:-1"
+
+        cluster: {
+          name: "xyz"
+          listen: "0.0.0.0:-1"
+        }
+        `)
+	if s.ClusterName() != "xyz" {
+		t.Fatalf("Expected update clustername of \"xyz\", got %q", s.ClusterName())
+	}
+
+	// New server joins with the new name.
+	template := fmt.Sprintf(`
+	listen: "0.0.0.0:-1"
+
+	cluster: {
+          name: "xyz"
+          listen: "0.0.0.0:-1"
+          routes: [ nats://localhost:%d ]
+	}
+	`, s.ClusterAddr().Port)
+
+	s2, _, conf2 := runReloadServerWithContent(t, []byte(template))
+	defer os.Remove(conf2)
+	defer s2.Shutdown()
+
+	checkClusterFormed(t, s, s2)
+
+	// Remove the name and use a dynamic one again.
+	reloadUpdateConfig(t, s, conf, `
+        listen: "0.0.0.0:-1"
+
+        cluster: {
+          listen: "0.0.0.0:-1"
+        }
+        `)
+
+	got = s.ClusterName()
+	if got == "xyz" || got == "" {
+		t.Fatalf("Expected update clustername to be new, got %q", got)
+	}
+
+	// No longer has dynamic name so there should not be communication.
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		if numRoutes := s.NumRoutes(); numRoutes != 0 {
+			return fmt.Errorf("Expected %d routes for server %q, got %d", 0, s.ID(), numRoutes)
+		}
+		return nil
+	})
+}
+
 func TestConfigReloadMaxSubsUnsupported(t *testing.T) {
 	s, _, conf := runReloadServerWithContent(t, []byte(`max_subs: 1`))
 	defer os.Remove(conf)
