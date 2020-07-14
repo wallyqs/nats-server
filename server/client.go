@@ -244,6 +244,10 @@ type client struct {
 
 	trace bool
 	echo  bool
+
+	// TODO: Should be part of route instead.
+	clusterName string
+	clusterDynamic bool
 }
 
 type rrTracking struct {
@@ -502,19 +506,26 @@ func (c *client) initClient() {
 		}
 	}
 
+	asdf := opts.ServerName
+	qwer := opts.Cluster.Name
+	info := s.info.Cluster	
+
 	switch c.kind {
 	case CLIENT:
 		name := "cid"
 		if c.ws != nil {
 			name = "wid"
 		}
-		c.ncs = fmt.Sprintf("%s - %s:%d", conn, name, c.cid)
+		// c.ncs = fmt.Sprintf("%s - %s:%d", conn, name, c.cid)
+		c.ncs = fmt.Sprintf("%v:%v/%v :: %s - %s:%d", info, qwer, asdf, conn, name, c.cid)
 	case ROUTER:
-		c.ncs = fmt.Sprintf("%s - rid:%d", conn, c.cid)
+		// c.ncs = fmt.Sprintf("%s - rid:%d", conn, c.cid)
+		c.ncs = fmt.Sprintf("%v:%v/%v :: %s - rid:%d", info, qwer, asdf, conn, c.cid)
 	case GATEWAY:
 		c.ncs = fmt.Sprintf("%s - gid:%d", conn, c.cid)
 	case LEAF:
-		c.ncs = fmt.Sprintf("%s - lid:%d", conn, c.cid)
+		// c.ncs = fmt.Sprintf("%s - lid:%d", conn, c.cid)
+		c.ncs = fmt.Sprintf("%v:%v/%v :: %s - lid:%d", info, qwer, asdf, conn, c.cid)
 	case SYSTEM:
 		c.ncs = "SYSTEM"
 	case JETSTREAM:
@@ -1381,6 +1392,7 @@ func (c *client) traceOp(format, op string, arg []byte) {
 
 // Process the information messages from Clients and other Routes.
 func (c *client) processInfo(arg []byte) error {
+	fmt.Println(c.srv.opts.ServerName, "<-- INFO --", string(arg))
 	info := Info{}
 	if err := json.Unmarshal(arg, &info); err != nil {
 		return err
@@ -1463,6 +1475,7 @@ func computeRTT(start time.Time) time.Duration {
 
 // processConnect will process a client connect op.
 func (c *client) processConnect(arg []byte) error {
+	fmt.Println(c.srv.opts.ServerName, "-- CONNECT ---", string(arg))
 	supportsHeaders := c.srv.supportsHeaders()
 	c.mu.Lock()
 	// If we can't stop the timer because the callback is in progress...
@@ -4057,6 +4070,8 @@ func (c *client) closeConnection(reason ClosedState) {
 		c.rrTracking = nil
 	}
 
+	// routeClusterName := c.clusterName
+	// routeClusterDynamic := c.clusterDynamic
 	c.mu.Unlock()
 
 	// Remove client's or leaf node or jetstream subscriptions.
