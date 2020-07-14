@@ -2463,6 +2463,16 @@ func (s *Server) ProfilerAddr() *net.TCPAddr {
 	return s.profiler.Addr().(*net.TCPAddr)
 }
 
+// LeafnodeAddr returns the net.Addr object for the leafnode listener.
+func (s *Server) LeafnodeAddr() *net.TCPAddr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.leafNodeListener == nil {
+		return nil
+	}
+	return s.leafNodeListener.Addr().(*net.TCPAddr)
+}
+
 // ReadyForConnections returns `true` if the server is ready to accept clients
 // and, if routing is enabled, route connections. If after the duration
 // `dur` the server is still not ready, returns `false`.
