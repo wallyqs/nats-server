@@ -218,6 +218,10 @@ type Server struct {
 
 	// Websocket structure
 	websocket srvWebsocket
+
+	// susceptible is to mark whether this node is susceptible
+	// to dynamic cluster name INFO/CONNECT proto updates.
+	susceptible bool
 }
 
 // Make sure all are 64bits for atomic use
@@ -300,6 +304,7 @@ func NewServer(opts *Options) (*Server, error) {
 		gwLeafSubs:   NewSublistWithCache(),
 		httpBasePath: httpBasePath,
 		eventIds:     nuid.New(),
+		susceptible:  opts.Cluster.Name == "",
 	}
 
 	// Trusted root operator keys.
@@ -436,8 +441,10 @@ func (s *Server) setClusterName(name string) {
 	}
 	s.info.Cluster = name
 	s.routeInfo.Cluster = name
+
 	// Regenerate the info byte array
 	s.generateRouteInfoJSON()
+
 	// Need to close solicited leaf nodes. The close has to be done outside of the server lock.
 	var leafs []*client
 	for _, c := range s.leafs {
@@ -447,6 +454,7 @@ func (s *Server) setClusterName(name string) {
 		}
 		c.mu.Unlock()
 	}
+
 	s.mu.Unlock()
 	for _, l := range leafs {
 		l.closeConnection(ClusterNameConflict)
@@ -454,13 +462,19 @@ func (s *Server) setClusterName(name string) {
 	if resetCh != nil {
 		resetCh <- struct{}{}
 	}
-	s.Noticef("Cluster name updated to %s", name)
+	s.Noticef("%v : Cluster name updated to %s || dynamic? %v", s.opts.ServerName, name, s.isClusterNameDynamic())
 
 }
 
 // Return whether the cluster name is dynamic.
 func (s *Server) isClusterNameDynamic() bool {
 	return s.getOpts().Cluster.Name == ""
+}
+
+// Return whether the cluster name is dynamic.
+func (s *Server) isClusterNameSusceptibleToChange() bool {
+	// TODO: Which lock? server lock?
+	return s.susceptible
 }
 
 // ClientURL returns the URL used to connect clients. Helpful in testing
@@ -2481,6 +2495,16 @@ func (s *Server) ProfilerAddr() *net.TCPAddr {
 		return nil
 	}
 	return s.profiler.Addr().(*net.TCPAddr)
+}
+
+// LeafnodeAddr returns the net.Addr object for the leafnode listener.
+func (s *Server) LeafnodeAddr() *net.TCPAddr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.leafNodeListener == nil {
+		return nil
+	}
+	return s.leafNodeListener.Addr().(*net.TCPAddr)
 }
 
 // ReadyForConnections returns `true` if the server is ready to accept clients

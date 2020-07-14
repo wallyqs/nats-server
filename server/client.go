@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
+	"github.com/nats-io/nuid"
 )
 
 // Type of client connection.
@@ -244,6 +245,10 @@ type client struct {
 
 	trace bool
 	echo  bool
+
+	// TODO: Should be part of route instead.
+	clusterName string
+	clusterDynamic bool
 }
 
 type rrTracking struct {
@@ -502,19 +507,26 @@ func (c *client) initClient() {
 		}
 	}
 
+	asdf := opts.ServerName
+	qwer := opts.Cluster.Name
+	info := s.info.Cluster	
+
 	switch c.kind {
 	case CLIENT:
 		name := "cid"
 		if c.ws != nil {
 			name = "wid"
 		}
-		c.ncs = fmt.Sprintf("%s - %s:%d", conn, name, c.cid)
+		// c.ncs = fmt.Sprintf("%s - %s:%d", conn, name, c.cid)
+		c.ncs = fmt.Sprintf("%v:%v/%v :: %s - %s:%d", info, qwer, asdf, conn, name, c.cid)
 	case ROUTER:
-		c.ncs = fmt.Sprintf("%s - rid:%d", conn, c.cid)
+		// c.ncs = fmt.Sprintf("%s - rid:%d", conn, c.cid)
+		c.ncs = fmt.Sprintf("%v:%v/%v :: %s - rid:%d", info, qwer, asdf, conn, c.cid)
 	case GATEWAY:
 		c.ncs = fmt.Sprintf("%s - gid:%d", conn, c.cid)
 	case LEAF:
-		c.ncs = fmt.Sprintf("%s - lid:%d", conn, c.cid)
+		// c.ncs = fmt.Sprintf("%s - lid:%d", conn, c.cid)
+		c.ncs = fmt.Sprintf("%v:%v/%v :: %s - lid:%d", info, qwer, asdf, conn, c.cid)
 	case SYSTEM:
 		c.ncs = "SYSTEM"
 	case JETSTREAM:
@@ -4057,6 +4069,8 @@ func (c *client) closeConnection(reason ClosedState) {
 		c.rrTracking = nil
 	}
 
+	routeClusterName := c.clusterName
+	routeClusterDynamic := c.clusterDynamic
 	c.mu.Unlock()
 
 	// Remove client's or leaf node or jetstream subscriptions.
@@ -4110,6 +4124,58 @@ func (c *client) closeConnection(reason ClosedState) {
 			if prev := acc.removeClient(c); prev == 1 && srv != nil {
 				srv.decActiveAccounts()
 			}
+		}
+
+		// Check whether we do not have any other routes that are not
+		// using explicit names, since in that case this node should go back
+		// to using a dynamic cluster name that will be negotiated among
+		// the remaining members of the cluster.
+		isDynamic := srv.isClusterNameDynamic()
+		isRoute := kind == ROUTER
+		myClusterName := srv.opts.Cluster.Name
+		isSolicited := routeClusterName == ""
+		// isSusceptible := srv.susceptible
+		shouldUpdateClusterName := func() bool {
+			var _routes [32]*client
+			routes := _routes[:0]
+
+			srv.mu.Lock()
+			for _, route := range srv.routes {
+				routes = append(routes, route)
+			}
+			srv.mu.Unlock()
+
+			if isSolicited {
+				c.Noticef("CLOSING SOLICITED ROUTE: %v ======| remote cluster name: %+v || dynamic remote: %+v || dynamic self: %+v || routes: %+v\n",
+					myClusterName, routeClusterName, routeClusterDynamic, isDynamic, routes)
+			} else {
+				c.Noticef("CLOSING ROUTE: %v ======| remote cluster name: %+v || dynamic remote: %+v || dynamic self: %+v || routes: %+v\n",
+					myClusterName, routeClusterName, routeClusterDynamic, isDynamic, routes)
+			}
+
+			if isDynamic && len(routes) == 0 {
+				// No more routes so go back and get a dynamic cluster name.
+				c.Debugf("<><><><><><><><>><><><<>><>< okokokok")
+				return true
+			}
+			for _, route := range routes {
+				if route.clusterName == routeClusterName {
+					c.Noticef("FOUND OTHER MEMBERS ROUTE: ======> %+v || %+v\n", route.clusterName, route.clusterDynamic)
+					return false
+				}
+				// Did not find any other route, with the same name.
+				// So we should likely go back to cluster mode.
+				c.Noticef("ROUTE: ======> %+v || %+v\n", route.clusterName, route.clusterDynamic)
+			}
+
+			return false
+			
+		}
+
+		if isRoute && shouldUpdateClusterName() {
+			c.Noticef("----------------------------------------------------SHOULD GO BACK TO DYNAMIC CLUSTER MODE!!!!!")
+			srv.setClusterName(nuid.Next())
+			srv.susceptible = true
 		}
 	}
 

@@ -511,16 +511,51 @@ func (c *client) processRouteInfo(info *Info) {
 		return
 	}
 
-	// Detect if we have a mismatch of cluster names.
+	// On INFO: Detect if we have a mismatch of cluster names.
 	if info.Cluster != "" && info.Cluster != clusterName {
+		isSusceptible := s.susceptible
+		useTheirs := strings.Compare(clusterName, info.Cluster) < 0
 		c.mu.Unlock()
+
+		fmt.Println(c.srv.opts.ServerName, "<<<<<<< RECEIVED INFO: we are dynamic?:",
+			s.isClusterNameDynamic(), "they are:", info.Dynamic, clusterName, "theirs:", info.Cluster, "susceptible?", isSusceptible)
+		fmt.Printf("%s || %+v\n", c.srv.opts.ServerName, info)
+		
 		// If we are dynamic we may update our cluster name.
 		// Use other if remote is non dynamic or their name is "bigger"
-		if s.isClusterNameDynamic() && (!info.Dynamic || (strings.Compare(clusterName, info.Cluster) < 0)) {
+		isDynamic := s.isClusterNameDynamic()
+		remoteIsDynamic := info.Dynamic
+		if isDynamic && !remoteIsDynamic {
+			// The remote INFO sent to this node contains what should be the name of the cluster.
+			fmt.Println(c.srv.opts.ServerName, "<<<<<<< INFO so using their NAME!", isDynamic, "they are:", info.Dynamic, clusterName, "theirs:", info.Cluster)
 			s.setClusterName(info.Cluster)
 			s.removeAllRoutesExcept(c)
+
+			// We are no longer susceptible since there is an explicit name in the cluster.
+			s.susceptible = false
+
+			c.mu.Lock()
+		} else if !isDynamic && remoteIsDynamic {
+			// This server cluster name should win on eventually CONNECT.
+			fmt.Println(c.srv.opts.ServerName, "<<<<<<< DO NOTHING!!! we are dynamic?",
+				isDynamic, "they are:", info.Dynamic, clusterName, "their cluster name:", info.Cluster)
+			
+			c.mu.Lock()
+
+			// Override the cluster name from this route with ours since should win.
+			c.clusterName = s.info.Cluster
+		} else if isDynamic && remoteIsDynamic {
+			if isSusceptible && useTheirs {
+				fmt.Println(c.srv.opts.ServerName, "<<<<<<< INFO BOTH DYNAMIC. CHOOSE THEIRS!", isDynamic, "they are:", info.Dynamic, clusterName, "theirs:", info.Cluster)
+				s.setClusterName(info.Cluster)
+				s.removeAllRoutesExcept(c)
+			} else {
+				fmt.Println(c.srv.opts.ServerName, "<<<<<<< INFO BOTH DYNAMIC. THEY MAY USE OURS! DO NOTHING!", isDynamic, "they are:", info.Dynamic, clusterName, "theirs:", info.Cluster)
+			}
 			c.mu.Lock()
 		} else {
+			fmt.Println(c.srv.opts.ServerName, "<<<<<<< CLOSING!!! we are dynamic?",
+				isDynamic, "they are:", info.Dynamic, clusterName, "their cluster name:", info.Cluster)
 			c.closeConnection(ClusterNameConflict)
 			return
 		}
@@ -1921,23 +1956,37 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 
 	clusterName := srv.ClusterName()
 
-	// If we have a cluster name set, make sure it matches ours.
+	// On CONNECT: If we have a cluster name set, make sure it matches ours.
 	if proto.Cluster != clusterName {
-		shouldReject := true
 		// If we have a dynamic name we will do additional checks.
-		if srv.isClusterNameDynamic() {
-			if !proto.Dynamic || strings.Compare(clusterName, proto.Cluster) < 0 {
+		isDynamic := srv.isClusterNameDynamic()
+		remoteIsDynamic := proto.Dynamic
+
+		// TODO: which lock
+		isSusceptible := srv.susceptible
+		useTheirs := strings.Compare(clusterName, proto.Cluster) < 0
+
+		if isDynamic && !remoteIsDynamic {
+			c.Noticef("Updating the explicit name from the CONNECT message: ", proto.Cluster)
+			srv.setClusterName(proto.Cluster)
+			srv.removeAllRoutesExcept(c)
+			srv.susceptible = false
+		} else if isDynamic && remoteIsDynamic {
+			if isSusceptible && useTheirs {
 				// We will take on their name since theirs is configured or higher then ours.
+				c.Noticef("Updating to use dynamic name from the CONNECT message: ", proto.Cluster)
 				srv.setClusterName(proto.Cluster)
-				if !proto.Dynamic {
-					srv.getOpts().Cluster.Name = proto.Cluster
-				}
 				srv.removeAllRoutesExcept(c)
-				shouldReject = false
+			} else {
+				c.Noticef("NOT Updating to use dynamic name from the CONNECT message: ", proto.Cluster)
 			}
-		}
-		if shouldReject {
+
+			// Dynamic names are always susceptible to changes.
+			// srv.susceptible = true
+		} else {
+			// Reject the change
 			errTxt := fmt.Sprintf("Rejecting connection, cluster name %q does not match %q", proto.Cluster, srv.info.Cluster)
+			fmt.Println("======================", errTxt)
 			c.Errorf(errTxt)
 			c.sendErr(errTxt)
 			c.closeConnection(ClusterNameConflict)
@@ -1953,6 +2002,12 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 	c.route.lnoc = proto.LNOC
 	c.setRoutePermissions(perms)
 	c.headers = supportsHeaders && proto.Headers
+
+	// Remember their cluster name.
+	c.clusterName = proto.Cluster
+	c.clusterDynamic = proto.Dynamic
+	fmt.Printf("%v RECEIVED CONNECT ============ we are dynamic? %v (%v) are they? %v :: theirs %+v\n",
+		srv.opts.ServerName, srv.opts.Cluster.Name == "", srv.opts.Cluster.Name, srv.info.Dynamic, proto)
 	c.mu.Unlock()
 	return nil
 }
