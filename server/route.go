@@ -512,14 +512,19 @@ func (c *client) processRouteInfo(info *Info) {
 	}
 
 	// Detect if we have a mismatch of cluster names.
+	fmt.Println("ROUTE INFO: --------------------------------------- Cluster name mismatch? INFO TO: (", s.opts.ServerName, "|", s.opts.Cluster.Name, "):::", s.ID(), "::: FROM: ", info.Cluster, clusterName)
 	if info.Cluster != "" && info.Cluster != clusterName {
 		c.mu.Unlock()
 		// If we are dynamic we may update our cluster name.
-		if s.isClusterNameDynamic() && strings.Compare(clusterName, info.Cluster) < 0 {
+		isDynamic := s.isClusterNameDynamic()
+		shouldUseTheirs := strings.Compare(clusterName, info.Cluster) < 0
+		fmt.Println("Should update CLUSTER NAME??? ", s.opts.ServerName, "||", clusterName, info.Cluster, "||", isDynamic, shouldUseTheirs)
+		if isDynamic && shouldUseTheirs {
 			s.setClusterName(info.Cluster)
 			s.removeAllRoutesExcept(c)
 			c.mu.Lock()
 		} else {
+			fmt.Println("DISCONNECTING THEN: ", s.opts.ServerName, "||", clusterName, info.Cluster, "||", isDynamic, shouldUseTheirs)
 			c.closeConnection(ClusterNameConflict)
 			return
 		}
@@ -1855,6 +1860,7 @@ func (s *Server) solicitRoutes(routes []*url.URL) {
 }
 
 func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error {
+	fmt.Println("<><><><><><><><><><><><><><><><><><>", srv.opts.ServerName, srv.opts.Cluster.Name, "::::::::::::", string(arg))
 	// Way to detect clients that incorrectly connect to the route listen
 	// port. Client provide Lang in the CONNECT protocol while ROUTEs don't.
 	if lang != "" {
@@ -1885,12 +1891,15 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 	clusterName := srv.ClusterName()
 
 	// If we have a cluster name set, make sure it matches ours.
+	fmt.Println("<><><><><><><><><><><><><><><><><><>", srv.opts.ServerName, srv.opts.Cluster.Name, clusterName, proto.Cluster, "::::::::::::]]]")
 	if proto.Cluster != clusterName {
 		shouldReject := true
 		// If we have a dynamic name we will do additional checks.
+		fmt.Println(">>>>>>>>>>>>>>>>>>>>>> DYNAMIC?", proto.Dynamic)
 		if srv.isClusterNameDynamic() {
 			if !proto.Dynamic || strings.Compare(clusterName, proto.Cluster) < 0 {
 				// We will take on their name since theirs is configured or higher then ours.
+				fmt.Println(">>>>>>>>>>>>>>>>>>>>>> updating to theirs!!!!!!!!!!", clusterName, proto.Cluster)
 				srv.setClusterName(proto.Cluster)
 				if !proto.Dynamic {
 					srv.getOpts().Cluster.Name = proto.Cluster
@@ -1916,6 +1925,7 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 	c.route.lnoc = proto.LNOC
 	c.setRoutePermissions(perms)
 	c.headers = supportsHeaders && proto.Headers
+	c.clusterName = proto.Cluster
 	c.mu.Unlock()
 	return nil
 }

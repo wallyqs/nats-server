@@ -241,6 +241,7 @@ type client struct {
 
 	trace bool
 	echo  bool
+	clusterName string
 }
 
 type rrTracking struct {
@@ -1276,6 +1277,9 @@ func (c *client) handleWriteTimeout(written, attempted int64, numChunks int) boo
 // Returns true if closed in place, flase otherwise.
 // Lock is held on entry.
 func (c *client) markConnAsClosed(reason ClosedState) bool {
+	defer func(){
+		fmt.Println("closing now!!! I AM: ", c, c.srv.opts.ServerName, "||| OF: ", c.srv.opts.Cluster.Name, ":::")
+	}()
 	// Possibly set skipFlushOnClose flag even if connection has already been
 	// mark as closed. The rationale is that a connection may be closed with
 	// a reason that justifies a flush (say after sending an -ERR), but then
@@ -1373,6 +1377,7 @@ func (c *client) traceOp(format, op string, arg []byte) {
 
 // Process the information messages from Clients and other Routes.
 func (c *client) processInfo(arg []byte) error {
+	fmt.Println(c.srv.opts.ServerName, "|||", c.srv.opts.Cluster.Name, "<<-", string(arg))
 	info := Info{}
 	if err := json.Unmarshal(arg, &info); err != nil {
 		return err

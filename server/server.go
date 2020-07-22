@@ -440,12 +440,14 @@ func (s *Server) setClusterName(name string) {
 	if resetCh != nil {
 		resetCh <- struct{}{}
 	}
+	fmt.Printf("^^^^^^^^^^^^^^^^^^^^^^^^^^ [%s:%s] Cluster name updated to %s\n", s.opts.ServerName, s.opts.Cluster.Name, name)
 	s.Noticef("Cluster name updated to %s", name)
 
 }
 
 // Return whether the cluster name is dynamic.
 func (s *Server) isClusterNameDynamic() bool {
+	fmt.Println("===================================== is the cluster name dynamic still???", s.getOpts().Cluster.Name, "<--- NAME:", s.getOpts().ServerName)
 	return s.getOpts().Cluster.Name == ""
 }
 

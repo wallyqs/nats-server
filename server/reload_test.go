@@ -91,9 +91,12 @@ func runReloadServerWithConfig(t *testing.T, configFile string) (*Server, *Optio
 
 func runReloadServerWithContent(t *testing.T, content []byte) (*Server, *Options, string) {
 	t.Helper()
+	fmt.Println(string(content))
 	opts, tmpFile := newOptionsFromContent(t, content)
 	opts.NoLog = true
 	opts.NoSigs = true
+	opts.Debug = false
+	opts.Trace = false
 	s := RunServer(opts)
 	return s, opts, tmpFile
 }
@@ -1632,6 +1635,7 @@ func TestConfigReloadClusterRemoveSolicitedRoutes(t *testing.T) {
 
 func reloadUpdateConfig(t *testing.T, s *Server, conf, content string) {
 	t.Helper()
+	fmt.Println("---------- RESULT:", content)
 	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error creating config file: %v", err)
 	}
@@ -1787,73 +1791,187 @@ func TestConfigReloadClusterName(t *testing.T) {
 	}
 }
 
-func TestConfigReloadClusterNameRenegotiation(t *testing.T) {
-	s, _, conf := runReloadServerWithContent(t, []byte(`
+func TestConfigReloadClusterMembershipReload(t *testing.T) {
+	s1, _, conf1 := runReloadServerWithContent(t, []byte(`
 	listen: "0.0.0.0:-1"
+        server_name: "A"
 
 	cluster: {
           listen: "0.0.0.0:-1"
 	}
 	`))
-	defer os.Remove(conf)
-	defer s.Shutdown()
+	defer os.Remove(conf1)
+	defer s1.Shutdown()
 
-	got := s.ClusterName()
+	got := s1.ClusterName()
 	if got == "" {
 		t.Fatalf("Expected update clustername to be set dynamically")
 	}
 
 	// Update config with a new cluster name.
-	reloadUpdateConfig(t, s, conf, `
+	reloadUpdateConfig(t, s1, conf1, `
         listen: "0.0.0.0:-1"
+        server_name: "A"
 
         cluster: {
-          name: "xyz"
+          name: "AB"
           listen: "0.0.0.0:-1"
         }
         `)
-	if s.ClusterName() != "xyz" {
-		t.Fatalf("Expected update clustername of \"xyz\", got %q", s.ClusterName())
+	if s1.ClusterName() != "AB" {
+		t.Fatalf("Expected update clustername of \"AB\", got %q", s1.ClusterName())
 	}
 
-	// New server joins with the new name.
+	// Server B joins with the new name and joins AB.
 	template := fmt.Sprintf(`
 	listen: "0.0.0.0:-1"
+        server_name: "B"
 
 	cluster: {
-          name: "xyz"
+          name: "AB"
           listen: "0.0.0.0:-1"
           routes: [ nats://localhost:%d ]
 	}
-	`, s.ClusterAddr().Port)
+	`, s1.ClusterAddr().Port)
 
 	s2, _, conf2 := runReloadServerWithContent(t, []byte(template))
 	defer os.Remove(conf2)
 	defer s2.Shutdown()
 
-	checkClusterFormed(t, s, s2)
+	// After the reload both become part of xyz cluster.
+	checkClusterFormed(t, s1, s2)
 
-	// Remove the name and use a dynamic one again.
-	reloadUpdateConfig(t, s, conf, `
+	// Try to send a request across the cluster with two connections.
+	addr1 := s1.Addr().(*net.TCPAddr)
+	endpoint1 := fmt.Sprintf("nats://%s:%d", "127.0.0.1", addr1.Port)
+	nc1, err := nats.Connect(endpoint1)
+	if err != nil {
+		t.Fatalf("Error creating client: %v", err)
+	}
+	defer nc1.Close()
+
+	addr2 := s2.Addr().(*net.TCPAddr)
+	endpoint2 := fmt.Sprintf("nats://%s:%d", "127.0.0.1", addr2.Port)
+	nc2, err := nats.Connect(endpoint2)
+	if err != nil {
+		t.Fatalf("Error creating client: %v", err)
+	}
+	defer nc2.Close()
+
+	// Make a request to confirm that clustering works on reload.
+	nc1.Subscribe("foo", func(m *nats.Msg){
+		m.Respond([]byte("OK"))
+	})
+	nc1.Flush()
+
+	_, err = nc2.Request("foo", []byte("bar"), 2*time.Second)
+	if err != nil {
+		t.Fatalf("Error making request to cluster, got: %s", err)
+	}
+
+	fmt.Println("------------------------------ROUTES-----------------------------------------")
+	fmt.Println(s1.ClusterName(), s2.ClusterName())
+	fmt.Println(s1.NumRoutes(), s2.NumRoutes())
+	fmt.Println("-----------------------------------------------------------------------")
+
+	// Now remove the cluster name of first server with a reload,
+	// and back to using a dynamic one.
+	// 
+	// In order to do that we need to first remove the static
+	// routes from the other members of the AB cluster otherwise,
+	// the A node will go back to using the AB cluster name
+	// because of the static route CONNECT.
+	reloadUpdateConfig(t, s2, conf2, `
         listen: "0.0.0.0:-1"
+        server_name: "B"
+
+        cluster: {
+          name: "AB"       
+          listen: "0.0.0.0:-1"
+        }
+        `)
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		if numRoutes := s1.NumRoutes(); numRoutes < 1 {
+			return fmt.Errorf("Expected %d routes for server %q, got %d", 0, s1.ID(), numRoutes)
+		}
+		return nil
+	})
+
+	// Now remove the cluster name and go back to dynamic.
+	reloadUpdateConfig(t, s1, conf1, `
+        listen: "0.0.0.0:-1"
+        server_name: "A"
 
         cluster: {
           listen: "0.0.0.0:-1"
         }
         `)
 
-	got = s.ClusterName()
-	if got == "xyz" || got == "" {
+	got = s1.ClusterName()
+	fmt.Println("GOT:::::::::::::::", got)
+	if got == "AB" || got == "" {
 		t.Fatalf("Expected update clustername to be new, got %q", got)
 	}
 
-	// No longer has dynamic name so there should not be communication.
+	// Make another request, which should fail since membership has changed now.
+	_, err = nc2.Request("foo", []byte("bar"), 2*time.Second)
+	if err == nil {
+		t.Fatalf("Expected error making a request to cluster.")
+	}
+	// Confirm that there are no routes.
+	if numRoutes := s1.NumRoutes(); numRoutes != 0 {
+		t.Fatalf("Expected %d routes for server %q, got %d", 0, s1.ID(), numRoutes)
+	}
+
+	// Add new node that tries to join with node A using a dynamic cluster name.
+	template = fmt.Sprintf(`
+	listen: "0.0.0.0:-1"
+        server_name: "C"
+
+	cluster: {
+          listen: "0.0.0.0:-1"
+          routes: [ nats://localhost:%d ]
+	}
+	`, s1.ClusterAddr().Port)
+
+	s3, _, conf3 := runReloadServerWithContent(t, []byte(template))
+	defer os.Remove(conf3)
+	defer s3.Shutdown()
+
+	// Connect to node with the new name.
+	addr3 := s3.Addr().(*net.TCPAddr)
+	endpoint3 := fmt.Sprintf("nats://%s:%d", "127.0.0.1", addr3.Port)
+	nc3, err := nats.Connect(endpoint3)
+	if err != nil {
+		t.Fatalf("Error creating client: %v", err)
+	}
+	defer nc3.Close()
+
 	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
-		if numRoutes := s.NumRoutes(); numRoutes != 0 {
-			return fmt.Errorf("Expected %d routes for server %q, got %d", 0, s.ID(), numRoutes)
+		if numRoutes := s1.NumRoutes(); numRoutes < 1 {
+			return fmt.Errorf("Expected %d routes for server %q, got %d", 0, s1.ID(), numRoutes)
 		}
 		return nil
 	})
+
+	fmt.Println("--------------------------ROUTES---------------------------------------------")
+	// All are named the same but there are no routes!?
+	fmt.Println(s1.ClusterName(), s2.ClusterName(), s3.ClusterName())
+	fmt.Println(s1.NumRoutes(), s2.NumRoutes(), s3.NumRoutes())
+	fmt.Println("-----------------------------------------------------------------------")
+
+	_, err = nc3.Request("foo", []byte("bar"), 2*time.Second)
+	if err != nil {
+		t.Fatalf("Error making request to cluster, got: %s", err)
+	}
+
+	// No longer has dynamic name so there should not be communication.
+	// checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+	// 	if numRoutes := s1.NumRoutes(); numRoutes != 0 {
+	// 		return fmt.Errorf("Expected %d routes for server %q, got %d", 0, s1.ID(), numRoutes)
+	// 	}
+	// 	return nil
+	// })
 }
 
 func TestConfigReloadMaxSubsUnsupported(t *testing.T) {
