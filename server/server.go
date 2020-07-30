@@ -2160,9 +2160,13 @@ func (s *Server) createClient(conn net.Conn, ws *websocket) *client {
 func (s *Server) saveClosedClient(c *client, nc net.Conn, reason ClosedState) {
 	now := time.Now()
 
+	fmt.Println("sending disconnect event...")
 	s.accountDisconnectEvent(c, now, reason.String())
+	fmt.Println("sent disconnect event...")
 
+	fmt.Println("getting the client lock now")
 	c.mu.Lock()
+	fmt.Println("got the client lock now")
 
 	cc := &closedClient{}
 	cc.fill(c, nc, now)
@@ -2182,6 +2186,7 @@ func (s *Server) saveClosedClient(c *client, nc net.Conn, reason ClosedState) {
 	if c.acc != nil && c.acc.Name != globalAccountName {
 		cc.acc = c.acc.Name
 	}
+	fmt.Println("got the client unlock")
 	c.mu.Unlock()
 
 	// Place in the ring buffer
@@ -2317,6 +2322,7 @@ func (s *Server) removeClient(c *client) {
 	case GATEWAY:
 		s.removeRemoteGatewayConnection(c)
 	case LEAF:
+		fmt.Println("removing from here......", c, "<---")
 		s.removeLeafNodeConnection(c)
 	}
 }

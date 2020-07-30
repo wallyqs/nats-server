@@ -454,7 +454,7 @@ func (c *client) wsEnqueueControlMessageLocked(controlMsg wsOpCode, payload []by
 		c.ws.frames = append(c.ws.frames, cm)
 		c.ws.fs += int64(len(cm))
 	}
-	c.flushSignal()
+	c.flushSignal("not this...")
 }
 
 // Enqueues a websocket close message with a status mapped from the given `reason`.

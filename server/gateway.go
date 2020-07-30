@@ -2987,9 +2987,12 @@ func (s *Server) trackGWReply(c *client, reply []byte) {
 // Starts a long lived go routine that is responsible to
 // remove GW reply mapping that have expired.
 func (s *Server) startGWReplyMapExpiration() {
+	fmt.Println("Starting the GW reply expiration!")
 	s.mu.Lock()
 	s.gwrm.ch = make(chan time.Duration, 1)
 	s.mu.Unlock()
+	fmt.Println("Starting the GW reply expiration! DONE!")
+
 	s.startGoRoutine(func() {
 		defer s.grWG.Done()
 

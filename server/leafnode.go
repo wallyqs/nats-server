@@ -807,11 +807,15 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 		// closed LN connection possible registered with the account
 		// and/or the server's leafs map. So check if connection
 		// is closed, and if so, manually cleanup.
+		fmt.Println("getting this lock")
 		c.mu.Lock()
 		closed := c.isClosed()
 		c.mu.Unlock()
+		fmt.Println("getting this unlocked!", closed)
 		if closed {
+			fmt.Println("REMOVING L CONNNECTION:", c, "<----------")
 			s.removeLeafNodeConnection(c)
+			fmt.Println("REMOVING L CONNNECTION: DONE")
 			if prev := acc.removeClient(c); prev == 1 {
 				s.decActiveAccounts()
 			}
@@ -982,9 +986,13 @@ func (s *Server) removeLeafNodeConnection(c *client) {
 		c.leaf.tsubt = nil
 	}
 	c.mu.Unlock()
+
+	fmt.Println("removing the leafnode connection, but need the lock...")
 	s.mu.Lock()
 	delete(s.leafs, cid)
 	s.mu.Unlock()
+	fmt.Println("removed the leafnode connection...")
+
 	s.removeFromTempClients(cid)
 }
 
@@ -1843,6 +1851,7 @@ func (s *Server) updatedSolicitedLeafnodes() {
 		shouldClose := c.leaf != nil && c.leaf.remote != nil
 		c.mu.Unlock()
 		if shouldClose {
+			fmt.Println("------> updating leafs disconnect", shouldClose)
 			c.closeConnection(ClusterNameConflict)
 		}
 	}

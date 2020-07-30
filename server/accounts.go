@@ -315,6 +315,7 @@ func (a *Account) updateRemoteServer(m *AccountNumConns) {
 
 // Removes tracking for a remote server that has shutdown.
 func (a *Account) removeRemoteServer(sid string) {
+	fmt.Println("this getting called?")
 	a.mu.Lock()
 	if a.strack != nil {
 		prev := a.strack[sid]
@@ -323,6 +324,7 @@ func (a *Account) removeRemoteServer(sid string) {
 		a.nrleafs -= prev.leafs
 	}
 	a.mu.Unlock()
+	fmt.Println("this getting called? and not finishing?")
 }
 
 // When querying for subject interest this is the number of

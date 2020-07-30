@@ -1135,16 +1135,44 @@ func (s *Server) reloadClientTraceLevel() {
 
 // reloadClusterName detects cluster membership changes triggered
 // due to a reload where the name changes.
+// func (s *Server) reloadClusterName() {
+// 	s.mu.Lock()
+// 	// Get all connected routes and notify the cluster rename.
+// 	infoJSON := s.routeInfoJSON
+// 	for _, route := range s.routes {
+// 		route.mu.Lock()
+// 		route.enqueueProto(infoJSON)
+// 		route.mu.Unlock()
+// 	}
+// 	s.mu.Unlock()
+// }
+
+// reloadClusterName detects cluster membership changes triggered
+// due to a reload where the name changes.
 func (s *Server) reloadClusterName() {
+	fmt.Println("--------------------- CALLED -----------------")
+	var (
+		routesa [64]*client
+		routes  = routesa[:0]
+	)
+
+	// Get all connected routes.
 	s.mu.Lock()
-	// Get all connected routes and notify the cluster rename.
-	infoJSON := s.routeInfoJSON
 	for _, route := range s.routes {
 		route.mu.Lock()
-		route.enqueueProto(infoJSON)
+		isClusterMember := route.clusterName == s.info.Cluster
+		if !isClusterMember {
+			fmt.Println("Disconnect this one: SELF/TO:", s.opts.ServerName, "ROUTE FROM CLUSTER: ", route.clusterName, "MY CLUSTER:", s.info.Cluster)
+			routes = append(routes, route)
+		}
 		route.mu.Unlock()
 	}
 	s.mu.Unlock()
+
+	// Give up the lock before starting to disconnect.
+	for _, route := range routes {
+		route.closeConnection(ClusterNameConflict)
+	}
 }
 
 // reloadAuthorization reconfigures the server authorization settings,

@@ -239,8 +239,9 @@ type client struct {
 
 	flags clientFlag // Compact booleans into a single field. Size will be increased when needed.
 
-	trace bool
-	echo  bool
+	trace       bool
+	echo        bool
+	clusterName string
 }
 
 type rrTracking struct {
@@ -499,19 +500,23 @@ func (c *client) initClient() {
 		}
 	}
 
+	asdf := opts.ServerName
+	qwer := opts.Cluster.Name
+	info := s.info.Cluster
+
 	switch c.kind {
 	case CLIENT:
 		name := "cid"
 		if c.ws != nil {
 			name = "wid"
 		}
-		c.ncs = fmt.Sprintf("%s - %s:%d", conn, name, c.cid)
+		c.ncs = fmt.Sprintf("%v:%v/%v :: %s - %s:%d", info, qwer, asdf, conn, name, c.cid)
 	case ROUTER:
-		c.ncs = fmt.Sprintf("%s - rid:%d", conn, c.cid)
+		c.ncs = fmt.Sprintf("%v:%v/%v :: %s - rid:%d", info, qwer, asdf, conn, c.cid)
 	case GATEWAY:
-		c.ncs = fmt.Sprintf("%s - gid:%d", conn, c.cid)
+		c.ncs = fmt.Sprintf("%v:%v/%v :: %s - gid:%d", info, qwer, asdf, conn, c.cid)
 	case LEAF:
-		c.ncs = fmt.Sprintf("%s - lid:%d", conn, c.cid)
+		c.ncs = fmt.Sprintf("%v:%v/%v :: %s - lid:%d", info, qwer, asdf, conn, c.cid)
 	case SYSTEM:
 		c.ncs = "SYSTEM"
 	case JETSTREAM:
@@ -873,7 +878,7 @@ func (c *client) flushClients(budget time.Duration) time.Time {
 		if budget > 0 && cp.out.lft < 2*budget && cp.flushOutbound() {
 			budget -= cp.out.lft
 		} else {
-			cp.flushSignal()
+			cp.flushSignal("flush clients")
 		}
 
 		cp.mu.Unlock()
@@ -1132,6 +1137,7 @@ func (c *client) flushOutbound() bool {
 	// Capture this (we change the value in some tests)
 	wdl := c.out.wdl
 	// Do NOT hold lock during actual IO.
+	fmt.Println("---- writing lock: gave it up:", c)
 	c.mu.Unlock()
 
 	// flush here
@@ -1148,7 +1154,9 @@ func (c *client) flushOutbound() bool {
 	lft := time.Since(start)
 
 	// Re-acquire client lock.
+	fmt.Println("---- writing lock", c)
 	c.mu.Lock()
+	fmt.Println("---- writing lock: got it", c)
 
 	// Ignore ErrShortWrite errors, they will be handled as partials.
 	if err != nil && err != io.ErrShortWrite {
@@ -1220,7 +1228,7 @@ func (c *client) flushOutbound() bool {
 	// Check that if there is still data to send and writeLoop is in wait,
 	// then we need to signal.
 	if c.out.pb > 0 {
-		c.flushSignal()
+		c.flushSignal("out pb")
 	}
 
 	// Check if we have a stalled gate and if so and we are recovering release
@@ -1306,34 +1314,41 @@ func (c *client) markConnAsClosed(reason ClosedState) bool {
 			c.Debugf("%s connection closed: %s", c.typeString(), reason)
 		}
 	}
+	fmt.Println("ok 1")
 
 	// Save off the connection if its a client or leafnode.
 	if c.kind == CLIENT || c.kind == LEAF {
 		if nc := c.nc; nc != nil && c.srv != nil {
 			// TODO: May want to send events to single go routine instead
 			// of creating a new go routine for each save.
+			fmt.Println("go save the closed client?")
 			go c.srv.saveClosedClient(c, nc, reason)
 		}
 	}
 	// If writeLoop exists, let it do the final flush, close and teardown.
 	if c.flags.isSet(writeLoopStarted) {
-		c.flushSignal()
+		fmt.Println("sending flush signal!!!!")
+		c.flushSignal("loop started")
 		return false
 	}
+	fmt.Println("flush signal called done")
 	// Flush (if skipFlushOnClose is not set) and close in place. If flushing,
 	// use a small WriteDeadline.
 	c.flushAndClose(true)
+	fmt.Println("done? flush and close? this is CLOSED!", c)
 	return true
 }
 
 // flushSignal will use server to queue the flush IO operation to a pool of flushers.
 // Lock must be held.
-func (c *client) flushSignal() bool {
+func (c *client) flushSignal(a string) bool {
+	fmt.Println("waiting for the sch channel signal", a)
 	select {
 	case c.out.sch <- struct{}{}:
 		return true
 	default:
 	}
+	fmt.Println("waiting for the sch channel signal: DONE!")
 	return false
 }
 
@@ -1383,6 +1398,7 @@ func (c *client) processInfo(arg []byte) error {
 	case GATEWAY:
 		c.processGatewayInfo(&info)
 	case LEAF:
+		fmt.Println(c.srv.opts.ServerName, "======================== INFO", string(arg))
 		return c.processLeafnodeInfo(&info)
 	}
 	return nil
@@ -1785,7 +1801,7 @@ func (c *client) enqueueProtoAndFlush(proto []byte, doFlush bool) {
 	}
 	c.queueOutbound(proto)
 	if !(doFlush && c.flushOutbound()) {
-		c.flushSignal()
+		c.flushSignal("eneueue proto:"+string(proto))
 	}
 }
 
@@ -2888,7 +2904,7 @@ func (c *client) deliverMsg(sub *subscription, subject, reply, mh, msg []byte, g
 	// readloop go routine at this point.
 	// FIXME(dlc) - We may call this alot, maybe suppress after first call?
 	if client.out.pm > 1 && client.out.pb > maxBufSize*2 {
-		client.flushSignal()
+		client.flushSignal("out pm out pb")
 	}
 
 	// Add the data size we are responsible for here. This will be processed when we
@@ -3853,6 +3869,7 @@ func (c *client) setExpirationTimer(d time.Duration) {
 // minimal write deadline.
 // Lock is held on entry.
 func (c *client) flushAndClose(minimalFlush bool) {
+	fmt.Println("flusing and closing!", c)
 	if !c.flags.isSet(skipFlushOnClose) && c.out.pb > 0 {
 		if minimalFlush {
 			const lowWriteDeadline = 100 * time.Millisecond
@@ -3872,6 +3889,7 @@ func (c *client) flushAndClose(minimalFlush bool) {
 		c.nc.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 		c.nc.Close()
 	}
+	fmt.Println("flusing and closing! DONE!", c)
 }
 
 func (c *client) typeString() string {
@@ -3986,10 +4004,12 @@ func (c *client) closeConnection(reason ClosedState) {
 	// This will set the closeConnection flag and save the connection, etc..
 	// Will return true if no writeLoop was started and TCP connection was
 	// closed in place, in which case we need to do the teardown.
+	fmt.Println("----- mark closing the connection!", c, reason)
 	teardownNow := c.markConnAsClosed(reason)
 	c.mu.Unlock()
 
 	if teardownNow {
+		fmt.Println("teardown now!!!!!", c)
 		c.teardownConn()
 	}
 }
@@ -4000,6 +4020,7 @@ func (c *client) closeConnection(reason ClosedState) {
 // happens when the writeLoop returns, or in closeConnection() if no writeLoop has
 // been started.
 func (c *client) teardownConn() {
+	fmt.Println("TEARDOWN CONNECTION", c)
 	c.mu.Lock()
 
 	c.clearAuthTimer()
@@ -4076,7 +4097,9 @@ func (c *client) teardownConn() {
 		}
 
 		// Unregister
-		srv.removeClient(c)
+		fmt.Println("TEARDOWN CLIENT: ", c)
+		srv.removeClient(c) // It gets stuck here
+		fmt.Println("TEARDOWN CLIENT:  BLOCKED?", c)
 
 		// Update remote subscriptions.
 		if acc != nil && (kind == CLIENT || kind == LEAF) {

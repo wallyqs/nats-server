@@ -1917,6 +1917,7 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 	c.route.lnoc = proto.LNOC
 	c.setRoutePermissions(perms)
 	c.headers = supportsHeaders && proto.Headers
+	c.clusterName = proto.Cluster
 	c.mu.Unlock()
 	return nil
 }
@@ -1952,6 +1953,8 @@ func (s *Server) removeRoute(c *client) {
 		gwURL = r.gatewayURL
 	}
 	c.mu.Unlock()
+
+	fmt.Println("removing route!!!!!!!!!!!!!!!!!!!1")
 	s.mu.Lock()
 	delete(s.routes, cid)
 	if r != nil {
@@ -1962,16 +1965,20 @@ func (s *Server) removeRoute(c *client) {
 		}
 		// Remove the remote's gateway URL from our list and
 		// send update to inbound Gateway connections.
+		fmt.Println("removing gw?!!!!!!!!!!!!!!!!!!!1")
 		if gwURL != _EMPTY_ && s.removeGatewayURL(gwURL) {
 			s.sendAsyncGatewayInfo()
 		}
+		fmt.Println("removing gw?!!!!!!!!!!!!!!!!!!!111111111")
 		// Remove the remote's leafNode URL from
 		// our list and send update to LN connections.
 		if lnURL != _EMPTY_ && s.removeLeafNodeURL(lnURL) {
 			s.sendAsyncLeafNodeInfo()
 		}
+		fmt.Println("removing gw?!!!!!!!!!!!!!!!!!!!111111111222222222")
 		s.routesByHash.Delete(hash)
 	}
 	s.removeFromTempClients(cid)
 	s.mu.Unlock()
+	fmt.Println("removing route!!!!!!!!!!!!!!!!!!!22222222222222222222")
 }

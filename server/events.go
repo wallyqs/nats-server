@@ -1095,7 +1095,9 @@ func (s *Server) accountConnectEvent(c *client) {
 // accountDisconnectEvent will send an account client disconnect event if there is interest.
 // This is a billing event.
 func (s *Server) accountDisconnectEvent(c *client, now time.Time, reason string) {
+	fmt.Println("will send and event for but need the lock", c)
 	s.mu.Lock()
+	fmt.Println("will send and event for but need the lock? OK?", c)	
 	if !s.eventsEnabled() {
 		s.mu.Unlock()
 		return
@@ -1103,6 +1105,7 @@ func (s *Server) accountDisconnectEvent(c *client, now time.Time, reason string)
 	gacc := s.gacc
 	eid := s.nextEventID()
 	s.mu.Unlock()
+	fmt.Println("ok now OK", c)
 
 	c.mu.Lock()
 
