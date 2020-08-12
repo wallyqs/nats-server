@@ -328,13 +328,11 @@ func (c *clusterOption) Apply(s *Server) {
 	// Check whether the cluster name has been removed or changed as that could affect a cluster membership.
 	switch {
 	case c.oldValue.Name != "" && c.newValue.Name == "":
-		// NOTE: If this node is still part of the static routes from a node that has an explicit cluster name
-		// then this new generated dynamic name will be overridden by the remote one when it sends CONNECT again.
-		s.setClusterName(nuid.Next())
+		s.setClusterName(nuid.Next(), true)
 		c.nameChanged = true
 	case c.newValue.Name != "" && c.oldValue.Name != c.newValue.Name:
 		// Use the new explicit cluster name from the config.
-		s.setClusterName(c.newValue.Name)
+		s.setClusterName(c.newValue.Name, false)
 		c.nameChanged = true
 	}
 

@@ -432,7 +432,7 @@ func (s *Server) ClusterName() string {
 }
 
 // setClusterName will update the cluster name for this server.
-func (s *Server) setClusterName(name string) {
+func (s *Server) setClusterName(name string, susceptible bool) {
 	s.mu.Lock()
 	var resetCh chan struct{}
 	if s.sys != nil && s.info.Cluster != name {
@@ -441,6 +441,11 @@ func (s *Server) setClusterName(name string) {
 	}
 	s.info.Cluster = name
 	s.routeInfo.Cluster = name
+
+	// Marks whether this is a dynamic name change that is
+	// susceptible to changes due to INFO/CONNECT messages
+	// from other nodes in the cluster.
+	s.susceptible = susceptible
 
 	// Regenerate the info byte array
 	s.generateRouteInfoJSON()

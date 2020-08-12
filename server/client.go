@@ -4069,8 +4069,8 @@ func (c *client) closeConnection(reason ClosedState) {
 		c.rrTracking = nil
 	}
 
-	routeClusterName := c.clusterName
-	routeClusterDynamic := c.clusterDynamic
+	// routeClusterName := c.clusterName
+	// routeClusterDynamic := c.clusterDynamic
 	c.mu.Unlock()
 
 	// Remove client's or leaf node or jetstream subscriptions.
@@ -4126,15 +4126,15 @@ func (c *client) closeConnection(reason ClosedState) {
 			}
 		}
 
-		// Check whether we do not have any other routes that are not
-		// using explicit names, since in that case this node should go back
-		// to using a dynamic cluster name that will be negotiated among
-		// the remaining members of the cluster.
+		// Check whether we do not have any other routes that are not using explicit names,
+		// since in that case this node should go back to using a dynamic cluster name
+		// that will be negotiated among the remaining members of the cluster.
 		isDynamic := srv.isClusterNameDynamic()
 		isRoute := kind == ROUTER
-		myClusterName := srv.opts.Cluster.Name
-		isSolicited := routeClusterName == ""
+		// myClusterName := srv.opts.Cluster.Name
+		// isSolicited := routeClusterName == ""
 		// isSusceptible := srv.susceptible
+
 		shouldUpdateClusterName := func() bool {
 			var _routes [32]*client
 			routes := _routes[:0]
@@ -4145,37 +4145,37 @@ func (c *client) closeConnection(reason ClosedState) {
 			}
 			srv.mu.Unlock()
 
-			if isSolicited {
-				c.Noticef("CLOSING SOLICITED ROUTE: %v ======| remote cluster name: %+v || dynamic remote: %+v || dynamic self: %+v || routes: %+v\n",
-					myClusterName, routeClusterName, routeClusterDynamic, isDynamic, routes)
-			} else {
-				c.Noticef("CLOSING ROUTE: %v ======| remote cluster name: %+v || dynamic remote: %+v || dynamic self: %+v || routes: %+v\n",
-					myClusterName, routeClusterName, routeClusterDynamic, isDynamic, routes)
-			}
+			// if isSolicited {
+			// 	c.Noticef("CLOSING SOLICITED ROUTE: %v ======| remote cluster name: %+v || dynamic remote: %+v || dynamic self: %+v || routes: %+v\n",
+			// 		myClusterName, routeClusterName, routeClusterDynamic, isDynamic, routes)
+			// } else {
+			// 	c.Noticef("CLOSING ROUTE: %v ======| remote cluster name: %+v || dynamic remote: %+v || dynamic self: %+v || routes: %+v\n",
+			// 		myClusterName, routeClusterName, routeClusterDynamic, isDynamic, routes)
+			// }
 
+			// Check whether there no more routes, if so go back to use dynamic cluster name.
 			if isDynamic && len(routes) == 0 {
-				// No more routes so go back and get a dynamic cluster name.
-				c.Debugf("<><><><><><><><>><><><<>><>< okokokok")
+				// c.Debugf("<><><><><><><><>><><><<>><>< okokokok")
 				return true
 			}
-			for _, route := range routes {
-				if route.clusterName == routeClusterName {
-					c.Noticef("FOUND OTHER MEMBERS ROUTE: ======> %+v || %+v\n", route.clusterName, route.clusterDynamic)
-					return false
-				}
-				// Did not find any other route, with the same name.
-				// So we should likely go back to cluster mode.
-				c.Noticef("ROUTE: ======> %+v || %+v\n", route.clusterName, route.clusterDynamic)
-			}
+			// for _, route := range routes {				
+			// 	// If another member of the cluster is using the same cluster name then leave as is.
+			// 	if route.clusterName == routeClusterName {
+			// 		// c.Noticef("FOUND OTHER MEMBERS ROUTE: ======> %+v || %+v\n", route.clusterName, route.clusterDynamic)
+			// 		return false
+			// 	}
+			// 	c.Noticef("ROUTE: ======> %+v || %+v\n", route.clusterName, route.clusterDynamic)
+			// }
 
+			// Did not find any other route, with the same name.
+			// so should likely go back to cluster mode.
+			// TODO: Only if we were not susceptible to changes?
 			return false
-			
 		}
 
 		if isRoute && shouldUpdateClusterName() {
-			c.Noticef("----------------------------------------------------SHOULD GO BACK TO DYNAMIC CLUSTER MODE!!!!!")
-			srv.setClusterName(nuid.Next())
-			srv.susceptible = true
+			// c.Noticef("----------------------------------------------------SHOULD GO BACK TO DYNAMIC CLUSTER MODE!!!!!")
+			srv.setClusterName(nuid.Next(), true)
 		}
 	}
 

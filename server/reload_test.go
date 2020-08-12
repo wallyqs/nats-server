@@ -91,12 +91,12 @@ func runReloadServerWithConfig(t *testing.T, configFile string) (*Server, *Optio
 
 func runReloadServerWithContent(t *testing.T, content []byte) (*Server, *Options, string) {
 	t.Helper()
-	fmt.Println(string(content))
+	// fmt.Println(string(content))
 	opts, tmpFile := newOptionsFromContent(t, content)
-	opts.NoLog = false
+	opts.NoLog = true
 	opts.NoSigs = true
-	opts.Debug = true
-	opts.Trace = true
+	// opts.Debug = true
+	// opts.Trace = true
 	s := RunServer(opts)
 	return s, opts, tmpFile
 }
@@ -1635,7 +1635,7 @@ func TestConfigReloadClusterRemoveSolicitedRoutes(t *testing.T) {
 
 func reloadUpdateConfig(t *testing.T, s *Server, conf, content string) {
 	t.Helper()
-	fmt.Println(content)
+	// fmt.Println(content)
 	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error creating config file: %v", err)
 	}
@@ -1871,7 +1871,7 @@ func TestConfigClusterMembershipReload(t *testing.T) {
 	}
 
 	//
-	// [B] leaves the cluster AB and stops soliciting from [A]
+	// [B] leaves the cluster AB and stops soliciting from [A],
 	// [A] is still is part of AB cluster with explicit name at this point.
 	//
 	template = fmt.Sprintf(`
@@ -1937,7 +1937,7 @@ func TestConfigClusterMembershipReload(t *testing.T) {
 	}
 
 	//
-	// [C] solicits from [A] and both form dynamic cluster.
+	// [C] solicits from [A] and both form a dynamic cluster.
 	//
 	template = fmt.Sprintf(`
 	listen: "0.0.0.0:-1"
@@ -2185,8 +2185,6 @@ func TestConfigLeafnodeClusterMembershipReload(t *testing.T) {
 	reloadUpdateConfig(t, sB, confB, `
 	listen: "0.0.0.0:-1"
         server_name: "B"
-        debug: true
-        trace: true
         `+clusterConf+leafConf)
 
 	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {

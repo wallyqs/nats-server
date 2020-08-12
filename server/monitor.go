@@ -1198,6 +1198,8 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 		HTTPBasePath: opts.HTTPBasePath,
 		HTTPSPort:    opts.HTTPSPort,
 		Cluster: ClusterOptsVarz{
+			// Whenever we use theirs, make sure that
+			// the cluster is the one we want here.
 			Name:        info.Cluster,
 			Host:        c.Host,
 			Port:        c.Port,
