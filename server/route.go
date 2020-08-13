@@ -501,7 +501,10 @@ func (c *client) processRouteInfo(info *Info) {
 	}
 
 	s := c.srv
+
+	// FIXME: These need a lock.
 	isSusceptible := s.susceptible
+	routeInfoJSON := s.routeInfoJSON
 
 	// Detect route to self.
 	if info.ID == s.info.ID {
@@ -513,7 +516,11 @@ func (c *client) processRouteInfo(info *Info) {
 	}
 
 	// Detect if we have a mismatch of cluster names.
-	if info.Cluster != "" && info.Cluster != clusterName {		
+	c.Debugf("@W: INFO mismatch? %v vs %v (isSusceptible: %v)", info.Cluster, clusterName, isSusceptible)
+	if info.Cluster != "" && info.Cluster != clusterName {
+		// Snapshot past state of the route in case there is some.
+		routeClusterName := c.clusterName
+		routeClusterNameIsDynamic := c.clusterDynamic
 		c.mu.Unlock()
 
 		// fmt.Println(c.srv.opts.ServerName, "<<<<<<< RECEIVED INFO: we are dynamic?:",
@@ -533,17 +540,29 @@ func (c *client) processRouteInfo(info *Info) {
 			s.setClusterName(info.Cluster, false)
 			s.removeAllRoutesExcept(c)
 			c.mu.Lock()
+
+			c.clusterName = info.Cluster
+			c.clusterDynamic = info.Dynamic
 		} else if !isDynamic && remoteIsDynamic {
-			// Do nothing since the remote may use this node's cluster name
-			// when sent an INFO/CONNECT message.
+			// Do nothing since the remote may use this node's cluster name when it is sent an INFO/CONNECT message.
 			c.mu.Lock()
+			c.Debugf("@W: ON INFO, I HAVE THIS FROM THIS ROUTE: %v, but got: %v, need: %v", c.clusterName, info.Cluster, clusterName)
+
+			// In case there is a mismatch we will send it another INFO message with the explicit cluster name so that it uses ours.
+			if routeClusterName != "" && routeClusterName != info.Cluster {
+				c.Debugf("@W: sending an update...", routeInfoJSON)
+				c.enqueueProto(routeInfoJSON)
+			}
 
 			// fmt.Println(c.srv.opts.ServerName, "<<<<<<< DO NOTHING!!! we are dynamic?",
 			// 	isDynamic, "they are:", info.Dynamic, clusterName, "their cluster name:", info.Cluster)
 
 			// Override the cluster name from this route with ours since should win.
 			c.clusterName = s.info.Cluster
+			c.clusterDynamic = info.Dynamic
 		} else if isDynamic && remoteIsDynamic {
+			c.Debugf("@W: ON INFO, BOTH DYNAMIC. I HAVE THIS FROM THIS ROUTE: %v, but got: %v, need: %v", c.clusterName, info.Cluster, clusterName)
+			c.Debugf("@W: Maybe it changed from being dynamic??? from %v to %v", routeClusterNameIsDynamic, info.Dynamic)
 			// Ignore the message unless we are susceptible to dynamic cluster updates
 			// and their dynamic cluster name is 'bigger'. If we are not susceptible,
 			// it means that there is an explicit name in the cluster and eventually nodes
@@ -554,10 +573,24 @@ func (c *client) processRouteInfo(info *Info) {
 				s.setClusterName(info.Cluster, true)
 				s.removeAllRoutesExcept(c)
 			}
+
+			wasDynamic := !routeClusterNameIsDynamic && info.Dynamic
+			if wasDynamic && routeClusterName != "" && routeClusterName != info.Cluster {
+				c.Debugf("@W: This is a route that is sending a new name on INFO and used to be dynamic.")
+				if strings.Compare(clusterName, info.Cluster) < 0 {
+					c.Debugf("@W: Use theirs!")
+					s.setClusterName(info.Cluster, true)		
+					s.removeAllRoutesExcept(c)
+				}
+			}
+
 			// else {
 			// 	fmt.Println(c.srv.opts.ServerName, "<<<<<<< INFO BOTH DYNAMIC. THEY MAY USE OURS! DO NOTHING!", isDynamic, "they are:", info.Dynamic, clusterName, "theirs:", info.Cluster)
 			// }
+
 			c.mu.Lock()
+			c.clusterName = info.Cluster
+			c.clusterDynamic = info.Dynamic
 		} else {
 			// We have an explicit cluster name and reject explicit cluster name changes.
 			// fmt.Println(c.srv.opts.ServerName, "<<<<<<< CLOSING!!! we are dynamic?",
@@ -1886,11 +1919,11 @@ func (s *Server) connectToRoute(rURL *url.URL, tryForEver, firstConnect bool) {
 		conn, err := net.DialTimeout("tcp", rURL.Host, DEFAULT_ROUTE_DIAL)
 		if err != nil {
 			attempts++
-			if s.shouldReportConnectErr(firstConnect, attempts) {
-				s.Errorf(connErrFmt, attempts, err)
-			} else {
-				s.Debugf(connErrFmt, attempts, err)
-			}
+			// if s.shouldReportConnectErr(firstConnect, attempts) {
+			// 	s.Errorf(connErrFmt, attempts, err)
+			// } else {
+			s.Debugf(connErrFmt, attempts, err)
+			// }
 			if !tryForEver {
 				if opts.Cluster.ConnectRetries <= 0 {
 					return
@@ -1964,20 +1997,22 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 	// TODO: which lock
 	isSusceptible := srv.susceptible
 
-	// On CONNECT: If we have a cluster name set, make sure it matches ours.
+	// If we have a cluster name set, make sure it matches ours.
+	c.Debugf("@W: CONNECT mismatch?: theirs: %+v vs ours: %+v", proto.Cluster, clusterName)
 	if proto.Cluster != clusterName {
 		// If we have a dynamic name we will do additional checks.
 		isDynamic := srv.isClusterNameDynamic()
 		remoteIsDynamic := proto.Dynamic
 
 		if isDynamic && !remoteIsDynamic {
-			c.Noticef("Updating the explicit name from the CONNECT message: ", proto.Cluster)
+			// c.Noticef("Updating the explicit name from the CONNECT message: ", proto.Cluster)
+			// Use the explicit name and mark this node as not susceptible
+			// to dynamic cluster name changes.
 			srv.setClusterName(proto.Cluster, false)
 			srv.removeAllRoutesExcept(c)
 		} else if !isDynamic && remoteIsDynamic {
 			// Do nothing since the remote may use this node's cluster name
 			// when sent an INFO/CONNECT message.
-
 			c.mu.Lock()
 			// Override the cluster name from this route with ours since should win.
 			c.clusterName = srv.info.Cluster
@@ -1985,19 +2020,15 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 		} else if isDynamic && remoteIsDynamic {
 			if isSusceptible && strings.Compare(clusterName, proto.Cluster) < 0 {
 				// We will take on their name since theirs is configured or higher then ours.
-				// c.Noticef("Updating to use dynamic name from the CONNECT message: ", proto.Cluster)
+				c.Debugf("@W: Updating to use dynamic name from the CONNECT message: %v", proto.Cluster)
 				srv.setClusterName(proto.Cluster, isSusceptible)
 				srv.removeAllRoutesExcept(c)
 			} else {
-				// c.Noticef("NOT Updating to use dynamic name from the CONNECT message: ", proto.Cluster)
+				c.Debugf("@W: NOT Updating to use dynamic name from the CONNECT message: %v", proto.Cluster)
 			}
-
-			// Dynamic names are always susceptible to changes.
-			// srv.susceptible = true
 		} else {
 			// We have an explicit cluster name and reject explicit cluster name changes.
 			errTxt := fmt.Sprintf("Rejecting connection, cluster name %q does not match %q", proto.Cluster, srv.info.Cluster)
-			// fmt.Println("======================", errTxt)
 			c.Errorf(errTxt)
 			c.sendErr(errTxt)
 			c.closeConnection(ClusterNameConflict)

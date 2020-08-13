@@ -446,6 +446,7 @@ func (s *Server) setClusterName(name string, susceptible bool) {
 	// susceptible to changes due to INFO/CONNECT messages
 	// from other nodes in the cluster.
 	s.susceptible = susceptible
+	s.routeInfo.Dynamic = susceptible
 
 	// Regenerate the info byte array
 	s.generateRouteInfoJSON()
@@ -467,8 +468,8 @@ func (s *Server) setClusterName(name string, susceptible bool) {
 	if resetCh != nil {
 		resetCh <- struct{}{}
 	}
-	s.Noticef("%v : Cluster name updated to %s || dynamic? %v", s.opts.ServerName, name, s.isClusterNameDynamic())
-
+	s.Debugf("%v : Cluster name updated to %s || dynamic? %v susceptible? %v", s.opts.ServerName, name, s.isClusterNameDynamic(), s.susceptible)
+	s.Noticef("Cluster name updated to %s", name)
 }
 
 // Return whether the cluster name is dynamic.
