@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nuid"
 )
 
 // FlagSnapshot captures the server options as specified by CLI flags at
@@ -328,7 +327,7 @@ func (c *clusterOption) Apply(s *Server) {
 	// Check whether the cluster name has been removed or changed as that could affect a cluster membership.
 	switch {
 	case c.oldValue.Name != "" && c.newValue.Name == "":
-		s.setClusterName(nuid.Next(), true)
+		s.setClusterName(s.defaultClusterName, true)
 		c.nameChanged = true
 	case c.newValue.Name != "" && c.oldValue.Name != c.newValue.Name:
 		// Use the new explicit cluster name from the config.

@@ -635,20 +635,12 @@ func TestClusterNameDynamicNegotiation(t *testing.T) {
 	conf := createConfFile(t, []byte(`
 		listen: 127.0.0.1:-1
 		cluster {listen: 127.0.0.1:5244}
+                server_name: "SEED_0"
 	`))
 	defer os.Remove(conf)
 
 	seed, _ := RunServerWithConfig(conf)
 	defer seed.Shutdown()
-
-	oconf := createConfFile(t, []byte(`
-		listen: 127.0.0.1:-1
-		cluster {
-			listen: 127.0.0.1:-1
-			routes = [nats-route://127.0.0.1:5244]
-		}
-	`))
-	defer os.Remove(oconf)
 
 	// Create a random number of additional servers, up to 20.
 	numServers := rand.Intn(20) + 1
@@ -656,13 +648,35 @@ func TestClusterNameDynamicNegotiation(t *testing.T) {
 	servers = append(servers, seed)
 
 	for i := 0; i < numServers; i++ {
+		oconf := createConfFile(t, []byte(`
+		listen: 127.0.0.1:-1
+		cluster {
+			listen: 127.0.0.1:-1
+			routes = [nats-route://127.0.0.1:5244]
+		}
+	`+ fmt.Sprintf("\nserver_name: 'NODE_%d'\n", i)))
+		defer os.Remove(oconf)
+
 		s, _ := RunServerWithConfig(oconf)
 		defer s.Shutdown()
+		time.Sleep(2*time.Second)
 		servers = append(servers, s)
 	}
 
 	// If this passes we should have all the same name.
-	checkClusterFormed(t, servers...)
+	expectedNumRoutes := len(servers) - 1
+	start := time.Now()
+	checkFor(t, 20*time.Second, 100*time.Millisecond, func() error {
+		for _, s := range servers {
+			numRoutes := s.NumRoutes()
+			fmt.Println("=================", s.ID(), numRoutes)
+			if numRoutes != expectedNumRoutes {
+				return fmt.Errorf("Expected %d routes for server %q, got %d", expectedNumRoutes, s.ID(), numRoutes)
+			}
+		}
+		return nil
+	})
+	fmt.Println("IT TOOK: ", time.Since(start))
 
 	clusterName := seed.ClusterName()
 	for _, s := range servers {

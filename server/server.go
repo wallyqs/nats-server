@@ -222,6 +222,10 @@ type Server struct {
 	// susceptible is to mark whether this node is susceptible
 	// to dynamic cluster name INFO/CONNECT proto updates.
 	susceptible bool
+
+	// defaultClusterName is the default cluster name used
+	// in case dynamic clustering name is used.
+	defaultClusterName string
 }
 
 // Make sure all are 64bits for atomic use
@@ -305,6 +309,7 @@ func NewServer(opts *Options) (*Server, error) {
 		httpBasePath: httpBasePath,
 		eventIds:     nuid.New(),
 		susceptible:  opts.Cluster.Name == "",
+		defaultClusterName: nuid.Next(),
 	}
 
 	// Trusted root operator keys.
@@ -330,10 +335,13 @@ func NewServer(opts *Options) (*Server, error) {
 		return nil, err
 	}
 
-	// If we have a cluster definition but do not have a cluster name, create one.
+	// If we have a cluster definition but do not have a cluster name,
+	// use the default dynamic cluster name for the node.
 	if opts.Cluster.Port != 0 && opts.Cluster.Name == "" {
-		s.info.Cluster = nuid.Next()
+		s.info.Cluster = s.defaultClusterName
+		s.susceptible = true
 	}
+	fmt.Println(">>>>>>>>>>>>>>>>", opts.ServerName, s.defaultClusterName, "<<<<<<<<<<<<<<<<<")
 
 	// This is normally done in the AcceptLoop, once the
 	// listener has been created (possibly with random port),
@@ -460,7 +468,7 @@ func (s *Server) setClusterName(name string, susceptible bool) {
 		}
 		c.mu.Unlock()
 	}
-
+	nroutes := len(s.routes)
 	s.mu.Unlock()
 	for _, l := range leafs {
 		l.closeConnection(ClusterNameConflict)
@@ -468,7 +476,10 @@ func (s *Server) setClusterName(name string, susceptible bool) {
 	if resetCh != nil {
 		resetCh <- struct{}{}
 	}
-	s.Debugf("%v : Cluster name updated to %s || dynamic? %v susceptible? %v", s.opts.ServerName, name, s.isClusterNameDynamic(), s.susceptible)
+	
+	msg := fmt.Sprintf("%v || %v : ROUTES: %v :: Cluster name updated to %s || dynamic? %v susceptible? %v", s.opts.ServerName, s.ID(), nroutes, name, s.isClusterNameDynamic(), s.susceptible)
+	fmt.Println(msg)
+	s.Debugf(msg)
 	s.Noticef("Cluster name updated to %s", name)
 }
 

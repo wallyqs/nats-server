@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nuid"
 )
 
 // Type of client connection.
@@ -1393,6 +1392,7 @@ func (c *client) traceOp(format, op string, arg []byte) {
 
 // Process the information messages from Clients and other Routes.
 func (c *client) processInfo(arg []byte) error {
+	fmt.Println(c.srv.opts.ServerName, "<-- INFO --", string(arg))
 	info := Info{}
 	if err := json.Unmarshal(arg, &info); err != nil {
 		return err
@@ -1475,6 +1475,7 @@ func computeRTT(start time.Time) time.Duration {
 
 // processConnect will process a client connect op.
 func (c *client) processConnect(arg []byte) error {
+	fmt.Println(c.srv.opts.ServerName, "-- CONNECT ---", string(arg))
 	supportsHeaders := c.srv.supportsHeaders()
 	c.mu.Lock()
 	// If we can't stop the timer because the callback is in progress...
@@ -4124,58 +4125,6 @@ func (c *client) closeConnection(reason ClosedState) {
 			if prev := acc.removeClient(c); prev == 1 && srv != nil {
 				srv.decActiveAccounts()
 			}
-		}
-
-		// Check whether we do not have any other routes that are not using explicit names,
-		// since in that case this node should go back to using a dynamic cluster name
-		// that will be negotiated among the remaining members of the cluster.
-		isDynamic := srv.isClusterNameDynamic()
-		isRoute := kind == ROUTER
-		// myClusterName := srv.opts.Cluster.Name
-		// isSolicited := routeClusterName == ""
-		// isSusceptible := srv.susceptible
-
-		shouldUpdateClusterName := func() bool {
-			var _routes [32]*client
-			routes := _routes[:0]
-
-			srv.mu.Lock()
-			for _, route := range srv.routes {
-				routes = append(routes, route)
-			}
-			srv.mu.Unlock()
-
-			// if isSolicited {
-			// 	c.Noticef("CLOSING SOLICITED ROUTE: %v ======| remote cluster name: %+v || dynamic remote: %+v || dynamic self: %+v || routes: %+v\n",
-			// 		myClusterName, routeClusterName, routeClusterDynamic, isDynamic, routes)
-			// } else {
-			// 	c.Noticef("CLOSING ROUTE: %v ======| remote cluster name: %+v || dynamic remote: %+v || dynamic self: %+v || routes: %+v\n",
-			// 		myClusterName, routeClusterName, routeClusterDynamic, isDynamic, routes)
-			// }
-
-			// Check whether there no more routes, if so go back to use dynamic cluster name.
-			if isDynamic && len(routes) == 0 {
-				// c.Debugf("<><><><><><><><>><><><<>><>< okokokok")
-				return true
-			}
-			// for _, route := range routes {				
-			// 	// If another member of the cluster is using the same cluster name then leave as is.
-			// 	if route.clusterName == routeClusterName {
-			// 		// c.Noticef("FOUND OTHER MEMBERS ROUTE: ======> %+v || %+v\n", route.clusterName, route.clusterDynamic)
-			// 		return false
-			// 	}
-			// 	c.Noticef("ROUTE: ======> %+v || %+v\n", route.clusterName, route.clusterDynamic)
-			// }
-
-			// Did not find any other route, with the same name.
-			// so should likely go back to cluster mode.
-			// TODO: Only if we were not susceptible to changes?
-			return false
-		}
-
-		if isRoute && shouldUpdateClusterName() {
-			// c.Noticef("----------------------------------------------------SHOULD GO BACK TO DYNAMIC CLUSTER MODE!!!!!")
-			srv.setClusterName(nuid.Next(), true)
 		}
 	}
 

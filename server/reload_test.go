@@ -2252,6 +2252,8 @@ func TestConfigLeafnodeClusterMembershipReload(t *testing.T) {
 		t.Fatal("Expected connection to node B to receive messages.")
 	}
 
+	fmt.Println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+
 	// [B] stops soliciting routes from [A] and goes back to dynamic.
 	// This will cause another leafnode reconnection.
 	reloadUpdateConfig(t, sB, confB, `
