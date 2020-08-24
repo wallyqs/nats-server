@@ -447,6 +447,7 @@ func (s *Server) setClusterName(name string, susceptible bool) {
 		// can't hold the lock as go routine reading it may be waiting for lock as well
 		resetCh = s.sys.resetCh
 	}
+	s.Debugf("---- UPDATE: FROM: %s %s -> %s", s.info.Cluster, s.routeInfo.Cluster, name)
 	s.info.Cluster = name
 	s.routeInfo.Cluster = name
 
