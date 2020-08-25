@@ -601,6 +601,23 @@ func (c *client) processRouteInfo(info *Info) {
 				}
 			}  else {
 				fmt.Println(c.srv.opts.ServerName, "<<<<<<< INFO BOTH DYNAMIC. THEY MAY USE OURS! DO NOTHING!", isDynamic, "they are:", info.Dynamic, clusterName, "theirs:", info.Cluster, "susceptible", s.susceptible)
+
+				// They may use ours if this is the last node that had that name!
+				if !s.nonDynamicClusterNameRoutePresent(info.ID) {
+					// Use the correct name and recluster with that name.
+					if strings.Compare(s.defaultClusterName, info.Cluster) < 0 {
+						// c.Debugf("@W: Use theirs!")
+						fmt.Println("@W: Use theirs!")
+						s.setClusterName(info.Cluster, true)
+						s.removeAllRoutesExcept(c)
+					} else {
+						fmt.Println("@W: Use our default name and advertise to others!")
+						s.setClusterName(s.defaultClusterName, true)
+						s.removeAllRoutesExcept(c)
+					}
+				} else {
+					fmt.Println("nothing matched!!!!!!!!!!!!!")
+				}
 			}
 
 			c.mu.Lock()
