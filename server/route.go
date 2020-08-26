@@ -568,15 +568,17 @@ func (c *client) processRouteInfo(info *Info) {
 			wasNotDynamic := routeClusterName != "" && !routeClusterNameIsDynamic && info.Dynamic
 			routeClusterNameChangedWhileConnected := routeClusterName != info.Cluster
 
-			// Ignore the message unless we are susceptible to dynamic cluster updates
-			// and their dynamic cluster name is 'bigger' that what we have. If we are not susceptible,
-			// it means that there is an explicit name in the cluster and eventually nodes
-			// with the explicit cluster name will make this node use the explicit cluster name via INFO messages.
-			if isSusceptible && strings.Compare(clusterName, info.Cluster) < 0 {
-				fmt.Println(c.srv.opts.ServerName, "<<<<<<< INFO BOTH DYNAMIC. CHOOSE THEIRS!", isDynamic, "they are:", info.Dynamic, clusterName, "theirs:", info.Cluster)
-				// Use their name and leave only this connection.
-				s.setClusterName(info.Cluster, true)
-				s.removeAllRoutesExcept(c)
+			if isSusceptible {
+				// Ignore the message unless we are susceptible to dynamic cluster updates and
+				// their dynamic cluster name is 'bigger' that what we have. If we are not susceptible,
+				// it means that there is an explicit name in the cluster and eventually nodes with the
+				// explicit cluster name will make this node use the explicit cluster name via INFO messages.
+				if strings.Compare(clusterName, info.Cluster) < 0 {
+					fmt.Println(c.srv.opts.ServerName, "<<<<<<< INFO BOTH DYNAMIC. CHOOSE THEIRS!", isDynamic, "they are:", info.Dynamic, clusterName, "theirs:", info.Cluster)
+					// Use their name and leave only this connection.
+					s.setClusterName(info.Cluster, true)
+					s.removeAllRoutesExcept(c)
+				}
 			} else if wasNotDynamic && routeClusterNameChangedWhileConnected {
 				// If the route moved from being static to dynamic, thus also changing its name,
 				// then only use their name if no other static nodes exist and it beats our default unique one.
@@ -603,21 +605,21 @@ func (c *client) processRouteInfo(info *Info) {
 				fmt.Println(c.srv.opts.ServerName, "<<<<<<< INFO BOTH DYNAMIC. THEY MAY USE OURS! DO NOTHING!", isDynamic, "they are:", info.Dynamic, clusterName, "theirs:", info.Cluster, "susceptible", s.susceptible)
 
 				// They may use ours if this is the last node that had that name!
-				if !s.nonDynamicClusterNameRoutePresent(info.ID) {
-					// Use the correct name and recluster with that name.
-					if strings.Compare(s.defaultClusterName, info.Cluster) < 0 {
-						// c.Debugf("@W: Use theirs!")
-						fmt.Println("@W: Use theirs!")
-						s.setClusterName(info.Cluster, true)
-						s.removeAllRoutesExcept(c)
-					} else {
-						fmt.Println("@W: Use our default name and advertise to others!")
-						s.setClusterName(s.defaultClusterName, true)
-						s.removeAllRoutesExcept(c)
-					}
-				} else {
-					fmt.Println("nothing matched!!!!!!!!!!!!!")
-				}
+				// if !s.nonDynamicClusterNameRoutePresent(info.ID) {
+				// 	// Use the correct name and recluster with that name.
+				// 	if strings.Compare(s.defaultClusterName, info.Cluster) < 0 {
+				// 		// c.Debugf("@W: Use theirs!")
+				// 		fmt.Println("@W: Use theirs!")
+				// 		s.setClusterName(info.Cluster, true)
+				// 		s.removeAllRoutesExcept(c)
+				// 	} else {
+				// 		fmt.Println("@W: Use our default name and advertise to others!")
+				// 		s.setClusterName(s.defaultClusterName, true)
+				// 		s.removeAllRoutesExcept(c)
+				// 	}
+				// } else {
+				// 	fmt.Println("nothing matched!!!!!!!!!!!!!")
+				// }
 			}
 
 			c.mu.Lock()
