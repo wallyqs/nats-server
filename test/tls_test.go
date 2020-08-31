@@ -1253,22 +1253,74 @@ func TestTLSClientAuthWithRDNSequence(t *testing.T) {
 			nil,
 			nil,
 		},
+		// {
+		// 	"connect with tls and RDN sequence does not match",
+		// 	`
+		// 		port: -1
+		// 		%s
+
+		// 		authorization {
+		// 		  users = [
+		// 		    { user = "CN=localhost,OU=NATS,O=NATS,L=Los Angeles,ST=California,C=US,DC=foo1,DC=foo2" }
+		// 		  ]
+		// 		}
+		// 	`,
+		// 	// C=US/ST=California/L=Los Angeles/O=NATS/OU=NATS/CN=localhost/DC=foo3/DC=foo4
+		// 	//
+		// 	nats.ClientCert("./configs/certs/rdns/client-c.pem", "./configs/certs/rdns/client-c.key"),
+		// 	errors.New("nats: Authorization Violation"),
+		// 	nil,
+		// },
 		{
-			"connect with tls and RDN sequence does not match",
+			"connect with tls and RDN sequence ordering should not matter",
 			`
 				port: -1
 				%s
 
 				authorization {
 				  users = [
-				    { user = "CN=localhost,OU=NATS,O=NATS,L=Los Angeles,ST=California,C=US,DC=foo1,DC=foo2" }
+				    { user = "CN=*.example.com,OU=NATS,O=NATS,L=Los Angeles,ST=CA,C=US" }
 				  ]
 				}
 			`,
-			// C=US/ST=California/L=Los Angeles/O=NATS/OU=NATS/CN=localhost/DC=foo3/DC=foo4
+			nats.ClientCert("./configs/certs/rdns/client-a.pem", "./configs/certs/rdns/client-a.key"),
+			nil,
+			nil,
+		},
+		{
+			"connect with tls and RDN sequence with space after comma not should matter",
+			`
+				port: -1
+				%s
+
+				authorization {
+				  users = [
+				    { user = "" }
+				  ]
+				}
+			`,
+			// C=US/ST=California/L=Los Angeles/O=NATS/OU=NATS/CN=localhost/DC=foo1/DC=foo2
 			//
-			nats.ClientCert("./configs/certs/rdns/client-c.pem", "./configs/certs/rdns/client-c.key"),
-			errors.New("nats: Authorization Violation"),
+			nats.ClientCert("./configs/certs/rdns/client-a.pem", "./configs/certs/rdns/client-a.key"),
+			nil,
+			nil,
+		},
+		{
+			"connect with tls and RDN sequence ordering nor spaces should matter",
+			`
+				port: -1
+				%s
+
+				authorization {
+				  users = [
+				    { user = "CN=localhost, O=NATS, OU=NATS, L=Los Angeles, ST=California, C=US, DC=foo1, DC=foo2" }
+				  ]
+				}
+			`,
+			// C=US/ST=California/L=Los Angeles/O=NATS/OU=NATS/CN=localhost/DC=foo1/DC=foo2
+			//
+			nats.ClientCert("./configs/certs/rdns/client-a.pem", "./configs/certs/rdns/client-a.key"),
+			nil,
 			nil,
 		},
 	} {
@@ -1290,6 +1342,112 @@ func TestTLSClientAuthWithRDNSequence(t *testing.T) {
 			nc, err := nats.Connect(fmt.Sprintf("tls://localhost:%d", opts.Port),
 				test.certs,
 				nats.RootCAs("./configs/certs/rdns/ca.pem"),
+			)
+			if test.err == nil && err != nil {
+				t.Errorf("Expected to connect, got %v", err)
+			} else if test.err != nil && err == nil {
+				t.Errorf("Expected error on connect")
+			} else if test.err != nil && err != nil {
+				// Error on connect was expected
+				if test.err.Error() != err.Error() {
+					t.Errorf("Expected error %s, got: %s", test.err, err)
+				}
+				return
+			}
+			defer nc.Close()
+
+			nc.Subscribe("ping", func(m *nats.Msg) {
+				m.Respond([]byte("pong"))
+			})
+			nc.Flush()
+
+			_, err = nc.Request("ping", []byte("ping"), 250*time.Millisecond)
+			if test.rerr != nil && err == nil {
+				t.Errorf("Expected error getting response")
+			} else if test.rerr == nil && err != nil {
+				t.Errorf("Expected response")
+			}
+		})
+	}
+}
+
+func TestTLSClientAuth2WithRDNSequence(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		config string
+		certs  nats.Option
+		err    error
+		rerr   error
+	}{
+		// {
+		// 	"connect with tls using full RDN sequence",
+		// 	`
+		// 		port: -1
+		// 		%s
+
+		// 		authorization {
+		// 		  users = [
+		// 		    { user = "CN=localhost,OU=NATS,O=NATS,L=Los Angeles,ST=California,C=US,DC=foo1,DC=foo2" }
+		// 		  ]
+		// 		}
+		// 	`,
+		// 	nats.ClientCert("./configs/certs/rdn/client-A.pem", "./configs/certs/rdn/client-A.key"),
+		// 	nil,
+		// 	nil,
+		// },
+		// {
+		// 	"connect with tls using full RDN sequence",
+		// 	`
+		// 		port: -1
+		// 		%s
+
+		// 		authorization {
+		// 		  users = [
+		// 		    { user = "CN=*.example.com,OU=NATS,O=NATS,L=Los Angeles,ST=CA,C=US" }
+		// 		  ]
+		// 		}
+		// 	`,
+		// 	nats.ClientCert("./configs/certs/rdn/client-B.pem", "./configs/certs/rdn/client-B.key"),
+		// 	nil,
+		// 	nil,
+		// },
+		{
+			"connect with tls using full RDN sequence",
+			`
+				port: -1
+debug: true
+trace: true
+				%s
+
+				authorization {
+				  users = [
+				    { user = "CN=*.example.com,O=NATS,OU=NATS,L=Los Angeles,ST=CA,C=US" }
+				  ]
+				}
+			`,
+			nats.ClientCert("./configs/certs/rdn/client-C.pem", "./configs/certs/rdn/client-C.key"),
+			nil,
+			nil,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			content := fmt.Sprintf(test.config, `
+				tls {
+					cert_file: "configs/certs/rdn/server.pem"
+					key_file: "configs/certs/rdn/server.key"
+					ca_file: "configs/certs/rdn/ca.pem"
+					timeout: 5
+					verify_and_map: true
+				}
+			`)
+			conf := createConfFile(t, []byte(content))
+			defer os.Remove(conf)
+			s, opts := RunServerWithConfig(conf)
+			defer s.Shutdown()
+
+			nc, err := nats.Connect(fmt.Sprintf("tls://localhost:%d", opts.Port),
+				test.certs,
+				nats.RootCAs("./configs/certs/rdn/ca.pem"),
 			)
 			if test.err == nil && err != nil {
 				t.Errorf("Expected to connect, got %v", err)
