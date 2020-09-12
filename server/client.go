@@ -1506,17 +1506,38 @@ func (c *client) processConnect(arg []byte) error {
 	account := c.opts.Account
 	accountNew := c.opts.AccountNew
 
-	ncs := c.String()
-	if c.opts.Name != "" {
-		ncs = fmt.Sprintf("%s - name: %s", ncs, c.opts.Name)
+	// ncs := c.String()
+	// if c.opts.Version != "" {
+	// 	ncs = fmt.Sprintf("%s - version:%s", ncs, c.opts.Version)
+	// }
+	// if c.opts.Name != "" {
+	// 	ncs = fmt.Sprintf("%s - name:%s", ncs, c.opts.Name)
+	// }
+	// if c.opts.Lang != "" {
+	// 	ncs = fmt.Sprintf("%s - lang:%-s", ncs, c.opts.Lang)
+	// }
+	// c.ncs.Store(ncs)
+	if c.kind == CLIENT {
+		// v1.11.0-NATS Sample Publisher-Lang:go
+		var ncs string
+		if c.opts.Name != "" {
+			ncs = c.opts.Name
+		}
+		if c.opts.Lang != "" {
+			if c.opts.Name == _EMPTY_ {
+				ncs = c.opts.Lang
+			} else {
+				ncs = fmt.Sprintf("%s/%s", ncs, c.opts.Lang)
+			}
+		}
+		if c.opts.Version != "" {
+			if c.opts.Name == _EMPTY_ && c.opts.Lang == _EMPTY_ {
+				ncs = c.opts.Version
+			}
+			ncs = fmt.Sprintf("%s/%s", ncs, fmt.Sprintf("v%s", c.opts.Version))
+		}
+		c.ncs.Store(fmt.Sprintf("%s - %q", c.String(), ncs))
 	}
-	if c.opts.Lang != "" {
-		ncs = fmt.Sprintf("%s - lang: %s", ncs, c.opts.Lang)
-	}
-	if c.opts.Version != "" {
-		ncs = fmt.Sprintf("%s - version: %s", ncs, c.opts.Version)
-	}
-	c.ncs.Store(ncs)
 
 	// If websocket client and JWT not in the CONNECT, use the cookie JWT (possibly empty).
 	if ws := c.ws; ws != nil && c.opts.JWT == "" {
