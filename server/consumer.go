@@ -2171,7 +2171,16 @@ func (mset *Stream) deliveryFormsCycle(deliverySubject string) bool {
 
 // This is same as check for delivery cycle.
 func (mset *Stream) validSubject(partitionSubject string) bool {
-	return mset.deliveryFormsCycle(partitionSubject)
+	mset.mu.Lock()
+	defer mset.mu.Unlock()
+
+	for _, subject := range mset.config.Subjects {
+		if subjectIsSubsetMatch(partitionSubject, subject) || subjectIsSubsetMatch(subject, partitionSubject) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // SetInActiveDeleteThreshold sets the delete threshold for how long to wait
