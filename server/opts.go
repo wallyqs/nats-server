@@ -215,6 +215,7 @@ type Options struct {
 	TLSCaCert             string        `json:"-"`
 	TLSConfig             *tls.Config   `json:"-"`
 	AllowNonTLS           bool          `json:"-"`
+	AllowMatchingRDNs     bool          `json:"-"`
 	WriteDeadline         time.Duration `json:"-"`
 	MaxClosedClients      int           `json:"-"`
 	LameDuckDuration      time.Duration `json:"-"`
@@ -403,6 +404,7 @@ type TLSConfigOpts struct {
 	Timeout           float64
 	Ciphers           []uint16
 	CurvePreferences  []tls.CurveID
+	AllowMatchingRDNs bool
 }
 
 var tlsUsage = `
@@ -760,6 +762,7 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		}
 		o.TLSTimeout = tc.Timeout
 		o.TLSMap = tc.Map
+		o.AllowMatchingRDNs = tc.AllowMatchingRDNs
 
 	case "allow_non_tls":
 		o.AllowNonTLS = v.(bool)
@@ -3272,6 +3275,12 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 				tc.Verify = verify
 			}
 			tc.TLSCheckKnownURLs = verify
+		case "allow_matching_rdns":
+			v, ok := mv.(bool)
+			if !ok {
+				return nil, &configErr{tk, "error parsing tls config, expected 'allow_matching_rdns' to be a boolean"}
+			}
+			tc.AllowMatchingRDNs = v
 		case "cipher_suites":
 			ra := mv.([]interface{})
 			if len(ra) == 0 {

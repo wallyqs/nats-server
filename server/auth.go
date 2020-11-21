@@ -451,6 +451,13 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 						user = usr
 						return usr.Username, true
 					}
+
+					// In case the RDNs may have been reordered, check the individual RDNs
+					// instead if allowed via config.
+					if opts.AllowMatchingRDNs && inputDN.RDNsMatch(certDN) {
+						user = usr
+						return usr.Username, true
+					}
 				}
 				return "", false
 			})
