@@ -1843,6 +1843,8 @@ type export struct {
 	rt   ServiceRespType
 	lat  *serviceLatency
 	rthr time.Duration
+	subjects []string
+	streamName string
 }
 
 type importStream struct {
@@ -1851,6 +1853,7 @@ type importStream struct {
 	sub string
 	to  string
 	pre string
+	streamName string
 }
 
 type importService struct {
@@ -2180,7 +2183,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 			}
 			accounts = append(accounts, ta)
 		}
-		if err := stream.acc.AddStreamExport(stream.sub, accounts); err != nil {
+		if err := stream.acc.AddStreamExport(stream.sub, accounts, stream.streamName); err != nil {
 			msg := fmt.Sprintf("Error adding stream export %q: %v", stream.sub, err)
 			*errors = append(*errors, &configErr{tk, msg})
 			continue
@@ -2235,12 +2238,16 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 			*errors = append(*errors, &configErr{tk, msg})
 			continue
 		}
+		fmt.Println(stream.an, "------", ta, "--------", stream.streamName, ".....", stream.pre, "\\\\\\", stream.to)
 		if stream.pre != "" {
 			if err := stream.acc.AddStreamImport(ta, stream.sub, stream.pre); err != nil {
 				msg := fmt.Sprintf("Error adding stream import %q: %v", stream.sub, err)
 				*errors = append(*errors, &configErr{tk, msg})
 				continue
 			}
+		} else if stream.streamName != "" {
+			// A JetStream stream being imported...
+			fmt.Println("STREAM being imported")
 		} else {
 			if err := stream.acc.AddMappedStreamImport(ta, stream.sub, stream.to); err != nil {
 				msg := fmt.Sprintf("Error adding stream import %q: %v", stream.sub, err)
@@ -2353,11 +2360,11 @@ func parseAccountImports(v interface{}, acc *Account, errors, warnings *[]error)
 }
 
 // Helper to parse an embedded account description for imported services or streams.
-func parseAccount(v map[string]interface{}, errors, warnings *[]error) (string, string, error) {
+func parseAccount(v map[string]interface{}, errors, warnings *[]error) (string, string, string, error) {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
-	var accountName, subject string
+	var accountName, subject, streamName string
 	for mk, mv := range v {
 		tk, mv := unwrapValue(mv, &lt)
 		switch strings.ToLower(mk) {
@@ -2365,6 +2372,8 @@ func parseAccount(v map[string]interface{}, errors, warnings *[]error) (string, 
 			accountName = mv.(string)
 		case "subject":
 			subject = mv.(string)
+		case "name":
+			streamName = mv.(string)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -2377,7 +2386,7 @@ func parseAccount(v map[string]interface{}, errors, warnings *[]error) (string, 
 			}
 		}
 	}
-	return accountName, subject, nil
+	return accountName, subject, streamName, nil
 }
 
 // Parse an export stream or service.
@@ -2399,6 +2408,7 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 		thresh     time.Duration
 		latToken   token
 		lt         token
+		subjects   []string
 	)
 	defer convertPanicToErrorList(&lt, errors)
 
@@ -2526,6 +2536,8 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 				_, mv := unwrapValue(iv, &lt)
 				accounts = append(accounts, mv.(string))
 			}
+			// NOTE: This should be done at the end?
+			// Otherwise accounts can be public accidentally due to order of map iteration.
 			if curStream != nil {
 				curStream.accs = accounts
 			} else if curService != nil {
@@ -2539,6 +2551,8 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 				*errors = append(*errors, err)
 				continue
 			}
+			// NOTE: This should be done at the end?
+			// Otherwise latency can be omitted?
 			if curStream != nil {
 				err = &configErr{tk, "Detected latency directive on non-service"}
 				*errors = append(*errors, err)
@@ -2546,6 +2560,12 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 			}
 			if curService != nil {
 				curService.lat = lat
+			}
+		case "subjects":
+			// Only for streams
+			for _, iv := range mv.([]interface{}) {
+				_, mv := unwrapValue(iv, &lt)
+				subjects = append(subjects, mv.(string))
 			}
 		default:
 			if !tk.IsUsedVariable() {
@@ -2558,6 +2578,9 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 				*errors = append(*errors, err)
 			}
 		}
+	}
+	if curStream != nil {
+		// continue
 	}
 	return curStream, curService, nil
 }
@@ -2675,17 +2698,21 @@ func parseImportStreamOrService(v interface{}, errors, warnings *[]error) (*impo
 				continue
 			}
 			// Make sure this is a map with account and subject
-			accountName, subject, err := parseAccount(ac, errors, warnings)
+			accountName, subject, streamName, err := parseAccount(ac, errors, warnings)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
 			}
-			if accountName == "" || subject == "" {
+			if streamName == "" && (accountName == "" || subject == "") {
 				err := &configErr{tk, "Expect an account name and a subject"}
 				*errors = append(*errors, err)
 				continue
 			}
-			curStream = &importStream{an: accountName, sub: subject}
+			curStream = &importStream{
+				an: accountName,
+				sub: subject,
+				streamName: streamName,
+			}
 			if to != "" {
 				curStream.to = to
 			}
@@ -2705,7 +2732,7 @@ func parseImportStreamOrService(v interface{}, errors, warnings *[]error) (*impo
 				continue
 			}
 			// Make sure this is a map with account and subject
-			accountName, subject, err := parseAccount(ac, errors, warnings)
+			accountName, subject, _, err := parseAccount(ac, errors, warnings)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue

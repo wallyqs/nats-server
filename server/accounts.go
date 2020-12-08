@@ -2281,7 +2281,7 @@ var IsPublicExport = []*Account(nil)
 
 // AddStreamExport will add an export to the account. If accounts is nil
 // it will signify a public export, meaning anyone can impoort.
-func (a *Account) AddStreamExport(subject string, accounts []*Account) error {
+func (a *Account) AddStreamExport(subject string, accounts []*Account, streamName string) error {
 	if a == nil {
 		return ErrMissingAccount
 	}
@@ -2882,7 +2882,7 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 		switch e.Type {
 		case jwt.Stream:
 			s.Debugf("Adding stream export %q for %s", e.Subject, a.Name)
-			if err := a.AddStreamExport(string(e.Subject), authAccounts(e.TokenReq)); err != nil {
+			if err := a.AddStreamExport(string(e.Subject), authAccounts(e.TokenReq), ""); err != nil {
 				s.Debugf("Error adding stream export to account [%s]: %v", a.Name, err.Error())
 			}
 		case jwt.Service:
