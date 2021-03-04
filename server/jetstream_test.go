@@ -9858,13 +9858,40 @@ func TestJetStreamPullConsumerMaxAckPending(t *testing.T) {
 				})
 			}
 
-			req = &JSApiConsumerGetNextRequest{Batch: maxAckPending}
+			// Make fetch request for a subset of messages, do not ack to leave them pending.
+			firstBatch := 10
+			req = &JSApiConsumerGetNextRequest{Batch: firstBatch}
+			jreq, _ = json.Marshal(req)
+			nc.PublishRequest(getSubj, sub.Subject, jreq)
+			checkSubPending(firstBatch)
+
+			// We hit the limit, double check we stayed there.
+			if nmsgs, _, _ := sub.Pending(); err != nil || nmsgs != firstBatch {
+				t.Fatalf("Too many messages received: %d vs %d", nmsgs, firstBatch)
+			}
+
+			// Already a number inflight so next batch request has to be for less than that.
+			req = &JSApiConsumerGetNextRequest{Batch: maxAckPending - firstBatch + 1}
+			jreq, _ = json.Marshal(req)
+			m, err = nc.Request(getSubj, jreq, time.Second)
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+
+			// Error expected since means that too many inflight as the result of the request.
+			if m.Header.Get("Status") != "409" {
+				t.Fatalf("Expected a 409 status code, got %q", m.Header.Get("Status"))
+			}
+
+			secondBatch := maxAckPending - firstBatch
+			req = &JSApiConsumerGetNextRequest{Batch: secondBatch}
 			jreq, _ = json.Marshal(req)
 			nc.PublishRequest(getSubj, sub.Subject, jreq)
 
+			// First batch still pending.
 			checkSubPending(maxAckPending)
-			// We hit the limit, double check we stayed there.
-			if nmsgs, _, _ := sub.Pending(); err != nil || nmsgs != maxAckPending {
+
+			if nmsgs, _, _ := sub.Pending(); err != nil || nmsgs > maxAckPending {
 				t.Fatalf("Too many messages received: %d vs %d", nmsgs, maxAckPending)
 			}
 		})
@@ -9939,6 +9966,8 @@ func TestJetStreamPullConsumerMaxAckPendingRedeliveries(t *testing.T) {
 					t.Fatalf("Unexpected error: %v", err)
 				}
 				sseq, dseq, dcount, _, pending := replyInfo(m.Reply)
+				t.Logf("%+v", m)
+
 				if sseq != expSeq {
 					t.Fatalf("Expected stream sequence of %d, got %d", expSeq, sseq)
 				}

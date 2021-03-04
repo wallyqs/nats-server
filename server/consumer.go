@@ -1677,7 +1677,8 @@ func (o *consumer) processNextMsgReq(_ *subscription, c *client, _, reply string
 		return
 	}
 
-	if o.maxp > 0 && batchSize > o.maxp {
+	// Check whether result of processing this batch request would mean too many unacked messages.
+	if o.maxp > 0 && len(o.pending)+batchSize > o.maxp {
 		sendErr(409, "Exceeded MaxAckPending")
 		return
 	}
