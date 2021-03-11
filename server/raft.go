@@ -1507,10 +1507,10 @@ func (n *raft) decodeAppendEntryResponse(msg []byte) *appendEntryResponse {
 
 // Called when a remove peer proposal has been forwarded
 func (n *raft) handleForwardedRemovePeerProposal(sub *subscription, c *client, _, reply string, msg []byte) {
-	n.debug("Received forwarded remove peer proposal: %q", msg)
+	n.warn("Received forwarded remove peer proposal: %q", msg)
 
 	if !n.Leader() {
-		n.debug("Ignoring forwarded peer removal proposal, not leader")
+		n.warn("Ignoring forwarded peer removal proposal, not leader")
 		return
 	}
 	if len(msg) != idLen {
@@ -1928,7 +1928,7 @@ func (n *raft) applyCommit(index uint64) error {
 			n.writePeerState(&peerState{n.peerNames(), n.csz})
 		case EntryRemovePeer:
 			oldPeer := string(e.Data)
-			n.debug("Removing peer %q", oldPeer)
+			n.debug("Removing peer %q (us: %v) %+v", oldPeer, n.id, n.peers)
 
 			// FIXME(dlc) - Check if this is us??
 			if _, ok := n.peers[oldPeer]; ok {
@@ -2047,7 +2047,12 @@ func (n *raft) runAsCandidate() {
 	n.Unlock()
 
 	// Send out our request for votes.
-	n.requestVote()
+	fmt.Println("JS enabled?...")
+	if n.s.JetStreamEnabled() {
+		n.requestVote()
+	} else {
+		fmt.Println("JS not enabled!!! not asking for votes...")
+	}
 
 	// We vote for ourselves.
 	votes := 1

@@ -2242,7 +2242,7 @@ func (s *Server) createClient(conn net.Conn) *client {
 	// Initialize
 	c.initClient()
 
-	c.Debugf("Client connection created")
+	// c.Debugf("Client connection created")
 
 	// Send our information.
 	// Need to be sent in place since writeLoop cannot be started until

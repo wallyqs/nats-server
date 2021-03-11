@@ -1909,6 +1909,7 @@ func (s *Server) jsLeaderServerRemoveRequest(sub *subscription, c *client, subje
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
+	s.Warnf(">>> Remove Request: %+v", req)
 
 	var found string
 	js.mu.RLock()

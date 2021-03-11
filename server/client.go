@@ -1450,7 +1450,7 @@ func (c *client) markConnAsClosed(reason ClosedState) {
 		if c.kind == ROUTER || c.kind == GATEWAY || c.kind == LEAF {
 			c.Noticef("%s connection closed: %s", c.typeString(), reason)
 		} else { // Client, System, Jetstream, and Account connections.
-			c.Debugf("%s connection closed: %s", c.typeString(), reason)
+			// c.Debugf("%s connection closed: %s", c.typeString(), reason)
 		}
 	}
 
@@ -2978,7 +2978,7 @@ func (c *client) deliverMsg(sub *subscription, subject, reply, mh, msg []byte, g
 			// still process the message in hand, otherwise
 			// unsubscribe and drop message on the floor.
 			if sub.nm == sub.max {
-				client.Debugf("Auto-unsubscribe limit of %d reached for sid '%s'", sub.max, string(sub.sid))
+		 		// client.Debugf("Auto-unsubscribe limit of %d reached for sid '%s'", sub.max, string(sub.sid))
 				// Due to defer, reverse the code order so that execution
 				// is consistent with other cases where we unsubscribe.
 				if shouldForward {
@@ -4233,7 +4233,7 @@ func (c *client) processPingTimer() {
 		return
 	}
 
-	c.Debugf("%s Ping Timer", c.typeString())
+	// c.Debugf("%s Ping Timer", c.typeString())
 
 	var sendPing bool
 
@@ -4251,9 +4251,9 @@ func (c *client) processPingTimer() {
 	// Do not delay PINGs for GATEWAY connections.
 	if c.kind != GATEWAY {
 		if delta := now.Sub(c.last); delta < pingInterval && !needRTT {
-			c.Debugf("Delaying PING due to client activity %v ago", delta.Round(time.Second))
+			c.Tracef("Delaying PING due to client activity %v ago", delta.Round(time.Second))
 		} else if delta := now.Sub(c.ping.last); delta < pingInterval && !needRTT {
-			c.Debugf("Delaying PING due to remote ping %v ago", delta.Round(time.Second))
+			c.Tracef("Delaying PING due to remote ping %v ago", delta.Round(time.Second))
 		} else {
 			sendPing = true
 		}

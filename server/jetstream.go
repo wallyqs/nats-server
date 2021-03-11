@@ -264,7 +264,7 @@ func (s *Server) setJetStreamDisabled() {
 
 func (s *Server) handleOutOfSpace(stream string) {
 	if s.JetStreamEnabled() {
-		s.Errorf("JetStream out of space, will be DISABLED")
+		s.Errorf("JetStream out of space, will be DISABLED (ouch!)")
 		go s.DisableJetStream()
 
 		adv := &JSServerOutOfSpaceAdvisory{
@@ -315,9 +315,21 @@ func (s *Server) DisableJetStream() error {
 					s.Warnf("JetStream timeout waiting for meta leader transfer")
 				}
 			}
+
 			// Once here we can forward our proposal to remove ourselves.
-			meta.ProposeRemovePeer(meta.ID())
-			time.Sleep(250 * time.Millisecond)
+			// s.Warnf("Going away...")
+			// meta.ProposeRemovePeer(meta.ID())
+			// time.Sleep(250 * time.Millisecond)
+
+			// Announce for 5 seconds that going away...
+			for i := 0; i < 10; i++ {
+				s.Warnf("Going away...")
+				err := meta.ProposeRemovePeer(meta.ID())
+				if err != nil {
+					s.Warnf("Error removing peer: %v :: %v", meta.ID(), err)
+				}
+				time.Sleep(250 * time.Millisecond)
+			}
 			meta.Delete()
 		}
 	}

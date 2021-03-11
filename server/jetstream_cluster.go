@@ -965,6 +965,7 @@ func (js *jetStream) remapStreamsLocked(peer string) {
 	// Grab our nodes.
 	// Need to search for this peer in our stream assignments for potential remapping.
 	for _, as := range cc.streams {
+		fmt.Printf("AS: %+v", as)
 		for _, sa := range as {
 			if sa.Group.isMember(peer) {
 				js.removePeerFromStream(sa, peer)
@@ -1167,7 +1168,7 @@ func (js *jetStream) createRaftGroup(rg *raftGroup, storage StorageType) error {
 		return nil
 	}
 
-	s.Debugf("JetStream cluster creating raft group:%+v", rg)
+	s.Debugf("JetStream cluster creating raft group: %+v", rg)
 
 	sysAcc := s.SystemAccount()
 	if sysAcc == nil {
@@ -1593,13 +1594,16 @@ func (js *jetStream) checkPeers(rg *raftGroup) {
 		return
 	}
 	for _, peer := range rg.node.Peers() {
+		fmt.Printf("Peers %+v\n", peer)
 		if !rg.isMember(peer.ID) {
+			fmt.Printf("ok removing peerID %v\n", peer.ID)
 			rg.node.ProposeRemovePeer(peer.ID)
 		}
 	}
 }
 
 func (js *jetStream) processStreamLeaderChange(mset *stream, isLeader bool) {
+	fmt.Printf("stream leader change!!!!!! %v\n", isLeader)
 	if mset == nil {
 		return
 	}

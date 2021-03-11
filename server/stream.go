@@ -1112,7 +1112,7 @@ func (mset *stream) processInboundMirrorMsg(m *inMsg) {
 			s.Warnf("Got error processing JetStream mirror msg: %v", err)
 		}
 		if strings.Contains(err.Error(), "no space left") {
-			s.Errorf("JetStream out of space, will be DISABLED")
+			s.Errorf("JetStream out of space, will be DISABLED (mirror)")
 			s.DisableJetStream()
 		}
 	}
@@ -1570,7 +1570,7 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) {
 			s.Warnf("JetStream got an error processing inbound source msg: %v", err)
 		}
 		if strings.Contains(err.Error(), "no space left") {
-			s.Errorf("JetStream out of space, will be DISABLED")
+			s.Errorf("JetStream out of space, will be DISABLED (inbound msg)")
 			s.DisableJetStream()
 		}
 	}
