@@ -4516,11 +4516,12 @@ func TestJWTAccountOps(t *testing.T) {
 			})
 			// connect so there is a reason to cache the request and so disconnect can be observed
 			ncA := natsConnect(t, srv.ClientURL(), nats.UserCredentials(aCreds1), nats.NoReconnect(),
-				nats.DisconnectErrHandler(func(conn *nats.Conn, err error) {
-					if lErr := conn.LastError(); strings.Contains(lErr.Error(), "Account Authentication Expired") {
+				nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+					if err != nil && strings.Contains(err.Error(), "account authentication expired") {
 						disconnectErrChan <- struct{}{}
 					}
-				}))
+				}),
+			)
 			defer ncA.Close()
 			resp, err := nc.Request(accListReqSubj, nil, time.Second)
 			require_NoError(t, err)
