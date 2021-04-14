@@ -6218,7 +6218,7 @@ func createJetStreamCluster(t *testing.T, tmpl string, clusterName string, numSe
 		storeDir := createDir(t, JetStreamStoreDir)
 		sn := fmt.Sprintf("S-%d", cp-startClusterPort+1)
 		conf := fmt.Sprintf(tmpl, sn, storeDir, clusterName, cp, routeConfig)
-		s, o := RunServerWithConfig(createConfFile(t, []byte(conf)))
+		s, o := RunServerWithLameDuckConfig(createConfFile(t, []byte(conf)))
 		c.servers = append(c.servers, s)
 		c.opts = append(c.opts, o)
 	}

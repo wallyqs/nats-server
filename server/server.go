@@ -2096,6 +2096,7 @@ func (s *Server) startMonitoring(secure bool) error {
 		}
 		hp = net.JoinHostPort(opts.HTTPHost, strconv.Itoa(port))
 		httpListener, err = net.Listen("tcp", hp)
+		fmt.Println("??????????????????????????", err)
 	}
 
 	if err != nil {

@@ -55,14 +55,14 @@ func checkFor(t *testing.T, totalWait, sleepDur time.Duration, f func() error) {
 
 func DefaultOptions() *Options {
 	return &Options{
-		Host:     "127.0.0.1",
-		Port:     -1,
-		HTTPPort: -1,
-		Cluster:  ClusterOpts{Port: -1, Name: "abc"},
-		NoLog:    true,
-		NoSigs:   true,
-		Debug:    true,
-		Trace:    true,
+		Host: "127.0.0.1",
+		Port: -1,
+		// HTTPPort: -1,
+		Cluster: ClusterOpts{Port: -1, Name: "abc"},
+		NoLog:   true,
+		NoSigs:  true,
+		Debug:   true,
+		Trace:   true,
 	}
 }
 
@@ -85,6 +85,11 @@ func RunServer(opts *Options) *Server {
 
 	// Wait for accept loop(s) to be started
 	if !s.ReadyForConnections(10 * time.Second) {
+		// buf := make([]byte, 10000000)
+		// n := runtime.Stack(buf, true)
+		// fmt.Printf(">>>>>>>>>>>>>>>>>> %s", buf[:n])
+		os.Stdout.Sync()
+		fmt.Fprintln(os.Stderr, "FAILED!!!!!!!!!!!!!!!!!!")
 		panic("Unable to start NATS Server in Go Routine")
 	}
 	return s

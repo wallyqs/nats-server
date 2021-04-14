@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	// "os"
 )
 
 // This map is used to store URLs string as the key with a reference count as
@@ -209,7 +210,14 @@ var natsListenConfig = &net.ListenConfig{
 // natsListen() is the same as net.Listen() except that TCP keepalives are
 // disabled (to match Go's behavior before Go 1.13).
 func natsListen(network, address string) (net.Listener, error) {
-	return natsListenConfig.Listen(context.Background(), network, address)
+	// start := time.Now()
+	// fmt.Fprintln(os.Stderr, "<<<<<<<<<<<<<<<<<<<<", start, "START")
+	l, err := natsListenConfig.Listen(context.Background(), network, address)
+	if err != nil {
+		fmt.Println("ERRORRR!", err)
+	}
+	// fmt.Fprintln(os.Stderr, ">>>>>>>>>>>>>>>>>>>>", time.Now(), "DONE", time.Since(start))
+	return l, err
 }
 
 // natsDialTimeout is the same as net.DialTimeout() except the TCP keepalives

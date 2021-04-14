@@ -181,6 +181,7 @@ func (c *cluster) shutdown() {
 	if c == nil {
 		return
 	}
+	storeDirs := make([]string, 0)
 	for i, s := range c.servers {
 		if cf := c.opts[i].ConfigFile; cf != "" {
 			os.RemoveAll(cf)
@@ -188,8 +189,15 @@ func (c *cluster) shutdown() {
 		if sd := s.StoreDir(); sd != "" {
 			os.RemoveAll(sd)
 		}
+		storeDirs = append(storeDirs, s.StoreDir())
 		s.Shutdown()
 		s.WaitForShutdown()
+		fmt.Println("Exited!!!!")
+	}
+
+	for j := 0; j < 10; j++ {
+		fmt.Println("Shutting down... are resources from gone in", storeDirs)
+		time.Sleep(1 * time.Second)
 	}
 }
 
