@@ -188,6 +188,7 @@ type sourceInfo struct {
 	lag   uint64
 	err   *ApiError
 	last  time.Time
+	lreq  time.Time
 	grr   bool
 }
 
@@ -1227,27 +1228,57 @@ func (mset *stream) processInboundMirrorMsg(m *inMsg) bool {
 	}
 
 	// Mirror info tracking.
-	olag, odseq, oclseq := mset.mirror.lag, mset.mirror.dseq, mset.mirror.clseq
-	if dseq == mset.mirror.dseq+1 {
-		mset.mirror.dseq++
-		mset.mirror.sseq = sseq
-	} else if dseq > mset.mirror.dseq {
-		if mset.mirror.cname == _EMPTY_ {
-			mset.mirror.cname = tokenAt(m.rply, 4)
-			mset.mirror.dseq, mset.mirror.sseq = dseq, sseq
+	olag, osseq, odseq, oclseq := mset.mirror.lag, mset.mirror.sseq, mset.mirror.dseq, mset.mirror.clseq
+	if sseq == mset.mirror.sseq+1 {
+		mset.mirror.dseq = dseq
+		mset.mirror.sseq++
+	} else if sseq <= mset.mirror.sseq {
+		// Ignore older messages.
+		mset.mu.Unlock()
+		return true
+	} else if mset.mirror.cname == _EMPTY_ {
+		mset.mirror.cname = tokenAt(m.rply, 4)
+		mset.mirror.dseq, mset.mirror.sseq = dseq, sseq
+	} else {
+		// If the deliver sequence matches then the upstream stream has expired or deleted messages.
+		if dseq == mset.mirror.dseq+1 {
+			//fmt.Printf("%s DSEQS OK, SKIP MSGS!! start: %d end %d\n", mset.cfg.Name, mset.mirror.sseq+1, sseq-1)
+			mset.skipMsgs(mset.mirror.sseq+1, sseq-1)
+			mset.mirror.dseq++
+			mset.mirror.sseq = sseq
 		} else {
+			//fmt.Printf("DETECTED GAP!!! WANTED SSEQ of %d but got %d\n\n", mset.mirror.sseq+1, sseq)
 			mset.mu.Unlock()
 			mset.retryMirrorConsumer()
 			return false
 		}
 	}
 
+	/*
+		if dseq == mset.mirror.dseq+1 {
+			if sseq != mset.mirror.sseq+1 {
+				fmt.Printf("DETECTED GAP!!! WANTED SSEQ of %d but got %d\n\n", mset.mirror.sseq+1, sseq)
+			}
+			mset.mirror.dseq++
+			mset.mirror.sseq = sseq
+		} else if dseq > mset.mirror.dseq {
+			if mset.mirror.cname == _EMPTY_ {
+				mset.mirror.cname = tokenAt(m.rply, 4)
+				mset.mirror.dseq, mset.mirror.sseq = dseq, sseq
+			} else {
+				mset.mu.Unlock()
+				mset.retryMirrorConsumer()
+				return false
+			}
+		}
+	*/
+
 	if pending == 0 {
 		mset.mirror.lag = 0
 	} else {
 		mset.mirror.lag = pending - 1
 	}
-	mset.mirror.dseq = dseq
+
 	mset.mirror.clseq = sseq - 1
 	js, stype := mset.js, mset.cfg.Storage
 	mset.mu.Unlock()
@@ -1270,6 +1301,7 @@ func (mset *stream) processInboundMirrorMsg(m *inMsg) bool {
 			if sseq <= mset.lastSeq() {
 				mset.mu.Lock()
 				mset.mirror.lag = olag
+				mset.mirror.sseq = osseq
 				mset.mirror.dseq = odseq
 				mset.mirror.clseq = oclseq
 				mset.mu.Unlock()
@@ -1277,6 +1309,7 @@ func (mset *stream) processInboundMirrorMsg(m *inMsg) bool {
 			} else {
 				mset.mu.Lock()
 				mset.mirror.dseq = odseq
+				mset.mirror.sseq = osseq
 				mset.mu.Unlock()
 				mset.retryMirrorConsumer()
 			}
@@ -1317,6 +1350,28 @@ func (mset *stream) retryMirrorConsumer() error {
 	defer mset.mu.Unlock()
 	mset.srv.Debugf("Retrying mirror consumer for '%s > %s'", mset.acc.Name, mset.cfg.Name)
 	return mset.setupMirrorConsumer()
+}
+
+// Lock should be held.
+func (mset *stream) skipMsgs(start, end uint64) {
+	node, store := mset.node, mset.store
+	var entries []*Entry
+	for seq := start; seq <= end; seq++ {
+		if node != nil {
+			entries = append(entries, &Entry{EntryNormal, encodeStreamMsg(_EMPTY_, _EMPTY_, nil, nil, seq-1, 0)})
+			// So a single message does not get too big.
+			if len(entries) > 10_000 {
+				node.ProposeDirect(entries)
+				entries = entries[:0]
+			}
+		} else {
+			mset.lseq = store.SkipMsg()
+		}
+	}
+	// Send all at once.
+	if node != nil && len(entries) > 0 {
+		node.ProposeDirect(entries)
+	}
 }
 
 // Setup our mirror consumer.
@@ -1364,6 +1419,13 @@ func (mset *stream) setupMirrorConsumer() error {
 		mset.srv.startGoRoutine(func() { mset.processMirrorMsgs() })
 	}
 
+	// We want to throttle here in terms of how fast we request new consumers.
+	if time.Since(mset.mirror.lreq) < 2*time.Second {
+		//fmt.Printf("SHOULD NOT REQUEST TOO SOON!\n\n")
+		return nil
+	}
+	mset.mirror.lreq = time.Now()
+
 	// Now send off request to create/update our consumer. This will be all API based even in single server mode.
 	// We calculate durable names apriori so we do not need to save them off.
 
@@ -1399,6 +1461,9 @@ func (mset *stream) setupMirrorConsumer() error {
 		// If starting out and lastSeq is 0.
 		req.Config.DeliverPolicy = DeliverAll
 	}
+
+	//fmt.Printf("MIRROR CONSUMER REQ: %+v\n", req)
+	//debug.PrintStack()
 
 	respCh := make(chan *JSApiConsumerCreateResponse, 1)
 	reply := infoReplySubject()
@@ -1444,25 +1509,11 @@ func (mset *stream) setupMirrorConsumer() error {
 				var state StreamState
 				mset.store.FastState(&state)
 
+				//fmt.Printf("CONSUMER RESPONSE: state is %+v, CI is %+v\n", state, ccr.ConsumerInfo)
+
+				// Check if we need to skip messages.
 				if state.LastSeq != ccr.ConsumerInfo.Delivered.Stream {
-					node, store := mset.node, mset.store
-					var entries []*Entry
-					for seq := state.LastSeq + 1; seq <= ccr.ConsumerInfo.Delivered.Stream; seq++ {
-						if node != nil {
-							entries = append(entries, &Entry{EntryNormal, encodeStreamMsg(_EMPTY_, _EMPTY_, nil, nil, seq-1, 0)})
-							// So a single message does not get too big.
-							if len(entries) > 10_000 {
-								node.ProposeDirect(entries)
-								entries = entries[:0]
-							}
-						} else {
-							mset.lseq = store.SkipMsg()
-						}
-					}
-					// Send all at once.
-					if node != nil && len(entries) > 0 {
-						node.ProposeDirect(entries)
-					}
+					mset.skipMsgs(state.LastSeq+1, ccr.ConsumerInfo.Delivered.Stream)
 				}
 
 				// Capture consumer name.
@@ -1483,6 +1534,7 @@ func (mset *stream) setupMirrorConsumer() error {
 					mset.mirror.sub = sub
 					mset.mirror.last = time.Now()
 					mset.mirror.dseq = 0
+					mset.mirror.sseq = ccr.ConsumerInfo.Delivered.Stream
 				}
 				mset.mu.Unlock()
 			}
@@ -1576,6 +1628,13 @@ func (mset *stream) setSourceConsumer(sname string, seq uint64) {
 		mset.srv.startGoRoutine(func() { mset.processSourceMsgs(si) })
 	}
 
+	// We want to throttle here in terms of how fast we request new consumers.
+	if time.Since(si.lreq) < 2*time.Second {
+		//fmt.Printf("SHOULD NOT REQUEST TOO SOON!\n\n")
+		return
+	}
+	si.lreq = time.Now()
+
 	req := &CreateConsumerRequest{
 		Stream: sname,
 		Config: ConsumerConfig{
@@ -1605,6 +1664,9 @@ func (mset *stream) setSourceConsumer(sname string, seq uint64) {
 	if ssi.FilterSubject != _EMPTY_ {
 		req.Config.FilterSubject = ssi.FilterSubject
 	}
+
+	//fmt.Printf("SOURCE CONSUMER REQ: %+v\n", req)
+	//debug.PrintStack()
 
 	respCh := make(chan *JSApiConsumerCreateResponse, 1)
 	reply := infoReplySubject()
@@ -2390,7 +2452,10 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 				mset.store.Compact(lseq + 1)
 				mset.lseq = lseq
 				isMisMatch = false
+			} else {
+				//fmt.Printf("%s MIRROR MISMATCH! WANTED %d but mset.lseq is %d and mset.clfs is %d\n", mset.cfg.Name, lseq, mset.lseq, mset.clfs)
 			}
+
 		}
 
 		if isMisMatch {
