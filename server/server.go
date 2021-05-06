@@ -1451,6 +1451,39 @@ func (s *Server) fetchAccount(name string) (*Account, error) {
 	return acc, nil
 }
 
+func (s *Server) enableOCSP() error {
+	opts := s.getOpts()
+	// Check if OCSP Stapling was enabled/disabled globally.
+	oc := opts.OCSPConfig
+	if oc == nil || oc.Mode == OCSPModeNever {
+		return nil
+	}
+
+	if opts.StateDir == "" {
+		// FIXME: Create temporary directory for these.
+		return fmt.Errorf("State Directory required for OCSP")
+	}
+	s.Debugf("Setting up OCSP Stapling...")
+
+	// Start OCSP Stapling for client connections.
+	if config := opts.TLSConfig; config != nil {
+		tc, mon, err := s.NewOCSPMonitor(config)
+		if err != nil {
+			return err
+		}
+		// Check if an OCSP stapling monitor is required for this certificate.
+		if mon != nil {
+			// Override the TLS config with one that follows OCSP.
+			opts.TLSConfig = tc
+			s.startGoRoutine(func() { mon.run() })
+		}
+	}
+	// FIXME: Add support for leafnodes, routes, MQTT, WebSocket
+	s.Noticef("OCSP Stapling enabled")
+
+	return nil
+}
+
 // Start up the server, this will block.
 // Start via a Go routine if needed.
 func (s *Server) Start() {
@@ -1601,6 +1634,17 @@ func (s *Server) Start() {
 			}
 			return true
 		})
+	}
+
+	// Setup OCSP Stapling monitors.
+	// This will abort server from starting if there are no valid staples
+	// and OCSP policy is Always or Must Staple.
+	if oc := opts.OCSPConfig; oc != nil && oc.Mode != OCSPModeNever {
+		err := s.enableOCSP()
+		if err != nil {
+			s.Fatalf("OCSP Error: %s", err)
+			return
+		}
 	}
 
 	// Start monitoring if needed

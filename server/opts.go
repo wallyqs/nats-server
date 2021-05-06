@@ -261,6 +261,12 @@ type Options struct {
 	// and used as a filter criteria for some system requests
 	Tags jwt.TagList `json:"-"`
 
+	// StateDir is a directory to hold state of the server.
+	StateDir string `json:"-"`
+
+	// OCSPConfig enables OCSP Stapling in the server.
+	OCSPConfig *OCSPConfig `json:"-"`
+
 	// private fields, used to know if bool options are explicitly
 	// defined in config and/or command line params.
 	inConfig  map[string]bool
@@ -470,6 +476,15 @@ type TLSConfigOpts struct {
 	Timeout           float64
 	Ciphers           []uint16
 	CurvePreferences  []tls.CurveID
+}
+
+// OCSPConfig represents the options of OCSP stapling options.
+type OCSPConfig struct {
+	// Mode defines the policy for OCSP stapling.
+	Mode OCSPMode
+
+	// OverrideURLs is the http URL endpoint used to get OCSP staples.
+	OverrideURLs []string
 }
 
 var tlsUsage = `
@@ -828,6 +843,29 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		o.TLSTimeout = tc.Timeout
 		o.TLSMap = tc.Map
 
+		// Need to keep track of path of the certs for OCSP Stapling.
+		o.TLSCert = tc.CertFile
+		o.TLSKey = tc.KeyFile
+		o.TLSCaCert = tc.CaFile
+	case "state_dir":
+		switch vv := v.(type) {
+		case string:
+			o.StateDir = vv
+		default:
+			*errors = append(*errors, &configErr{tk, fmt.Sprintf("error parsing state_dir: unsupported type %T", v)})
+			return
+		}
+	case "ocsp":
+		switch v.(type) {
+		case bool:
+			// Default is Auto which honors Must Staple status request
+			// but does not shutdown the server in case it is revoked,
+			// letting the client choose whether to trust or not the server.
+			o.OCSPConfig = &OCSPConfig{Mode: OCSPModeAuto}
+		default:
+			*errors = append(*errors, &configErr{tk, fmt.Sprintf("error parsing ocsp config: unsupported type %T", v)})
+			return
+		}
 	case "allow_non_tls":
 		o.AllowNonTLS = v.(bool)
 	case "write_deadline":
