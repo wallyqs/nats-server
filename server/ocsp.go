@@ -246,12 +246,12 @@ func (oc *OCSPMonitor) run() {
 		nextRun = oc.getNextRun()
 		t := resp.NextUpdate.Format(time.RFC3339Nano)
 		s.Noticef(
-			"Found existing OCSP status for certificate at '%s': good, next update %s, checking again in %s",
+			"Found OCSP status for certificate at '%s': good, next update %s, checking again in %s",
 			certFile, t, nextRun,
 		)
 	} else if err == nil && shutdownOnRevoke {
 		// If resp.Status is ocsp.Revoked, ocsp.Unknown, or any other value.
-		s.Errorf("Found existing OCSP status for certificate at '%s': %s", certFile, ocspStatusString(resp.Status))
+		s.Errorf("Found OCSP status for certificate at '%s': %s", certFile, ocspStatusString(resp.Status))
 		s.Shutdown()
 		return
 	}
@@ -302,21 +302,36 @@ func (oc *OCSPMonitor) stop() {
 
 // NewOCSPMonitor takes a TLS configuration then wraps it with the callbacks set for OCSP verification
 // along with a monitor that will periodically fetch OCSP staples.
-func (srv *Server) NewOCSPMonitor(tc *tls.Config) (*tls.Config, *OCSPMonitor, error) {
+func (srv *Server) NewOCSPMonitor(kind string, tc *tls.Config) (*tls.Config, *OCSPMonitor, error) {
 	opts := srv.getOpts()
 	oc := opts.OCSPConfig
-	tcOpts := opts.tlsConfigOpts
 
-	var certFile, caFile string
+	// We need to track the CA certificate in case the CA is not present
+	// in the chain to be able to verify the signature of the OCSP staple.
+	var (
+		certFile string
+		caFile   string
+		tcOpts   *TLSConfigOpts
+	)
+	switch kind {
+	case typeStringMap[CLIENT]:
+		tcOpts = opts.tlsConfigOpts
+		if opts.TLSCert != _EMPTY_ {
+			certFile = opts.TLSCert
+		}
+		if opts.TLSCaCert != _EMPTY_ {
+			caFile = opts.TLSCaCert
+		}
+	case typeStringMap[ROUTER]:
+		tcOpts = opts.Cluster.tlsConfigOpts
+	case typeStringMap[LEAF]:
+		tcOpts = opts.LeafNode.tlsConfigOpts
+	case typeStringMap[GATEWAY]:
+		tcOpts = opts.Gateway.tlsConfigOpts
+	}
 	if tcOpts != nil {
 		certFile = tcOpts.CertFile
 		caFile = tcOpts.CaFile
-	}
-	if opts.TLSCert != _EMPTY_ {
-		certFile = opts.TLSCert
-	}
-	if opts.TLSCaCert != _EMPTY_ {
-		caFile = opts.TLSCaCert
 	}
 
 	// NOTE: Currently OCSP Stapling is enabled only for the first certificate found.
@@ -370,11 +385,9 @@ func (srv *Server) NewOCSPMonitor(tc *tls.Config) (*tls.Config, *OCSPMonitor, er
 		}
 
 		// Get the certificate status from the memory, then remote OCSP responder.
-		_, resp, err := mon.getStatus()
-		if err != nil {
+		if _, resp, err := mon.getStatus(); err != nil {
 			return nil, nil, fmt.Errorf("bad OCSP status update for certificate at '%s': %s", certFile, err)
-		}
-		if err == nil && resp.Status != ocsp.Good && shutdownOnRevoke {
+		} else if err == nil && resp != nil && resp.Status != ocsp.Good && shutdownOnRevoke {
 			return nil, nil, fmt.Errorf("found existing OCSP status for certificate at '%s': %s", certFile, ocspStatusString(resp.Status))
 		}
 
@@ -400,11 +413,58 @@ func (srv *Server) NewOCSPMonitor(tc *tls.Config) (*tls.Config, *OCSPMonitor, er
 			}, nil
 		}
 
-		// GetClientCertificate returns a certificate that's presented to a
-		// server.
-		tc.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
-			return &cert, nil
+		// Check whether need to verify staples from a client connection depending on the type.
+		switch kind {
+		case typeStringMap[ROUTER], typeStringMap[GATEWAY], typeStringMap[LEAF]:
+			tc.VerifyConnection = func(s tls.ConnectionState) (namedErr error) {
+				oresp := s.OCSPResponse
+				if oresp == nil {
+					return fmt.Errorf("missing OCSP Staple")
+				}
+
+				// Client route connections will verify the response of
+				// the staple.
+				if len(s.VerifiedChains) == 0 {
+					return fmt.Errorf("missing TLS verified chains")
+				}
+				chain := s.VerifiedChains[0]
+
+				if got, want := len(chain), 2; got < want {
+					return fmt.Errorf("incomplete cert chain, got %d, want at least %d", got, want)
+				}
+				leaf, issuer := chain[0], chain[1]
+
+				resp, err := ocsp.ParseResponseForCert(oresp, leaf, issuer)
+				if err != nil {
+					return fmt.Errorf("failed to parse OCSP response: %w", err)
+				}
+				if err := resp.CheckSignatureFrom(issuer); err != nil {
+					return err
+				}
+				if resp.Status != ocsp.Good {
+					return fmt.Errorf("bad status for OCSP Staple")
+				}
+
+				return nil
+			}
+
+			// When server makes a client connection, need to also present an OCSP Staple.
+			tc.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				raw, _, err := mon.getStatus()
+				if err != nil {
+					return nil, err
+				}
+				cert.OCSPStaple = raw
+
+				return &cert, nil
+			}
+		default:
+			// GetClientCertificate returns a certificate that's presented to a server.
+			tc.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				return &cert, nil
+			}
 		}
+
 	}
 	return tc, mon, nil
 }

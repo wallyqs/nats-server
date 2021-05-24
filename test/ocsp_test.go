@@ -231,7 +231,7 @@ func TestOCSPMustStapleAutoDoesNotShutdown(t *testing.T) {
 	const (
 		caCert     = "configs/certs/ocsp/ca-cert.pem"
 		caKey      = "configs/certs/ocsp/ca-key.pem"
-		serverCert = "configs/certs/ocsp/server-status-request-url-cert.pem"
+		serverCert = "configs/certs/ocsp/server-status-request-url-01-cert.pem"
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -244,8 +244,8 @@ func TestOCSPMustStapleAutoDoesNotShutdown(t *testing.T) {
 		port: -1
 
 		tls {
-			cert_file: "configs/certs/ocsp/server-status-request-url-cert.pem"
-			key_file: "configs/certs/ocsp/server-status-request-url-key.pem"
+			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
@@ -482,8 +482,8 @@ func TestOCSPClient(t *testing.T) {
 				port: -1
 
 				tls {
-					cert_file: "configs/certs/ocsp/server-status-request-url-cert.pem"
-					key_file: "configs/certs/ocsp/server-status-request-url-key.pem"
+					cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+					key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
 					ca_file: "configs/certs/ocsp/ca-cert.pem"
 					timeout: 5
 				}
@@ -496,7 +496,7 @@ func TestOCSPClient(t *testing.T) {
 			nil,
 			nil,
 			func() {
-				setOCSPStatus(t, ocspURL, "configs/certs/ocsp/server-status-request-url-cert.pem", ocsp.Good)
+				setOCSPStatus(t, ocspURL, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
 			},
 		},
 		{
@@ -507,8 +507,8 @@ func TestOCSPClient(t *testing.T) {
 				ocsp: false
 
 				tls {
-					cert_file: "configs/certs/ocsp/server-status-request-url-cert.pem"
-					key_file: "configs/certs/ocsp/server-status-request-url-key.pem"
+					cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+					key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
 					ca_file: "configs/certs/ocsp/ca-cert.pem"
 					timeout: 5
 				}
@@ -521,7 +521,7 @@ func TestOCSPClient(t *testing.T) {
 			nil,
 			nil,
 			func() {
-				setOCSPStatus(t, ocspURL, "configs/certs/ocsp/server-status-request-url-cert.pem", ocsp.Revoked)
+				setOCSPStatus(t, ocspURL, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Revoked)
 			},
 		},
 	} {
@@ -566,7 +566,7 @@ func TestOCSPReloadRotateTLSCertWithNoURL(t *testing.T) {
 	const (
 		caCert            = "configs/certs/ocsp/ca-cert.pem"
 		caKey             = "configs/certs/ocsp/ca-key.pem"
-		serverCert        = "configs/certs/ocsp/server-status-request-url-cert.pem"
+		serverCert        = "configs/certs/ocsp/server-status-request-url-01-cert.pem"
 		updatedServerCert = "configs/certs/ocsp/server-status-request-cert.pem"
 	)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -580,8 +580,8 @@ func TestOCSPReloadRotateTLSCertWithNoURL(t *testing.T) {
 		port: -1
 
 		tls {
-			cert_file: "configs/certs/ocsp/server-status-request-url-cert.pem"
-			key_file: "configs/certs/ocsp/server-status-request-url-key.pem"
+			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
@@ -668,7 +668,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 	const (
 		caCert            = "configs/certs/ocsp/ca-cert.pem"
 		caKey             = "configs/certs/ocsp/ca-key.pem"
-		serverCert        = "configs/certs/ocsp/server-status-request-url-cert.pem"
+		serverCert        = "configs/certs/ocsp/server-status-request-url-01-cert.pem"
 		updatedServerCert = "configs/certs/ocsp/server-status-request-cert.pem"
 	)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -687,8 +687,8 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 		store_dir: "%s"
 
 		tls {
-			cert_file: "configs/certs/ocsp/server-status-request-url-cert.pem"
-			key_file: "configs/certs/ocsp/server-status-request-url-key.pem"
+			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
@@ -867,7 +867,7 @@ func TestOCSPReloadRotateTLSCertEnableMustStaple(t *testing.T) {
 		caCert            = "configs/certs/ocsp/ca-cert.pem"
 		caKey             = "configs/certs/ocsp/ca-key.pem"
 		serverCert        = "configs/certs/ocsp/server-cert.pem"
-		updatedServerCert = "configs/certs/ocsp/server-status-request-url-cert.pem"
+		updatedServerCert = "configs/certs/ocsp/server-status-request-url-01-cert.pem"
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -926,8 +926,8 @@ func TestOCSPReloadRotateTLSCertEnableMustStaple(t *testing.T) {
 		port: -1
 
 		tls {
-			cert_file: "configs/certs/ocsp/server-status-request-url-cert.pem"
-			key_file: "configs/certs/ocsp/server-status-request-url-key.pem"
+			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
@@ -962,6 +962,107 @@ func TestOCSPReloadRotateTLSCertEnableMustStaple(t *testing.T) {
 		t.Fatal(err)
 	}
 	nc.Close()
+}
+
+func TestOCSPClusterReload(t *testing.T) {
+	doLog = true
+	doDebug = true
+	const (
+		caCert = "configs/certs/ocsp/ca-cert.pem"
+		caKey  = "configs/certs/ocsp/ca-key.pem"
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ocspr := newOCSPResponder(t, caCert, caKey)
+	defer ocspr.Shutdown(ctx)
+	addr := fmt.Sprintf("http://%s", ocspr.Addr)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-03-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-04-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-05-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-06-cert.pem", ocsp.Good)
+
+	// Store Dirs
+	storeDirA := createDir(t, "_ocspA")
+	defer removeDir(t, storeDirA)
+	storeDirB := createDir(t, "_ocspB")
+	defer removeDir(t, storeDirB)
+
+	// Seed server configuration
+	srvConfA := `
+		port: -1
+
+		tls {
+			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
+			ca_file: "configs/certs/ocsp/ca-cert.pem"
+			timeout: 5
+		}
+		store_dir: "%s"
+		cluster {
+			name: AB
+			port: -1
+
+			tls {
+				cert_file: "configs/certs/ocsp/server-status-request-url-02-cert.pem"
+				key_file: "configs/certs/ocsp/server-status-request-url-02-key.pem"
+				ca_file: "configs/certs/ocsp/ca-cert.pem"
+				timeout: 5
+			}
+		}
+	`
+	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
+	conf := createConfFile(t, []byte(srvConfA))
+	defer removeFile(t, conf)
+	srvA, optsA := RunServerWithConfig(conf)
+	defer srvA.Shutdown()
+
+	// The rest
+	srvConfB := `
+		port: -1
+
+		tls {
+			cert_file: "configs/certs/ocsp/server-status-request-url-03-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-03-key.pem"
+			ca_file: "configs/certs/ocsp/ca-cert.pem"
+			timeout: 5
+		}
+		store_dir: "%s"
+		cluster { 
+			name: AB
+			port: -1
+
+			routes: [ nats://localhost:%d ]
+
+			tls {
+				cert_file: "configs/certs/ocsp/server-status-request-url-04-cert.pem"
+				key_file: "configs/certs/ocsp/server-status-request-url-04-key.pem"
+				ca_file: "configs/certs/ocsp/ca-cert.pem"
+				timeout: 5
+			}
+		}
+	`
+	srvConfB = fmt.Sprintf(srvConfB, storeDirB, optsA.Cluster.Port)
+	conf = createConfFile(t, []byte(srvConfB))
+	defer removeFile(t, conf)
+	srvB, _ := RunServerWithConfig(conf)
+	defer srvB.Shutdown()
+
+	_, err := nats.Connect(fmt.Sprintf("tls://localhost:%d", optsA.Port),
+		nats.Secure(&tls.Config{
+			VerifyConnection: func(s tls.ConnectionState) error {
+				fmt.Println("From the client: ", s.OCSPResponse)
+				return nil
+			},
+		}),
+		nats.RootCAs(caCert),
+		nats.ErrorHandler(noOpErrHandler),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Second)
 }
 
 func newOCSPResponder(t *testing.T, issuerCertPEM, issuerKeyPEM string) *http.Server {
