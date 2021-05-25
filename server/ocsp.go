@@ -284,7 +284,7 @@ func (oc *OCSPMonitor) run() {
 			)
 			continue
 		default:
-			s.Errorf("Received OCSP certificate status: %s", ocspStatusString(n))
+			s.Errorf("Received OCSP status for certificate '%s': %s", certFile, ocspStatusString(n))
 			if shutdownOnRevoke {
 				s.Shutdown()
 			}
@@ -297,7 +297,11 @@ func (oc *OCSPMonitor) stop() {
 	oc.mu.Lock()
 	stopCh := oc.stopCh
 	oc.mu.Unlock()
-	stopCh <- struct{}{}
+	select {
+	case stopCh <- struct{}{}:
+	default:
+		// OCSP Monitor already stopped, likely due to certificate being revoked.
+	}
 }
 
 // NewOCSPMonitor takes a TLS configuration then wraps it with the callbacks set for OCSP verification
@@ -416,7 +420,7 @@ func (srv *Server) NewOCSPMonitor(kind string, tc *tls.Config) (*tls.Config, *OC
 		// Check whether need to verify staples from a client connection depending on the type.
 		switch kind {
 		case typeStringMap[ROUTER], typeStringMap[GATEWAY], typeStringMap[LEAF]:
-			tc.VerifyConnection = func(s tls.ConnectionState) (namedErr error) {
+			tc.VerifyConnection = func(s tls.ConnectionState) error {
 				oresp := s.OCSPResponse
 				if oresp == nil {
 					return fmt.Errorf("missing OCSP Staple")

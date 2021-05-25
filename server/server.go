@@ -1516,7 +1516,6 @@ func (s *Server) enableOCSP() error {
 	for kind, config := range withOCSP {
 		myconf := config
 		tc, mon, err := s.NewOCSPMonitor(kind, myconf)
-		fmt.Println(kind, tc, mon)
 		if err != nil {
 			// There should be no OCSP Stapling errors on boot.
 			return err
