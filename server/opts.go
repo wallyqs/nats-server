@@ -115,10 +115,11 @@ type GatewayOpts struct {
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
 type RemoteGatewayOpts struct {
-	Name       string      `json:"name"`
-	TLSConfig  *tls.Config `json:"-"`
-	TLSTimeout float64     `json:"tls_timeout,omitempty"`
-	URLs       []*url.URL  `json:"urls,omitempty"`
+	Name          string      `json:"name"`
+	TLSConfig     *tls.Config `json:"-"`
+	TLSTimeout    float64     `json:"tls_timeout,omitempty"`
+	URLs          []*url.URL  `json:"urls,omitempty"`
+	tlsConfigOpts *TLSConfigOpts
 }
 
 // LeafNodeOpts are options for a given server to accept leaf node connections and/or connect to a remote cluster.
@@ -171,6 +172,8 @@ type RemoteLeafOpts struct {
 		Compression bool `json:"-"`
 		NoMasking   bool `json:"-"`
 	}
+
+	tlsConfigOpts *TLSConfigOpts
 }
 
 // Options block for nats-server.
@@ -1884,6 +1887,7 @@ func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]
 				} else {
 					remote.TLSTimeout = float64(DEFAULT_LEAF_TLS_TIMEOUT)
 				}
+				remote.tlsConfigOpts = tc
 			case "hub":
 				remote.Hub = v.(bool)
 			case "deny_imports", "deny_import":

@@ -306,7 +306,10 @@ func (oc *OCSPMonitor) stop() {
 
 // NewOCSPMonitor takes a TLS configuration then wraps it with the callbacks set for OCSP verification
 // along with a monitor that will periodically fetch OCSP staples.
-func (srv *Server) NewOCSPMonitor(kind string, tc *tls.Config) (*tls.Config, *OCSPMonitor, error) {
+func (srv *Server) NewOCSPMonitor(config *tlsConfigKind) (*tls.Config, *OCSPMonitor, error) {
+	kind := config.kind
+	tc := config.tlsConfig
+	tcOpts := config.tlsOpts
 	opts := srv.getOpts()
 	oc := opts.OCSPConfig
 
@@ -315,10 +318,8 @@ func (srv *Server) NewOCSPMonitor(kind string, tc *tls.Config) (*tls.Config, *OC
 	var (
 		certFile string
 		caFile   string
-		tcOpts   *TLSConfigOpts
 	)
-	switch kind {
-	case typeStringMap[CLIENT]:
+	if kind == typeStringMap[CLIENT] {
 		tcOpts = opts.tlsConfigOpts
 		if opts.TLSCert != _EMPTY_ {
 			certFile = opts.TLSCert
@@ -326,12 +327,6 @@ func (srv *Server) NewOCSPMonitor(kind string, tc *tls.Config) (*tls.Config, *OC
 		if opts.TLSCaCert != _EMPTY_ {
 			caFile = opts.TLSCaCert
 		}
-	case typeStringMap[ROUTER]:
-		tcOpts = opts.Cluster.tlsConfigOpts
-	case typeStringMap[LEAF]:
-		tcOpts = opts.LeafNode.tlsConfigOpts
-	case typeStringMap[GATEWAY]:
-		tcOpts = opts.Gateway.tlsConfigOpts
 	}
 	if tcOpts != nil {
 		certFile = tcOpts.CertFile
@@ -556,7 +551,7 @@ func getOCSPIssuer(issuerCert string, chain [][]byte) (*x509.Certificate, error)
 	var err error
 	switch {
 	case len(chain) == 1 && issuerCert == _EMPTY_:
-		err = fmt.Errorf("require ocsp ca in chain or configuration")
+		err = fmt.Errorf("ocsp ca required in chain or configuration")
 	case issuerCert != _EMPTY_:
 		issuer, err = parseCertPEM(issuerCert)
 	case len(chain) > 1 && issuerCert == _EMPTY_:

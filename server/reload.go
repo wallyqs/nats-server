@@ -1084,7 +1084,7 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			// If there is really a change prevents reload.
 			if !reflect.DeepEqual(tmpOld, tmpNew) {
 				// See TODO(ik) note below about printing old/new values.
-				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
+				return nil, fmt.Errorf("config reload not supported for %s: old=%+v, new=%+v",
 					field.Name, oldValue, newValue)
 			}
 		case "jetstream":
@@ -1343,6 +1343,7 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 }
 
 func (s *Server) reloadOCSP() error {
+	/*
 	sopts := s.getOpts()
 
 	if err := s.setupOCSPStapleStoreDir(); err != nil {
@@ -1425,6 +1426,7 @@ func (s *Server) reloadOCSP() error {
 	s.ocsps = ocspm
 	s.mu.Unlock()
 
+	*/
 	return nil
 }
 

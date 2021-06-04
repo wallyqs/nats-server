@@ -1488,34 +1488,91 @@ func (s *Server) setupOCSPStapleStoreDir() error {
 	return nil
 }
 
+type tlsConfigKind struct {
+	tlsConfig *tls.Config
+	tlsOpts   *TLSConfigOpts
+	kind      string
+	enabled   bool
+	apply     func(*tls.Config)
+}
+
 func (s *Server) enableOCSP() error {
 	sopts := s.getOpts()
 
-	withOCSP := make(map[string]*tls.Config)
+	configs := make([]*tlsConfigKind, 0)
 
-	// Start OCSP Stapling for client connections.
 	if config := sopts.TLSConfig; config != nil {
-		withOCSP[typeStringMap[CLIENT]] = config
+		opts := sopts.tlsConfigOpts
+		o := &tlsConfigKind{
+			kind:      typeStringMap[CLIENT],
+			tlsConfig: config,
+			tlsOpts:   opts,
+			apply:     func(tc *tls.Config) { sopts.TLSConfig = tc },
+		}
+		configs = append(configs, o)
 	}
 	if config := sopts.Cluster.TLSConfig; config != nil {
-		withOCSP[typeStringMap[ROUTER]] = config
+		opts := sopts.Cluster.tlsConfigOpts
+		o := &tlsConfigKind{
+			kind:      typeStringMap[ROUTER],
+			tlsConfig: config,
+			tlsOpts:   opts,
+			apply:     func(tc *tls.Config) { sopts.Cluster.TLSConfig = tc },
+		}
+		configs = append(configs, o)
 	}
 	if config := sopts.LeafNode.TLSConfig; config != nil {
-		withOCSP[typeStringMap[LEAF]] = config
+		opts := sopts.LeafNode.tlsConfigOpts
+		o := &tlsConfigKind{
+			kind:      typeStringMap[LEAF],
+			tlsConfig: config,
+			tlsOpts:   opts,
+			apply:     func(tc *tls.Config) { sopts.LeafNode.TLSConfig = tc },
+		}
+		configs = append(configs, o)
+	}
+	for i, remote := range sopts.LeafNode.Remotes {
+		opts := remote.tlsConfigOpts
+		if config := remote.TLSConfig; config != nil {
+			o := &tlsConfigKind{
+				kind:      typeStringMap[LEAF],
+				tlsConfig: config,
+				tlsOpts:   opts,
+				apply: func(tc *tls.Config) {
+					sopts.LeafNode.Remotes[i].TLSConfig = tc
+				},
+			}
+			configs = append(configs, o)
+		}
 	}
 	if config := sopts.Gateway.TLSConfig; config != nil {
-		withOCSP[typeStringMap[GATEWAY]] = config
+		opts := sopts.Gateway.tlsConfigOpts
+		o := &tlsConfigKind{
+			kind:      typeStringMap[GATEWAY],
+			tlsConfig: config,
+			tlsOpts:   opts,
+			apply:     func(tc *tls.Config) { sopts.Gateway.TLSConfig = tc },
+		}
+		configs = append(configs, o)
 	}
-	if config := sopts.Websocket.TLSConfig; config != nil {
-		withOCSP["WebSocket"] = config
-	}
-	if config := sopts.MQTT.TLSConfig; config != nil {
-		withOCSP["MQTT"] = config
+	for i, remote := range sopts.Gateway.Gateways {
+		opts := remote.tlsConfigOpts
+		if config := remote.TLSConfig; config != nil {
+			o := &tlsConfigKind{
+				kind:      typeStringMap[GATEWAY],
+				tlsConfig: config,
+				tlsOpts:   opts,
+				apply: func(tc *tls.Config) {
+					sopts.Gateway.Gateways[i].TLSConfig = tc
+				},
+			}
+			configs = append(configs, o)
+		}
 	}
 
-	for kind, config := range withOCSP {
-		myconf := config
-		tc, mon, err := s.NewOCSPMonitor(kind, myconf)
+	for _, config := range configs {
+		kind := config.kind
+		tc, mon, err := s.NewOCSPMonitor(config)
 		if err != nil {
 			// There should be no OCSP Stapling errors on boot.
 			return err
@@ -1525,21 +1582,10 @@ func (s *Server) enableOCSP() error {
 			s.Noticef("OCSP Stapling enabled for %s connections", kind)
 
 			s.ocsps = append(s.ocsps, mon)
+
 			// Override the TLS config with one that follows OCSP.
-			switch kind {
-			case typeStringMap[CLIENT]:
-				sopts.TLSConfig = tc
-			case typeStringMap[ROUTER]:
-				sopts.Cluster.TLSConfig = tc
-			case typeStringMap[LEAF]:
-				sopts.LeafNode.TLSConfig = tc
-			case typeStringMap[GATEWAY]:
-				sopts.Gateway.TLSConfig = tc
-			case "WebSocket":
-				sopts.Websocket.TLSConfig = tc
-			case "MQTT":
-				sopts.MQTT.TLSConfig = tc
-			}
+			config.apply(tc)
+
 			s.startGoRoutine(func() { mon.run() })
 		}
 	}
