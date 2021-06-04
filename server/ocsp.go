@@ -293,17 +293,6 @@ func (oc *OCSPMonitor) run() {
 	}
 }
 
-func (oc *OCSPMonitor) stop() {
-	oc.mu.Lock()
-	stopCh := oc.stopCh
-	oc.mu.Unlock()
-	select {
-	case stopCh <- struct{}{}:
-	default:
-		// OCSP Monitor already stopped, likely due to certificate being revoked.
-	}
-}
-
 // NewOCSPMonitor takes a TLS configuration then wraps it with the callbacks set for OCSP verification
 // along with a monitor that will periodically fetch OCSP staples.
 func (srv *Server) NewOCSPMonitor(config *tlsConfigKind) (*tls.Config, *OCSPMonitor, error) {

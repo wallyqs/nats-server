@@ -388,6 +388,12 @@ func NewServer(opts *Options) (*Server, error) {
 	// Ensure that non-exported options (used in tests) are properly set.
 	s.setLeafNodeNonExportedOptions()
 
+	// Setup OCSP Stapling. This will abort server from starting if there
+	// are no valid staples and OCSP policy is to Always or MustStaple.
+	if err := s.enableOCSP(); err != nil {
+		return nil, err
+	}
+
 	// Call this even if there is no gateway defined. It will
 	// initialize the structure so we don't have to check for
 	// it to be nil or not in various places in the code.
@@ -1492,7 +1498,6 @@ type tlsConfigKind struct {
 	tlsConfig *tls.Config
 	tlsOpts   *TLSConfigOpts
 	kind      string
-	enabled   bool
 	apply     func(*tls.Config)
 }
 
@@ -1743,13 +1748,6 @@ func (s *Server) Start() {
 			}
 			return true
 		})
-	}
-
-	// Setup OCSP Stapling. This will abort server from starting if there
-	// are no valid staples and OCSP policy is to Always or MustStaple.
-	if err := s.enableOCSP(); err != nil {
-		s.Fatalf("Can't enable OCSP Stapling: %v", err)
-		return
 	}
 
 	// Start monitoring if needed
