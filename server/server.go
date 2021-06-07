@@ -1480,7 +1480,7 @@ func (s *Server) setupOCSPStapleStoreDir() error {
 	opts := s.getOpts()
 	storeDir := opts.StoreDir
 	if storeDir == _EMPTY_ {
-		s.Warnf("OCSP Stapling disk cache is disabled (missing 'store_dir')")
+		// s.Warnf("OCSP Stapling disk cache is disabled (missing 'store_dir')")
 		return nil
 	}
 	storeDir = filepath.Join(storeDir, defaultOCSPStoreDir)
@@ -1591,11 +1591,23 @@ func (s *Server) enableOCSP() error {
 			// Override the TLS config with one that follows OCSP.
 			config.apply(tc)
 
-			s.startGoRoutine(func() { mon.run() })
+			// s.startGoRoutine(func() { mon.run() })
 		}
 	}
 
 	return nil
+}
+
+func (s *Server) startOCSPMonitoring() {
+	s.mu.Lock()
+	ocsps := s.ocsps
+	s.mu.Unlock()
+	if ocsps == nil {
+		return
+	}
+	for _, mon := range ocsps {
+		s.startGoRoutine(func() { mon.run() })
+	}
 }
 
 // Start up the server, this will block.
@@ -1750,7 +1762,10 @@ func (s *Server) Start() {
 		})
 	}
 
-	// Start monitoring if needed
+	// Start OCSP Stapling monitoring for TLS certificates if enabled.
+	s.startOCSPMonitoring()
+
+	// Start monitoring if needed.
 	if err := s.StartMonitoring(); err != nil {
 		s.Fatalf("Can't start monitoring: %v", err)
 		return

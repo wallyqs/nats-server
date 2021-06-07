@@ -331,7 +331,7 @@ func (srv *Server) NewOCSPMonitor(config *tlsConfigKind) (*tls.Config, *OCSPMoni
 			switch {
 			case oc.Mode == OCSPModeNever:
 				if mustStaple {
-					srv.Warnf("Certificate at '%s' has MustStaple but OCSP is disabled", certFile)
+					// srv.Warnf("Certificate at '%s' has MustStaple but OCSP is disabled", certFile)
 				}
 				return tc, nil, nil
 			case oc.Mode == OCSPModeAlways:
