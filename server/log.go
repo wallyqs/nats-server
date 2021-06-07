@@ -163,10 +163,10 @@ func (s *Server) ReOpenLogFile() {
 }
 
 // Noticef logs a notice statement
-func (s *Server) Noticef(format string, v ...interface{}) {	
+func (s *Server) Noticef(format string, v ...interface{}) {
 	s.executeLogCall(func(logger Logger, format string, v ...interface{}) {
 		logger.Noticef(format, v...)
-	}, s.opts.ServerName + " ::: "+ format, v...)
+	}, s.opts.ServerName+" ::: "+format, v...)
 }
 
 // Errorf logs an error
