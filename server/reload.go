@@ -1319,11 +1319,6 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 	s.Noticef("Reloaded server configuration")
 }
 
-func (s *Server) reloadOCSP() error {
-	// TODO: Do we need this?
-	return nil
-}
-
 // Update all cached debug and trace settings for every client
 func (s *Server) reloadClientTraceLevel() {
 	opts := s.getOpts()

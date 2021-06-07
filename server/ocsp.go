@@ -58,6 +58,7 @@ const (
 
 // OCSPMonitor monitors the state of a staple per certificate.
 type OCSPMonitor struct {
+	kind     string
 	mu       sync.Mutex
 	raw      []byte
 	srv      *Server
@@ -363,6 +364,7 @@ func (srv *Server) NewOCSPMonitor(config *tlsConfigKind) (*tls.Config, *OCSPMoni
 		}
 
 		mon = &OCSPMonitor{
+			kind:             kind,
 			srv:              srv,
 			hc:               &http.Client{Timeout: 30 * time.Second},
 			shutdownOnRevoke: shutdownOnRevoke,
@@ -451,6 +453,184 @@ func (srv *Server) NewOCSPMonitor(config *tlsConfigKind) (*tls.Config, *OCSPMoni
 	return tc, mon, nil
 }
 
+func (s *Server) setupOCSPStapleStoreDir() error {
+	opts := s.getOpts()
+	storeDir := opts.StoreDir
+	if storeDir == _EMPTY_ {
+		return nil
+	}
+	storeDir = filepath.Join(storeDir, defaultOCSPStoreDir)
+	if stat, err := os.Stat(storeDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(storeDir, defaultDirPerms); err != nil {
+			return fmt.Errorf("could not create OCSP storage directory - %v", err)
+		}
+	} else if stat == nil || !stat.IsDir() {
+		return fmt.Errorf("OCSP storage directory is not a directory")
+	}
+	return nil
+}
+
+type tlsConfigKind struct {
+	tlsConfig *tls.Config
+	tlsOpts   *TLSConfigOpts
+	kind      string
+	apply     func(*tls.Config)
+}
+
+func (s *Server) configureOCSP() []*tlsConfigKind {
+	sopts := s.getOpts()
+
+	configs := make([]*tlsConfigKind, 0)
+
+	if config := sopts.TLSConfig; config != nil {
+		opts := sopts.tlsConfigOpts
+		o := &tlsConfigKind{
+			kind:      typeStringMap[CLIENT],
+			tlsConfig: config,
+			tlsOpts:   opts,
+			apply:     func(tc *tls.Config) { sopts.TLSConfig = tc },
+		}
+		configs = append(configs, o)
+	}
+	if config := sopts.Cluster.TLSConfig; config != nil {
+		opts := sopts.Cluster.tlsConfigOpts
+		o := &tlsConfigKind{
+			kind:      typeStringMap[ROUTER],
+			tlsConfig: config,
+			tlsOpts:   opts,
+			apply:     func(tc *tls.Config) { sopts.Cluster.TLSConfig = tc },
+		}
+		configs = append(configs, o)
+	}
+	if config := sopts.LeafNode.TLSConfig; config != nil {
+		opts := sopts.LeafNode.tlsConfigOpts
+		o := &tlsConfigKind{
+			kind:      typeStringMap[LEAF],
+			tlsConfig: config,
+			tlsOpts:   opts,
+			apply:     func(tc *tls.Config) { sopts.LeafNode.TLSConfig = tc },
+		}
+		configs = append(configs, o)
+	}
+	for i, remote := range sopts.LeafNode.Remotes {
+		opts := remote.tlsConfigOpts
+		if config := remote.TLSConfig; config != nil {
+			o := &tlsConfigKind{
+				kind:      typeStringMap[LEAF],
+				tlsConfig: config,
+				tlsOpts:   opts,
+				apply: func(tc *tls.Config) {
+					sopts.LeafNode.Remotes[i].TLSConfig = tc
+				},
+			}
+			configs = append(configs, o)
+		}
+	}
+	if config := sopts.Gateway.TLSConfig; config != nil {
+		opts := sopts.Gateway.tlsConfigOpts
+		o := &tlsConfigKind{
+			kind:      typeStringMap[GATEWAY],
+			tlsConfig: config,
+			tlsOpts:   opts,
+			apply:     func(tc *tls.Config) { sopts.Gateway.TLSConfig = tc },
+		}
+		configs = append(configs, o)
+	}
+	for i, remote := range sopts.Gateway.Gateways {
+		opts := remote.tlsConfigOpts
+		if config := remote.TLSConfig; config != nil {
+			o := &tlsConfigKind{
+				kind:      typeStringMap[GATEWAY],
+				tlsConfig: config,
+				tlsOpts:   opts,
+				apply: func(tc *tls.Config) {
+					sopts.Gateway.Gateways[i].TLSConfig = tc
+				},
+			}
+			configs = append(configs, o)
+		}
+	}
+	return configs
+}
+
+func (s *Server) enableOCSP() error {
+	configs := s.configureOCSP()
+
+	for _, config := range configs {
+		tc, mon, err := s.NewOCSPMonitor(config)
+		if err != nil {
+			// There should be no OCSP Stapling errors on boot.
+			return err
+		}
+		// Check if an OCSP stapling monitor is required for this certificate.
+		if mon != nil {
+			s.ocsps = append(s.ocsps, mon)
+
+			// Override the TLS config with one that follows OCSP.
+			config.apply(tc)
+		}
+	}
+
+	return nil
+}
+
+func (s *Server) startOCSPMonitoring() {
+	s.mu.Lock()
+	ocsps := s.ocsps
+	s.mu.Unlock()
+	if ocsps == nil {
+		return
+	}
+	for _, mon := range ocsps {
+		s.Noticef("OCSP Stapling enabled for %s connections", mon.kind)
+		s.startGoRoutine(func() { mon.run() })
+	}
+}
+
+func (s *Server) reloadOCSP() error {
+	if err := s.setupOCSPStapleStoreDir(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	ocsps := s.ocsps
+	s.mu.Unlock()
+
+	// Stop all OCSP Stapling monitors in case there were any running.
+	for _, oc := range ocsps {
+		oc.stop()
+	}
+
+	configs := s.configureOCSP()
+
+	// Restart the monitors under the new configuration.
+	ocspm := make([]*OCSPMonitor, 0)
+	for _, config := range configs {
+		tc, mon, err := s.NewOCSPMonitor(config)
+		if err != nil {
+			// There should be no OCSP Stapling errors on boot.
+			return err
+		}
+		// Check if an OCSP stapling monitor is required for this certificate.
+		if mon != nil {
+			ocspm = append(ocspm, mon)
+
+			// Apply latest TLS configuration.
+			config.apply(tc)
+		}
+	}
+
+	// Replace stopped monitors with the new ones.
+	s.mu.Lock()
+	s.ocsps = ocspm
+	s.mu.Unlock()
+
+	// Dispatch all goroutines once again.
+	s.startOCSPMonitoring()
+
+	return nil
+}
+
 func hasOCSPStatusRequest(cert *x509.Certificate) bool {
 	// OID for id-pe-tlsfeature defined in RFC here:
 	// https://datatracker.ietf.org/doc/html/rfc7633
@@ -512,6 +692,13 @@ func (oc *OCSPMonitor) writeOCSPStatus(storeDir, file string, data []byte) error
 	}
 
 	return nil
+}
+
+func (oc *OCSPMonitor) stop() {
+	oc.mu.Lock()
+	stopCh := oc.stopCh
+	oc.mu.Unlock()
+	stopCh <- struct{}{}
 }
 
 func parseCertPEM(name string) (*x509.Certificate, error) {
