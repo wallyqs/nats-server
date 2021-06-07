@@ -1016,10 +1016,6 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			tmpNew.TLSConfig = nil
 			tmpOld.tlsConfigOpts = nil
 			tmpNew.tlsConfigOpts = nil
-			if len(tmpOld.Gateways) == len(tmpNew.Gateways) {
-				tmpOld.Gateways = nil
-				tmpNew.Gateways = nil
-			}
 
 			// Need to do the same for remote gateways' TLS configs.
 			// But we can't just set remotes' TLSConfig to nil otherwise this
@@ -1049,11 +1045,38 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			tmpNew.Remotes = copyRemoteLNConfigWithoutTLSConfig(tmpNew.Remotes)
 
 			// Special check for leafnode remotes changes which are not supported right now.
+			leafRemotesChanged := func(a, b LeafNodeOpts) bool {
+				if len(tmpOld.Remotes) != len(tmpNew.Remotes) {
+					return true
+				}
+
+				// Check whether all remotes URLs are still the same.
+				for _, oldRemote := range tmpOld.Remotes {
+					var found bool
+
+					for _, newRemote := range tmpNew.Remotes {
+						// Bind to global account in case not defined.
+						if newRemote.LocalAccount == _EMPTY_ {
+							newRemote.LocalAccount = globalAccountName
+						}
+
+						if reflect.DeepEqual(oldRemote, newRemote) {
+							found = true
+							break
+						}
+					}
+
+					if !found {
+						return true
+					}
+				}
+
+				return false
+			}
 
 			// First check whether remotes changed at all. If they did not,
 			// skip them in the complete equal check.
-			if len(tmpOld.Remotes) == len(tmpNew.Remotes) {
-				// TODO: We probably need a better check for this...
+			if !leafRemotesChanged(tmpOld, tmpNew) {
 				tmpOld.Remotes = nil
 				tmpNew.Remotes = nil
 			}
@@ -1220,6 +1243,7 @@ func copyRemoteGWConfigsWithoutTLSConfig(current []*RemoteGatewayOpts) []*Remote
 	for _, rcfg := range current {
 		cp := *rcfg
 		cp.TLSConfig = nil
+		cp.tlsConfigOpts = nil
 		rgws = append(rgws, &cp)
 	}
 	return rgws
@@ -1234,6 +1258,7 @@ func copyRemoteLNConfigWithoutTLSConfig(current []*RemoteLeafOpts) []*RemoteLeaf
 	for _, rcfg := range current {
 		cp := *rcfg
 		cp.TLSConfig = nil
+		cp.tlsConfigOpts = nil
 		// This is set only when processing a CONNECT, so reset here so that we
 		// don't fail the DeepEqual comparison.
 		cp.TLS = false

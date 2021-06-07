@@ -1596,23 +1596,25 @@ func TestOCSPGateway(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// checkClusterFormed(t, srvA, srvB)
+	waitForOutboundGateways(t, srvB, 1, 5*time.Second)
 
 	// Revoke the seed server cluster certificate, following servers will not be able to verify connection.
-	// setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Revoked)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Revoked)
 
 	// Original set of servers still can communicate to each other, even though the cert has been revoked.
-	// NOTE: Should we unplug from the cluster in case our server is revoke and OCSP policy is always or must?
-	// checkClusterFormed(t, srvA, srvB)
+	waitForOutboundGateways(t, srvA, 1, 5*time.Second)
+	waitForOutboundGateways(t, srvB, 1, 5*time.Second)
 
-	// Wait for seed server to notice that its certificate has been revoked,
-	// so that new routes can't connect to it.
+	// Wait for gateway A to notice that its certificate has been revoked,
+	// so that new gateways can't connect to it.
 	time.Sleep(6 * time.Second)
 
 	// Start another server against the seed server that has an invalid OCSP Staple
 	srvConfC := `
 		host: "127.0.0.1"
 		port: -1
+
+		server_name: "CCC"
 
 		tls {
 			cert_file: "configs/certs/ocsp/server-status-request-url-05-cert.pem"
@@ -1687,10 +1689,14 @@ func TestOCSPGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	cB.Flush()
+
+	// Gateway C was not able to mesh with Gateway A because of the revoked OCSP staple
+	// so these requests to A and B should fail.
 	resp, err := cC.Request("foo", nil, 2*time.Second)
 	if err == nil {
 		t.Logf("Unexpected success, response: %+v", resp)
 	}
+	// Make request to B
 	resp, err = cC.Request("bar", nil, 2*time.Second)
 	if err == nil {
 		t.Logf("Unexpected success, response: %+v", resp)
@@ -1734,6 +1740,9 @@ func TestOCSPGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(4 * time.Second)
+	waitForOutboundGateways(t, srvA, 2, 5*time.Second)
+	waitForOutboundGateways(t, srvB, 2, 5*time.Second)
+	waitForOutboundGateways(t, srvC, 2, 5*time.Second)
 
 	// Now clients connect to C can communicate with B and A.
 	_, err = cC.Request("foo", nil, 2*time.Second)
