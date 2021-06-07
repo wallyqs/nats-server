@@ -1026,7 +1026,7 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			// If there is really a change prevents reload.
 			if !reflect.DeepEqual(tmpOld, tmpNew) {
 				// See TODO(ik) note below about printing old/new values.
-				return nil, fmt.Errorf("config reload not supported for %s: old=%#v, new=%#v",
+				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
 					field.Name, oldValue, newValue)
 			}
 		case "leafnode":
@@ -1084,7 +1084,7 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			// If there is really a change prevents reload.
 			if !reflect.DeepEqual(tmpOld, tmpNew) {
 				// See TODO(ik) note below about printing old/new values.
-				return nil, fmt.Errorf("config reload not supported for %s: old=%#v, new=%#v",
+				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
 					field.Name, oldValue, newValue)
 			}
 		case "jetstream":

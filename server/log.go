@@ -166,7 +166,7 @@ func (s *Server) ReOpenLogFile() {
 func (s *Server) Noticef(format string, v ...interface{}) {
 	s.executeLogCall(func(logger Logger, format string, v ...interface{}) {
 		logger.Noticef(format, v...)
-	}, s.opts.ServerName+" ::: "+format, v...)
+	}, format, v...)
 }
 
 // Errorf logs an error

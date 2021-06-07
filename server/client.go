@@ -4965,28 +4965,12 @@ func (c *client) doTLSHandshake(typ string, solicit bool, url *url.URL, tlsConfi
 			tlsConfig.ServerName = host
 		}
 
-		if kind == LEAF {
-			tlsConfig = tlsConfig.Clone()
-			// GetCertificate is used by a server to send the server cert to a
-			// client. We're a client, so we must not set this.
-			tlsConfig.GetCertificate = nil
-		}
-
 		c.nc = tls.Client(c.nc, tlsConfig)
 	} else {
 		if kind == CLIENT {
 			c.Debugf("Starting TLS client connection handshake")
 		} else {
 			c.Debugf("Starting TLS %s server handshake", typ)
-		}
-
-		if kind == LEAF {
-			// RequireAndVerifyClientCert is used to tell a client that it
-			// should send the client cert to the server.
-			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-			// GetClientCertificate is used by a client to send the client cert
-			// to a server. We're a server, so we must not set this.
-			tlsConfig.GetClientCertificate = nil
 		}
 
 		c.nc = tls.Server(c.nc, tlsConfig)

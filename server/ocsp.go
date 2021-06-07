@@ -508,7 +508,16 @@ func (s *Server) configureOCSP() []*tlsConfigKind {
 			kind:      typeStringMap[LEAF],
 			tlsConfig: config,
 			tlsOpts:   opts,
-			apply:     func(tc *tls.Config) { sopts.LeafNode.TLSConfig = tc },
+			apply: func(tc *tls.Config) {
+
+				// RequireAndVerifyClientCert is used to tell a client that it
+				// should send the client cert to the server.
+				tc.ClientAuth = tls.RequireAndVerifyClientCert
+				// GetClientCertificate is used by a client to send the client cert
+				// to a server. We're a server, so we must not set this.
+				tc.GetClientCertificate = nil
+				sopts.LeafNode.TLSConfig = tc
+			},
 		}
 		configs = append(configs, o)
 	}
@@ -520,6 +529,10 @@ func (s *Server) configureOCSP() []*tlsConfigKind {
 				tlsConfig: config,
 				tlsOpts:   opts,
 				apply: func(tc *tls.Config) {
+					// GetCertificate is used by a server to send the server cert to a
+					// client. We're a client, so we must not set this.
+					tc.GetCertificate = nil
+
 					sopts.LeafNode.Remotes[i].TLSConfig = tc
 				},
 			}
