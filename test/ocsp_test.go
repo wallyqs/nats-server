@@ -1223,6 +1223,8 @@ func TestOCSPClusterReload(t *testing.T) {
 }
 
 func TestOCSPLeaf(t *testing.T) {
+	doLog = true
+	doDebug = true
 	const (
 		caCert = "configs/certs/ocsp/ca-cert.pem"
 		caKey  = "configs/certs/ocsp/ca-key.pem"
@@ -1330,23 +1332,24 @@ func TestOCSPLeaf(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// checkClusterFormed(t, srvA, srvB)
+	// checkLeafNodeConnected(t, srvA)
 
 	// Revoke the seed server cluster certificate, following servers will not be able to verify connection.
-	// setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Revoked)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Revoked)
 
 	// Original set of servers still can communicate to each other, even though the cert has been revoked.
-	// NOTE: Should we unplug from the cluster in case our server is revoke and OCSP policy is always or must?
-	// checkClusterFormed(t, srvA, srvB)
+	// checkLeafNodeConnected(t, srvA)
 
 	// Wait for seed server to notice that its certificate has been revoked,
-	// so that new routes can't connect to it.
+	// so that new leafnodes can't connect to it.
 	time.Sleep(6 * time.Second)
 
 	// Start another server against the seed server that has an invalid OCSP Staple
 	srvConfC := `
 		host: "127.0.0.1"
 		port: -1
+
+		server_name: "CCC"
 
 		tls {
 			cert_file: "configs/certs/ocsp/server-status-request-url-05-cert.pem"
@@ -1428,8 +1431,8 @@ func TestOCSPLeaf(t *testing.T) {
 		t.Logf("Unexpected success, response: %+v", resp)
 	}
 
-	// Switch the certs from the seed server to new ones that are not revoked,
-	// this should restart OCSP Stapling for the cluster routes.
+	// Switch the certs from the leafnode server to new ones that are not revoked,
+	// this should restart OCSP Stapling for the leafnode server.
 	srvConfA = `
 		host: "127.0.0.1"
 		port: -1
@@ -1465,11 +1468,24 @@ func TestOCSPLeaf(t *testing.T) {
 	}
 	time.Sleep(4 * time.Second)
 
-	// Now clients connect to C can communicate with B and A.
+	// A <-> A
+	_, err = cA.Request("foo", nil, 2*time.Second)
+	if err != nil {
+		t.Logf("%v", err)
+	}
+
+	// B <-> A
+	_, err = cB.Request("foo", nil, 2*time.Second)
+	if err != nil {
+		t.Logf("%v", err)
+	}
+
+	// C <-> A
 	_, err = cC.Request("foo", nil, 2*time.Second)
 	if err != nil {
 		t.Logf("%v", err)
 	}
+	// C <-> B via leafnode A
 	_, err = cC.Request("bar", nil, 2*time.Second)
 	if err != nil {
 		t.Logf("%v", err)
