@@ -1223,8 +1223,6 @@ func TestOCSPClusterReload(t *testing.T) {
 }
 
 func TestOCSPLeaf(t *testing.T) {
-	doLog = true
-	doDebug = true
 	const (
 		caCert = "configs/certs/ocsp/ca-cert.pem"
 		caKey  = "configs/certs/ocsp/ca-key.pem"
