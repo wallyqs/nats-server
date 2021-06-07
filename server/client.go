@@ -4980,6 +4980,9 @@ func (c *client) doTLSHandshake(typ string, solicit bool, url *url.URL, tlsConfi
 		}
 
 		if typ == "leafnode" {
+			// RequireAndVerifyClientCert is used to tell a client that it
+			// should send the client cert to the server.
+			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
 			// GetClientCertificate is used by a client to send the client cert
 			// to a server. We're a server, so we must not set this.
 			tlsConfig.GetClientCertificate = nil
