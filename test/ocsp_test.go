@@ -2438,3 +2438,100 @@ func getOCSPStatus(s tls.ConnectionState) (*ocsp.Response, error) {
 	}
 	return resp, nil
 }
+
+func TestOCSPServerExample(t *testing.T) {
+	doLog = true
+	doDebug = true
+	const (
+		caCert     = "configs/certs/ocsp/ca-cert.pem"
+		caKey      = "configs/certs/ocsp/ca-key.pem"
+		serverCert = "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ocspr := newOCSPResponder(t, caCert, caKey)
+	defer ocspr.Shutdown(ctx)
+	addr := fmt.Sprintf("http://%s", ocspr.Addr)
+	setOCSPStatus(t, addr, serverCert, ocsp.Good)
+
+	content := `
+		port: 4222
+
+		tls {
+			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
+			ca_file: "configs/certs/ocsp/ca-cert.pem"
+			timeout: 5
+		}
+	`
+	conf := createConfFile(t, []byte(content))
+	defer removeFile(t, conf)
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	s.Debugf("------------------------------- OCSP TEST SERVER: Cert Valid for a 3 minutes ------------")
+	s.Debugf("")
+	s.Debugf("Use 'configs/certs/ocsp/ca-cert.pem' CA in your client to connect")
+	s.Debugf("")
+	nc, err := nats.Connect(fmt.Sprintf("tls://localhost:4222"),
+		nats.Secure(&tls.Config{
+			VerifyConnection: func(s tls.ConnectionState) error {
+				resp, err := getOCSPStatus(s)
+				if err != nil {
+					return err
+				}
+				if resp.Status != ocsp.Good {
+					t.Errorf("Expected valid OCSP staple status")
+				}
+				return nil
+			},
+		}),
+		nats.RootCAs(caCert),
+		nats.ErrorHandler(noOpErrHandler),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := nc.SubscribeSync("foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nc.Publish("foo", []byte("hello world"))
+	nc.Flush()
+
+	_, err = sub.NextMsg(1 * time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nc.Close()
+
+	time.Sleep(3 * time.Minute)
+	s.Debugf("------------------------------- OCSP: Revoking cert --------------------------------")
+	setOCSPStatus(t, addr, serverCert, ocsp.Revoked)
+	time.Sleep(10 * time.Second)
+
+	// Should not be connection refused, the client will continue running and
+	// be served the stale OCSP staple instead.
+	_, err = nats.Connect(fmt.Sprintf("tls://localhost:4222"),
+		nats.Secure(&tls.Config{
+			VerifyConnection: func(s tls.ConnectionState) error {
+				resp, err := getOCSPStatus(s)
+				if err != nil {
+					return err
+				}
+				if resp.Status != ocsp.Revoked {
+					t.Errorf("Expected revoked status")
+				}
+				return nil
+			},
+		}),
+		nats.RootCAs(caCert),
+		nats.ErrorHandler(noOpErrHandler),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.Debugf("------------------------------- OCSP: Running with invalid staple for 3 minutes------")
+	time.Sleep(3 * time.Minute)
+}
