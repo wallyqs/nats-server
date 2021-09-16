@@ -1841,6 +1841,7 @@ func (wq *waitQueue) pop() *waitingRequest {
 	wr := wq.peek()
 	if wr != nil {
 		wr.n--
+		fmt.Printf("[%+v] ===> %v || %+v\n", time.Now(), time.Since(wr.expires), wr)
 		if wr.n <= 0 {
 			wq.done()
 		}
@@ -1862,6 +1863,7 @@ func (wq *waitQueue) done() {
 // a single message. If the payload is a formal request or a number parseable with Atoi(), then we will send a
 // batch of messages without requiring another request to this endpoint, or an ACK.
 func (o *consumer) processNextMsgReq(_ *subscription, c *client, _ *Account, _, reply string, msg []byte) {
+	fmt.Println(time.Now(), "-------- START: ", reply, string(msg))
 	_, msg = c.msgParts(msg)
 
 	o.mu.Lock()
@@ -2075,12 +2077,16 @@ func (o *consumer) getNextMsg() (subj string, hdr, msg []byte, seq uint64, dc ui
 // Lock should be held.
 func (o *consumer) forceExpireFirstWaiting() *waitingRequest {
 	// FIXME(dlc) - Should we do advisory here as well?
-	wr := o.waiting.peek()
-	if wr != nil {
-		o.waiting.done()
-	} else {
+	wr := o.waiting.pop()
+	if wr == nil {
 		return wr
 	}
+	// wr := o.waiting.peek()
+	// if wr != nil {
+	// 	o.waiting.done()
+	// } else {
+	// 	return wr
+	// }
 	// If we are expiring this and we think there is still interest, alert.
 	if rr := o.acc.sl.Match(wr.reply); len(rr.psubs)+len(rr.qsubs) > 0 && o.mset != nil {
 		// We still appear to have interest, so send alert as courtesy.

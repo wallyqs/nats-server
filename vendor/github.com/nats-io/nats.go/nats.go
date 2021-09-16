@@ -2789,6 +2789,7 @@ func (nc *Conn) processMsg(data []byte) {
 		// We have two modes of delivery. One is the channel, used by channel
 		// subscribers and syncSubscribers, the other is a linked list for async.
 		if sub.mch != nil {
+			fmt.Println("------ GOT: ", sub.Subject, m, string(m.Data))
 			select {
 			case sub.mch <- m:
 			default:
