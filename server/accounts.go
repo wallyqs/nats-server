@@ -508,7 +508,33 @@ func (a *Account) RoutedSubs() int {
 func (a *Account) TotalSubs() int {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return int(a.sl.Count())
+	res := int(a.sl.Count())
+	fmt.Printf("==================== %+v ||| %+v\n", a.sl, a.sl.root.nodes)
+	for k, v := range a.sl.root.nodes {
+		fmt.Printf("AAAAAAAA: %+v || %+v\n", k, v)
+		fmt.Printf(">>>>>>>> %+v\n", v.next)
+		for kk, vv := range v.next.nodes {
+			fmt.Printf("BBBBBBBB: %+v || %+v\n", kk, vv)
+			fmt.Printf(">>>>>>>> %+v\n", vv.next)
+			for kk, vv := range vv.next.nodes {
+				fmt.Printf("CCCCCCCC: %+v || %+v\n", kk, vv)
+				fmt.Printf(">>>>>>>> %+v\n", vv.next)
+				for kk, vv := range vv.next.nodes {
+					fmt.Printf("DDDDDDDD: %+v || %+v\n", kk, vv)
+					fmt.Printf(">>>>>>>> %+v\n", vv.next)
+					for kk, vv := range vv.next.nodes {
+						fmt.Printf("EEEEEEEE: %+v || %+v\n", kk, vv)
+						fmt.Printf(">>>>>>>> %+v\n", vv.next)
+					}
+				}
+			}
+		}
+		// for kk, vv := range v {
+		// 	// fmt.Println("BBBBBBBB: ", kk, vv)
+		// }
+	}
+
+	return res
 }
 
 func (a *Account) shouldLogMaxSubErr() bool {

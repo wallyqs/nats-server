@@ -16,6 +16,7 @@ package server
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -352,6 +353,8 @@ func (s *Sublist) chkForRemoveNotification(subject, queue string) {
 
 // Insert adds a subscription into the sublist
 func (s *Sublist) Insert(sub *subscription) error {
+	res := int(s.Count())
+	fmt.Println(string(sub.subject), res)
 	// copy the subject since we hold this and this might be part of a large byte slice.
 	subject := string(sub.subject)
 	tsa := [32]string{}
@@ -440,6 +443,7 @@ func (s *Sublist) Insert(sub *subscription) error {
 	}
 
 	s.count++
+	fmt.Println(">>>>>>>>>>>>>>", s.count)
 	s.inserts++
 
 	s.addToCache(subject, sub)
@@ -779,6 +783,7 @@ func (s *Sublist) remove(sub *subscription, shouldLock bool, doCacheUpdates bool
 	}
 
 	s.count--
+	fmt.Println("....................", s.count)
 	s.removes++
 
 	for i := len(levels) - 1; i >= 0; i-- {

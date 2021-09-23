@@ -49,6 +49,7 @@ var DefaultTestOptions = server.Options{
 	NoSigs:                true,
 	MaxControlLine:        4096,
 	DisableShortFirstPing: true,
+	HTTPPort: 8222,
 }
 
 // RunDefaultServer starts a new Go routine based server using the default options
