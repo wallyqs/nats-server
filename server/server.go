@@ -34,6 +34,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -1755,6 +1756,8 @@ func (s *Server) Start() {
 // Shutdown will shutdown the server instance by kicking out the AcceptLoop
 // and closing all associated clients.
 func (s *Server) Shutdown() {
+	debug.PrintStack()
+	s.Errorf("SHUTTING DOWN OOOOOOOOOOOOOOOOOOOOOOOOOOO RAFT NODES1!!!!!!!!!!!!!!!!!!!!!!!!")
 	if s == nil {
 		return
 	}

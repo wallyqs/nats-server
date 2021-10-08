@@ -553,6 +553,7 @@ func (s *Server) reloadDebugRaftNodes() {
 }
 
 func (s *Server) shutdownRaftNodes() {
+	s.Errorf("SHUTTING DOWN RAFT NODES1!!!!!!!!!!!!!!!!!!!!!!!!")
 	if s == nil {
 		return
 	}
@@ -3019,10 +3020,17 @@ func (n *raft) setWriteErrLocked(err error) {
 			return
 		}
 	}
+	if os.IsNotExist(err) {
+		n.warn("Directory not found: %v", err)
+		// This could be temporary error so ignore.
+		return
+	}
+
 	n.werr = err
 
 	// For now since this can be happening all under the covers, we will call up and disable JetStream.
 	n.Unlock()
+	n.error("Critical write error: %v", err)
 	n.s.handleOutOfSpace(_EMPTY_)
 	n.Lock()
 }
