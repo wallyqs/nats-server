@@ -1106,24 +1106,31 @@ func TestOCSPCluster(t *testing.T) {
 		server_name: "CCC"
 
 		tls {
-			cert_file: "configs/certs/ocsp/server-status-request-url-05-cert.pem"
-			key_file: "configs/certs/ocsp/server-status-request-url-05-key.pem"
+			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
 		store_dir: "%s"
-		cluster {
-			name: AB
+
+		gateway {
+			name: C
 			host: "127.0.0.1"
-			advertise: 127.0.0.1
+			advertise: "127.0.0.1"
 			port: -1
-
-			routes: [ nats://127.0.0.1:%d ]
-			connect_retries: 30
-
+			gateways: [{
+			 	name: "A"
+			 	url: "nats://127.0.0.1:%d"
+				tls {
+					cert_file: "configs/certs/ocsp/server-status-request-url-04-cert.pem"
+					key_file: "configs/certs/ocsp/server-status-request-url-04-key.pem"
+					ca_file: "configs/certs/ocsp/ca-cert.pem"
+					timeout: 5
+				}
+			}]
 			tls {
-				cert_file: "configs/certs/ocsp/server-status-request-url-06-cert.pem"
-				key_file: "configs/certs/ocsp/server-status-request-url-06-key.pem"
+				cert_file: "configs/certs/ocsp/server-status-request-url-04-cert.pem"
+				key_file: "configs/certs/ocsp/server-status-request-url-04-key.pem"
 				ca_file: "configs/certs/ocsp/ca-cert.pem"
 				timeout: 5
 			}
@@ -2478,6 +2485,7 @@ func TestOCSPSuperCluster(t *testing.T) {
 	ocspr := newOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-cert.pem", ocsp.Good)
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Good)
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-03-cert.pem", ocsp.Good)
@@ -2502,11 +2510,11 @@ func TestOCSPSuperCluster(t *testing.T) {
 
 		server_name: "AAA"
 
-		ocsp { mode: "always" }
+		ocsp { mode: "always", url: "%s" }
 
 		tls {
-			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
-			key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
+			cert_file: "configs/certs/ocsp/server-cert.pem"
+			key_file: "configs/certs/ocsp/server-key.pem"
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
@@ -2519,8 +2527,8 @@ func TestOCSPSuperCluster(t *testing.T) {
 			port: -1
 
 			tls {
-				cert_file: "configs/certs/ocsp/server-status-request-url-02-cert.pem"
-				key_file: "configs/certs/ocsp/server-status-request-url-02-key.pem"
+   				cert_file: "configs/certs/ocsp/server-cert.pem"
+				key_file: "configs/certs/ocsp/server-key.pem"
 				ca_file: "configs/certs/ocsp/ca-cert.pem"
 				timeout: 5
 			}
@@ -2533,14 +2541,14 @@ func TestOCSPSuperCluster(t *testing.T) {
 			advertise: "127.0.0.1"
 
 			tls {
-				cert_file: "configs/certs/ocsp/server-status-request-url-03-cert.pem"
-				key_file: "configs/certs/ocsp/server-status-request-url-03-key.pem"
+				cert_file: "configs/certs/ocsp/server-cert.pem"
+				key_file: "configs/certs/ocsp/server-key.pem"
 				ca_file: "configs/certs/ocsp/ca-cert.pem"
 				timeout: 5
 			}
 		}
 	`
-	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
+	srvConfA = fmt.Sprintf(srvConfA, addr, storeDirA)
 	sconfA := createConfFile(t, []byte(srvConfA))
 	defer removeFile(t, sconfA)
 	srvA, optsA := RunServerWithConfig(sconfA)
@@ -2553,11 +2561,11 @@ func TestOCSPSuperCluster(t *testing.T) {
 
 		server_name: "BBB"
 
-		ocsp { mode: "always" }
+		ocsp { mode: "always", url: "%s" }
 
 		tls {
-			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
-			key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
+			cert_file: "configs/certs/ocsp/server-cert.pem"
+			key_file: "configs/certs/ocsp/server-key.pem"
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
@@ -2572,8 +2580,8 @@ func TestOCSPSuperCluster(t *testing.T) {
 			routes: [ nats://127.0.0.1:%d ]
 
 			tls {
-				cert_file: "configs/certs/ocsp/server-status-request-url-02-cert.pem"
-				key_file: "configs/certs/ocsp/server-status-request-url-02-key.pem"
+				cert_file: "configs/certs/ocsp/server-cert.pem"
+				key_file: "configs/certs/ocsp/server-key.pem"
 				ca_file: "configs/certs/ocsp/ca-cert.pem"
 				timeout: 5
 			}
@@ -2586,14 +2594,14 @@ func TestOCSPSuperCluster(t *testing.T) {
 			port: -1
 
 			tls {
-				cert_file: "configs/certs/ocsp/server-status-request-url-03-cert.pem"
-				key_file: "configs/certs/ocsp/server-status-request-url-03-key.pem"
+				cert_file: "configs/certs/ocsp/server-cert.pem"
+				key_file: "configs/certs/ocsp/server-key.pem"
 				ca_file: "configs/certs/ocsp/ca-cert.pem"
 				timeout: 5
 			}
 		}
 	`
-	srvConfB = fmt.Sprintf(srvConfB, storeDirB, optsA.Cluster.Port)
+	srvConfB = fmt.Sprintf(srvConfB, addr, storeDirB, optsA.Cluster.Port)
 	conf := createConfFile(t, []byte(srvConfB))
 	defer removeFile(t, conf)
 	srvB, optsB := RunServerWithConfig(conf)
@@ -2625,11 +2633,11 @@ func TestOCSPSuperCluster(t *testing.T) {
 
 		server_name: "CCC"
 
-		ocsp { mode: "always" }
+		ocsp { mode: "always", url: "%s" }
 
 		tls {
-			cert_file: "configs/certs/ocsp/server-status-request-url-05-cert.pem"
-			key_file: "configs/certs/ocsp/server-status-request-url-05-key.pem"
+			cert_file: "configs/certs/ocsp/server-cert.pem"
+			key_file: "configs/certs/ocsp/server-key.pem"
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
@@ -2641,14 +2649,14 @@ func TestOCSPSuperCluster(t *testing.T) {
 			port: -1
 			gateways: [{name: "A", urls: ["nats://127.0.0.1:%d"] }]
 			tls {
-				cert_file: "configs/certs/ocsp/server-status-request-url-06-cert.pem"
-				key_file: "configs/certs/ocsp/server-status-request-url-06-key.pem"
+				cert_file: "configs/certs/ocsp/server-cert.pem"
+				key_file: "configs/certs/ocsp/server-key.pem"
 				ca_file: "configs/certs/ocsp/ca-cert.pem"
 				timeout: 5
 			}
 		}
 	`
-	srvConfC = fmt.Sprintf(srvConfC, storeDirC, optsA.Gateway.Port)
+	srvConfC = fmt.Sprintf(srvConfC, addr, storeDirC, optsA.Gateway.Port)
 	conf = createConfFile(t, []byte(srvConfC))
 	defer removeFile(t, conf)
 	srvC, optsC := RunServerWithConfig(conf)
@@ -2732,3 +2740,4 @@ func TestOCSPSuperCluster(t *testing.T) {
 		t.Errorf("Expected %v, got: %v", expected, got)
 	}
 }
+
