@@ -77,6 +77,7 @@ type ClusterOpts struct {
 	Advertise         string            `json:"-"`
 	NoAdvertise       bool              `json:"-"`
 	ConnectRetries    int               `json:"-"`
+	AllowNonTLS       bool              `json:"-"`
 
 	// Not exported (used in tests)
 	resolver netResolver
@@ -1452,6 +1453,8 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 			opts.Cluster.tlsConfigOpts = tlsopts
 		case "cluster_advertise", "advertise":
 			opts.Cluster.Advertise = mv.(string)
+		case "allow_non_tls":
+			opts.Cluster.AllowNonTLS = mv.(bool)
 		case "no_advertise":
 			opts.Cluster.NoAdvertise = mv.(bool)
 			trackExplicitVal(opts, &opts.inConfig, "Cluster.NoAdvertise", opts.Cluster.NoAdvertise)

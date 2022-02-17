@@ -18,6 +18,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"net/url"
@@ -1321,6 +1322,21 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 		c.flags.set(expectConnect)
 	}
 
+	var pre []byte
+	if tlsRequired && opts.Cluster.AllowNonTLS {
+		pre = make([]byte, 0)
+		c.nc.SetReadDeadline(time.Now().Add(secondsToDuration(opts.Cluster.TLSTimeout)))
+		n, _ := io.ReadFull(c.nc, pre[:])
+		c.nc.SetReadDeadline(time.Time{})
+		pre = pre[:n]
+		fmt.Println("->>>>>>>>>>", pre)
+		if n > 0 && pre[0] == 0x16 {
+			tlsRequired = true
+		} else {
+			tlsRequired = false
+		}
+	}
+
 	// Check for TLS
 	if tlsRequired {
 		tlsConfig := opts.Cluster.TLSConfig
@@ -1328,6 +1344,11 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 			// Copy off the config to add in ServerName if we need to.
 			tlsConfig = tlsConfig.Clone()
 		}
+		if len(pre) > 0 {
+			c.nc = &tlsMixConn{c.nc, bytes.NewBuffer(pre)}
+			pre = nil
+		}
+
 		// Perform (server or client side) TLS handshake.
 		if _, err := c.doTLSHandshake("route", didSolicit, rURL, tlsConfig, _EMPTY_, opts.Cluster.TLSTimeout, opts.Cluster.TLSPinnedCerts); err != nil {
 			c.mu.Unlock()
