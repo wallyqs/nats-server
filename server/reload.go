@@ -1591,6 +1591,7 @@ func (s *Server) reloadAuthorization() {
 		s.configureAuthorization()
 		s.mu.Unlock()
 
+		// TODO: Reproduce without this.
 		s.accounts.Range(func(k, v interface{}) bool {
 			newAcc := v.(*Account)
 			if acc, ok := oldAccounts[newAcc.Name]; ok {
@@ -1627,10 +1628,12 @@ func (s *Server) reloadAuthorization() {
 				newAcc.nrleafs = acc.nrleafs
 				// Process any reverse map entries.
 				if len(acc.imports.rrMap) > 0 {
+					fmt.Println("=========================> BEFORE", acc.Name, len(acc.imports.rrMap), acc.imports.rrMap)
 					newAcc.imports.rrMap = make(map[string][]*serviceRespEntry)
 					for k, v := range acc.imports.rrMap {
 						newAcc.imports.rrMap[k] = v
 					}
+					fmt.Println("=========================> AFTER", acc.Name, len(newAcc.imports.rrMap), newAcc.imports.rrMap)
 				}
 				newAcc.mu.Unlock()
 				acc.mu.RUnlock()

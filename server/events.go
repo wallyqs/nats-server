@@ -762,13 +762,17 @@ func (s *Server) startStatszTimer() {
 	// We will start by sending out more of these and trail off to the statsz being the max.
 	s.sys.cstatsz = 250 * time.Millisecond
 	// Send out the first one quickly, we will slowly back off.
-	s.sys.stmr = time.AfterFunc(s.sys.cstatsz, s.wrapChk(s.heartbeatStatsz))
+	// s.sys.stmr = time.AfterFunc(s.sys.cstatsz, s.wrapChk(s.heartbeatStatsz))
+	cb := func(){}
+	s.sys.stmr = time.AfterFunc(s.sys.cstatsz, cb)
 }
 
 // Start a ticker that will fire periodically and check for orphaned servers.
 // This should be wrapChk() to setup common locking.
 func (s *Server) startRemoteServerSweepTimer() {
-	s.sys.sweeper = time.AfterFunc(s.sys.chkOrph, s.wrapChk(s.checkRemoteServers))
+	cb := func(){}
+	s.sys.sweeper = time.AfterFunc(s.sys.chkOrph, cb)
+	// s.sys.sweeper = time.AfterFunc(s.sys.chkOrph, s.wrapChk(s.checkRemoteServers))
 }
 
 // Length of our system hash used for server targeted messages.
@@ -1771,7 +1775,9 @@ func (s *Server) sendAccConnsUpdate(a *Account, subj ...string) {
 	} else {
 		// Check to see if we have an HB running and update.
 		if a.ctmr == nil {
-			a.ctmr = time.AfterFunc(eventsHBInterval, func() { s.accConnsUpdate(a) })
+			a.ctmr = time.AfterFunc(eventsHBInterval, func() {
+				// s.accConnsUpdate(a)
+			})
 		} else {
 			a.ctmr.Reset(eventsHBInterval)
 		}

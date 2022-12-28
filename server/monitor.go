@@ -2086,6 +2086,7 @@ type LeafzOptions struct {
 // LeafInfo has detailed information on each remote leafnode connection.
 type LeafInfo struct {
 	Account  string   `json:"account"`
+	Name     string   `json:"name"`
 	IP       string   `json:"ip"`
 	Port     int      `json:"port"`
 	RTT      string   `json:"rtt,omitempty"`
@@ -2125,6 +2126,7 @@ func (s *Server) Leafz(opts *LeafzOptions) (*Leafz, error) {
 			ln.mu.Lock()
 			lni := &LeafInfo{
 				Account:  ln.acc.Name,
+				Name:     ln.leaf.remoteServer,
 				IP:       ln.host,
 				Port:     int(ln.port),
 				RTT:      ln.getRTT().String(),

@@ -129,7 +129,7 @@ type serviceImport struct {
 	claim       *jwt.Import
 	se          *serviceExport
 	sid         []byte
-	from        string
+	from        string // <---
 	to          string
 	tr          *transform
 	ts          int64
@@ -1443,6 +1443,7 @@ func (a *Account) lowestServiceExportResponseTime() time.Duration {
 
 // AddServiceImportWithClaim will add in the service import via the jwt claim.
 func (a *Account) AddServiceImportWithClaim(destination *Account, from, to string, imClaim *jwt.Import) error {
+	fmt.Println("CLAIM???????????")
 	return a.addServiceImportWithClaim(destination, from, to, imClaim, false)
 }
 
@@ -1470,7 +1471,13 @@ func (a *Account) addServiceImportWithClaim(destination *Account, from, to strin
 		return err
 	}
 
-	_, err := a.addServiceImport(destination, from, to, imClaim)
+	fmt.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! CLAIM: ", a.Name, destination.Name, from, to, imClaim)
+	var err error
+	if from != jsAllAPI {
+		_, err = a.addServiceImport(destination, from, to, imClaim)
+	} else {
+		fmt.Println("Skipping due to JS.API", a.Name, destination.Name, from, to, imClaim)
+	}
 
 	return err
 }
@@ -1695,6 +1702,12 @@ func (a *Account) addReverseRespMapEntry(acc *Account, reply, from string) {
 	sre := &serviceRespEntry{acc, from}
 	sra := a.imports.rrMap[reply]
 	a.imports.rrMap[reply] = append(sra, sre)
+	fmt.Println("REVERSE MAP: ", a.imports.rrMap)
+	for k, v := range a.imports.rrMap {
+		for kk, vv := range v {
+			fmt.Println("●●●●●●●", k, kk, v, vv)
+		}
+	}
 	a.mu.Unlock()
 }
 
@@ -1858,6 +1871,10 @@ func (a *Account) addServiceImport(dest *Account, from, to string, claim *jwt.Im
 	dest.mu.RUnlock()
 
 	a.mu.Lock()
+	fmt.Println(a.Name, len(a.imports.services), "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO", a.imports.services)
+	for name, asdf := range a.imports.services {
+		fmt.Println("QQQQQQQQQQQQQQQQQQQQ", name, "::::", asdf)
+	}
 	if a.imports.services == nil {
 		a.imports.services = make(map[string]*serviceImport)
 	} else if dup := a.imports.services[from]; dup != nil {
@@ -1899,9 +1916,17 @@ func (a *Account) addServiceImport(dest *Account, from, to string, claim *jwt.Im
 	}
 	si := &serviceImport{dest, claim, se, nil, from, to, tr, 0, rt, lat, nil, nil, usePub, false, false, share, false, false, nil}
 	a.imports.services[from] = si
+
+	fmt.Println(a.Name, len(a.imports.services), "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", a.imports.services)
+	for name, asdf := range a.imports.services {
+		fmt.Println("SSSSSSSSSSSSSSSSSSSSSS", name, "::::", asdf)
+	}
+
 	a.mu.Unlock()
 
+	fmt.Printf("■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■ %+v || %+v || %v\n", a.Name, si, to)
 	if err := a.addServiceImportSub(si); err != nil {
+		fmt.Println("ERROR: ", err, si)
 		a.removeServiceImport(si.from)
 		return nil, err
 	}
@@ -1960,14 +1985,17 @@ func (a *Account) addServiceImportSub(si *serviceImport) error {
 	si.sid = []byte(sid)
 	subject := si.from
 	a.mu.Unlock()
+	fmt.Println("DOING the import: ", subject)
 
 	cb := func(sub *subscription, c *client, acc *Account, subject, reply string, msg []byte) {
+		fmt.Println("CALLBACK IS DOING THE IMPORT!!!", c.kind, subject, reply)
 		c.processServiceImport(si, acc, msg)
 	}
 	sub, err := c.processSubEx([]byte(subject), nil, []byte(sid), cb, true, true, false)
 	if err != nil {
 		return err
 	}
+	fmt.Println(sub)
 	// Leafnodes introduce a new way to introduce messages into the system. Therefore forward import subscription
 	// This is similar to what initLeafNodeSmapAndSendSubs does
 	// TODO we need to consider performing this update as we get client subscriptions.
@@ -1980,7 +2008,9 @@ func (a *Account) addServiceImportSub(si *serviceImport) error {
 func (a *Account) removeAllServiceImportSubs() {
 	a.mu.RLock()
 	var sids [][]byte
+	total := len(a.imports.services)
 	for _, si := range a.imports.services {
+		fmt.Printf("<<<<<<<<<<< ============================ RM %+v\n", si)
 		if si.sid != nil {
 			sids = append(sids, si.sid)
 			si.sid = nil
@@ -1988,6 +2018,7 @@ func (a *Account) removeAllServiceImportSubs() {
 	}
 	c := a.ic
 	a.ic = nil
+	fmt.Println("<<<<<<<<<<< BEFORE: ", a.Name, total)
 	a.mu.RUnlock()
 
 	if c == nil {
@@ -2001,9 +2032,12 @@ func (a *Account) removeAllServiceImportSubs() {
 
 // Add in subscriptions for all registered service imports.
 func (a *Account) addAllServiceImportSubs() {
+	total := len(a.imports.services)
 	for _, si := range a.imports.services {
+		fmt.Printf(">>>>>>>>>>> ============================ ADD %+v\n", si)
 		a.addServiceImportSub(si)
 	}
+	fmt.Println("<<<<<<<<<<< AFTER: ", a.Name, total)
 }
 
 var (
@@ -2352,6 +2386,10 @@ func (a *Account) addRespServiceImport(dest *Account, to string, osi *serviceImp
 		si.trackingHdr = header
 	}
 	isBoundToLeafnode := a.lds != _EMPTY_
+	fmt.Println("addRespServiceImport: :::::::::::::::::::::::::::::::", isBoundToLeafnode, nrr, len(a.exports.responses), dest.Name, to)
+	for k, v := range a.exports.responses {
+		fmt.Println("export responses ||||||||||||||||", k, string(v.sid), ":::::::", v)
+	}
 	a.mu.Unlock()
 
 	// We might not do individual subscriptions here like we do on configured imports.
@@ -2360,12 +2398,17 @@ func (a *Account) addRespServiceImport(dest *Account, to string, osi *serviceImp
 	// will process appropriately there. This does not pollute the sublist and the caches.
 
 	if isBoundToLeafnode {
+		// Extra import added
+		fmt.Println("ADDING EXTRA IMPORT SINCE BOUND TO LEAFNODE!!!", nrr)
 		sub, _ := a.subscribeServiceImportResponse(nrr)
 		si.sid = sub.sid
-	}
+	} 
 
 	// We do add in the reverse map such that we can detect loss of interest and do proper
 	// cleanup of this si as interest goes away.
+	// to: _INBOX.ml0B3coBxLq4A0VbK7ACev
+	// nrr/from: _R_.sBRvgU.8DdJMn
+	// a.imports.rrMap[_INBOX...] = &serviceRespEntry{account, }
 	dest.addReverseRespMapEntry(a, to, nrr)
 
 	return si

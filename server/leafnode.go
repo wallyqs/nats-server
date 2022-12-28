@@ -1352,7 +1352,7 @@ func (s *Server) addLeafNodeConnection(c *client, srvName, clusterName string, c
 			}
 		} else {
 			c.Noticef("JetStream Not Extended, adding deny %+v for account %q", denyAllClientJs, accName)
-			c.mergeDenyPermissionsLocked(both, denyAllClientJs)
+			// c.mergeDenyPermissionsLocked(both, denyAllClientJs)
 		}
 		blockMappingOutgoing = true
 	} else if acc == sysAcc {
@@ -1374,7 +1374,8 @@ func (s *Server) addLeafNodeConnection(c *client, srvName, clusterName string, c
 		// If the system account is shared, jsAllAPI traffic will go through the system account.
 		// So in order to prevent duplicate delivery (from system and actual account) suppress it on the account.
 		// If the system account is NOT shared, jsAllAPI traffic has no business
-		c.Noticef("Adding deny %+v for account %q", denyAllClientJs, accName)
+		c.Noticef("★★★★★★★★★★★★★★★★★★★★★★★★ Adding deny %+v for account %q to prevent duplicates", denyAllClientJs, accName)
+		c.Noticef("Adding deny %+v for account %q to prevent duplicates", denyAllClientJs, accName)
 		c.mergeDenyPermissionsLocked(both, denyAllClientJs)
 	}
 	// If we have a specified JetStream domain we will want to add a mapping to

@@ -16,6 +16,7 @@ package server
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -354,6 +355,7 @@ func (s *Sublist) chkForRemoveNotification(subject, queue string) {
 func (s *Sublist) Insert(sub *subscription) error {
 	// copy the subject since we hold this and this might be part of a large byte slice.
 	subject := string(sub.subject)
+	fmt.Println("SUBLIST INSERT: ", string(sub.subject))
 	tsa := [32]string{}
 	tokens := tsa[:0]
 	start := 0
@@ -534,6 +536,8 @@ func (s *Sublist) matchNoLock(subject string) *SublistResult {
 }
 
 func (s *Sublist) match(subject string, doLock bool) *SublistResult {
+	// JS.fps@mc.API.CONSUMER.MSG.NEXT.form3-events.fps-form3-events
+	fmt.Println("MATCHING ON", subject)
 	atomic.AddUint64(&s.matches, 1)
 
 	// Check cache first.
@@ -595,6 +599,10 @@ func (s *Sublist) match(subject string, doLock bool) *SublistResult {
 		go s.reduceCacheCount()
 	}
 
+	fmt.Println("MATCHING ON", subject, len(result.psubs))
+	for _, psub := range result.psubs {
+		fmt.Println("   ::", string(psub.subject), string(psub.sid), string(psub.origin))
+	}
 	return result
 }
 

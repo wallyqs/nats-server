@@ -2495,6 +2495,7 @@ func (c *client) processSubEx(subject, queue, bsid []byte, cb msgHandler, noForw
 	if es == nil {
 		c.subs[sid] = sub
 		if acc != nil && acc.sl != nil {
+			// FIXME: Should check whether the interest is already here?
 			err = acc.sl.Insert(sub)
 			if err != nil {
 				delete(c.subs, sid)
@@ -3096,6 +3097,9 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		client.mu.Unlock()
 		return false
 	}
+	if acc.Name != "$SYS" && acc.Name != "SYS" {
+		// fmt.Println("___________ DELIVER!!!", client.kind, acc.Name, string(subject), string(reply))
+	}
 
 	// Check if we have a subscribe deny clause. This will trigger us to check the subject
 	// for a match against the denied subjects.
@@ -3189,8 +3193,10 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		// Internal account clients are for service imports and need the '\r\n'.
 		start := time.Now()
 		if client.kind == ACCOUNT {
+			// fmt.Println("INTO ACCOUNT", acc.Name, string(subject), string(reply))
 			sub.icb(sub, c, acc, string(subject), string(reply), msg)
 		} else {
+			// fmt.Println("NOT INTO ACCOUNT", string(subject), string(reply))
 			sub.icb(sub, c, acc, string(subject), string(reply), msg[:msgSize])
 		}
 		if dur := time.Since(start); dur >= readLoopReportThreshold {
@@ -3863,12 +3869,14 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 			}
 		}
 	}
-
 	acc.mu.RLock()
 	var checkJS bool
 	shouldReturn := si.invalid || acc.sl == nil
+
+	// TODO: This will not match against custom prefixes and domains.
 	if !shouldReturn && !isResponse && si.to == jsAllAPI {
 		subj := string(c.pa.subject)
+		// NOTE: This will not match custom prefixes.
 		if strings.HasPrefix(subj, jsRequestNextPre) || strings.HasPrefix(subj, jsDirectGetPre) {
 			checkJS = true
 		}
@@ -3882,6 +3890,7 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 	if shouldReturn || (checkJS && si.se != nil && si.se.acc == c.srv.SystemAccount()) {
 		return
 	}
+	fmt.Println("SHOULD RETURN????", string(c.pa.subject), si.se, si.se.acc, si.se, si.se.acc, si.se.acc == c.srv.SystemAccount())
 
 	var nrr []byte
 	var rsi *serviceImport
@@ -3893,12 +3902,15 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 		// TODO(dlc) - Formalize as a service import option for reply rewrite.
 		// For now we can't do $JS.ACK since that breaks pull consumers across accounts.
 		if !bytes.HasPrefix(c.pa.reply, []byte(jsAckPre)) {
+			// fmt.Println("SVC IMPORT SETUP ", acc.Name, si)
 			if rsi = c.setupResponseServiceImport(acc, si, tracking, headers); rsi != nil {
 				nrr = []byte(rsi.from)
 			}
 		} else {
 			// This only happens when we do a pull subscriber that trampolines through another account.
 			// Normally this code is not called.
+			fmt.Println("TRAMPOLINE!", c.kind, acc.Name, string(c.pa.reply), string(nrr))
+			// return
 			nrr = c.pa.reply
 		}
 	} else if !isResponse && si.latency != nil && tracking {
@@ -3994,6 +4006,11 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 
 	// FIXME(dlc) - Do L1 cache trick like normal client?
 	rr := si.acc.sl.Match(to)
+	// fmt.Println("RESULTS: ", acc.Name, c.kind, rr.psubs)
+	// for _, psub := range rr.psubs {
+	// 	// fmt.Println("   ::", acc.Name, c.kind, string(psub.subject), string(psub.sid), string(psub.origin))
+	// 	// fmt.Println("::::", psub)
+	// }
 
 	// If we are a route or gateway or leafnode and this message is flipped to a queue subscriber we
 	// need to handle that since the processMsgResults will want a queue filter.
@@ -4022,6 +4039,7 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 		didDeliver = c.sendMsgToGateways(si.acc, msg, []byte(to), nrr, queues) || didDeliver
 	} else {
 		didDeliver, _ = c.processMsgResults(si.acc, rr, msg, c.pa.deliver, []byte(to), nrr, flags)
+		// fmt.Println("IMPORT: ProcessMsgResults", rr, string(msg), c.pa.deliver, to, nrr, didDeliver)
 	}
 
 	// Restore to original values.
@@ -4097,6 +4115,8 @@ func (c *client) addSubToRouteTargets(sub *subscription) {
 // This processes the sublist results for a given message.
 // Returns if the message was delivered to at least target and queue filters.
 func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver, subject, reply []byte, flags int) (bool, [][]byte) {
+	var deliveredTimes int
+	 doPrint := !strings.HasPrefix(string(subject), "$NRG") && !strings.HasPrefix(string(subject), "$JSC") && !strings.HasPrefix(string(subject), "$SYS")
 	// For sending messages across routes and leafnodes.
 	// Reset if we have one since we reuse this data structure.
 	if c.in.rts != nil {
@@ -4122,6 +4142,10 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 	if len(deliver) > 0 {
 		subj = deliver
 	}
+	if doPrint {
+		// creply : _R_.....
+		// fmt.Println(":::::::::::::::::::::::: AAA ", string(subject), string(subj), "|||", string(creply))
+	}
 
 	// Check for JetStream encoded reply subjects.
 	// For now these will only be on $JS.ACK prefixed reply subjects.
@@ -4134,6 +4158,11 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 			remapped = true
 			subj, creply = creply[li+1:], creply[:li]
 		}
+	}
+	if doPrint {
+		// creply : _R_.....
+		// form3-events.payment $JS.ACK.form3-events.fps-form3-events.1.400858.417812.1672129661683585000.0
+		fmt.Println("BBB >>>>>>>>>>>>>>>>>>>", string(subj), string(creply))
 	}
 
 	var didDeliver bool
@@ -4174,8 +4203,59 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 		}
 	}
 
+	// Filter out subs that have already an rrMap applied.
+	// skip := make([]string, 0)
+	// for _, sub := range r.psubs {
+	// 	a, ok := acc.imports.rrMap[string(sub.subject)]
+	// 	// fmt.Println("???????????????????????????????????????", string(sub.subject), a, ok, skip)
+	// 	for k, v := range acc.imports.rrMap {
+	// 		// fmt.Println("?>>>>>>>>>>>>>>>>>>>>>>>>>????????>>>>>>>>", k, v, string(sub.subject))
+	// 		for kk, vv := range v {
+	// 			// fmt.Println("QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ", kk, vv)
+	// 		}
+	// 	}
+	// }
+
 	// Loop over all normal subscriptions that match.
-	for _, sub := range r.psubs {
+	for i, psub := range r.psubs {
+		sub := psub
+		fmt.Println("~~~~~~~~~~~~~~~~~~~", string(psub.subject))
+		acc.mu.RLock()
+		if len(r.psubs) > 1 {
+			// Skip delivery in case we have found that this is already a routed reply prefix
+			// since this could cause duplicates.
+			v, ok := acc.imports.rrMap[string(psub.subject)]
+			if v != nil {
+				fmt.Println("                                                 A: CHECKING!!!!!!!!!!!!!!!!!!!!!!", ok, remapped, string(psub.subject), v[0], deliveredTimes)
+			} else {
+				fmt.Println("                                                 B: CHECKING!!!!!!!!!!!!!!!!!!!!!!", ok, remapped, string(psub.subject), deliveredTimes)
+			}
+
+			vv, ook := acc.exports.responses[string(psub.subject)]
+			if vv != nil {
+				fmt.Println("                                                 AA: CHECKING!!!!!!!!!!!!!!!!!!!!!!", ook, remapped, string(psub.subject), vv, deliveredTimes)
+			} else {
+				fmt.Println("                                                 BB: CHECKING!!!!!!!!!!!!!!!!!!!!!!", ook, remapped, string(psub.subject), deliveredTimes)
+			}
+
+			if remapped && ook {
+				fmt.Println("                                                 \033[32mSKIPPED DUPLICATE!!!!!!!!!!!!!!!!!!!!!! Maybe a DUPLICATE?\033[0m", string(sub.subject), v)
+				acc.mu.RUnlock()
+				continue
+			}
+		
+			// if ok {
+			// 	fmt.Println("SKIPPED DUPLICATE!!!!!!!!!!!!!!!!!!!!!!", string(sub.subject), v)
+			// 	//acc.mu.RUnlock()
+			// 	// continue
+			// }
+		}
+		acc.mu.RUnlock()
+
+		if doPrint {
+			// sub.subject: 
+			fmt.Println("CCC >>>>>>>>>>>>   ::", i, psub.client.kind, string(psub.subject), string(psub.sid), string(psub.origin), string(subj), string(subject), deliveredTimes)
+		}
 		// Check if this is a send to a ROUTER. We now process
 		// these after everything else.
 		switch sub.client.kind {
@@ -4188,6 +4268,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 			// Never send to gateway from here.
 			continue
 		case LEAF:
+			// fmt.Println("IS SERVICE REPLY??", string(creply), string(c.pa.subject))
 			// We handle similarly to routes and use the same data structures.
 			// Leaf node delivery audience is different however.
 			// Also leaf nodes are always no echo, so we make sure we are not
@@ -4204,6 +4285,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 
 		// Check for stream import mapped subs (shadow subs). These apply to local subs only.
 		if sub.im != nil {
+			// fmt.Println("shadow sub: ", sub.im, sub, string(creply))
 			// If this message was a service import do not re-export to an exported stream.
 			if flags&pmrMsgImportedFromService != 0 {
 				continue
@@ -4231,11 +4313,30 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 
 		// Remap to the original subject if internal.
 		if sub.icb != nil && sub.rsi {
+			// fmt.Println("internal so remapping", string(dsubj), string(subject))
 			dsubj = subject
 		}
 
 		// Normal delivery
 		mh := c.msgHeader(dsubj, creply, sub)
+		// NOTE: This line gets called twice
+		// 1) dsubj is _R_.By1EEt.fVIFyn
+		// 2) dsubj is form3-events.payment (the rewritten reply subject)
+		deliveredTimes += 1
+		if doPrint {
+			// dsubj was transformed
+			// === NG: A remapped message with deliver not using the routed version.
+			// remapped: true
+			// creply:   $JS.ACK.form3-events.fps-form3-events.1.419832.439189.1672195696621569000.0
+			// subj:     form3-events.payment
+			// deliver:  form3-events.payment
+			// === OK:
+			// remapped: true
+			// creply:   $JS.ACK.form3-events.fps-form3-events.1.419832.439189.1672195696621569000.0
+			// subj:     form3-events.payment
+			// deliver:  _R_.1a3e3p.TevbTX
+			fmt.Println("normal deliveryyyyyyyyy", remapped, string(creply), string(subj), string(deliver), string(dsubj), string(msg), "delivered: ", deliveredTimes)
+		}
 		if c.deliverMsg(prodIsMQTT, sub, acc, dsubj, creply, mh, msg, rplyHasGWPrefix) {
 			// We don't count internal deliveries, so do only when sub.icb is nil.
 			if sub.icb == nil {
@@ -4244,6 +4345,8 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 			didDeliver = true
 		}
 	}
+	// CONTINUED HERE
+	// fmt.Println("DELIVERED ALREADY???", didDeliver, string(dsubj), string(creply))
 
 	// Set these up to optionally filter based on the queue lists.
 	// This is for messages received from routes which will have directed
@@ -4415,6 +4518,7 @@ sendToRoutesOrLeafs:
 	if len(deliver) > 0 && len(reply) > 0 {
 		reply = append(reply, '@')
 		reply = append(reply, deliver...)
+		fmt.Println("REWROTE THINGS", string(reply), string(deliver), didDeliver)
 	}
 
 	// Copy off original pa in case it changes.
@@ -4425,6 +4529,9 @@ sendToRoutesOrLeafs:
 	for i := range c.in.rts {
 		rt := &c.in.rts[i]
 		dc := rt.sub.client
+		if doPrint {
+			// fmt.Println("//\\//\\//\\//\\ CLIENT CONNZ: ", i, rt, dc.kind, dc)
+		}
 		dmsg, hset := msg, false
 
 		// Check if we have an origin cluster set from a leafnode message.
@@ -4440,6 +4547,7 @@ sendToRoutesOrLeafs:
 			// The other is leaf to leaf.
 			if c.kind == LEAF {
 				src, dest := c.remoteCluster(), dc.remoteCluster()
+				// fmt.Println("SRC: ", src, "DEST:", dest)
 				if src != _EMPTY_ && src == dest {
 					continue
 				}
@@ -4456,12 +4564,17 @@ sendToRoutesOrLeafs:
 			}
 		}
 
+		deliveredTimes += 1
+		if doPrint {
+			fmt.Println("SENDING NOW TO ROUTES OR LEAFS!!!", i, dc.kind, string(subject), string(reply), acc.Name, didDeliver, deliveredTimes, "★★★★★★★★", string(rt.sub.subject))
+		}
 		mh := c.msgHeaderForRouteOrLeaf(subject, reply, rt, acc)
 		if c.deliverMsg(prodIsMQTT, rt.sub, acc, subject, reply, mh, dmsg, false) {
 			if rt.sub.icb == nil {
 				dlvMsgs++
 				dlvExtraSize += int64(len(dmsg) - len(msg))
 			}
+			// Should be stopping for JS pull in case we made it here to avoid duplicates???
 			didDeliver = true
 		}
 

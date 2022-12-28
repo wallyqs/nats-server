@@ -37,11 +37,13 @@ func FuzzClient(data []byte) int {
 
 	err := c.parse(data[:50])
 	if err != nil {
+		fmt.Println(err)
 		return 0
 	}
 
 	err = c.parse(data[50:])
 	if err != nil {
+		fmt.Println(err)
 		return 0
 	}
 	return 1

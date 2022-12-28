@@ -610,10 +610,12 @@ func (a *Account) enableAllJetStreamServiceImportsAndMappings() error {
 	}
 
 	if !a.serviceImportExists(jsAllAPI) {
+		fmt.Println("SETTING UP ", jsAllAPI, "for account", a.Name)
 		if err := a.AddServiceImport(s.SystemAccount(), jsAllAPI, _EMPTY_); err != nil {
 			return fmt.Errorf("Error setting up jetstream service imports for account: %v", err)
 		}
 	}
+	fmt.Println(">>>>>>>>>>>>> SVC IMPORT!!!!!!!", a.serviceImportExists(jsAllAPI))
 
 	// Check if we have a Domain specified.
 	// If so add in a subject mapping that will allow local connected clients to reach us here as well.
@@ -676,15 +678,17 @@ func (s *Server) configJetStream(acc *Account) error {
 		}
 		// We will setup basic service imports to respond to
 		// requests if JS is enabled for this account.
-		if err := acc.enableJetStreamInfoServiceImportOnly(); err != nil {
-			return err
-		}
+		fmt.Println("________________________________ (Disabled) ADDING JS IMPORT: ", acc.Name)
+		// if err := acc.enableJetStreamInfoServiceImportOnly(); err != nil {
+		// 	return err
+		// }
 	}
 	return nil
 }
 
 // configAllJetStreamAccounts walk all configured accounts and turn on jetstream if requested.
 func (s *Server) configAllJetStreamAccounts() error {
+	fmt.Println("configAllJetStreamAccounts :::::::::::::::::::::::::::::::::")
 	// Check to see if system account has been enabled. We could arrive here via reload and
 	// a non-default system account.
 	s.checkJetStreamExports()
@@ -725,6 +729,7 @@ func (s *Server) configAllJetStreamAccounts() error {
 	// Process any jetstream enabled accounts here. These will be accounts we are
 	// already aware of at startup etc.
 	for _, acc := range jsAccounts {
+		fmt.Println("!!!!!!!!!!!!!!!!!! Enabling JS for ACC: ", acc.Name)
 		if err := s.configJetStream(acc); err != nil {
 			return err
 		}
