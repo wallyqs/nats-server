@@ -2556,11 +2556,24 @@ func (c *client) processSubEx(subject, queue, bsid []byte, cb msgHandler, noForw
 	if es == nil {
 		c.subs[sid] = sub
 		if acc != nil && acc.sl != nil {
-			err = acc.sl.Insert(sub)
-			if err != nil {
+			// FIXME(wqs): There is an issue with leafnodes and imports where there might already exist
+			// a subscription that represents the same interest as the service response import.
+			// In order to avoid both '_R_.foo.>' and '_R_.foo.bar' become registered which would cause
+			// duplicates one of them is supressed in case there was a match.
+			r := acc.sl.Match(string(sub.subject))
+			fmt.Println("                                                      !!!!!!!!!!!!!!!!!!!!!!! <........................> INSERTING: MATCHED:", len(r.psubs), rsi, string(sub.subject))
+			if r != nil && rsi && (len(r.psubs) > 0) {
+				fmt.Println("                                 SUPRESSED!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", len(r.psubs), rsi, string(sub.subject))
 				delete(c.subs, sid)
+				c.mu.Unlock()
+				return sub, nil
 			} else {
-				updateGWs = c.srv.gateway.enabled
+				err = acc.sl.Insert(sub)
+				if err != nil {
+					delete(c.subs, sid)
+				} else {
+					updateGWs = c.srv.gateway.enabled
+				}
 			}
 		}
 	}
@@ -4055,6 +4068,11 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 
 	// FIXME(dlc) - Do L1 cache trick like normal client?
 	rr := si.acc.sl.Match(to)
+	asdf := rand.Int()
+	fmt.Println(asdf, "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT TOTAL:", isResponse, len(rr.psubs))
+	for _, sssub := range rr.psubs {
+		fmt.Println(asdf, "<:::::::::::::::>       ", isResponse, string(sssub.subject), to)
+	}
 
 	// If we are a route or gateway or leafnode and this message is flipped to a queue subscriber we
 	// need to handle that since the processMsgResults will want a queue filter.
@@ -4158,6 +4176,7 @@ func (c *client) addSubToRouteTargets(sub *subscription) {
 // This processes the sublist results for a given message.
 // Returns if the message was delivered to at least target and queue filters.
 func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver, subject, reply []byte, flags int) (bool, [][]byte) {
+	var deliveredTimes int
 	// For sending messages across routes and leafnodes.
 	// Reset if we have one since we reuse this data structure.
 	if c.in.rts != nil {
@@ -4235,8 +4254,49 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 		}
 	}
 
+	// WIP(wqs): Skip delivery in case we have found that this is already a routed
+	// reply prefix since that can cause duplicates.
+	// This is to support a case where the SublistResult includes both the routed reply (_R_)
+	// and the _INBOX that it represents as matches.
+	acc.mu.RLock()
+	psubs := make([]*subscription, 0)
+	asdf := rand.Int()
+	fmt.Println(asdf, "WWWWWWWWWWWWWWWWWWWWWWWWWW", string(subject), string(subj), string(creply), "TOTAL", len(r.psubs))
+	fmt.Println("IMPORTS ::::", acc.imports.rrMap)
+	fmt.Println("EXPORTS ::::", acc.exports.responses)
+Next:
+	for ii, sub := range r.psubs {
+		sub := sub
+		// Try to match against the _INBOX.
+		if respEntries, ok := acc.imports.rrMap[string(sub.subject)]; ok {
+			for i, entry := range respEntries {
+				c.Warnf("%d/%d: %v %v %v %v -> %+v TOTAL (%d)", ii, i, string(subject), string(sub.subject), string(subj), string(creply), entry.msub, len(r.psubs))
+				for j, rsub := range r.psubs {
+					// See if there is another _R_ reply in the SublistResult
+					// that mathes the reverse mapping of the original _INBOX.
+					c.Errorf("%d/%d: %v -> %+v", ii, j, string(rsub.subject), entry.msub)
+					if string(rsub.subject) == string(entry.msub) {
+						c.Errorf("FOUND!!!! Skipping: %v -> %+v", string(rsub.subject), entry.msub)
+						continue Next
+					}
+				}
+			}
+			// Scan again for the result.
+			// if response, ok := acc.exports.responses[string(sub.subject)]; ok {
+			// 	continue
+			// }
+		} else {
+			// Not in the rrMap
+			c.Warnf("%v ;;; %v %v %v %v ", asdf, string(subject), string(sub.subject), string(subj), string(creply))
+			c.Noticef("%v %d: ;;;;;;; %v", asdf, ii, string(sub.subject))
+		}
+
+		psubs = append(psubs, sub)
+	}
+	acc.mu.RUnlock()
+
 	// Loop over all normal subscriptions that match.
-	for _, sub := range r.psubs {
+	for _, sub := range psubs {
 		// Check if this is a send to a ROUTER. We now process
 		// these after everything else.
 		switch sub.client.kind {
@@ -4297,6 +4357,8 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 
 		// Normal delivery
 		mh := c.msgHeader(dsubj, creply, sub)
+		deliveredTimes += 1
+		fmt.Println(asdf, "A: DELIVERY: ", remapped, string(creply), string(subj), string(deliver), string(dsubj), string(msg), "delivered: ", deliveredTimes)
 		if c.deliverMsg(prodIsMQTT, sub, acc, dsubj, creply, mh, msg, rplyHasGWPrefix) {
 			// We don't count internal deliveries, so do only when sub.icb is nil.
 			if sub.icb == nil {
@@ -4437,6 +4499,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 			}
 
 			mh := c.msgHeader(dsubj, creply, sub)
+			fmt.Println("B: DELIVERY: ", remapped, string(creply), string(subj), string(deliver), string(dsubj), string(msg), "delivered: ", deliveredTimes)
 			if c.deliverMsg(prodIsMQTT, sub, acc, subject, creply, mh, msg, rplyHasGWPrefix) {
 				if sub.icb == nil {
 					dlvMsgs++
