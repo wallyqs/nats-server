@@ -14,6 +14,7 @@
 package server
 
 import (
+	"runtime/debug"
 	"time"
 )
 
@@ -38,6 +39,17 @@ var (
 	// trustedKeys is a whitespace separated array of trusted operator's public nkeys.
 	trustedKeys string
 )
+
+func init() {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				gitCommit = setting.Value[:7]
+			}
+		}
+	}
+}
 
 const (
 	// VERSION is the current version for the server.
