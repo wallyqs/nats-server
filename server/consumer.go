@@ -3309,6 +3309,7 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 
 		// Grab our next msg.
 		pmsg, dc, err = o.getNextMsg()
+		fmt.Println(">>>>>>>>", pmsg, dc, err)
 
 		// On error either wait or return.
 		if err != nil || pmsg == nil {

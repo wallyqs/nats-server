@@ -19783,3 +19783,60 @@ func TestJetStreamConsumerAckFloorWithExpired(t *testing.T) {
 	require_True(t, ci.NumPending == 0)
 	require_True(t, ci.NumRedelivered == 0)
 }
+
+func TestJetStreamBasic_StreamCreateRaceWQ(t *testing.T) {
+	cases := []struct {
+		name    string
+		mconfig *StreamConfig
+	}{
+		{"MemoryStore", &StreamConfig{Name: "MY_MSG_SET", Storage: MemoryStorage, Subjects: []string{"foo", "bar"}}},
+		{"FileStore", &StreamConfig{Name: "MY_MSG_SET", Storage: FileStorage, Subjects: []string{"foo", "bar"}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := RunBasicJetStreamServer(t)
+
+			// Two clients will create the same streams twice consecutively.
+			nc1, js1 := jsClientConnect(t, s)
+			defer nc1.Close()
+
+			nc2, js2 := jsClientConnect(t, s)
+			defer nc2.Close()
+
+			sconf := &nats.StreamConfig{
+				Name:      "hello",
+				Subjects:  []string{"hello"},
+				MaxAge:    time.Hour,
+				Retention: nats.WorkQueuePolicy,
+			}
+
+			go func() {
+				_, err := js1.AddStream(sconf)
+				if err != nil {
+					t.Logf("-------> %v", err)
+				}
+			}()
+			go func() {
+				_, err := js2.AddStream(sconf)
+				if err != nil {
+					t.Logf("-------> %v", err)
+				}
+			}()
+
+			sub, err := js1.SubscribeSync("hello")
+			if err != nil {
+				t.Error(err)
+			}
+			defer sub.Unsubscribe()
+
+			for i := 0; i < 100; i++ {
+				_, err := js1.Publish("hello", nil)
+				if err != nil {
+					t.Error(err)
+				}
+			}
+
+			defer s.Shutdown()
+		})
+	}
+}
