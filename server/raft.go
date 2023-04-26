@@ -1171,12 +1171,13 @@ func (n *raft) isCatchingUp() bool {
 func (n *raft) isCurrent(includeForwardProgress bool) bool {
 	// Check whether we've made progress on any state, 0 is invalid so not healthy.
 	if n.commit == 0 {
-		n.debug("Not current, no commits")
+		n.warn("Not current, no commits")
 		return false
 	}
 
 	// Make sure we are the leader or we know we have heard from the leader recently.
 	if n.state == Leader {
+		n.warn("no leader....")
 		return true
 	}
 
@@ -1190,12 +1191,12 @@ func (n *raft) isCurrent(includeForwardProgress bool) bool {
 		okInterval := int64(hbInterval) * 2
 		ts := time.Now().UnixNano()
 		if ps := n.peers[n.leader]; ps == nil || ps.ts == 0 && (ts-ps.ts) > okInterval {
-			n.debug("Not current, no recent leader contact")
+			n.warn("Not current, no recent leader contact")
 			return false
 		}
 	}
 	if cs := n.catchup; cs != nil {
-		n.debug("Not current, still catching up pindex=%d, cindex=%d", n.pindex, cs.cindex)
+		n.warn("Not current, still catching up pindex=%d, cindex=%d", n.pindex, cs.cindex)
 	}
 
 	if n.commit == n.applied {
@@ -1205,6 +1206,7 @@ func (n *raft) isCurrent(includeForwardProgress bool) bool {
 		// Otherwise, if we aren't allowed to include forward progress
 		// (i.e. we are checking "current" instead of "healthy") then
 		// give up now.
+		n.warn("not include forward progress")
 		return false
 	}
 
@@ -3695,7 +3697,8 @@ func (n *raft) processVoteRequest(vr *voteRequest) error {
 	// If this is a higher term go ahead and stepdown.
 	if vr.term > n.term {
 		if n.state != Follower {
-			n.debug("Stepping down from %s, detected higher term: %d vs %d", vr.term, n.term, strings.ToLower(n.state.String()))
+			n.debug("Stepping down from %s, detected higher term: %d vs %d",
+				strings.ToLower(n.state.String()), vr.term, n.term)
 			n.stepdown.push(noLeader)
 			n.term = vr.term
 		}

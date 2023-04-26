@@ -441,6 +441,8 @@ func (c *client) parse(buf []byte) error {
 				}
 			}
 		case MSG_PAYLOAD:
+			// fmt.Println("_BUFFF", len(buf), c.state)
+			fmt.Println(c.cid, ":: _BUFFF", b, string(b), len(buf), c.state, c.msgBuf != nil, len(c.msgBuf), c.as, c.pa.size, i)
 			if c.msgBuf != nil {
 				// copy as much as we can to the buffer and skip ahead.
 				toCopy := c.pa.size - len(c.msgBuf)
@@ -449,23 +451,30 @@ func (c *client) parse(buf []byte) error {
 					toCopy = avail
 				}
 				if toCopy > 0 {
+					fmt.Println(c.cid, ":: A")
 					start := len(c.msgBuf)
 					// This is needed for copy to work.
 					c.msgBuf = c.msgBuf[:start+toCopy]
 					copy(c.msgBuf[start:], buf[i:i+toCopy])
+					fmt.Println("A::::::::::::::::::", string(c.msgBuf)[:20])
+					fmt.Println("Z::::::::::::::::::", string(c.msgBuf)[len(c.msgBuf)-20:len(c.msgBuf)-1])
 					// Update our index
 					i = (i + toCopy) - 1
 				} else {
+					fmt.Println(c.cid, ":: B")
 					// Fall back to append if needed.
 					c.msgBuf = append(c.msgBuf, b)
 				}
 				if len(c.msgBuf) >= c.pa.size {
+					fmt.Println(c.cid, ":: C (incorrect???)", len(c.msgBuf), c.pa.size)
 					c.state = MSG_END_R
 				}
 			} else if i-c.as+1 >= c.pa.size {
+				fmt.Println(c.cid, ":: D")
 				c.state = MSG_END_R
 			}
 		case MSG_END_R:
+			fmt.Println(c.cid, "_BUFFFEND", b, string(b), len(buf), c.state, string(buf)[:30])
 			if b != '\r' {
 				goto parseErr
 			}
@@ -1210,6 +1219,8 @@ authErr:
 parseErr:
 	c.sendErr("Unknown Protocol Operation")
 	snip := protoSnippet(i, PROTO_SNIPPET_SIZE, buf)
+	fmt.Println("BUFFF ERROR: ", c.cid, len(buf), string(buf))
+	fmt.Println("RESULT: ", c.cid, len(buf), string(c.msgBuf))
 	err := fmt.Errorf("%s parser ERROR, state=%d, i=%d: proto='%s...'", c.kindString(), c.state, i, snip)
 	return err
 }
