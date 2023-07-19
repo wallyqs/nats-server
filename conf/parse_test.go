@@ -3,6 +3,7 @@ package conf
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -401,5 +402,120 @@ func TestParserNoInfiniteLoop(t *testing.T) {
 		} else if !strings.Contains(err.Error(), "Unexpected EOF") {
 			t.Fatal("expected unexpected eof error")
 		}
+	}
+}
+
+func TestParseDigest(t *testing.T) {
+	for _, test := range []struct {
+		input    string
+		includes map[string]string
+		digest   string
+	}{
+		{
+			`foo = bar`,
+			nil,
+			"sha256:226e49e13d16e5e8aa0d62e58cd63361bf097d3e2b2444aa3044334628a2e8de",
+		},
+		{
+			`# Comments and whitespace have no effect
+                        foo = bar
+                        `,
+			nil,
+			"sha256:226e49e13d16e5e8aa0d62e58cd63361bf097d3e2b2444aa3044334628a2e8de",
+		},
+		{
+			`# Syntax changes have no effect
+                        'foo': 'bar'
+                        `,
+			nil,
+			"sha256:226e49e13d16e5e8aa0d62e58cd63361bf097d3e2b2444aa3044334628a2e8de",
+		},
+		{
+			`# Syntax changes have no effect
+                        { 'foo': 'bar' }
+                        `,
+			nil,
+			"sha256:226e49e13d16e5e8aa0d62e58cd63361bf097d3e2b2444aa3044334628a2e8de",
+		},
+		{
+			`# substitutions
+                        BAR_USERS = { users = [ {user = "foo"} ]}
+                        bar = $BAR_USERS
+                        accounts {
+                          users = { users = [ {user = "foo"} ]}
+                        }
+                        `,
+			nil,
+			"sha256:ceba211df843b01ff2d4b4ad193e5c4bf8d7f4d92814c505045bdff614070149",
+		},
+		{
+			`# substitutions, still the same
+                        BAR_USERS = { users = [ {user = "foo"} ]}
+                        bar = $BAR_USERS
+                        accounts {
+                          users = $BAR_USERS
+                        }
+                        `,
+			nil,
+			"sha256:ceba211df843b01ff2d4b4ad193e5c4bf8d7f4d92814c505045bdff614070149",
+		},
+		{
+			`# includes
+			accounts {
+                          foo { include 'foo.conf'}
+                          bar { users = [{user = "bar"}] }
+                          quux { include 'quux.conf'}
+                        }
+                        `,
+			map[string]string{
+				"foo.conf":  ` users = [{user = "foo"}]`,
+				"quux.conf": ` users = [{user = "quux"}]`,
+			},
+			"sha256:e72d70c91b64b0f880f86decb95ec2600cbdcf8bdcd2355fce5ebc54a84a77e9",
+		},
+		{
+			`# includes
+			accounts {
+                          foo { include 'foo.conf'}
+                          bar { include 'bar.conf'}
+                          quux { include 'quux.conf'}
+                        }
+                        `,
+			map[string]string{
+				"foo.conf":  ` users = [{user = "foo"}]`,
+				"bar.conf":  ` users = [{user = "bar"}]`,
+				"quux.conf": ` users = [{user = "quux"}]`,
+			},
+			"sha256:e72d70c91b64b0f880f86decb95ec2600cbdcf8bdcd2355fce5ebc54a84a77e9",
+		},
+	} {
+		t.Run("", func(t *testing.T) {
+			sdir := t.TempDir()
+			f, err := os.CreateTemp(sdir, "nats.conf-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f.Name(), []byte(test.input), 066); err != nil {
+				t.Error(err)
+			}
+			if test.includes != nil {
+				for includeFile, contents := range test.includes {
+					inf, err := os.Create(filepath.Join(sdir, includeFile))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(inf.Name(), []byte(contents), 066); err != nil {
+						t.Error(err)
+					}
+				}
+			}
+			_, digest, err := ParseWithDigest(f.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if digest != test.digest {
+				t.Errorf("\ngot: %s\nexpected: %s", digest, test.digest)
+			}
+		})
 	}
 }

@@ -26,6 +26,8 @@ package conf
 // see parse_test.go for more examples.
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,11 +100,40 @@ func ParseFileWithChecks(fp string) (map[string]interface{}, error) {
 	return p.mapping, nil
 }
 
+// ParseWithDigest returns the processed config and a digest
+// that represents the configuration.
+func ParseWithDigest(fp string) (map[string]interface{}, string, error) {
+	data, err := os.ReadFile(fp)
+	if err != nil {
+		return nil, "", err
+	}
+	p, err := parse(string(data), fp, true)
+	if err != nil {
+		return nil, "", err
+	}
+	digest := sha256.New()
+	e := json.NewEncoder(digest)
+	err = e.Encode(p.mapping)
+	if err != nil {
+		return nil, "", err
+	}
+	return p.mapping, fmt.Sprintf("sha256:%x", digest.Sum(nil)), nil
+}
+
 type token struct {
 	item         item
 	value        interface{}
 	usedVariable bool
 	sourceFile   string
+}
+
+func (t *token) MarshalJSON() ([]byte, error) {
+	// Do not duplicate variable contents since
+	// they already have been expanded at this point.
+	if t.usedVariable {
+		return []byte("null"), nil
+	}
+	return json.Marshal(t.value)
 }
 
 func (t *token) Value() interface{} {
