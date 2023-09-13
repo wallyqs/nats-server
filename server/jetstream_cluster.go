@@ -2254,7 +2254,13 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 					ne, nb = n.Applied(ce.Index)
 					ce.ReturnToPool()
 				} else {
-					s.Warnf("Error applying entries to '%s > %s': %v", accName, sa.Config.Name, err)
+					s.Warnf("ERROR!!!!!!!!!---------------------------> %+v", reflect.TypeOf(err))
+					jserr, ok := err.(*json.SyntaxError)
+					if ok {
+						s.Warnf(">>>>>>>>>>>>>>>>>>> JSON ERR: %+v", jserr)
+					} else {
+						s.Warnf("Error applying entries to '%s > %s': %v", accName, sa.Config.Name, err)
+					}
 					if isClusterResetErr(err) {
 						if mset.isMirror() && mset.IsLeader() {
 							mset.retryMirrorConsumer()
@@ -2847,8 +2853,11 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 				}
 			} else if isRecovering && mset != nil {
 				// On recovery, reset CLFS/FAILED.
+				// On a rollback from DEV this will fail.
 				var snap streamSnapshot
 				if err := json.Unmarshal(e.Data, &snap); err != nil {
+					// fmt.Println("FAILED UNMARSHALLING 2: ", string(e.Data))
+					// fmt.Println("BUT CONTINUING: ", string(e.Data))
 					return err
 				}
 
