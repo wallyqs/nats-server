@@ -5706,7 +5706,7 @@ func TestJetStreamClusterRestartThenScaleStreamReplicas(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	end := time.Now().Add(30 * time.Second)
+	end := time.Now().Add(10 * time.Second)
 	for time.Now().Before(end) {
 		select {
 		case <-ctx.Done():
@@ -5716,7 +5716,7 @@ func TestJetStreamClusterRestartThenScaleStreamReplicas(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
-	wg := sync.WaitGroup{}
+	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
 		sub, err := js.PullSubscribe("foo", fmt.Sprintf("C-%d", i))
 		require_NoError(t, err)
@@ -5746,7 +5746,7 @@ func TestJetStreamClusterRestartThenScaleStreamReplicas(t *testing.T) {
 	c.waitOnStreamLeader(globalAccountName, "TEST")
 
 	// Start publishing again for a while.
-	end = time.Now().Add(30 * time.Second)
+	end = time.Now().Add(10 * time.Second)
 	for time.Now().Before(end) {
 		select {
 		case <-ctx.Done():
@@ -5754,6 +5754,8 @@ func TestJetStreamClusterRestartThenScaleStreamReplicas(t *testing.T) {
 		}
 		producer.Publish("foo", []byte(strings.Repeat("A", 128)))
 	}
+
+	fmt.Printf("SCALE DOWN TO R1\n")
 
 	// Try to do a stream edit back to R=1 after doing all the upgrade.
 	info, _ := js.StreamInfo("TEST")
@@ -5763,7 +5765,9 @@ func TestJetStreamClusterRestartThenScaleStreamReplicas(t *testing.T) {
 	require_NoError(t, err)
 
 	// Let running for some time.
-	time.Sleep(30 * time.Second)
+	time.Sleep(10 * time.Second)
+
+	fmt.Printf("SCALE UP TO R3\n")
 
 	info, _ = js.StreamInfo("TEST")
 	sconfig = info.Config
@@ -5771,7 +5775,7 @@ func TestJetStreamClusterRestartThenScaleStreamReplicas(t *testing.T) {
 	_, err = js.UpdateStream(&sconfig)
 	require_NoError(t, err)
 	// Let running after the update...
-	time.Sleep(30 * time.Second)
+	time.Sleep(10 * time.Second)
 
 	// Start publishing again for a while.
 	end = time.Now().Add(30 * time.Second)
