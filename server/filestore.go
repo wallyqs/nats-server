@@ -2502,6 +2502,10 @@ func (fs *fileStore) numFilteredPending(filter string, ss *SimpleState) {
 
 // SubjectsState returns a map of SimpleState for all matching subjects.
 func (fs *fileStore) SubjectsState(subject string) map[string]SimpleState {
+	starttime := time.Now()
+	defer func(){
+		fmt.Println("SUBJECT STATE Z: ", time.Since(starttime))
+	}()
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 
@@ -2523,7 +2527,8 @@ func (fs *fileStore) SubjectsState(subject string) map[string]SimpleState {
 	fss := make(map[string]SimpleState)
 	var startFound bool
 
-	for _, mb := range fs.blks {
+	fmt.Println("SUBJECT STATE 0: ", time.Since(starttime), len(fs.blks))
+	for iii, mb := range fs.blks {
 		if !startFound {
 			if mb != start {
 				continue
@@ -2538,6 +2543,7 @@ func (fs *fileStore) SubjectsState(subject string) map[string]SimpleState {
 			mb.loadMsgsWithLock()
 			shouldExpire = true
 		}
+		fmt.Println("SUBJECT STATE 1: ", time.Since(starttime), iii)
 		for subj, ss := range mb.fss {
 			if subject == _EMPTY_ || subject == fwcs || subjectIsSubsetMatch(subj, subject) {
 				if ss.firstNeedsUpdate {
@@ -2553,10 +2559,12 @@ func (fs *fileStore) SubjectsState(subject string) map[string]SimpleState {
 				}
 			}
 		}
+		fmt.Println("SUBJECT STATE 2: ", time.Since(starttime), iii)
 		if shouldExpire {
 			// Expire this cache before moving on.
 			mb.tryForceExpireCacheLocked()
 		}
+		fmt.Println("SUBJECT STATE 3: ", time.Since(starttime), iii)
 		mb.mu.Unlock()
 
 		if mb == stop {
@@ -2639,6 +2647,7 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 
 		for i := seqStart; i < len(fs.blks); i++ {
 			mb := fs.blks[i]
+			b := time.Now()
 			mb.mu.Lock()
 			var t uint64
 			if isAll && sseq <= atomic.LoadUint64(&mb.first.seq) {
@@ -2661,12 +2670,14 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 			// If we are here we need to at least scan the subject fss.
 			// Make sure we have fss loaded.
 			mb.ensurePerSubjectInfoLoaded()
-			fmt.Println(i, "FILENUM_5", time.Since(starttime))
+			aa := time.Now()
+			fmt.Println(i, "FILENUM_5", time.Since(starttime), "======================================================================")
 			var havePartial bool
 			for subj, ss := range mb.fss {
-				fmt.Println(i, "FILENUM_6", time.Since(starttime))
+				// fmt.Println(i, "FILENUM_6", time.Since(starttime))
 				if !seen[subj] && isMatch(subj) {
 					if lastPerSubject {
+						// fmt.Println(i, "FILENUM_6.0", time.Since(starttime))
 						// Can't have a partials with last by subject.
 						if sseq <= ss.Last {
 							t++
@@ -2675,6 +2686,7 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 					} else {
 						if ss.firstNeedsUpdate {
 							mb.recalculateFirstForSubj(subj, ss.First, ss)
+							// fmt.Println(i, "FILENUM_6.1", time.Since(starttime))
 						}
 						if sseq <= ss.First {
 							t += ss.Msgs
@@ -2686,6 +2698,7 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 					}
 				}
 			}
+			fmt.Println(i, "FILENUM_5.1", time.Since(starttime), "--------------------------------------------------------------------", time.Since(aa))
 			// See if we need to scan msgs here.
 			if havePartial {
 				// Clear on partial.
@@ -2694,29 +2707,37 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 				var shouldExpire bool
 				if mb.cacheNotLoaded() {
 					mb.loadMsgsWithLock()
+					fmt.Println(i, "FILENUM_6.2", time.Since(starttime))
 					shouldExpire = true
 				}
 				var smv StoreMsg
 				for seq, lseq := sseq, atomic.LoadUint64(&mb.last.seq); seq <= lseq; seq++ {
-					if sm, _ := mb.cacheLookup(seq, &smv); sm != nil && (isAll || isMatch(sm.subj)) {
+					sm, _ := mb.cacheLookup(seq, &smv)
+					fmt.Println(i, "FILENUM_6.3", time.Since(starttime))
+					if sm != nil && (isAll || isMatch(sm.subj)) {
 						t++
 					}
 				}
 				// If we loaded this block for this operation go ahead and expire it here.
+				fmt.Println(i, "FILENUM_6.4", time.Since(starttime))
 				if shouldExpire {
 					mb.tryForceExpireCacheLocked()
+					fmt.Println(i, "FILENUM_6.5", time.Since(starttime))
 				}
 			}
 			mb.mu.Unlock()
+			fmt.Println(i, "FILENUM_6.6", time.Since(starttime), "WITH LOCK", time.Since(b))
 			total += t
 		}
 		return total, validThrough
 	}
-	fmt.Println("FILENUM_7", time.Since(starttime))
+	fmt.Println("FILENUM_7", time.Since(starttime), len(fs.psim))
 
 	// If we are here its better to calculate totals from psim and adjust downward by scanning less blocks.
 	// TODO(dlc) - Eventually when sublist uses generics, make this sublist driven instead.
 	start := uint32(math.MaxUint32)
+	j := 0
+	jt := time.Now()
 	for subj, psi := range fs.psim {
 		if isMatch(subj) {
 			if lastPerSubject {
@@ -2734,9 +2755,15 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 				}
 			}
 		}
+		j++
+		if j % 20 == 0 {
+			fmt.Println("FILENUM_7.?", time.Since(starttime), time.Since(jt), j)
+		}
 	}
+	fmt.Println("FILENUM_7.0", time.Since(starttime))
 	// See if we were asked for all, if so we are done.
 	if sseq <= fs.state.FirstSeq {
+		fmt.Println("FILENUM_7.1", time.Since(starttime))
 		return total, validThrough
 	}
 
@@ -2751,6 +2778,7 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 	// Track how many we need to adjust against the total.
 	var adjust uint64
 
+	fmt.Println("FILENUM_8", time.Since(starttime))
 	for i := 0; i <= seqStart; i++ {
 		mb := fs.blks[i]
 		// We can skip blks if we know they are below the first one that has any subject matches.
@@ -2789,6 +2817,7 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 					}
 				}
 			}
+			fmt.Println("FILENUM_9.1", time.Since(starttime), len(mb.fss), i)
 		} else {
 			// This is the last block. We need to scan per message here.
 			if mb.cacheNotLoaded() {
@@ -2798,6 +2827,7 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 				}
 				shouldExpire = true
 			}
+			fmt.Println("FILENUM_9.2", time.Since(starttime), len(mb.fss), i)
 
 			var last = atomic.LoadUint64(&mb.last.seq)
 			if sseq < last {
@@ -2833,6 +2863,7 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 		if shouldExpire {
 			mb.tryForceExpireCacheLocked()
 		}
+		fmt.Println("FILENUM_9.3", time.Since(starttime), len(mb.fss), i)
 		mb.mu.Unlock()
 	}
 	// Make final adjustment.
@@ -5439,13 +5470,18 @@ checkCache:
 		return err
 	}
 
+	a := time.Now()
 	if err := mb.indexCacheBuf(buf); err != nil {
+		fmt.Println("MSGS PER BLOCK 5.0: ", time.Since(starttime), time.Since(a))
 		if err == errCorruptState {
 			var ld *LostStreamData
-			if ld, _, err = mb.rebuildStateLocked(); ld != nil {
+			ld, _, err = mb.rebuildStateLocked()
+			fmt.Println("MSGS PER BLOCK 5.1: ", time.Since(starttime), time.Since(a))
+			if ld != nil {
 				// We do not know if fs is locked or not at this point.
 				// This should be an exceptional condition so do so in Go routine.
 				go mb.fs.rebuildState(ld)
+				fmt.Println("MSGS PER BLOCK 5.2: ", time.Since(starttime), time.Since(a))
 			}
 		}
 		if err != nil {
@@ -5453,7 +5489,7 @@ checkCache:
 		}
 		goto checkCache
 	}
-	fmt.Println("MSGS PER BLOCK 5: ", time.Since(starttime))
+	fmt.Println("MSGS PER BLOCK 5: ", time.Since(starttime), time.Since(a))
 
 	if len(buf) > 0 {
 		mb.cloads++
@@ -5740,6 +5776,7 @@ func (fs *fileStore) loadLast(subj string, sm *StoreMsg) (lsm *StoreMsg, err err
 	}
 
 	// Walk blocks backwards.
+	// PROFILE HERE
 	for i := start; i >= stop; i-- {
 		mb := fs.bim[i]
 		if mb == nil {

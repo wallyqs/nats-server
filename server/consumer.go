@@ -4764,7 +4764,7 @@ func (o *consumer) selectStartingSeqNo() {
 	} else {
 		var state StreamState
 		o.mset.store.FastState(&state)
-		fmt.Println("SEQNO 1", time.Since(a))
+		fmt.Println("SEQNO 1", time.Since(a), o.cfg.OptStartSeq)
 		if o.cfg.OptStartSeq == 0 {
 			if o.cfg.DeliverPolicy == DeliverAll {
 				o.sseq = state.FirstSeq
@@ -4786,10 +4786,11 @@ func (o *consumer) selectStartingSeqNo() {
 				// If our parent stream is set to max msgs per subject of 1 this is just
 				// a normal consumer at this point. We can avoid any heavy lifting.
 				if o.mset.cfg.MaxMsgsPer == 1 {
+					fmt.Println("NO SEQNO 3", time.Since(a))
 					o.sseq = state.FirstSeq
 				} else {
 					// A threshold for when we switch from get last msg to subjects state.
-					const numSubjectsThresh = 256
+					const numSubjectsThresh = 10
 					lss := &lastSeqSkipList{resume: state.LastSeq}
 					var filters []string
 					if o.subjf == nil {
@@ -4799,14 +4800,17 @@ func (o *consumer) selectStartingSeqNo() {
 							filters = append(filters, filter.subject)
 						}
 					}
+					fmt.Println("________________________________________________________________________[ MAX MSGS PER", o.mset.cfg.MaxMsgsPer)
 					fmt.Println("SEQNO 3", time.Since(a))
-					for _, filter := range filters {
-						if st := o.mset.store.SubjectsTotals(filter); len(st) < numSubjectsThresh {
+					for iii, filter := range filters {
+						st := o.mset.store.SubjectsTotals(filter)
+						fmt.Println(":::::::::: FILTER: ", time.Since(a), iii, filter, len(st))
+						if len(st) < numSubjectsThresh {
 							fmt.Println("SEQNO 3.1", time.Since(a), len(st))
 							var smv StoreMsg
 							for subj := range st {
 								if sm, err := o.mset.store.LoadLastMsg(subj, &smv); err == nil {
-									fmt.Println("SEQNO 3.2", time.Since(a))
+									fmt.Println("SEQNO 3.2", time.Since(a), subj)
 									lss.seqs = append(lss.seqs, sm.seq)
 								}
 							}
@@ -4817,6 +4821,7 @@ func (o *consumer) selectStartingSeqNo() {
 							}
 						}
 					}
+					fmt.Println("________________________________________________________________________]")
 					fmt.Println("SEQNO 4", time.Since(a))
 					// Sort the skip list if needed.
 					if len(lss.seqs) > 1 {
