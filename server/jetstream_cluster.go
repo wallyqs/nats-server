@@ -4127,8 +4127,10 @@ func (js *jetStream) processClusterCreateConsumer(ca *consumerAssignment, state 
 		// Process the raft group and make sure its running if needed.
 		storage := mset.config().Storage
 		if ca.Config.MemoryStorage {
+			fmt.Println("STORAGE is MEMORY")
 			storage = MemoryStorage
 		}
+		fmt.Println("STORAGE:", storage)
 		// No-op if R1.
 		js.createRaftGroup(accName, rg, storage, pprofLabels{
 			"type":     "consumer",

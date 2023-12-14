@@ -322,12 +322,16 @@ func (ms *memStore) FilteredState(sseq uint64, subj string) SimpleState {
 }
 
 func (ms *memStore) filteredStateLocked(sseq uint64, filter string, lastPerSubject bool) SimpleState {
+	start := time.Now()
+	defer func(){
+		fmt.Println("FILTERZ", time.Since(start))
+	}()
 	var ss SimpleState
 
 	if sseq < ms.state.FirstSeq {
 		sseq = ms.state.FirstSeq
 	}
-
+	fmt.Println("FILTER1", time.Since(start))
 	// If past the end no results.
 	if sseq > ms.state.LastSeq {
 		return ss
@@ -538,10 +542,13 @@ func (ms *memStore) SubjectsTotals(filterSubject string) map[string]uint64 {
 // NumPending will return the number of pending messages matching the filter subject starting at sequence.
 func (ms *memStore) NumPending(sseq uint64, filter string, lastPerSubject bool) (total, validThrough uint64) {
 	// This needs to be a write lock, as filteredStateLocked can mutate the per-subject state.
+	start := time.Now()
 	ms.mu.Lock()
+	fmt.Println("MEMNUM_1", time.Since(start))
 	defer ms.mu.Unlock()
 
 	ss := ms.filteredStateLocked(sseq, filter, lastPerSubject)
+	fmt.Println("MEMNUM_Z", time.Since(start))
 	return ss.Msgs, ms.state.LastSeq
 }
 
@@ -1391,6 +1398,7 @@ func (o *consumerMemStore) SetStarting(sseq uint64) error {
 
 // HasState returns if this store has a recorded state.
 func (o *consumerMemStore) HasState() bool {
+	fmt.Println("MEM STORE DOES NOT HAVE STATE")
 	return false
 }
 

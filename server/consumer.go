@@ -700,6 +700,10 @@ func (mset *stream) addConsumer(config *ConsumerConfig) (*consumer, error) {
 }
 
 func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname string, ca *consumerAssignment, isRecovering bool, action ConsumerAction) (*consumer, error) {
+	start := time.Now()
+	defer func() {
+		fmt.Println("TOOOK", time.Since(start))
+	}()
 	mset.mu.RLock()
 	s, jsa, tierName, cfg, acc, closed := mset.srv, mset.jsa, mset.tier, mset.cfg, mset.acc, mset.closed
 	retention := cfg.Retention
@@ -809,6 +813,7 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 		mset.mu.Unlock()
 		return nil, NewJSMaximumConsumersLimitError()
 	}
+	fmt.Println("A", time.Since(start))
 
 	// Check on stream type conflicts with WorkQueues.
 	if mset.cfg.Retention == WorkQueuePolicy && !config.Direct {
@@ -817,8 +822,9 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 			mset.mu.Unlock()
 			return nil, NewJSConsumerWQRequiresExplicitAckError()
 		}
-
+		fmt.Println("AA", time.Since(start))
 		if len(mset.consumers) > 0 {
+			fmt.Println("A", time.Since(start))
 			subjects := gatherSubjectFilters(config.FilterSubject, config.FilterSubjects)
 			if len(subjects) == 0 {
 				mset.mu.Unlock()
@@ -850,8 +856,9 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 			return nil, NewJSConsumerWQConsumerNotDeliverAllError()
 		}
 	}
-
+	fmt.Println("AAA", time.Since(start))
 	// Set name, which will be durable name if set, otherwise we create one at random.
+	fmt.Printf("CONFIG: %+v\n", *config)
 	o := &consumer{
 		mset:      mset,
 		js:        s.getJetStream(),
@@ -875,8 +882,10 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 
 	// Bind internal client to the user account.
 	o.client.registerWithAccount(a)
+	fmt.Println("AAAA", time.Since(start))
 	// Bind to the system account.
 	o.sysc.registerWithAccount(s.SystemAccount())
+	fmt.Println("AAAAA", time.Since(start))
 
 	if isDurableConsumer(config) {
 		if len(config.Durable) > JSMaxNameLen {
@@ -901,6 +910,8 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 			config.Name = o.name
 		}
 	}
+	fmt.Println("B", time.Since(start))
+
 	// Create ackMsgs queue now that we have a consumer name
 	o.ackMsgs = newIPQueue[*jsAckMsg](s, fmt.Sprintf("[ACC:%s] consumer '%s' on stream '%s' ackMsgs", accName, o.name, mset.cfg.Name))
 
@@ -910,6 +921,7 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 		// Create our internal queue for next msg requests.
 		o.nextMsgReqs = newIPQueue[*nextMsgReq](s, fmt.Sprintf("[ACC:%s] consumer '%s' on stream '%s' pull requests", accName, o.name, mset.cfg.Name))
 	}
+	fmt.Println("BB", time.Since(start))
 
 	// already under lock, mset.Name() would deadlock
 	o.stream = mset.cfg.Name
@@ -922,6 +934,7 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 		o.deleteWithoutAdvisory()
 		return nil, NewJSConsumerBadDurableNameError()
 	}
+	fmt.Println("BBB", time.Since(start))
 
 	// Setup our storage if not a direct consumer.
 	if !config.Direct {
@@ -931,10 +944,12 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 			o.deleteWithoutAdvisory()
 			return nil, NewJSConsumerStoreFailedError(err)
 		}
+		fmt.Println("BBBB", time.Since(start))
 		o.store = store
 	}
 
 	subjects := gatherSubjectFilters(o.cfg.FilterSubject, o.cfg.FilterSubjects)
+	fmt.Println("C", time.Since(start))
 	for _, filter := range subjects {
 		sub := &subjectFilter{
 			subject:          filter,
@@ -943,16 +958,24 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 		}
 		o.subjf = append(o.subjf, sub)
 	}
+	fmt.Println("CC", time.Since(start))
 
 	if o.store != nil && o.store.HasState() {
+		fmt.Println("HAS STATE ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★")
 		// Restore our saved state.
+		fmt.Println("CCC1", time.Since(start))
 		o.mu.Lock()
 		o.readStoredState(0)
 		o.mu.Unlock()
+		fmt.Println("CCC2", time.Since(start))
 	} else {
 		// Select starting sequence number
+		a := time.Now()
 		o.selectStartingSeqNo()
+		b := time.Since(a)
+		fmt.Println("CCC3", time.Since(start), b)
 	}
+	fmt.Println("CCC", time.Since(start))
 
 	// Now register with mset and create the ack subscription.
 	// Check if we already have this one registered.
@@ -963,12 +986,14 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 			o.deleteWithoutAdvisory()
 			return nil, NewJSConsumerNameExistError()
 		}
+		fmt.Println("D", time.Since(start))
 		// If we are here we have already registered this durable. If it is still active that is an error.
 		if eo.isActive() {
 			o.name = _EMPTY_ // Prevent removal since same name.
 			o.deleteWithoutAdvisory()
 			return nil, NewJSConsumerExistingActiveError()
 		}
+		fmt.Println("DD", time.Since(start))
 		// Since we are here this means we have a potentially new durable so we should update here.
 		// Check that configs are the same.
 		if !configsEqualSansDelivery(o.cfg, eo.cfg) {
@@ -976,8 +1001,10 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 			o.deleteWithoutAdvisory()
 			return nil, NewJSConsumerReplacementWithDifferentNameError()
 		}
+		fmt.Println("DDD", time.Since(start))
 		// Once we are here we have a replacement push-based durable.
 		eo.updateDeliverSubject(o.cfg.DeliverSubject)
+		fmt.Println("DDDD", time.Since(start))
 		return eo, nil
 	}
 
@@ -994,6 +1021,7 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 
 	// Check/update the inactive threshold
 	o.updateInactiveThreshold(&o.cfg)
+	fmt.Println("E", time.Since(start))
 
 	if o.isPushMode() {
 		// Check if we are running only 1 replica and that the delivery subject has interest.
@@ -1005,11 +1033,13 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 				o.updateDeliveryInterest(false)
 			}
 		}
+		fmt.Println("EE", time.Since(start))
 	}
 
 	// Set our ca.
 	if ca != nil {
 		o.setConsumerAssignment(ca)
+		fmt.Println("EEE", time.Since(start))
 	}
 
 	// Check if we have a rate limit set.
@@ -1019,10 +1049,13 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 
 	mset.setConsumer(o)
 	mset.mu.Unlock()
+	fmt.Println("EEEE", time.Since(start))
 
 	if config.Direct || (!s.JetStreamIsClustered() && s.standAloneMode()) {
+		fmt.Println("F0", time.Since(start))
 		o.setLeader(true)
 	}
+	fmt.Println("F", time.Since(start))
 
 	// This is always true in single server mode.
 	if o.IsLeader() {
@@ -1033,8 +1066,10 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 		} else if ca != nil {
 			suppress = ca.responded
 		}
+		fmt.Println("FF", time.Since(start))
 		if !suppress {
 			o.sendCreateAdvisory()
+			fmt.Println("FFF", time.Since(start))
 		}
 	}
 
@@ -1142,10 +1177,12 @@ func (o *consumer) isLeader() bool {
 }
 
 func (o *consumer) setLeader(isLeader bool) {
+	start := time.Now()
 	o.mu.RLock()
 	mset, closed := o.mset, o.closed
 	movingToClustered := o.node != nil && o.pch == nil
 	wasLeader := o.leader.Swap(isLeader)
+	fmt.Println("L1", time.Since(start))
 	o.mu.RUnlock()
 
 	// If we are here we have a change in leader status.
@@ -1158,6 +1195,7 @@ func (o *consumer) setLeader(isLeader bool) {
 			// If we detect we are scaling up, make sure to create clustered routines and channels.
 			if movingToClustered {
 				o.mu.Lock()
+				fmt.Println("L2", time.Since(start))
 				// We are moving from R1 to clustered.
 				o.pch = make(chan struct{}, 1)
 				go o.loopAndForwardProposals(o.qch)
@@ -1173,38 +1211,48 @@ func (o *consumer) setLeader(isLeader bool) {
 		}
 
 		mset.mu.RLock()
+		fmt.Println("L3", time.Since(start))
 		s, jsa, stream, lseq := mset.srv, mset.jsa, mset.cfg.Name, mset.lseq
 		mset.mu.RUnlock()
 
 		// Register as a leader with our parent stream.
 		mset.setConsumerAsLeader(o)
+		fmt.Println("L4", time.Since(start))
 
 		o.mu.Lock()
+		fmt.Println("L5", time.Since(start))
 		o.rdq = nil
 		o.rdqi.Empty()
 
 		// Restore our saved state. During non-leader status we just update our underlying store.
 		o.readStoredState(lseq)
+		fmt.Println("L6", time.Since(start))
 
 		// Setup initial num pending.
+		fmt.Println("-----------------------------")
 		o.streamNumPending()
+		fmt.Println("L7 - SLOW", time.Since(start))
 
 		// Cleanup lss when we take over in clustered mode.
 		if o.hasSkipListPending() && o.sseq >= o.lss.resume {
 			o.lss = nil
 		}
+		fmt.Println("L8", time.Since(start))
 
 		// Update the group on the our starting sequence if we are starting but we skipped some in the stream.
 		if o.dseq == 1 && o.sseq > 1 {
 			o.updateSkipped(o.sseq)
 		}
+		fmt.Println("L9", time.Since(start))
 
 		// Do info sub.
 		if o.infoSub == nil && jsa != nil {
 			isubj := fmt.Sprintf(clusterConsumerInfoT, jsa.acc(), stream, o.name)
 			// Note below the way we subscribe here is so that we can send requests to ourselves.
 			o.infoSub, _ = s.systemSubscribe(isubj, _EMPTY_, false, o.sysc, o.handleClusterConsumerInfoRequest)
+			fmt.Println("L9.1", time.Since(start))
 		}
+		fmt.Println("L10", time.Since(start))
 
 		var err error
 		if o.cfg.AckPolicy != AckNone {
@@ -1214,6 +1262,7 @@ func (o *consumer) setLeader(isLeader bool) {
 				return
 			}
 		}
+		fmt.Println("L11", time.Since(start))
 
 		// Setup the internal sub for next message requests regardless.
 		// Will error if wrong mode to provide feedback to users.
@@ -4162,6 +4211,8 @@ func (o *consumer) streamNumPendingLocked() uint64 {
 // Depends on delivery policy, for last per subject we calculate differently.
 // Lock should be held.
 func (o *consumer) streamNumPending() uint64 {
+	start := time.Now()
+	defer func() { fmt.Println("NPZ", time.Since(start)) }()
 	if o.mset == nil || o.mset.store == nil {
 		o.npc, o.npf = 0, 0
 		return 0
@@ -4175,12 +4226,14 @@ func (o *consumer) streamNumPending() uint64 {
 		// Consumer without filters.
 		if o.subjf == nil {
 			npc, npf := o.mset.store.NumPending(o.sseq, _EMPTY_, isLastPerSubject)
+			fmt.Println("NP1", time.Since(start))
 			o.npc, o.npf = int64(npc), npf
 			return o.numPending()
 		}
-		// Consumer with filters.
+		// Consumer with multiple filters uses slower path.
 		for _, filter := range o.subjf {
 			npc, npf := o.mset.store.NumPending(o.sseq, filter.subject, isLastPerSubject)
+			fmt.Println("NP2", time.Since(start), filter)
 			o.npc += int64(npc)
 			if npf > o.npf {
 				o.npf = npf // Always last
@@ -4192,6 +4245,7 @@ func (o *consumer) streamNumPending() uint64 {
 	// Consumer without filters.
 	if o.subjf == nil {
 		npc, npf := o.mset.store.NumPending(o.sseq, o.cfg.FilterSubject, isLastPerSubject)
+		fmt.Println("NP3", time.Since(start))
 		o.npc, o.npf = int64(npc), npf
 		return o.numPending()
 	}
@@ -4203,6 +4257,7 @@ func (o *consumer) streamNumPending() uint64 {
 			filter.currentSeq = o.sseq
 		}
 		npc, npf := o.mset.store.NumPending(filter.currentSeq, filter.subject, isLastPerSubject)
+		fmt.Println("NP4", time.Since(start))
 		o.npc += int64(npc)
 		if npf > o.npf {
 			o.npf = npf // Always last
@@ -4703,11 +4758,13 @@ func (o *consumer) hasSkipListPending() bool {
 
 // Will select the starting sequence.
 func (o *consumer) selectStartingSeqNo() {
+	a := time.Now()
 	if o.mset == nil || o.mset.store == nil {
 		o.sseq = 1
 	} else {
 		var state StreamState
 		o.mset.store.FastState(&state)
+		fmt.Println("SEQNO 1", time.Since(a))
 		if o.cfg.OptStartSeq == 0 {
 			if o.cfg.DeliverPolicy == DeliverAll {
 				o.sseq = state.FirstSeq
@@ -4724,6 +4781,7 @@ func (o *consumer) selectStartingSeqNo() {
 						o.sseq = ss.Last
 					}
 				}
+				fmt.Println("SEQNO 2", time.Since(a))
 			} else if o.cfg.DeliverPolicy == DeliverLastPerSubject {
 				// If our parent stream is set to max msgs per subject of 1 this is just
 				// a normal consumer at this point. We can avoid any heavy lifting.
@@ -4741,26 +4799,32 @@ func (o *consumer) selectStartingSeqNo() {
 							filters = append(filters, filter.subject)
 						}
 					}
+					fmt.Println("SEQNO 3", time.Since(a))
 					for _, filter := range filters {
 						if st := o.mset.store.SubjectsTotals(filter); len(st) < numSubjectsThresh {
+							fmt.Println("SEQNO 3.1", time.Since(a), len(st))
 							var smv StoreMsg
 							for subj := range st {
 								if sm, err := o.mset.store.LoadLastMsg(subj, &smv); err == nil {
+									fmt.Println("SEQNO 3.2", time.Since(a))
 									lss.seqs = append(lss.seqs, sm.seq)
 								}
 							}
 						} else if mss := o.mset.store.SubjectsState(filter); len(mss) > 0 {
 							for _, ss := range mss {
+								fmt.Println("SEQNO 3.3", time.Since(a))
 								lss.seqs = append(lss.seqs, ss.Last)
 							}
 						}
 					}
+					fmt.Println("SEQNO 4", time.Since(a))
 					// Sort the skip list if needed.
 					if len(lss.seqs) > 1 {
 						sort.Slice(lss.seqs, func(i, j int) bool {
 							return lss.seqs[j] > lss.seqs[i]
 						})
 					}
+					fmt.Println("SEQNO 5", time.Since(a))
 					if len(lss.seqs) == 0 {
 						o.sseq = state.LastSeq
 					} else {
@@ -4773,6 +4837,7 @@ func (o *consumer) selectStartingSeqNo() {
 				// If we are here we are time based.
 				// TODO(dlc) - Once clustered can't rely on this.
 				o.sseq = o.mset.store.GetSeqFromTime(*o.cfg.OptStartTime)
+				fmt.Println("SEQNO 6", time.Since(a))
 			} else {
 				// DeliverNew
 				o.sseq = state.LastSeq + 1
@@ -4791,6 +4856,7 @@ func (o *consumer) selectStartingSeqNo() {
 		} else if o.sseq > state.LastSeq {
 			o.sseq = state.LastSeq + 1
 		}
+		fmt.Println("SEQNO 7", time.Since(a))
 		for _, filter := range o.subjf {
 			if state.FirstSeq == 0 {
 				filter.nextSeq = 1
@@ -4802,6 +4868,7 @@ func (o *consumer) selectStartingSeqNo() {
 				filter.nextSeq = state.LastSeq + 1
 			}
 		}
+		fmt.Println("SEQNO 8", time.Since(a))
 	}
 	if o.subjf != nil {
 		sort.Slice(o.subjf, func(i, j int) bool {
@@ -4819,6 +4886,7 @@ func (o *consumer) selectStartingSeqNo() {
 	if o.store != nil && o.sseq > 0 {
 		o.store.SetStarting(o.sseq - 1)
 	}
+	fmt.Println("SEQNO 9", time.Since(a))
 }
 
 // Test whether a config represents a durable subscriber.

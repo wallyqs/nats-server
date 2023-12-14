@@ -2570,7 +2570,12 @@ func (fs *fileStore) SubjectsState(subject string) map[string]SimpleState {
 // NumPending will return the number of pending messages matching the filter subject starting at sequence.
 // Optimized for stream num pending calculations for consumers.
 func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool) (total, validThrough uint64) {
+	starttime := time.Now()
+	defer func(){
+		fmt.Println("FILENUM_Z", time.Since(starttime))
+	}()
 	fs.mu.RLock()
+	fmt.Println("FILENUM_1", time.Since(starttime))
 	defer fs.mu.RUnlock()
 
 	// This can always be last for these purposes.
@@ -2590,9 +2595,11 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 			seqStart = 0
 		}
 	}
+	fmt.Println("FILENUM_2", time.Since(starttime))
 
 	isAll := filter == _EMPTY_ || filter == fwcs
 	wc := subjectHasWildcard(filter)
+	fmt.Println("FILENUM_3", time.Since(starttime))
 
 	// See if filter was provided but its the only subject.
 	if !isAll && !wc && len(fs.psim) == 1 && fs.psim[filter] != nil {
@@ -2649,12 +2656,15 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 				mb.mu.Unlock()
 				continue
 			}
+			fmt.Println(i, "FILENUM_4", time.Since(starttime))
 
 			// If we are here we need to at least scan the subject fss.
 			// Make sure we have fss loaded.
 			mb.ensurePerSubjectInfoLoaded()
+			fmt.Println(i, "FILENUM_5", time.Since(starttime))
 			var havePartial bool
 			for subj, ss := range mb.fss {
+				fmt.Println(i, "FILENUM_6", time.Since(starttime))
 				if !seen[subj] && isMatch(subj) {
 					if lastPerSubject {
 						// Can't have a partials with last by subject.
@@ -2702,6 +2712,7 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 		}
 		return total, validThrough
 	}
+	fmt.Println("FILENUM_7", time.Since(starttime))
 
 	// If we are here its better to calculate totals from psim and adjust downward by scanning less blocks.
 	// TODO(dlc) - Eventually when sublist uses generics, make this sublist driven instead.
@@ -5281,6 +5292,7 @@ func (mb *msgBlock) cacheNotLoaded() bool {
 // Used to load in the block contents.
 // Lock should be held and all conditionals satisfied prior.
 func (mb *msgBlock) loadBlock(buf []byte) ([]byte, error) {
+	starttime := time.Now()
 	f, err := os.Open(mb.mfn)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -5299,6 +5311,7 @@ func (mb *msgBlock) loadBlock(buf []byte) ([]byte, error) {
 			return nil, errMsgBlkTooBig
 		}
 	}
+	fmt.Println("LOAD BLOCK 1: ", time.Since(starttime))
 
 	if buf == nil {
 		buf = getMsgBlockBuf(sz)
@@ -5308,6 +5321,7 @@ func (mb *msgBlock) loadBlock(buf []byte) ([]byte, error) {
 			buf = nil
 		}
 	}
+	fmt.Println("LOAD BLOCK 2: ", time.Since(starttime))
 
 	if sz > cap(buf) {
 		buf = make([]byte, sz)
@@ -5320,11 +5334,13 @@ func (mb *msgBlock) loadBlock(buf []byte) ([]byte, error) {
 	if err == nil {
 		mb.rbytes = uint64(n)
 	}
+	fmt.Println("LOAD BLOCK 3: ", time.Since(starttime))
 	return buf[:n], err
 }
 
 // Lock should be held.
 func (mb *msgBlock) loadMsgsWithLock() error {
+	starttime := time.Now()
 	// Check for encryption, we do not load keys on startup anymore so might need to load them here.
 	if mb.fs != nil && mb.fs.prf != nil && (mb.aek == nil || mb.bek == nil) {
 		if err := mb.fs.loadEncryptionForMsgBlock(mb); err != nil {
@@ -5357,6 +5373,7 @@ checkCache:
 	mb.llts = time.Now().UnixNano()
 
 	// FIXME(dlc) - We could be smarter here.
+	fmt.Println("MSGS PER BLOCK 1: ", time.Since(starttime))
 	if buf, _ := mb.bytesPending(); len(buf) > 0 {
 		ld, err := mb.flushPendingMsgsLocked()
 		if ld != nil && mb.fs != nil {
@@ -5369,10 +5386,12 @@ checkCache:
 		}
 		goto checkCache
 	}
+	fmt.Println("MSGS PER BLOCK 2: ", time.Since(starttime))
 
 	// Load in the whole block.
 	// We want to hold the mb lock here to avoid any changes to state.
 	buf, err := mb.loadBlock(nil)
+	fmt.Println("MSGS PER BLOCK 2.1: ", time.Since(starttime), err)
 	if err != nil {
 		if err == errNoBlkData {
 			if ld, _, err := mb.rebuildStateLocked(); err != nil && ld != nil {
@@ -5382,6 +5401,7 @@ checkCache:
 		}
 		return err
 	}
+	fmt.Println("MSGS PER BLOCK 3: ", time.Since(starttime), mb.mfn)
 
 	// Reset the cache since we just read everything in.
 	// Make sure this is cleared in case we had a partial when we started.
@@ -5396,6 +5416,7 @@ checkCache:
 		mb.bek = bek
 		mb.bek.XORKeyStream(buf, buf)
 	}
+	fmt.Println("MSGS PER BLOCK 4: ", time.Since(starttime))
 
 	// Check for compression.
 	if buf, err = mb.decompressIfNeeded(buf); err != nil {
@@ -5416,6 +5437,7 @@ checkCache:
 		}
 		goto checkCache
 	}
+	fmt.Println("MSGS PER BLOCK 5: ", time.Since(starttime))
 
 	if len(buf) > 0 {
 		mb.cloads++
@@ -6802,15 +6824,21 @@ func (mb *msgBlock) resetPerSubjectInfo() error {
 // generatePerSubjectInfo will generate the per subject info via the raw msg block.
 // Lock should be held.
 func (mb *msgBlock) generatePerSubjectInfo() error {
+	start := time.Now()
+	defer func(){
+		fmt.Println("PERSUBJECT_Z", time.Since(start))
+	}()
 	// Check if this mb is empty. This can happen when its the last one and we are holding onto it for seq and timestamp info.
 	if mb.msgs == 0 {
 		return nil
 	}
 
 	if mb.cacheNotLoaded() {
+		fmt.Println("PERSUBJECT_1", time.Since(start))
 		if err := mb.loadMsgsWithLock(); err != nil {
 			return err
 		}
+		fmt.Println("PERSUBJECT_2", time.Since(start))
 		// indexCacheBuf can produce fss now, so if non-nil we are good.
 		if mb.fss != nil {
 			return nil
@@ -6824,6 +6852,7 @@ func (mb *msgBlock) generatePerSubjectInfo() error {
 	fseq, lseq := atomic.LoadUint64(&mb.first.seq), atomic.LoadUint64(&mb.last.seq)
 	for seq := fseq; seq <= lseq; seq++ {
 		sm, err := mb.cacheLookup(seq, &smv)
+		fmt.Println("PERSUBJECT_3", time.Since(start))
 		if err != nil {
 			// Since we are walking by sequence we can ignore some errors that are benign to rebuilding our state.
 			if err == ErrStoreMsgNotFound || err == errDeletedMsg {
@@ -6843,11 +6872,13 @@ func (mb *msgBlock) generatePerSubjectInfo() error {
 			}
 		}
 	}
+	fmt.Println("PERSUBJECT_4", time.Since(start))
 
 	if len(mb.fss) > 0 {
 		// Make sure we run the cache expire timer.
 		mb.llts = time.Now().UnixNano()
 		mb.startCacheExpireTimer()
+		fmt.Println("PERSUBJECT_5", time.Since(start))
 	}
 	return nil
 }
@@ -7987,6 +8018,7 @@ func (o *consumerFileStore) HasState() bool {
 	o.mu.Lock()
 	_, err := os.Stat(o.ifn)
 	o.mu.Unlock()
+	fmt.Println("FILE STORE HAS STATE?", err)
 	return err == nil
 }
 
