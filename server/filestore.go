@@ -2586,7 +2586,7 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 	}
 
 	// Track starting for both block for the sseq and staring block that matches any subject.
-	var seqStart, subjStart int
+	var seqStart int
 
 	// See if we need to figure out starting block per sseq.
 	if sseq > fs.state.FirstSeq {
@@ -2630,7 +2630,7 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 
 	// If we would need to scan more from the beginning, revert back to calculating directly here.
 	// TODO(dlc) - Redo properly with sublists etc for subject-based filtering.
-	if lastPerSubject || seqStart >= (len(fs.blks)/2) {
+	if seqStart >= (len(fs.blks) / 2) {
 		// If we need to track seen for last per subject.
 		var seen map[string]bool
 		if lastPerSubject {
@@ -2741,11 +2741,8 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 	}
 
 	// If we are here we need to calculate partials for the first blocks.
-	subjStart = int(start)
-	firstSubjBlk := fs.bim[uint32(subjStart)]
+	firstSubjBlk := fs.bim[start]
 	var firstSubjBlkFound bool
-	var smv StoreMsg
-
 	// Adjust in case not found.
 	if firstSubjBlk == nil {
 		firstSubjBlkFound = true
@@ -2756,7 +2753,6 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 
 	for i := 0; i <= seqStart; i++ {
 		mb := fs.blks[i]
-
 		// We can skip blks if we know they are below the first one that has any subject matches.
 		if !firstSubjBlkFound {
 			if mb == firstSubjBlk {
@@ -2775,9 +2771,14 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 				adjust += mb.msgs
 			} else {
 				// We need to adjust for all matches in this block.
-				// We will scan fss state vs messages themselves.
-				// Make sure we have fss loaded.
-				mb.ensurePerSubjectInfoLoaded()
+				// Make sure we have fss loaded. This loads whole block now.
+				if mb.cacheNotLoaded() {
+					if err := mb.loadMsgsWithLock(); err != nil {
+						mb.mu.Unlock()
+						return 0, 0
+					}
+					shouldExpire = true
+				}
 				for subj, ss := range mb.fss {
 					if isMatch(subj) {
 						if lastPerSubject {
@@ -2802,13 +2803,28 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 			if sseq < last {
 				last = sseq
 			}
+
+			// If we need to track seen for last per subject.
+			var seen map[string]bool
+			if lastPerSubject {
+				seen = make(map[string]bool)
+			}
+
+			var smv StoreMsg
 			for seq := atomic.LoadUint64(&mb.first.seq); seq < last; seq++ {
 				sm, _ := mb.cacheLookup(seq, &smv)
-				if sm == nil {
+				if sm == nil || sm.subj == _EMPTY_ {
 					continue
 				}
 				// Check if it matches our filter.
-				if isMatch(sm.subj) && sm.seq < sseq {
+				if sm.seq < sseq && isMatch(sm.subj) {
+					if lastPerSubject {
+						if seen[sm.subj] {
+							continue
+						} else {
+							seen[sm.subj] = true
+						}
+					}
 					adjust++
 				}
 			}
