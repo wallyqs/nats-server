@@ -6075,7 +6075,7 @@ func TestJetStreamClusterLimitsBasedStreamFileStoreDesync(t *testing.T) {
 		Subjects: []string{"messages.*"},
 		Replicas: 3,
 		MaxAge:   10 * time.Minute,
-		MaxMsgs:  100000,
+		MaxMsgs:  100_000,
 	})
 	require_NoError(t, err)
 
@@ -6117,8 +6117,9 @@ func TestJetStreamClusterLimitsBasedStreamFileStoreDesync(t *testing.T) {
 				for _, msg := range msgs {
 					received++
 					receivedMap[msg.Subject] = msg
-					// meta, _ := msg.Metadata()
-					// t.Logf("GOT MSG: %s :: %+v :: %d", msg.Subject, meta, len(msg.Data))
+					if meta, _ := msg.Metadata(); meta.NumDelivered > 1 {
+						t.Logf("GOT MSG: %s :: %+v :: %d", msg.Subject, meta, len(msg.Data))
+					}
 					msg.Ack()
 				}
 			}
@@ -6131,8 +6132,7 @@ func TestJetStreamClusterLimitsBasedStreamFileStoreDesync(t *testing.T) {
 	go func() {
 		payload := []byte(strings.Repeat("A", 1024))
 		tick := time.NewTicker(1 * time.Millisecond)
-		i := 1
-		for i < 100_000 {
+		for i := 1; i < 100_000; {
 			select {
 			case <-ctx.Done():
 				wg.Done()
@@ -6173,7 +6173,7 @@ Setup:
 			t.Fatalf("Timed out waiting for limits error")
 		}
 	}
-	time.Sleep(500 * time.Millisecond)
+
 	// Both goroutines should be exiting now..
 	wg.Wait()
 
