@@ -260,6 +260,7 @@ type client struct {
 	msgb       [msgScratchSize]byte
 	last       time.Time
 	lastIn     time.Time
+	lastPing   time.Time
 
 	headers bool
 
@@ -2380,7 +2381,9 @@ func (c *client) processPing() {
 
 	// Record this to suppress us sending one if this
 	// is within a given time interval for activity.
-	c.lastIn = time.Now()
+	now := time.Now()
+	c.lastIn = now
+	c.lastPing = now
 
 	// If not a CLIENT, we are done. Also the CONNECT should
 	// have been received, but make sure it is so before proceeding
@@ -2431,6 +2434,7 @@ func (c *client) processPong() {
 	c.mu.Lock()
 	c.ping.out = 0
 	c.rtt = computeRTT(c.rttStart)
+	c.lastPing = time.Now()
 	srv := c.srv
 	reorderGWs := c.kind == GATEWAY && c.gw.outbound
 	// If compression is currently active for a route/leaf connection, if the

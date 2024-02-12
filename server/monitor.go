@@ -140,6 +140,7 @@ type ConnInfo struct {
 	NameTag        string         `json:"name_tag,omitempty"`
 	Tags           jwt.TagList    `json:"tags,omitempty"`
 	MQTTClient     string         `json:"mqtt_client,omitempty"` // This is the MQTT client id
+	LastPing       time.Time      `json:"last_ping_activity"`
 
 	// Internal
 	rtt int64 // For fast sorting
@@ -543,6 +544,7 @@ func (ci *ConnInfo) fill(client *client, nc net.Conn, now time.Time, auth bool) 
 	ci.Type = client.clientTypeString()
 	ci.Start = client.start
 	ci.LastActivity = client.last
+	ci.LastPing = client.lastPing
 	ci.Uptime = myUptime(now.Sub(client.start))
 	ci.Idle = myUptime(now.Sub(client.last))
 	ci.RTT = rtt.String()
