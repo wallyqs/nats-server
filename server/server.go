@@ -4459,3 +4459,15 @@ func (s *Server) LDMClientByID(id uint64) error {
 	}
 	return errors.New("no such client id")
 }
+
+// PingClientByID sends a Ping to a client by connection ID.
+func (s *Server) PingClientByID(id uint64) error {
+	c := s.clients[id]
+	if c != nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.enqueueProto([]byte("PING\r\n"))
+		return nil
+	}
+	return errors.New("no such client id")
+}

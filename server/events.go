@@ -60,6 +60,7 @@ const (
 	shutdownEventSubj         = "$SYS.SERVER.%s.SHUTDOWN"
 	clientKickReqSubj         = "$SYS.REQ.SERVER.%s.KICK"
 	clientLDMReqSubj          = "$SYS.REQ.SERVER.%s.LDM"
+	clientPingReqSubj         = "$SYS.REQ.SERVER.%s.PING"
 	authErrorEventSubj        = "$SYS.SERVER.%s.CLIENT.AUTH.ERR"
 	authErrorAccountEventSubj = "$SYS.ACCOUNT.CLIENT.AUTH.ERR"
 	serverStatsSubj           = "$SYS.SERVER.%s.STATSZ"
@@ -1279,6 +1280,11 @@ func (s *Server) initEventTracking() {
 	subject = fmt.Sprintf(clientLDMReqSubj, s.info.ID)
 	if _, err := s.sysSubscribe(subject, s.noInlineCallback(s.ldmClient)); err != nil {
 		s.Errorf("Error setting up client LDM service: %v", err)
+	}
+	// Client connection PING
+	subject = fmt.Sprintf(clientPingReqSubj, s.info.ID)
+	if _, err := s.sysSubscribe(subject, s.noInlineCallback(s.pingReqClient)); err != nil {
+		s.Errorf("Error setting up client ping request service: %v", err)
 	}
 }
 
@@ -2778,6 +2784,10 @@ type LDMClientReq struct {
 	CID uint64 `json:"cid"`
 }
 
+type PingClientReq struct {
+	CID uint64 `json:"cid"`
+}
+
 func (s *Server) kickClient(_ *subscription, c *client, _ *Account, subject, reply string, hdr, msg []byte) {
 	if !s.eventsRunning() {
 		return
@@ -2810,6 +2820,23 @@ func (s *Server) ldmClient(_ *subscription, c *client, _ *Account, subject, repl
 	optz := &EventFilterOptions{}
 	s.zReq(c, reply, hdr, msg, optz, optz, func() (interface{}, error) {
 		return nil, s.LDMClientByID(req.CID)
+	})
+}
+
+func (s *Server) pingReqClient(_ *subscription, c *client, _ *Account, subject, reply string, hdr, msg []byte) {
+	if !s.eventsRunning() {
+		return
+	}
+
+	var req PingClientReq
+	if err := json.Unmarshal(msg, &req); err != nil {
+		s.sys.client.Errorf("Error unmarshalling kick client request: %v", err)
+		return
+	}
+
+	optz := &EventFilterOptions{}
+	s.zReq(c, reply, hdr, msg, optz, optz, func() (interface{}, error) {
+		return nil, s.PingClientByID(req.CID)
 	})
 }
 
