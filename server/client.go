@@ -143,6 +143,7 @@ const (
 	connectProcessFinished                        // Marks if this connection has finished the connect process.
 	compressionNegotiated                         // Marks if this connection has negotiated compression level with remote.
 	didTLSFirst                                   // Marks if this connection requested and was accepted doing the TLS handshake first (prior to INFO).
+	isSlowConsumer                                // Marks connection as a slow consumer.
 )
 
 // set the flag (would be equivalent to set the boolean to true)
@@ -1617,6 +1618,7 @@ func (c *client) flushOutbound() bool {
 
 	// Re-acquire client lock.
 	c.mu.Lock()
+	debugNB := len(c.out.nb)
 
 	// Adjust if we were compressing.
 	if cw != nil {
@@ -1651,9 +1653,11 @@ func (c *client) flushOutbound() bool {
 	}
 
 	// Ignore ErrShortWrite errors, they will be handled as partials.
+	var gotWriteTimeout bool
 	if err != nil && err != io.ErrShortWrite {
 		// Handle timeout error (slow consumer) differently
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			gotWriteTimeout = true
 			if closed := c.handleWriteTimeout(n, attempted, len(orig)); closed {
 				return true
 			}
@@ -1691,6 +1695,11 @@ func (c *client) flushOutbound() bool {
 		close(c.out.stc)
 		c.out.stc = nil
 	}
+	// Check if the connection is recovering from being a slow consumer.
+	if !gotWriteTimeout && c.flags.isSet(isSlowConsumer) {
+		c.Noticef("SlowConsumer Recovered: Flush took %s (written=%v nv=%v)", time.Since(start), len(orig), debugNB)
+		c.flags.clear(isSlowConsumer)
+	}
 
 	return true
 }
@@ -1716,6 +1725,7 @@ func (c *client) handleWriteTimeout(written, attempted int64, numChunks int) boo
 		c.markConnAsClosed(SlowConsumerWriteDeadline)
 		return true
 	}
+	alreadySC := c.flags.isSet(isSlowConsumer)
 
 	// Aggregate slow consumers.
 	atomic.AddInt64(&c.srv.slowConsumers, 1)
@@ -1723,7 +1733,9 @@ func (c *client) handleWriteTimeout(written, attempted int64, numChunks int) boo
 	case CLIENT:
 		c.srv.scStats.clients.Add(1)
 	case ROUTER:
-		c.srv.scStats.routes.Add(1)
+		if !alreadySC {
+			c.srv.scStats.routes.Add(1)
+		}
 	case GATEWAY:
 		c.srv.scStats.gateways.Add(1)
 	case LEAF:
@@ -1732,13 +1744,21 @@ func (c *client) handleWriteTimeout(written, attempted int64, numChunks int) boo
 	if c.acc != nil {
 		atomic.AddInt64(&c.acc.slowConsumers, 1)
 	}
-	c.Noticef("Slow Consumer Detected: WriteDeadline of %v exceeded with %d chunks of %d total bytes.",
-		c.out.wdl, numChunks, attempted)
+
+	if alreadySC {
+		c.Noticef("Slow Consumer State: WriteDeadline of %v exceeded with %d chunks of %d total bytes. (written=%v, nb=%v)",
+			c.out.wdl, numChunks, attempted, written, len(c.out.nb))
+	} else {
+		c.Noticef("Slow Consumer Detected: WriteDeadline of %v exceeded with %d chunks of %d total bytes. (written=%v, nb=%v)",
+			c.out.wdl, numChunks, attempted, written, len(c.out.nb))
+	}
 
 	// We always close CLIENT connections, or when nothing was written at all...
 	if c.kind == CLIENT || written == 0 {
 		c.markConnAsClosed(SlowConsumerWriteDeadline)
 		return true
+	} else {
+		c.flags.setIfNotSet(isSlowConsumer)
 	}
 	return false
 }
