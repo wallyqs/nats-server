@@ -4411,12 +4411,12 @@ func TestMonitorJsz(t *testing.T) {
 			}
 			acc = info.AccountDetails[0]
 			got = int(acc.ReservedMemory)
-			expected = -1
+			expected = 0
 			if got != expected {
 				t.Errorf("Expected: %v, got: %v", expected, got)
 			}
 			got = int(acc.ReservedStore)
-			expected = -1
+			expected = 0
 			if got != expected {
 				t.Errorf("Expected: %v, got: %v", expected, got)
 			}
