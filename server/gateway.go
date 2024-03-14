@@ -1670,6 +1670,30 @@ func (s *Server) getOutboundGatewayConnection(name string) *client {
 	return gwc
 }
 
+// func (s *Server) GetOutboundGatewayConnection(name string) *client {
+// 	s.gateway.RLock()
+// 	gwc := s.gateway.out[name]
+// 	s.gateway.RUnlock()
+// 	return gwc
+// }
+
+// func (c *client) SetWriteDeadline(t time.Duration) {
+// 	c.mu.Lock()
+// 	c.out.wdl = time.Nanosecond
+// 	c.mu.Unlock()
+// }
+
+// func (s *Server) BlockRoutesFor(t time.Duration) {
+// 	s.mu.RLock()
+// 	s.forEachRemote(func(r *client) {
+// 		r.mu.Lock()
+// 		// r.nc = &capturePingConn{r.nc, ch}
+// 		time.Sleep(t)
+// 		r.mu.Unlock()
+// 	})
+// 	s.mu.RUnlock()
+// }
+
 // Returns all outbound gateway connections in the provided array.
 // The order of the gateways is suited for the sending of a message.
 // Current ordering is based on individual gateway's RTT value.

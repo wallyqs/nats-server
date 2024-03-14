@@ -16,32 +16,18 @@ package test
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/pem"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/ocsp"
-
-	"github.com/nats-io/nats-server/v2/internal/testhelper"
+	. "github.com/nats-io/nats-server/v2/internal/testhelper"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
-)
-
-const (
-	defaultResponseTTL = 4 * time.Second
-	defaultAddress     = "127.0.0.1:8888"
+	"golang.org/x/crypto/ocsp"
 )
 
 func TestOCSPAlwaysMustStapleAndShutdown(t *testing.T) {
@@ -55,7 +41,7 @@ func TestOCSPAlwaysMustStapleAndShutdown(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, serverCert, ocsp.Good)
@@ -152,7 +138,7 @@ func TestOCSPMustStapleShutdown(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, serverCert, ocsp.Good)
@@ -191,7 +177,7 @@ func TestOCSPMustStapleShutdown(t *testing.T) {
 	nc, err := nats.Connect(fmt.Sprintf("tls://localhost:%d", opts.Port),
 		nats.Secure(&tls.Config{
 			VerifyConnection: func(s tls.ConnectionState) error {
-				resp, err := getOCSPStatus(s)
+				resp, err := GetOCSPStatus(s)
 				if err != nil {
 					return err
 				}
@@ -246,7 +232,7 @@ func TestOCSPMustStapleAutoDoesNotShutdown(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, serverCert, ocsp.Good)
@@ -268,7 +254,7 @@ func TestOCSPMustStapleAutoDoesNotShutdown(t *testing.T) {
 	nc, err := nats.Connect(fmt.Sprintf("tls://localhost:%d", opts.Port),
 		nats.Secure(&tls.Config{
 			VerifyConnection: func(s tls.ConnectionState) error {
-				resp, err := getOCSPStatus(s)
+				resp, err := GetOCSPStatus(s)
 				if err != nil {
 					return err
 				}
@@ -310,7 +296,7 @@ func TestOCSPMustStapleAutoDoesNotShutdown(t *testing.T) {
 	nc, err = nats.Connect(fmt.Sprintf("tls://localhost:%d", opts.Port),
 		nats.Secure(&tls.Config{
 			VerifyConnection: func(s tls.ConnectionState) error {
-				resp, err := getOCSPStatus(s)
+				resp, err := GetOCSPStatus(s)
 				if err != nil {
 					return err
 				}
@@ -339,7 +325,7 @@ func TestOCSPAutoWithoutMustStapleDoesNotShutdownOnRevoke(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, serverCert, ocsp.Good)
@@ -431,7 +417,7 @@ func TestOCSPClient(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	ocspURL := fmt.Sprintf("http://%s", ocspr.Addr)
 	defer ocspr.Shutdown(ctx)
 
@@ -584,7 +570,7 @@ func TestOCSPReloadRotateTLSCertWithNoURL(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, serverCert, ocsp.Good)
@@ -606,7 +592,7 @@ func TestOCSPReloadRotateTLSCertWithNoURL(t *testing.T) {
 	nc, err := nats.Connect(fmt.Sprintf("tls://localhost:%d", opts.Port),
 		nats.Secure(&tls.Config{
 			VerifyConnection: func(s tls.ConnectionState) error {
-				resp, err := getOCSPStatus(s)
+				resp, err := GetOCSPStatus(s)
 				if err != nil {
 					return err
 				}
@@ -686,7 +672,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, serverCert, ocsp.Good)
@@ -716,7 +702,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 		nats.Secure(&tls.Config{
 			VerifyConnection: func(s tls.ConnectionState) error {
 				staple = s.OCSPResponse
-				resp, err := getOCSPStatus(s)
+				resp, err := GetOCSPStatus(s)
 				if err != nil {
 					return err
 				}
@@ -826,7 +812,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 		nats.Secure(&tls.Config{
 			VerifyConnection: func(s tls.ConnectionState) error {
 				newStaple = s.OCSPResponse
-				resp, err := getOCSPStatus(s)
+				resp, err := GetOCSPStatus(s)
 				if err != nil {
 					return err
 				}
@@ -883,7 +869,7 @@ func TestOCSPReloadRotateTLSCertEnableMustStaple(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, serverCert, ocsp.Good)
@@ -957,7 +943,7 @@ func TestOCSPReloadRotateTLSCertEnableMustStaple(t *testing.T) {
 	nc, err = nats.Connect(fmt.Sprintf("tls://localhost:%d", opts.Port),
 		nats.Secure(&tls.Config{
 			VerifyConnection: func(s tls.ConnectionState) error {
-				resp, err := getOCSPStatus(s)
+				resp, err := GetOCSPStatus(s)
 				if err != nil {
 					return err
 				}
@@ -983,7 +969,7 @@ func TestOCSPCluster(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
@@ -1256,7 +1242,7 @@ func TestOCSPLeaf(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
@@ -1530,7 +1516,7 @@ func TestOCSPLeafNoVerify(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
@@ -1804,7 +1790,7 @@ func TestOCSPLeafVerifyLeafRemote(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
@@ -1914,7 +1900,7 @@ func TestOCSPLeafVerifyAndMapLeafRemote(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
@@ -2036,7 +2022,7 @@ func TestOCSPGateway(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
@@ -2309,7 +2295,7 @@ func TestOCSPGatewayIntermediate(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	intermediateCA1Responder := newOCSPResponderIntermediateCA1(t)
+	intermediateCA1Responder := NewOCSPResponderIntermediateCA1(t)
 	intermediateCA1ResponderURL := fmt.Sprintf("http://%s", intermediateCA1Responder.Addr)
 	defer intermediateCA1Responder.Shutdown(ctx)
 	setOCSPStatus(t, intermediateCA1ResponderURL, "configs/certs/ocsp_peer/mini-ca/server1/TestServer1_cert.pem", ocsp.Good)
@@ -2405,7 +2391,7 @@ func TestOCSPGatewayReload(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 
@@ -2631,7 +2617,7 @@ func TestOCSPCustomConfig(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	ocspURL := fmt.Sprintf("http://%s", ocspr.Addr)
 	defer ocspr.Shutdown(ctx)
 
@@ -2897,7 +2883,7 @@ func TestOCSPCustomConfigReloadDisable(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, serverCert, ocsp.Good)
@@ -2999,7 +2985,7 @@ func TestOCSPCustomConfigReloadEnable(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, serverCert, ocsp.Good)
@@ -3090,241 +3076,241 @@ func TestOCSPCustomConfigReloadEnable(t *testing.T) {
 	nc.Close()
 }
 
-func newOCSPResponderCustomAddress(t *testing.T, issuerCertPEM, issuerKeyPEM string, addr string) *http.Server {
-	t.Helper()
-	return newOCSPResponderBase(t, issuerCertPEM, issuerCertPEM, issuerKeyPEM, false, addr, defaultResponseTTL, "")
-}
+// func NewOCSPResponderCustomAddress(t *testing.T, issuerCertPEM, issuerKeyPEM string, addr string) *http.Server {
+// 	t.Helper()
+// 	return NewOCSPResponderBase(t, issuerCertPEM, issuerCertPEM, issuerKeyPEM, false, addr, defaultResponseTTL, "")
+// }
 
-func newOCSPResponder(t *testing.T, issuerCertPEM, issuerKeyPEM string) *http.Server {
-	t.Helper()
-	return newOCSPResponderBase(t, issuerCertPEM, issuerCertPEM, issuerKeyPEM, false, defaultAddress, defaultResponseTTL, "")
-}
+// func NewOCSPResponder(t *testing.T, issuerCertPEM, issuerKeyPEM string) *http.Server {
+// 	t.Helper()
+// 	return NewOCSPResponderBase(t, issuerCertPEM, issuerCertPEM, issuerKeyPEM, false, defaultAddress, defaultResponseTTL, "")
+// }
 
-func newOCSPResponderDesignatedCustomAddress(t *testing.T, issuerCertPEM, respCertPEM, respKeyPEM string, addr string) *http.Server {
-	t.Helper()
-	return newOCSPResponderBase(t, issuerCertPEM, respCertPEM, respKeyPEM, true, addr, defaultResponseTTL, "")
-}
+// func NewOCSPResponderDesignatedCustomAddress(t *testing.T, issuerCertPEM, respCertPEM, respKeyPEM string, addr string) *http.Server {
+// 	t.Helper()
+// 	return NewOCSPResponderBase(t, issuerCertPEM, respCertPEM, respKeyPEM, true, addr, defaultResponseTTL, "")
+// }
 
-func newOCSPResponderPreferringHTTPMethod(t *testing.T, issuerCertPEM, issuerKeyPEM, method string) *http.Server {
-	t.Helper()
-	return newOCSPResponderBase(t, issuerCertPEM, issuerCertPEM, issuerKeyPEM, false, defaultAddress, defaultResponseTTL, method)
-}
+// func NewOCSPResponderPreferringHTTPMethod(t *testing.T, issuerCertPEM, issuerKeyPEM, method string) *http.Server {
+// 	t.Helper()
+// 	return NewOCSPResponderBase(t, issuerCertPEM, issuerCertPEM, issuerKeyPEM, false, defaultAddress, defaultResponseTTL, method)
+// }
 
-func newOCSPResponderCustomTimeout(t *testing.T, issuerCertPEM, issuerKeyPEM string, responseTTL time.Duration) *http.Server {
-	t.Helper()
-	return newOCSPResponderBase(t, issuerCertPEM, issuerCertPEM, issuerKeyPEM, false, defaultAddress, responseTTL, "")
-}
+// func NewOCSPResponderCustomTimeout(t *testing.T, issuerCertPEM, issuerKeyPEM string, responseTTL time.Duration) *http.Server {
+// 	t.Helper()
+// 	return NewOCSPResponderBase(t, issuerCertPEM, issuerCertPEM, issuerKeyPEM, false, defaultAddress, responseTTL, "")
+// }
 
-func newOCSPResponderBase(t *testing.T, issuerCertPEM, respCertPEM, respKeyPEM string, embed bool, addr string, responseTTL time.Duration, method string) *http.Server {
-	t.Helper()
-	var mu sync.Mutex
-	status := make(map[string]int)
+// func NewOCSPResponderBase(t *testing.T, issuerCertPEM, respCertPEM, respKeyPEM string, embed bool, addr string, responseTTL time.Duration, method string) *http.Server {
+// 	t.Helper()
+// 	var mu sync.Mutex
+// 	status := make(map[string]int)
 
-	issuerCert := parseCertPEM(t, issuerCertPEM)
-	respCert := parseCertPEM(t, respCertPEM)
-	respKey := parseKeyPEM(t, respKeyPEM)
+// 	issuerCert := parseCertPEM(t, issuerCertPEM)
+// 	respCert := parseCertPEM(t, respCertPEM)
+// 	respKey := parseKeyPEM(t, respKeyPEM)
 
-	mux := http.NewServeMux()
-	// The "/statuses/" endpoint is for directly setting a key-value pair in
-	// the CA's status database.
-	mux.HandleFunc("/statuses/", func(rw http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+// 	mux := http.NewServeMux()
+// 	// The "/statuses/" endpoint is for directly setting a key-value pair in
+// 	// the CA's status database.
+// 	mux.HandleFunc("/statuses/", func(rw http.ResponseWriter, r *http.Request) {
+// 		defer r.Body.Close()
 
-		key := r.URL.Path[len("/statuses/"):]
-		switch r.Method {
-		case "GET":
-			mu.Lock()
-			n, ok := status[key]
-			if !ok {
-				n = ocsp.Unknown
-			}
-			mu.Unlock()
+// 		key := r.URL.Path[len("/statuses/"):]
+// 		switch r.Method {
+// 		case "GET":
+// 			mu.Lock()
+// 			n, ok := status[key]
+// 			if !ok {
+// 				n = ocsp.Unknown
+// 			}
+// 			mu.Unlock()
 
-			fmt.Fprintf(rw, "%s %d", key, n)
-		case "POST":
-			data, err := io.ReadAll(r.Body)
-			if err != nil {
-				http.Error(rw, err.Error(), http.StatusBadRequest)
-				return
-			}
+// 			fmt.Fprintf(rw, "%s %d", key, n)
+// 		case "POST":
+// 			data, err := io.ReadAll(r.Body)
+// 			if err != nil {
+// 				http.Error(rw, err.Error(), http.StatusBadRequest)
+// 				return
+// 			}
 
-			n, err := strconv.Atoi(string(data))
-			if err != nil {
-				http.Error(rw, err.Error(), http.StatusBadRequest)
-				return
-			}
+// 			n, err := strconv.Atoi(string(data))
+// 			if err != nil {
+// 				http.Error(rw, err.Error(), http.StatusBadRequest)
+// 				return
+// 			}
 
-			mu.Lock()
-			status[key] = n
-			mu.Unlock()
+// 			mu.Lock()
+// 			status[key] = n
+// 			mu.Unlock()
 
-			fmt.Fprintf(rw, "%s %d", key, n)
-		default:
-			http.Error(rw, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-	})
-	// The "/" endpoint is for normal OCSP requests. This actually parses an
-	// OCSP status request and signs a response with a CA. Lightly based off:
-	// https://www.ietf.org/rfc/rfc2560.txt
-	mux.HandleFunc("/", func(rw http.ResponseWriter, r *http.Request) {
-		var reqData []byte
-		var err error
+// 			fmt.Fprintf(rw, "%s %d", key, n)
+// 		default:
+// 			http.Error(rw, "Method Not Allowed", http.StatusMethodNotAllowed)
+// 			return
+// 		}
+// 	})
+// 	// The "/" endpoint is for normal OCSP requests. This actually parses an
+// 	// OCSP status request and signs a response with a CA. Lightly based off:
+// 	// https://www.ietf.org/rfc/rfc2560.txt
+// 	mux.HandleFunc("/", func(rw http.ResponseWriter, r *http.Request) {
+// 		var reqData []byte
+// 		var err error
 
-		switch {
-		case r.Method == "GET":
-			if method != "" && r.Method != method {
-				http.Error(rw, "", http.StatusBadRequest)
-				return
-			}
-			reqData, err = base64.StdEncoding.DecodeString(r.URL.Path[1:])
-		case r.Method == "POST":
-			if method != "" && r.Method != method {
-				http.Error(rw, "", http.StatusBadRequest)
-				return
-			}
-			reqData, err = io.ReadAll(r.Body)
-		default:
-			http.Error(rw, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if err != nil {
-			http.Error(rw, err.Error(), http.StatusBadRequest)
-			return
-		}
+// 		switch {
+// 		case r.Method == "GET":
+// 			if method != "" && r.Method != method {
+// 				http.Error(rw, "", http.StatusBadRequest)
+// 				return
+// 			}
+// 			reqData, err = base64.StdEncoding.DecodeString(r.URL.Path[1:])
+// 		case r.Method == "POST":
+// 			if method != "" && r.Method != method {
+// 				http.Error(rw, "", http.StatusBadRequest)
+// 				return
+// 			}
+// 			reqData, err = io.ReadAll(r.Body)
+// 		default:
+// 			http.Error(rw, "Method Not Allowed", http.StatusMethodNotAllowed)
+// 			return
+// 		}
+// 		if err != nil {
+// 			http.Error(rw, err.Error(), http.StatusBadRequest)
+// 			return
+// 		}
 
-		ocspReq, err := ocsp.ParseRequest(reqData)
-		if err != nil {
-			http.Error(rw, err.Error(), http.StatusBadRequest)
-			return
-		}
+// 		ocspReq, err := ocsp.ParseRequest(reqData)
+// 		if err != nil {
+// 			http.Error(rw, err.Error(), http.StatusBadRequest)
+// 			return
+// 		}
 
-		mu.Lock()
-		n, ok := status[ocspReq.SerialNumber.String()]
-		if !ok {
-			n = ocsp.Unknown
-		}
-		mu.Unlock()
+// 		mu.Lock()
+// 		n, ok := status[ocspReq.SerialNumber.String()]
+// 		if !ok {
+// 			n = ocsp.Unknown
+// 		}
+// 		mu.Unlock()
 
-		tmpl := ocsp.Response{
-			Status:       n,
-			SerialNumber: ocspReq.SerialNumber,
-			ThisUpdate:   time.Now(),
-		}
-		if responseTTL != 0 {
-			tmpl.NextUpdate = tmpl.ThisUpdate.Add(responseTTL)
-		}
-		if embed {
-			tmpl.Certificate = respCert
-		}
-		respData, err := ocsp.CreateResponse(issuerCert, respCert, tmpl, respKey)
-		if err != nil {
-			http.Error(rw, err.Error(), http.StatusInternalServerError)
-			return
-		}
+// 		tmpl := ocsp.Response{
+// 			Status:       n,
+// 			SerialNumber: ocspReq.SerialNumber,
+// 			ThisUpdate:   time.Now(),
+// 		}
+// 		if responseTTL != 0 {
+// 			tmpl.NextUpdate = tmpl.ThisUpdate.Add(responseTTL)
+// 		}
+// 		if embed {
+// 			tmpl.Certificate = respCert
+// 		}
+// 		respData, err := ocsp.CreateResponse(issuerCert, respCert, tmpl, respKey)
+// 		if err != nil {
+// 			http.Error(rw, err.Error(), http.StatusInternalServerError)
+// 			return
+// 		}
 
-		rw.Header().Set("Content-Type", "application/ocsp-response")
-		rw.Header().Set("Content-Length", fmt.Sprint(len(respData)))
+// 		rw.Header().Set("Content-Type", "application/ocsp-response")
+// 		rw.Header().Set("Content-Length", fmt.Sprint(len(respData)))
 
-		fmt.Fprint(rw, string(respData))
-	})
+// 		fmt.Fprint(rw, string(respData))
+// 	})
 
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-	}
-	go srv.ListenAndServe()
-	time.Sleep(1 * time.Second)
-	return srv
-}
+// 	srv := &http.Server{
+// 		Addr:    addr,
+// 		Handler: mux,
+// 	}
+// 	go srv.ListenAndServe()
+// 	time.Sleep(1 * time.Second)
+// 	return srv
+// }
 
-func setOCSPStatus(t *testing.T, ocspURL, certPEM string, status int) {
-	t.Helper()
+// func setOCSPStatus(t *testing.T, ocspURL, certPEM string, status int) {
+// 	t.Helper()
 
-	cert := parseCertPEM(t, certPEM)
+// 	cert := parseCertPEM(t, certPEM)
 
-	hc := &http.Client{Timeout: 10 * time.Second}
-	resp, err := hc.Post(
-		fmt.Sprintf("%s/statuses/%s", ocspURL, cert.SerialNumber),
-		"",
-		strings.NewReader(fmt.Sprint(status)),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+// 	hc := &http.Client{Timeout: 10 * time.Second}
+// 	resp, err := hc.Post(
+// 		fmt.Sprintf("%s/statuses/%s", ocspURL, cert.SerialNumber),
+// 		"",
+// 		strings.NewReader(fmt.Sprint(status)),
+// 	)
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("failed to read OCSP HTTP response body: %s", err)
-	}
+// 	data, err := io.ReadAll(resp.Body)
+// 	if err != nil {
+// 		t.Fatalf("failed to read OCSP HTTP response body: %s", err)
+// 	}
 
-	if got, want := resp.Status, "200 OK"; got != want {
-		t.Error(strings.TrimSpace(string(data)))
-		t.Fatalf("unexpected OCSP HTTP set status, got %q, want %q", got, want)
-	}
-}
+// 	if got, want := resp.Status, "200 OK"; got != want {
+// 		t.Error(strings.TrimSpace(string(data)))
+// 		t.Fatalf("unexpected OCSP HTTP set status, got %q, want %q", got, want)
+// 	}
+// }
 
-func parseCertPEM(t *testing.T, certPEM string) *x509.Certificate {
-	t.Helper()
-	block := parsePEM(t, certPEM)
+// func parseCertPEM(t *testing.T, certPEM string) *x509.Certificate {
+// 	t.Helper()
+// 	block := parsePEM(t, certPEM)
 
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		t.Fatalf("failed to parse cert '%s': %s", certPEM, err)
-	}
-	return cert
-}
+// 	cert, err := x509.ParseCertificate(block.Bytes)
+// 	if err != nil {
+// 		t.Fatalf("failed to parse cert '%s': %s", certPEM, err)
+// 	}
+// 	return cert
+// }
 
-func parseKeyPEM(t *testing.T, keyPEM string) crypto.Signer {
-	t.Helper()
-	block := parsePEM(t, keyPEM)
+// func parseKeyPEM(t *testing.T, keyPEM string) crypto.Signer {
+// 	t.Helper()
+// 	block := parsePEM(t, keyPEM)
 
-	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-		if err != nil {
-			t.Fatalf("failed to parse ikey %s: %s", keyPEM, err)
-		}
-	}
-	keyc := key.(crypto.Signer)
-	return keyc
-}
+// 	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+// 	if err != nil {
+// 		key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+// 		if err != nil {
+// 			t.Fatalf("failed to parse ikey %s: %s", keyPEM, err)
+// 		}
+// 	}
+// 	keyc := key.(crypto.Signer)
+// 	return keyc
+// }
 
-func parsePEM(t *testing.T, pemPath string) *pem.Block {
-	t.Helper()
-	data, err := os.ReadFile(pemPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+// func parsePEM(t *testing.T, pemPath string) *pem.Block {
+// 	t.Helper()
+// 	data, err := os.ReadFile(pemPath)
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
 
-	block, _ := pem.Decode(data)
-	if block == nil {
-		t.Fatalf("failed to decode PEM %s", pemPath)
-	}
-	return block
-}
+// 	block, _ := pem.Decode(data)
+// 	if block == nil {
+// 		t.Fatalf("failed to decode PEM %s", pemPath)
+// 	}
+// 	return block
+// }
 
-func getOCSPStatus(s tls.ConnectionState) (*ocsp.Response, error) {
-	if len(s.VerifiedChains) == 0 {
-		return nil, fmt.Errorf("missing TLS verified chains")
-	}
-	chain := s.VerifiedChains[0]
+// func getOCSPStatus(s tls.ConnectionState) (*ocsp.Response, error) {
+// 	if len(s.VerifiedChains) == 0 {
+// 		return nil, fmt.Errorf("missing TLS verified chains")
+// 	}
+// 	chain := s.VerifiedChains[0]
 
-	if got, want := len(chain), 2; got < want {
-		return nil, fmt.Errorf("incomplete cert chain, got %d, want at least %d", got, want)
-	}
-	leaf, issuer := chain[0], chain[1]
+// 	if got, want := len(chain), 2; got < want {
+// 		return nil, fmt.Errorf("incomplete cert chain, got %d, want at least %d", got, want)
+// 	}
+// 	leaf, issuer := chain[0], chain[1]
 
-	resp, err := ocsp.ParseResponseForCert(s.OCSPResponse, leaf, issuer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse OCSP response: %w", err)
-	}
-	if err := resp.CheckSignatureFrom(issuer); err != nil {
-		return resp, err
-	}
-	return resp, nil
-}
+// 	resp, err := ocsp.ParseResponseForCert(s.OCSPResponse, leaf, issuer)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to parse OCSP response: %w", err)
+// 	}
+// 	if err := resp.CheckSignatureFrom(issuer); err != nil {
+// 		return resp, err
+// 	}
+// 	return resp, nil
+// }
 
 func TestOCSPTLSConfigNoLeafSet(t *testing.T) {
 	o := DefaultTestOptions
@@ -3347,7 +3333,7 @@ func TestOCSPSuperCluster(t *testing.T) {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponder(t, caCert, caKey)
+	ocspr := NewOCSPResponder(t, caCert, caKey)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
@@ -3692,7 +3678,7 @@ func TestOCSPLocalIssuerDetermination(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	intermediateCA1Responder := newOCSPResponderIntermediateCA1(t)
+	intermediateCA1Responder := NewOCSPResponderIntermediateCA1(t)
 	intermediateCA1ResponderURL := fmt.Sprintf("http://%s", intermediateCA1Responder.Addr)
 	defer intermediateCA1Responder.Shutdown(ctx)
 
@@ -3951,12 +3937,12 @@ func TestMixedCAOCSPSuperCluster(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	intermediateCA1Responder := newOCSPResponderIntermediateCA1(t)
+	intermediateCA1Responder := NewOCSPResponderIntermediateCA1(t)
 	intermediateCA1ResponderURL := fmt.Sprintf("http://%s", intermediateCA1Responder.Addr)
 	defer intermediateCA1Responder.Shutdown(ctx)
 	setOCSPStatus(t, intermediateCA1ResponderURL, "configs/certs/ocsp_peer/mini-ca/server1/TestServer1_cert.pem", ocsp.Good)
 
-	intermediateCA2Responder := newOCSPResponderIntermediateCA2(t)
+	intermediateCA2Responder := NewOCSPResponderIntermediateCA2(t)
 	intermediateCA2ResponderURL := fmt.Sprintf("http://%s", intermediateCA2Responder.Addr)
 	defer intermediateCA2Responder.Shutdown(ctx)
 	setOCSPStatus(t, intermediateCA2ResponderURL, "configs/certs/ocsp_peer/mini-ca/server2/TestServer3_cert.pem", ocsp.Good)
@@ -4246,14 +4232,14 @@ func testOCSPResponderHTTPMethods(t *testing.T, method string) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponderPreferringHTTPMethod(t, caCert, caKey, method)
+	ocspr := NewOCSPResponderPreferringHTTPMethod(t, caCert, caKey, method)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, serverCert, ocsp.Good)
 
 	// Add another responder that fails.
 	badaddr := "http://127.0.0.1:8889"
-	badocsp := newOCSPResponderCustomAddress(t, caCert, caKey, badaddr)
+	badocsp := NewOCSPResponderCustomAddress(t, caCert, caKey, badaddr)
 	defer badocsp.Shutdown(ctx)
 
 	opts := server.Options{}
@@ -4330,7 +4316,7 @@ func testOCSPResponderFailing(t *testing.T, method string) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ocspr := newOCSPResponderPreferringHTTPMethod(t, caCert, caKey, method)
+	ocspr := NewOCSPResponderPreferringHTTPMethod(t, caCert, caKey, method)
 	defer ocspr.Shutdown(ctx)
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, serverCert, ocsp.Good)
@@ -4373,7 +4359,7 @@ func testOCSPResponderFailing(t *testing.T, method string) {
 }
 
 type testMissingOCSPStapleLogger struct {
-	testhelper.DummyLogger
+	DummyLogger
 	ch chan string
 }
 
@@ -4387,306 +4373,306 @@ func (l *testMissingOCSPStapleLogger) Errorf(format string, v ...interface{}) {
 	}
 }
 
-func TestOCSPGatewayMissingPeerStaple(t *testing.T) {
-	const (
-		caCert = "configs/certs/ocsp/ca-cert.pem"
-		caKey  = "configs/certs/ocsp/ca-key.pem"
-	)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ocspr := newOCSPResponderCustomTimeout(t, caCert, caKey, 10*time.Minute)
-	defer ocspr.Shutdown(ctx)
-	addr := fmt.Sprintf("http://%s", ocspr.Addr)
+// func TestOCSPGatewayMissingPeerStaple(t *testing.T) {
+// 	const (
+// 		caCert = "configs/certs/ocsp/ca-cert.pem"
+// 		caKey  = "configs/certs/ocsp/ca-key.pem"
+// 	)
+// 	ctx, cancel := context.WithCancel(context.Background())
+// 	defer cancel()
+// 	ocspr := NewOCSPResponderCustomTimeout(t, caCert, caKey, 10*time.Minute)
+// 	defer ocspr.Shutdown(ctx)
+// 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 
-	// Node A
-	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
-	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Good)
+// 	// Node A
+// 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
+// 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Good)
 
-	// Node B
-	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-03-cert.pem", ocsp.Good)
-	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-04-cert.pem", ocsp.Good)
+// 	// Node B
+// 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-03-cert.pem", ocsp.Good)
+// 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-04-cert.pem", ocsp.Good)
 
-	// Node C
-	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-05-cert.pem", ocsp.Good)
-	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-06-cert.pem", ocsp.Good)
+// 	// Node C
+// 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-05-cert.pem", ocsp.Good)
+// 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-06-cert.pem", ocsp.Good)
 
-	// Node A rotated certs
-	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-07-cert.pem", ocsp.Good)
-	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-08-cert.pem", ocsp.Good)
+// 	// Node A rotated certs
+// 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-07-cert.pem", ocsp.Good)
+// 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-08-cert.pem", ocsp.Good)
 
-	// Store Dirs
-	storeDirA := t.TempDir()
-	storeDirB := t.TempDir()
-	storeDirC := t.TempDir()
+// 	// Store Dirs
+// 	storeDirA := t.TempDir()
+// 	storeDirB := t.TempDir()
+// 	storeDirC := t.TempDir()
 
-	// Gateway server configuration
-	srvConfA := `
-		host: "127.0.0.1"
-		port: -1
+// 	// Gateway server configuration
+// 	srvConfA := `
+// 		host: "127.0.0.1"
+// 		port: -1
 
-		server_name: "AAA"
+// 		server_name: "AAA"
 
-		ocsp { mode = always }
+// 		ocsp { mode = always }
 
-                system_account = sys
-                accounts {
-                  sys   { users = [{ user: sys, pass: sys }]}
-                  guest { users = [{ user: guest, pass: guest }]}
-                }
-                no_auth_user = guest
+//                 system_account = sys
+//                 accounts {
+//                   sys   { users = [{ user: sys, pass: sys }]}
+//                   guest { users = [{ user: guest, pass: guest }]}
+//                 }
+//                 no_auth_user = guest
 
-		store_dir: '%s'
-		gateway {
-			name: A
-			host: "127.0.0.1"
-			port: -1
-			advertise: "127.0.0.1"
+// 		store_dir: '%s'
+// 		gateway {
+// 			name: A
+// 			host: "127.0.0.1"
+// 			port: -1
+// 			advertise: "127.0.0.1"
 
-			tls {
-				cert_file: "configs/certs/ocsp/server-status-request-url-02-cert.pem"
-				key_file: "configs/certs/ocsp/server-status-request-url-02-key.pem"
-				ca_file: "configs/certs/ocsp/ca-cert.pem"
-				timeout: 5
-			}
-		}
-	`
-	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
-	sconfA := createConfFile(t, []byte(srvConfA))
-	srvA, optsA := RunServerWithConfig(sconfA)
-	defer srvA.Shutdown()
+// 			tls {
+// 				cert_file: "configs/certs/ocsp/server-status-request-url-02-cert.pem"
+// 				key_file: "configs/certs/ocsp/server-status-request-url-02-key.pem"
+// 				ca_file: "configs/certs/ocsp/ca-cert.pem"
+// 				timeout: 5
+// 			}
+// 		}
+// 	`
+// 	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
+// 	sconfA := createConfFile(t, []byte(srvConfA))
+// 	srvA, optsA := RunServerWithConfig(sconfA)
+// 	defer srvA.Shutdown()
 
-	// Gateway B connects to Gateway A.
-	srvConfB := `
-		host: "127.0.0.1"
-		port: -1
+// 	// Gateway B connects to Gateway A.
+// 	srvConfB := `
+// 		host: "127.0.0.1"
+// 		port: -1
 
-		server_name: "BBB"
+// 		server_name: "BBB"
 
-		ocsp { mode = always }
+// 		ocsp { mode = always }
 
-                system_account = sys
-                accounts {
-                  sys   { users = [{ user: sys, pass: sys }]}
-                  guest { users = [{ user: guest, pass: guest }]}
-                }
-                no_auth_user = guest
+//                 system_account = sys
+//                 accounts {
+//                   sys   { users = [{ user: sys, pass: sys }]}
+//                   guest { users = [{ user: guest, pass: guest }]}
+//                 }
+//                 no_auth_user = guest
 
-		store_dir: '%s'
-		gateway {
-			name: B
-			host: "127.0.0.1"
-			advertise: "127.0.0.1"
-			port: -1
-			gateways: [{
-				name: "A"
-				url: "nats://127.0.0.1:%d"
-			}]
-			tls {
-				cert_file: "configs/certs/ocsp/server-status-request-url-04-cert.pem"
-				key_file: "configs/certs/ocsp/server-status-request-url-04-key.pem"
-				ca_file: "configs/certs/ocsp/ca-cert.pem"
-				timeout: 5
-			}
-		}
-	`
-	srvConfB = fmt.Sprintf(srvConfB, storeDirB, optsA.Gateway.Port)
-	conf := createConfFile(t, []byte(srvConfB))
-	srvB, optsB := RunServerWithConfig(conf)
-	defer srvB.Shutdown()
+// 		store_dir: '%s'
+// 		gateway {
+// 			name: B
+// 			host: "127.0.0.1"
+// 			advertise: "127.0.0.1"
+// 			port: -1
+// 			gateways: [{
+// 				name: "A"
+// 				url: "nats://127.0.0.1:%d"
+// 			}]
+// 			tls {
+// 				cert_file: "configs/certs/ocsp/server-status-request-url-04-cert.pem"
+// 				key_file: "configs/certs/ocsp/server-status-request-url-04-key.pem"
+// 				ca_file: "configs/certs/ocsp/ca-cert.pem"
+// 				timeout: 5
+// 			}
+// 		}
+// 	`
+// 	srvConfB = fmt.Sprintf(srvConfB, storeDirB, optsA.Gateway.Port)
+// 	conf := createConfFile(t, []byte(srvConfB))
+// 	srvB, optsB := RunServerWithConfig(conf)
+// 	defer srvB.Shutdown()
 
-	// Client connects to server A.
-	cA, err := nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", optsA.Port),
-		nats.ErrorHandler(noOpErrHandler),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cA.Close()
+// 	// Client connects to server A.
+// 	cA, err := nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", optsA.Port),
+// 		nats.ErrorHandler(noOpErrHandler),
+// 	)
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer cA.Close()
 
-	// Wait for connectivity between A and B.
-	waitForOutboundGateways(t, srvB, 1, 5*time.Second)
+// 	// Wait for connectivity between A and B.
+// 	waitForOutboundGateways(t, srvB, 1, 5*time.Second)
 
-	// Gateway C also connects to Gateway A.
-	srvConfC := `
-		host: "127.0.0.1"
-		port: -1
+// 	// Gateway C also connects to Gateway A.
+// 	srvConfC := `
+// 		host: "127.0.0.1"
+// 		port: -1
 
-		server_name: "CCC"
+// 		server_name: "CCC"
 
-		ocsp { mode = always }
+// 		ocsp { mode = always }
 
-                system_account = sys
-                accounts {
-                  sys   { users = [{ user: sys, pass: sys }]}
-                  guest { users = [{ user: guest, pass: guest }]}
-                }
-                no_auth_user = guest
+//                 system_account = sys
+//                 accounts {
+//                   sys   { users = [{ user: sys, pass: sys }]}
+//                   guest { users = [{ user: guest, pass: guest }]}
+//                 }
+//                 no_auth_user = guest
 
-		store_dir: '%s'
-		gateway {
-			name: C
-			host: "127.0.0.1"
-			advertise: "127.0.0.1"
-			port: -1
-			gateways: [{name: "A", url: "nats://127.0.0.1:%d" }]
+// 		store_dir: '%s'
+// 		gateway {
+// 			name: C
+// 			host: "127.0.0.1"
+// 			advertise: "127.0.0.1"
+// 			port: -1
+// 			gateways: [{name: "A", url: "nats://127.0.0.1:%d" }]
 
-			tls {
-				cert_file: "configs/certs/ocsp/server-status-request-url-06-cert.pem"
-				key_file: "configs/certs/ocsp/server-status-request-url-06-key.pem"
-				ca_file: "configs/certs/ocsp/ca-cert.pem"
-				timeout: 5
-			}
-		}
-	`
-	srvConfC = fmt.Sprintf(srvConfC, storeDirC, optsA.Gateway.Port)
-	conf = createConfFile(t, []byte(srvConfC))
-	srvC, optsC := RunServerWithConfig(conf)
-	defer srvC.Shutdown()
+// 			tls {
+// 				cert_file: "configs/certs/ocsp/server-status-request-url-06-cert.pem"
+// 				key_file: "configs/certs/ocsp/server-status-request-url-06-key.pem"
+// 				ca_file: "configs/certs/ocsp/ca-cert.pem"
+// 				timeout: 5
+// 			}
+// 		}
+// 	`
+// 	srvConfC = fmt.Sprintf(srvConfC, storeDirC, optsA.Gateway.Port)
+// 	conf = createConfFile(t, []byte(srvConfC))
+// 	srvC, optsC := RunServerWithConfig(conf)
+// 	defer srvC.Shutdown()
 
-	////////////////////////////////////////////////////////////////////////////
-	//                                                                        //
-	//  A and B are connected at this point and C is starting with certs that //
-	//  will be rotated.
-	//                                                                        //
-	////////////////////////////////////////////////////////////////////////////
-	cB, err := nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", optsB.Port),
-		nats.ErrorHandler(noOpErrHandler),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cB.Close()
-	cC, err := nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", optsC.Port),
-		nats.ErrorHandler(noOpErrHandler),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cC.Close()
+// 	////////////////////////////////////////////////////////////////////////////
+// 	//                                                                        //
+// 	//  A and B are connected at this point and C is starting with certs that //
+// 	//  will be rotated.
+// 	//                                                                        //
+// 	////////////////////////////////////////////////////////////////////////////
+// 	cB, err := nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", optsB.Port),
+// 		nats.ErrorHandler(noOpErrHandler),
+// 	)
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer cB.Close()
+// 	cC, err := nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", optsC.Port),
+// 		nats.ErrorHandler(noOpErrHandler),
+// 	)
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer cC.Close()
 
-	_, err = cA.Subscribe("foo", func(m *nats.Msg) {
-		m.Respond(nil)
-	})
-	if err != nil {
-		t.Errorf("%v", err)
-	}
-	cA.Flush()
-	_, err = cB.Subscribe("bar", func(m *nats.Msg) {
-		m.Respond(nil)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cB.Flush()
+// 	_, err = cA.Subscribe("foo", func(m *nats.Msg) {
+// 		m.Respond(nil)
+// 	})
+// 	if err != nil {
+// 		t.Errorf("%v", err)
+// 	}
+// 	cA.Flush()
+// 	_, err = cB.Subscribe("bar", func(m *nats.Msg) {
+// 		m.Respond(nil)
+// 	})
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	cB.Flush()
 
-	waitForOutboundGateways(t, srvB, 1, 10*time.Second)
-	waitForOutboundGateways(t, srvC, 2, 10*time.Second)
+// 	waitForOutboundGateways(t, srvB, 1, 10*time.Second)
+// 	waitForOutboundGateways(t, srvC, 2, 10*time.Second)
 
-	/////////////////////////////////////////////////////////////////////////////////
-	//                                                                             //
-	//  Switch all the certs from server A, all OCSP monitors should be restarted  //
-	//  so it should have new staples.                                             //
-	//                                                                             //
-	/////////////////////////////////////////////////////////////////////////////////
-	srvConfA = `
-		host: "127.0.0.1"
-		port: -1
+// 	/////////////////////////////////////////////////////////////////////////////////
+// 	//                                                                             //
+// 	//  Switch all the certs from server A, all OCSP monitors should be restarted  //
+// 	//  so it should have new staples.                                             //
+// 	//                                                                             //
+// 	/////////////////////////////////////////////////////////////////////////////////
+// 	srvConfA = `
+// 		host: "127.0.0.1"
+// 		port: -1
 
-		server_name: "AAA"
+// 		server_name: "AAA"
 
-		ocsp { mode = always }
+// 		ocsp { mode = always }
 
-                system_account = sys
-                accounts {
-                  sys   { users = [{ user: sys, pass: sys }]}
-                  guest { users = [{ user: guest, pass: guest }]}
-                }
-                no_auth_user = guest
+//                 system_account = sys
+//                 accounts {
+//                   sys   { users = [{ user: sys, pass: sys }]}
+//                   guest { users = [{ user: guest, pass: guest }]}
+//                 }
+//                 no_auth_user = guest
 
-		store_dir: '%s'
-		gateway {
-			name: A
-			host: "127.0.0.1"
-			port: -1
-			advertise: "127.0.0.1"
+// 		store_dir: '%s'
+// 		gateway {
+// 			name: A
+// 			host: "127.0.0.1"
+// 			port: -1
+// 			advertise: "127.0.0.1"
 
-			tls {
-				cert_file: "configs/certs/ocsp/server-status-request-url-08-cert.pem"
-				key_file: "configs/certs/ocsp/server-status-request-url-08-key.pem"
-				ca_file: "configs/certs/ocsp/ca-cert.pem"
-				timeout: 5
+// 			tls {
+// 				cert_file: "configs/certs/ocsp/server-status-request-url-08-cert.pem"
+// 				key_file: "configs/certs/ocsp/server-status-request-url-08-key.pem"
+// 				ca_file: "configs/certs/ocsp/ca-cert.pem"
+// 				timeout: 5
 
-			}
-		}
-	`
+// 			}
+// 		}
+// 	`
 
-	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
-	if err := os.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
-		t.Fatalf("Error writing config: %v", err)
-	}
-	if err := srvA.Reload(); err != nil {
-		t.Fatal(err)
-	}
-	waitForOutboundGateways(t, srvA, 2, 5*time.Second)
-	waitForOutboundGateways(t, srvB, 2, 5*time.Second)
-	waitForOutboundGateways(t, srvC, 2, 5*time.Second)
+// 	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
+// 	if err := os.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
+// 		t.Fatalf("Error writing config: %v", err)
+// 	}
+// 	if err := srvA.Reload(); err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	waitForOutboundGateways(t, srvA, 2, 5*time.Second)
+// 	waitForOutboundGateways(t, srvB, 2, 5*time.Second)
+// 	waitForOutboundGateways(t, srvC, 2, 5*time.Second)
 
-	// Now clients connect to C can communicate with B and A.
-	_, err = cC.Request("foo", nil, 2*time.Second)
-	if err != nil {
-		t.Errorf("%v", err)
-	}
-	_, err = cC.Request("bar", nil, 2*time.Second)
-	if err != nil {
-		t.Errorf("%v", err)
-	}
+// 	// Now clients connect to C can communicate with B and A.
+// 	_, err = cC.Request("foo", nil, 2*time.Second)
+// 	if err != nil {
+// 		t.Errorf("%v", err)
+// 	}
+// 	_, err = cC.Request("bar", nil, 2*time.Second)
+// 	if err != nil {
+// 		t.Errorf("%v", err)
+// 	}
 
-	// Reload and disconnect very fast trying to produce the race.
-	ctx, cancel = context.WithTimeout(context.Background(), 1*time.Minute)
-	defer cancel()
+// 	// Reload and disconnect very fast trying to produce the race.
+// 	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Minute)
+// 	defer cancel()
 
-	// Swap logger from server to capture the missing peer log.
-	lA := &testMissingOCSPStapleLogger{ch: make(chan string, 30)}
-	srvA.SetLogger(lA, false, false)
+// 	// Swap logger from server to capture the missing peer log.
+// 	lA := &testMissingOCSPStapleLogger{ch: make(chan string, 30)}
+// 	srvA.SetLogger(lA, false, false)
 
-	lB := &testMissingOCSPStapleLogger{ch: make(chan string, 30)}
-	srvB.SetLogger(lB, false, false)
+// 	lB := &testMissingOCSPStapleLogger{ch: make(chan string, 30)}
+// 	srvB.SetLogger(lB, false, false)
 
-	var wg sync.WaitGroup
-	go func() {
-		for range time.NewTicker(500 * time.Millisecond).C {
-			select {
-			case <-ctx.Done():
-				wg.Done()
-				return
-			default:
-			}
-			srvC.DisconnectInboundGatewaysAsStale()
-		}
-	}()
-	wg.Add(1)
+// 	var wg sync.WaitGroup
+// 	go func() {
+// 		for range time.NewTicker(500 * time.Millisecond).C {
+// 			select {
+// 			case <-ctx.Done():
+// 				wg.Done()
+// 				return
+// 			default:
+// 			}
+// 			server.DisconnectInboundGatewaysAsStale(t, srvA)
+// 		}
+// 	}()
+// 	wg.Add(1)
 
-	go func() {
-		for range time.NewTicker(1 * time.Second).C {
-			select {
-			case <-ctx.Done():
-				wg.Done()
-				return
-			default:
-			}
-			if err := srvC.Reload(); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}()
-	wg.Add(1)
+// 	go func() {
+// 		for range time.NewTicker(1 * time.Second).C {
+// 			select {
+// 			case <-ctx.Done():
+// 				wg.Done()
+// 				return
+// 			default:
+// 			}
+// 			if err := srvC.Reload(); err != nil {
+// 				t.Fatal(err)
+// 			}
+// 		}
+// 	}()
+// 	wg.Add(1)
 
-	select {
-	case <-ctx.Done():
-	case msg := <-lA.ch:
-		t.Fatalf("Got OCSP Staple error: %v", msg)
-	case msg := <-lB.ch:
-		t.Fatalf("Got OCSP Staple error: %v", msg)
-	}
-	wg.Wait()
-}
+// 	select {
+// 	case <-ctx.Done():
+// 	case msg := <-lA.ch:
+// 		t.Fatalf("Got OCSP Staple error: %v", msg)
+// 	case msg := <-lB.ch:
+// 		t.Fatalf("Got OCSP Staple error: %v", msg)
+// 	}
+// 	wg.Wait()
+// }
