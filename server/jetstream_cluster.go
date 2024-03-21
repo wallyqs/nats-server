@@ -7773,7 +7773,10 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 	// Check to see if we are being overrun.
 	// TODO(dlc) - Make this a limit where we drop messages to protect ourselves, but allow to be configured.
 	if mset.clseq-(lseq+mset.clfs) > streamLagWarnThreshold {
-		lerr := fmt.Errorf("JetStream stream '%s > %s' has high message lag", jsa.acc().Name, name)
+		lerr := fmt.Errorf("JetStream stream '%s > %s' has high message lag (clseq: %v, lseq: %v, clfs:%v, lseq+mset.clfs: %v, result: %v)",
+			jsa.acc().Name, name,
+			mset.clseq, lseq, mset.clfs, lseq+mset.clfs, mset.clseq-(lseq+mset.clfs),
+		)
 		s.RateLimitWarnf(lerr.Error())
 	}
 	mset.clMu.Unlock()

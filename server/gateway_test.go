@@ -7072,6 +7072,7 @@ func TestOCSPGatewayMissingPeerStaple(t *testing.T) {
 				name: "A"
 				url: "nats://127.0.0.1:%d"
 			}]
+
 			tls {
 				cert_file: "../test/configs/certs/ocsp/server-status-request-url-04-cert.pem"
 				key_file: "../test/configs/certs/ocsp/server-status-request-url-04-key.pem"
@@ -7237,65 +7238,104 @@ func TestOCSPGatewayMissingPeerStaple(t *testing.T) {
 	defer cancel()
 
 	// Swap logger from server to capture the missing peer log.
-	lA := &testMissingOCSPStapleLogger{ch: make(chan string, 30)}
-	srvA.SetLogger(lA, false, false)
+	// lA := &testMissingOCSPStapleLogger{ch: make(chan string, 30)}
+	// srvA.SetLogger(lA, false, false)
 
-	lB := &testMissingOCSPStapleLogger{ch: make(chan string, 30)}
-	srvB.SetLogger(lB, false, false)
+	// lB := &testMissingOCSPStapleLogger{ch: make(chan string, 30)}
+	// srvB.SetLogger(lB, false, false)
 
-	lC := &testMissingOCSPStapleLogger{ch: make(chan string, 30)}
-	srvB.SetLogger(lC, false, false)
+	// lC := &testMissingOCSPStapleLogger{ch: make(chan string, 30)}
+	// srvC.SetLogger(lC, false, false)
+
+	// if err := srvC.Reload(); err != nil {
+	// 	t.Fatal(err)
+	// }
 
 	var wg sync.WaitGroup
-	go func() {
-		for range time.NewTicker(500 * time.Millisecond).C {
-			select {
-			case <-ctx.Done():
-				wg.Done()
-				return
-			default:
-			}
-			disconnectInboundGatewaysAsStale(srvC)
-		}
-	}()
-	wg.Add(1)
+	// go func() {
+	// 	for range time.NewTicker(500 * time.Millisecond).C {
+	// 		select {
+	// 		case <-ctx.Done():
+	// 			wg.Done()
+	// 			return
+	// 		default:
+	// 		}
+	// 		disconnectInboundGatewaysAsStale(srvA)
+	// 	}
+	// }()
+	// wg.Add(1)
 
-	go func() {
-		for range time.NewTicker(500 * time.Millisecond).C {
-			select {
-			case <-ctx.Done():
-				wg.Done()
-				return
-			default:
-			}
-			disconnectInboundGatewaysAsStale(srvA)
-		}
-	}()
-	wg.Add(1)
+	// Reload here ok
+	// if err := srvC.Reload(); err != nil {
+	// 	t.Fatal(err)
+	// }
 
-	go func() {
-		for range time.NewTicker(1 * time.Second).C {
-			select {
-			case <-ctx.Done():
-				wg.Done()
-				return
-			default:
-			}
-			if err := srvC.Reload(); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}()
-	wg.Add(1)
+	// go func() {
+	// 	for range time.NewTicker(500 * time.Millisecond).C {
+	// 		select {
+	// 		case <-ctx.Done():
+	// 			wg.Done()
+	// 			return
+	// 		default:
+	// 		}
+	// 		disconnectInboundGatewaysAsStale(srvA)
+	// 	}
+	// }()
+	// wg.Add(1)
 
-	select {
-	case <-ctx.Done():
-	case msg := <-lA.ch:
-		t.Fatalf("Got OCSP Staple error: %v", msg)
-	case msg := <-lB.ch:
-		t.Fatalf("Got OCSP Staple error: %v", msg)
-	case msg := <-lC.ch:
-		t.Fatalf("Got OCSP Staple error: %v", msg)
-	}
+	// go func() {
+	// 	for range time.NewTicker(1 * time.Second).C {
+	// 		select {
+	// 		case <-ctx.Done():
+	// 			wg.Done()
+	// 			return
+	// 		default:
+	// 		}
+	// 		if err := srvC.Reload(); err != nil {
+	// 			t.Fatal(err)
+	// 		}
+	// 	}
+	// }()
+	// wg.Add(1)
+
+	// srvA.Reload()
+	// srvB.Reload()
+	time.Sleep(1*time.Second)
+	t.Logf("RELOAD SRVC===================================================================================================================")
+	srvC.Reload()
+
+	time.AfterFunc(2*time.Second, func(){
+		// Disconnect once
+		t.Logf("DISCONNECTING===================================================================================================================")
+		disconnectInboundGatewaysAsStale(srvA)
+	})
+
+	time.AfterFunc(4*time.Second, func(){
+		// Reload again
+		t.Logf("reload again")
+		srvC.Reload()
+	})
+
+	time.AfterFunc(6*time.Second, func(){
+		// Reload again
+		t.Logf("reload again")
+		srvA.Reload()
+	})
+
+	disconnectInboundGatewaysAsStale(srvA)
+	disconnectInboundGatewaysAsStale(srvB)
+	disconnectInboundGatewaysAsStale(srvC)
+
+
+	// select {
+	// case <-ctx.Done():
+	// case msg := <-lA.ch:
+	// 	t.Fatalf("Server A: Got OCSP Staple error: %v", msg)
+	// case msg := <-lB.ch:
+	// 	t.Fatalf("Server B: Got OCSP Staple error: %v", msg)
+	// case msg := <-lC.ch:
+	// 	t.Fatalf("Server C: Got OCSP Staple error: %v", msg)
+	// }
+	select {}
 	wg.Wait()
 }

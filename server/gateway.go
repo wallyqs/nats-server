@@ -27,6 +27,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"runtime/debug"
 )
 
 const (
@@ -293,6 +294,7 @@ func (r *RemoteGatewayOpts) clone() *RemoteGatewayOpts {
 	if r.TLSConfig != nil {
 		clone.TLSConfig = r.TLSConfig.Clone()
 		clone.TLSTimeout = r.TLSTimeout
+		fmt.Println(":::::::::::", r, r.TLSConfig.GetClientCertificate == nil)
 	}
 	return clone
 }
@@ -383,6 +385,7 @@ func (s *Server) newGateway(opts *Options) error {
 			gateway.ownCfgURLs = getURLsAsString(rgo.URLs)
 			continue
 		}
+		// s.reloadMu.Lock()
 		cfg := &gatewayCfg{
 			RemoteGatewayOpts: rgo.clone(),
 			hash:              getGWHash(rgo.Name),
@@ -391,7 +394,9 @@ func (s *Server) newGateway(opts *Options) error {
 		}
 		if opts.Gateway.TLSConfig != nil && cfg.TLSConfig == nil {
 			cfg.TLSConfig = opts.Gateway.TLSConfig.Clone()
+			fmt.Printf("%v |||| %+v\n", s.Name(), cfg.TLSConfig.GetClientCertificate == nil)
 		}
+		// s.reloadMu.Unlock()
 		if cfg.TLSTimeout == 0 {
 			cfg.TLSTimeout = opts.Gateway.TLSTimeout
 		}
@@ -553,7 +558,10 @@ func (s *Server) startGatewayAcceptLoop() {
 	if warn {
 		s.Warnf(gatewayTLSInsecureWarning)
 	}
-	go s.acceptConnections(l, "Gateway", func(conn net.Conn) { s.createGateway(nil, nil, conn) }, nil)
+	go s.acceptConnections(l, "Gateway", func(conn net.Conn) {
+		// NOT SOLICITED
+		s.createGateway(nil, nil, conn)
+	}, nil)
 	s.mu.Unlock()
 }
 
@@ -635,7 +643,12 @@ func (s *Server) solicitGateways() {
 	gw := s.gateway
 	gw.RLock()
 	defer gw.RUnlock()
-	for _, cfg := range gw.remotes {
+	for name, cfg := range gw.remotes {
+		if cfg.TLSConfig != nil {
+			fmt.Println(s.Name(), "----> MORE SOLICITING", name, cfg.TLSConfig.GetClientCertificate == nil)
+		} else {
+			fmt.Println(s.Name(), "----> MORE SOLICITING, NOCONFIG!!!!!!", name, cfg.TLSConfig.GetClientCertificate == nil)
+		}
 		// Since we delay the creation of gateways, it is
 		// possible that server starts to receive inbound from
 		// other clusters and in turn create outbounds. So here
@@ -670,6 +683,8 @@ func (s *Server) reconnectGateway(cfg *gatewayCfg) {
 // This function will loop trying to connect to any URL attached
 // to the given Gateway. It will return once a connection has been created.
 func (s *Server) solicitGateway(cfg *gatewayCfg, firstConnect bool) {
+	// s.reloadMu.Lock()
+	// defer s.reloadMu.Unlock()
 	var (
 		opts       = s.getOpts()
 		isImplicit = cfg.isImplicit()
@@ -706,8 +721,21 @@ func (s *Server) solicitGateway(cfg *gatewayCfg, firstConnect bool) {
 			}
 			conn, err := natsDialTimeout("tcp", address, DEFAULT_ROUTE_DIAL)
 			if err == nil {
-				// We could connect, create the gateway connection and return.
+				if cfg.TLSConfig == nil {
+					fmt.Println(s.Name(), "CREATE GATEWAY WITH NIL TLS!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1",
+						address, cfg.TLSConfig == nil)
+				} else {
+					debug.PrintStack()
+					// We could connect, create the gateway connection and return.
+					fmt.Println(s.Name(), "CREATE GATEWAY!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1",
+						address, cfg.TLSConfig.GetClientCertificate == nil)
+				}
+
+				// reload lock here deadlocks
+				// s.reloadMu.Lock()
+				// SOLICITED
 				s.createGateway(cfg, u, conn)
+				// s.reloadMu.Unlock()
 				return
 			}
 			if report {
@@ -763,6 +791,10 @@ func (g *srvGateway) hasInbound(name string) bool {
 func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 	// Snapshot server options.
 	opts := s.getOpts()
+	s.Warnf("A~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ OPTS SOLICIT STATE: %v", opts.Gateway.TLSConfig.GetClientCertificate == nil)
+	if cfg != nil {
+		s.Warnf("B~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  CFG SOLICIT STATE: %v", cfg.TLSConfig.GetClientCertificate == nil)
+	}
 
 	now := time.Now()
 	c := &client{srv: s, nc: conn, start: now, last: now, kind: GATEWAY}
@@ -780,6 +812,9 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 	c.initClient()
 	c.gw = &gateway{}
 	if solicit {
+		// Check if ocsp enabled and there are no client callbacks setup,
+		// then reuse the config from the top level.
+
 		// This is an outbound gateway connection
 		cfg.RLock()
 		tlsRequired = cfg.TLSConfig != nil
@@ -793,7 +828,13 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 		// the remote's INFO protocol, save the URL we need to connect to.
 		c.gw.connectURL = url
 
-		c.Noticef("Creating outbound gateway connection to %q", cfgName)
+		c.Noticef("SOLICIT: Creating outbound gateway connection to %q", cfgName)
+		c.Warnf("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ SOLICIT STATE: %v", cfg.TLSConfig.GetClientCertificate == nil)
+
+		// PICK UP AGAIN IN CASE THEY WENT MISSING SOMEHOW
+		// if opts.Gateway.TLSConfig.GetClientCertificate != nil && cfg.TLSConfig.GetClientCertificate == nil {
+		// 	cfg.TLSConfig.GetClientCertificate = opts.Gateway.TLSConfig.GetClientCertificate
+		// }
 	} else {
 		c.flags.set(expectConnect)
 		// Inbound gateway connection
@@ -811,14 +852,17 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 		var timeout float64
 
 		if solicit {
+			c.Warnf("A    SOLICIT ::::::::::::::::::::::: %v", cfg.TLSConfig.GetClientCertificate == nil)
 			cfg.RLock()
 			tlsName = cfg.tlsName
 			tlsConfig = cfg.TLSConfig.Clone()
 			timeout = cfg.TLSTimeout
 			cfg.RUnlock()
+			c.Warnf("B    SOLICIT ::::::::::::::::::::::: %v", tlsConfig.GetClientCertificate == nil)
 		} else {
 			tlsConfig = opts.Gateway.TLSConfig
 			timeout = opts.Gateway.TLSTimeout
+			c.Warnf("NON SOLICIT ::::::::::::::::::::::: %v", tlsConfig.GetClientCertificate == nil)
 		}
 
 		// Perform (either server or client side) TLS handshake.
@@ -1013,6 +1057,7 @@ func (c *client) processGatewayInfo(info *Info) {
 				if s.gateway.rejectUnknown() && s.getRemoteGateway(info.Gateway) == nil {
 					return
 				}
+				s.Warnf("---------------------------------------------------------------- IMPLICIT GATEWAY")
 				s.processImplicitGateway(info)
 				return
 			}
@@ -1392,6 +1437,7 @@ func (s *Server) processImplicitGateway(info *Info) {
 		cfg.Unlock()
 		return
 	}
+	// s.reloadMu.Lock()
 	opts := s.getOpts()
 	cfg = &gatewayCfg{
 		RemoteGatewayOpts: &RemoteGatewayOpts{Name: gwName},
@@ -1400,10 +1446,15 @@ func (s *Server) processImplicitGateway(info *Info) {
 		urls:              make(map[string]*url.URL, len(info.GatewayURLs)),
 		implicit:          true,
 	}
+	// s.reloadMu.Lock()
 	if opts.Gateway.TLSConfig != nil {
 		cfg.TLSConfig = opts.Gateway.TLSConfig.Clone()
 		cfg.TLSTimeout = opts.Gateway.TLSTimeout
 	}
+	fmt.Println("A>>>>>>>>>>>>>>>>>>>>>>>>>> IMPLICIT GATEWAY!!!!!!!",
+		cfg.TLSConfig.GetClientCertificate == nil,
+		opts.Gateway.TLSConfig.GetClientCertificate == nil,
+	)
 
 	// Since we know we don't have URLs (no config, so just based on what we
 	// get from INFO), directly call addURLs(). We don't need locking since
@@ -1414,7 +1465,12 @@ func (s *Server) processImplicitGateway(info *Info) {
 		return
 	}
 	s.gateway.remotes[gwName] = cfg
+	// s.reloadMu.Unlock()
 	s.startGoRoutine(func() {
+		fmt.Println("B>>>>>>>>>>>>>>>>>>>>>>>>>> IMPLICIT GATEWAY!!!!!!!",
+			cfg.TLSConfig.GetClientCertificate == nil,
+			opts.Gateway.TLSConfig.GetClientCertificate == nil,
+		)
 		s.solicitGateway(cfg, true)
 		s.grWG.Done()
 	})

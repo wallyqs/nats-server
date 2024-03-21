@@ -532,11 +532,15 @@ func (srv *Server) NewOCSPMonitor(config *tlsConfigKind) (*tls.Config, *OCSPMoni
 
 			// When server makes a peer connection, need to also present an OCSP Staple.
 			tc.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				// srv.reloadMu.RLock()
 				raw, _, err := mon.getStatus()
+				fmt.Println("RAW: ", srv.Name(), raw)
 				if err != nil {
+					srv.reloadMu.RUnlock()
 					return nil, err
 				}
 				cert.OCSPStaple = raw
+				// srv.reloadMu.RUnlock()
 
 				return &cert, nil
 			}
@@ -731,7 +735,12 @@ func (s *Server) reloadOCSP() error {
 	}
 
 	s.mu.Lock()
+	// Track the state of the previous set of ocsp monitors.
+	om := make(map[string]*OCSPMonitor)
 	ocsps := s.ocsps
+	for _, o := range ocsps {
+		om[o.certFile] = o
+	}
 	s.mu.Unlock()
 
 	// Stop all OCSP Stapling monitors in case there were any running.
@@ -743,6 +752,7 @@ func (s *Server) reloadOCSP() error {
 
 	// Restart the monitors under the new configuration.
 	ocspm := make([]*OCSPMonitor, 0)
+	// cbs := make([]func(), 0)
 
 	// Reset server's ocspPeerVerify flag to re-detect at least one plugged OCSP peer
 	s.mu.Lock()
@@ -750,7 +760,9 @@ func (s *Server) reloadOCSP() error {
 	s.mu.Unlock()
 	s.stopOCSPResponseCache()
 
+	s.mu.Lock()
 	for _, config := range configs {
+		config := config
 		// We do not staple Leaf Hub and Leaf Spokes, use ocsp_peer
 		if config.kind != kindStringMap[LEAF] {
 			tc, mon, err := s.NewOCSPMonitor(config)
@@ -759,9 +771,15 @@ func (s *Server) reloadOCSP() error {
 			}
 			// Check if an OCSP stapling monitor is required for this certificate.
 			if mon != nil {
+				// Carry over the staple in memory for the cert.
+				if o, ok := om[mon.certFile]; ok {
+					mon.raw = o.raw
+					mon.resp = o.resp
+				}
 				ocspm = append(ocspm, mon)
 
 				// Apply latest TLS configuration.
+				// cbs = append(cbs, func() { config.apply(tc) })
 				config.apply(tc)
 			}
 		}
@@ -774,14 +792,18 @@ func (s *Server) reloadOCSP() error {
 			}
 			if plugged && tc != nil {
 				s.ocspPeerVerify = true
+				// defer config.apply(tc)
+				// cbs = append(cbs, func() { config.apply(tc) })
 				config.apply(tc)
 			}
 		}
 	}
 
 	// Replace stopped monitors with the new ones.
-	s.mu.Lock()
 	s.ocsps = ocspm
+	// for _, cb := range cbs {
+	// 	cb()
+	// }
 	s.mu.Unlock()
 
 	// Dispatch all goroutines once again.

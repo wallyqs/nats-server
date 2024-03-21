@@ -5527,7 +5527,16 @@ func (c *client) reconnect() {
 			// Run this as a go routine since we may be called within
 			// the solicitGateway itself if there was an error during
 			// the creation of the gateway connection.
-			srv.startGoRoutine(func() { srv.reconnectGateway(gwCfg) })
+			srv.startGoRoutine(func() {
+				fmt.Println("RECONNECT GATEWAY", gwCfg.TLSConfig == nil)
+				// srv.reloadMu.Lock()
+				if gwCfg.TLSConfig != nil && gwCfg.TLSConfig.GetClientCertificate == nil {
+					fmt.Println("FIXING!!!!!!!!!!!!!............... ", gwCfg.TLSConfig.GetClientCertificate == nil)
+					gwCfg.TLSConfig.GetClientCertificate = srv.getOpts().Gateway.TLSConfig.GetClientCertificate
+				}
+				srv.reconnectGateway(gwCfg)
+				// srv.reloadMu.Unlock()
+			})
 		} else {
 			srv.Debugf("Gateway %q not in configuration, not attempting reconnect", gwName)
 		}
