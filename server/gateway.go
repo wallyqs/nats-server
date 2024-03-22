@@ -816,6 +816,14 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 			tlsConfig = cfg.TLSConfig.Clone()
 			timeout = cfg.TLSTimeout
 			cfg.RUnlock()
+
+			// Ensure that OCSP callbacks are always setup on gateway reconnect.
+			if (opts.Gateway.TLSConfig.GetClientCertificate != nil && tlsConfig.GetClientCertificate == nil) {
+				tlsConfig.GetClientCertificate = opts.Gateway.TLSConfig.GetClientCertificate
+			}
+			if (opts.Gateway.TLSConfig.VerifyConnection != nil && tlsConfig.VerifyConnection == nil) {
+				tlsConfig.VerifyConnection = opts.Gateway.TLSConfig.VerifyConnection
+			}
 		} else {
 			tlsConfig = opts.Gateway.TLSConfig
 			timeout = opts.Gateway.TLSTimeout
