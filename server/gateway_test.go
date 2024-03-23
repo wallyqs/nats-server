@@ -7348,5 +7348,8 @@ func TestOCSPGatewayMissingPeerStapleIssue(t *testing.T) {
 	case msg := <-lC.ch:
 		t.Fatalf("Server C: Got OCSP Staple error: %v", msg)
 	}
+	waitForOutboundGateways(t, srvA, 2, 5*time.Second)
+	waitForOutboundGateways(t, srvB, 2, 5*time.Second)
+	waitForOutboundGateways(t, srvC, 2, 5*time.Second)
 	wg.Wait()
 }
