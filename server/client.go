@@ -32,6 +32,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"runtime/debug"
 
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
@@ -5527,7 +5528,11 @@ func (c *client) reconnect() {
 			// Run this as a go routine since we may be called within
 			// the solicitGateway itself if there was an error during
 			// the creation of the gateway connection.
-			srv.startGoRoutine(func() { srv.reconnectGateway(gwCfg) })
+			srv.startGoRoutine(func() {
+				// c.srv.reloadMu.RLock()
+				// defer c.srv.reloadMu.RUnlock()
+				srv.reconnectGateway(gwCfg)
+			})
 		} else {
 			srv.Debugf("Gateway %q not in configuration, not attempting reconnect", gwName)
 		}
@@ -5801,7 +5806,8 @@ func (c *client) doTLSHandshake(typ string, solicit bool, url *url.URL, tlsConfi
 		if kind == CLIENT {
 			c.Errorf("TLS handshake error: %v", err)
 		} else {
-			c.Errorf("TLS %s handshake error: %v", typ, err)
+			debug.PrintStack()
+			c.Errorf("TLS %s handshake error: %v (solicit: %v)", typ, err, solicit)
 		}
 		c.closeConnection(TLSHandshakeError)
 
