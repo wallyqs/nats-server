@@ -6975,7 +6975,7 @@ func TestJetStreamClusterWorkQueueStreamOrphanDesync(t *testing.T) {
 			Subjects:   []string{"messages.>"},
 			Replicas:   1,
 			MaxAge:     10 * time.Minute,
-			Duplicates: 2 * time.Minute,
+			Duplicates: 10 * time.Minute,
 			Retention:  nats.WorkQueuePolicy,
 			Discard:    nats.DiscardOld,
 		})
@@ -7024,45 +7024,55 @@ func testJetStreamClusterWorkQueueStreamOrphanDesync(t *testing.T, sc *nats.Stre
 	ctx, cancel := context.WithTimeout(context.Background(), 5*60*time.Second)
 	defer cancel()
 
-	// Start producer.
+	// Start producers
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		subjects := []string{
-			"messages.Z.A.B.10013.1.C.D.000000000000",
-			"messages.Z.A.B.10013.1.C.D.000000000001",
-			"messages.Z.A.B.10013.1.C.D.000000000002",
-			"messages.Z.A.B.10013.1.C.D.000000000003",
-			"messages.Z.A.B.10013.1.C.D.000000000004",
-		}
-		payload := []byte(strings.Repeat("A", 1024))
-		tick := time.NewTicker(1 * time.Millisecond)
-		wait := nats.AckWait(200 * time.Millisecond)
-		for i := 1; i < 200000; i++ {
-			select {
-			case <-ctx.Done():
-				wg.Done()
-				return
-			case <-tick.C:
-				for _, subject := range subjects {
-					// Send each message at least twice.
-					msgID := nats.MsgId(nuid.Next())
-					_, err := js.Publish(subject, payload, msgID, wait)
-					if err != nil {
-						continue
-					}
-					_, err = js.Publish(subject, payload, msgID, wait)
-					if err != nil {
-						continue
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			pnc, pjs := jsClientConnect(t, c.randomServer())
+			defer pnc.Close()
+
+			subjects := []string{
+				"messages.Z.A.B.10013.1.C.D.000000000000",
+				"messages.Z.A.B.10013.1.C.D.000000000001",
+				"messages.Z.A.B.10013.1.C.D.000000000002",
+				"messages.Z.A.B.10013.1.C.D.000000000003",
+				"messages.Z.A.B.10013.1.C.D.000000000004",
+			}
+			payload := []byte(strings.Repeat("A", 1024))
+			tick := time.NewTicker(1 * time.Millisecond)
+			wait := nats.AckWait(200 * time.Millisecond)
+			for i := 1; i < 500000; i++ {
+				select {
+				case <-ctx.Done():
+					wg.Done()
+					return
+				case <-tick.C:
+					for _, subject := range subjects {
+						// Send each message a few times.
+						msgID := nats.MsgId(nuid.Next())
+						_, err := pjs.Publish(subject, payload, msgID, wait)
+						if err != nil {
+							continue
+						}
+						_, err = pjs.Publish(subject, payload, msgID, wait)
+						if err != nil {
+							continue
+						}
+						_, err = pjs.Publish(subject, payload, msgID, wait)
+						if err != nil {
+							continue
+						}
 					}
 				}
 			}
-		}
-		t.Logf("Stopped publishing.")
-	}()
+			t.Logf("Stopped publishing.")
+		}()
+	}
 
 	// Let enough messages into the stream then start consumers.
-	time.Sleep(5*time.Second)
+	time.Sleep(15 * time.Second)
 
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
@@ -7070,7 +7080,7 @@ func testJetStreamClusterWorkQueueStreamOrphanDesync(t *testing.T, sc *nats.Stre
 		psub, err := cjs.PullSubscribe(fmt.Sprintf("messages.*.A.B.*.*.C.D.00000000000%d", i), fmt.Sprintf("consumer:%d", i), nats.MaxAckPending(10000))
 		require_NoError(t, err)
 		go func() {
-			tick := time.NewTicker(20 * time.Millisecond)
+			tick := time.NewTicker(1 * time.Millisecond)
 			for {
 				select {
 				case <-ctx.Done():
