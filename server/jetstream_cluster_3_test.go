@@ -35,6 +35,7 @@ import (
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nuid"
 )
 
 func TestJetStreamClusterRemovePeerByID(t *testing.T) {
@@ -6965,4 +6966,156 @@ func TestJetStreamClusterConsumerPauseSurvivesRestart(t *testing.T) {
 	leader = c.consumerLeader(globalAccountName, "TEST", "my_consumer")
 	require_True(t, leader != nil)
 	checkTimer(leader)
+}
+
+func TestJetStreamClusterWorkQueueStreamOrphanDesync(t *testing.T) {
+	t.Run("R1", func(t *testing.T) {
+		testJetStreamClusterWorkQueueStreamOrphanDesync(t, &nats.StreamConfig{
+			Name:       "OWQTEST_R1",
+			Subjects:   []string{"messages.>"},
+			Replicas:   1,
+			MaxAge:     10 * time.Minute,
+			Duplicates: 2 * time.Minute,
+			Retention:  nats.WorkQueuePolicy,
+			Discard:    nats.DiscardOld,
+		})
+	})
+}
+
+func testJetStreamClusterWorkQueueStreamOrphanDesync(t *testing.T, sc *nats.StreamConfig) {
+	conf := `
+	listen: 127.0.0.1:-1
+	server_name: %s
+	jetstream: {
+		store_dir: '%s',
+	}
+	cluster {
+		name: %s
+		listen: 127.0.0.1:%d
+		routes = [%s]
+	}
+        system_account: sys
+        no_auth_user: js
+	accounts {
+	  sys {
+	    users = [
+	      { user: sys, pass: sys }
+	    ]
+	  }
+	  js {
+	    jetstream = enabled
+	    users = [
+	      { user: js, pass: js }
+	    ]
+	  }
+	}`
+	c := createJetStreamClusterWithTemplate(t, conf, sc.Name, 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	cnc, cjs := jsClientConnect(t, c.randomServer())
+	defer cnc.Close()
+
+	_, err := js.AddStream(sc)
+	require_NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*60*time.Second)
+	defer cancel()
+
+	// Start producer.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		subjects := []string{
+			"messages.Z.A.B.10013.1.C.D.000000000000",
+			"messages.Z.A.B.10013.1.C.D.000000000001",
+			"messages.Z.A.B.10013.1.C.D.000000000002",
+			"messages.Z.A.B.10013.1.C.D.000000000003",
+			"messages.Z.A.B.10013.1.C.D.000000000004",
+		}
+		payload := []byte(strings.Repeat("A", 1024))
+		tick := time.NewTicker(1 * time.Millisecond)
+		wait := nats.AckWait(200 * time.Millisecond)
+		for i := 1; i < 200000; i++ {
+			select {
+			case <-ctx.Done():
+				wg.Done()
+				return
+			case <-tick.C:
+				for _, subject := range subjects {
+					// Send each message at least twice.
+					msgID := nats.MsgId(nuid.Next())
+					_, err := js.Publish(subject, payload, msgID, wait)
+					if err != nil {
+						continue
+					}
+					_, err = js.Publish(subject, payload, msgID, wait)
+					if err != nil {
+						continue
+					}
+				}
+			}
+		}
+		t.Logf("Stopped publishing.")
+	}()
+
+	// Let enough messages into the stream then start consumers.
+	time.Sleep(5*time.Second)
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+
+		psub, err := cjs.PullSubscribe(fmt.Sprintf("messages.*.A.B.*.*.C.D.00000000000%d", i), fmt.Sprintf("consumer:%d", i), nats.MaxAckPending(10000))
+		require_NoError(t, err)
+		go func() {
+			tick := time.NewTicker(20 * time.Millisecond)
+			for {
+				select {
+				case <-ctx.Done():
+					wg.Done()
+					return
+				case <-tick.C:
+					// Fetch 1 first, then if no errors Fetch 100.
+					msgs, err := psub.Fetch(1, nats.MaxWait(200*time.Millisecond))
+					if err != nil {
+						continue
+					}
+					for _, msg := range msgs {
+						msg.Ack()
+					}
+					msgs, err = psub.Fetch(100, nats.MaxWait(200*time.Millisecond))
+					if err != nil {
+						continue
+					}
+					for _, msg := range msgs {
+						msg.Ack()
+					}
+				}
+			}
+		}()
+	}
+
+	// Wait until context is done then check state.
+	select {
+	case <-ctx.Done():
+	}
+
+	// Check state of streams and consumers.
+	// psub, err := cjs.PullSubscribe(fmt.Sprintf("messages.*.A.B.*.*.C.D.00000000000%d", i), fmt.Sprintf("consumer:%d", i))
+	// require_NoError(t, err)
+	si, err := js.StreamInfo(sc.Name)
+	require_NoError(t, err)
+
+	t.Logf("Stream: %+v", si.State)
+
+	for i := 0; i < 5; i++ {
+		ci, err := js.ConsumerInfo(sc.Name, fmt.Sprintf("consumer:%d", i))
+		require_NoError(t, err)
+
+		t.Logf("Consumer: %+v", ci)
+	}
+
+	select {}
 }
