@@ -131,6 +131,7 @@ func NewOCSPResponderBase(t *testing.T, issuerCertPEM, respCertPEM, respKeyPEM s
 				return
 			}
 			reqData, err = io.ReadAll(r.Body)
+			r.Body.Close()
 		default:
 			http.Error(rw, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return

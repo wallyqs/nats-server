@@ -7149,31 +7149,26 @@ func TestOCSPGatewayMissingPeerStapleIssue(t *testing.T) {
 	cB, err := nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", optsB.Port),
 		nats.ErrorHandler(noOpErrHandler),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require_NoError(t, err)
 	defer cB.Close()
+
 	cC, err := nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", optsC.Port),
 		nats.ErrorHandler(noOpErrHandler),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require_NoError(t, err)
 	defer cC.Close()
 
 	_, err = cA.Subscribe("foo", func(m *nats.Msg) {
 		m.Respond(nil)
 	})
-	if err != nil {
-		t.Errorf("%v", err)
-	}
+	require_NoError(t, err)
+
 	cA.Flush()
+
 	_, err = cB.Subscribe("bar", func(m *nats.Msg) {
 		m.Respond(nil)
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require_NoError(t, err)
 	cB.Flush()
 
 	waitForOutboundGateways(t, srvB, 1, 10*time.Second)
@@ -7230,13 +7225,10 @@ func TestOCSPGatewayMissingPeerStapleIssue(t *testing.T) {
 
 	// Now clients connect to C can communicate with B and A.
 	_, err = cC.Request("foo", nil, 2*time.Second)
-	if err != nil {
-		t.Errorf("%v", err)
-	}
+	require_NoError(t, err)
+
 	_, err = cC.Request("bar", nil, 2*time.Second)
-	if err != nil {
-		t.Errorf("%v", err)
-	}
+	require_NoError(t, err)
 
 	// Reload and disconnect very fast trying to produce the race.
 	ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
@@ -7253,9 +7245,8 @@ func TestOCSPGatewayMissingPeerStapleIssue(t *testing.T) {
 	srvC.SetLogger(lC, false, false)
 
 	// Start with a reload from the last server that connected directly to A.
-	if err := srvC.Reload(); err != nil {
-		t.Fatal(err)
-	}
+	err = srvC.Reload()
+	require_NoError(t, err)
 
 	// Stress reconnections and reloading servers without getting
 	// missing OCSP peer staple errors.
