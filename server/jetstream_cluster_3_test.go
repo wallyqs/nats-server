@@ -7075,9 +7075,6 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 	_, err := js.AddStream(sc)
 	require_NoError(t, err)
 
-	pctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
 	// Start producers
 	var wg sync.WaitGroup
 
@@ -7092,6 +7089,30 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 			require_NoError(t, err)
 		}
 	}
+
+	// Restart all servers before continuing.
+	time.Sleep(10 * time.Second)
+	for i, s := range c.servers {
+		if i == 2 {
+			// Do not restart one of them.
+			break
+		}
+		s.lameDuckMode()
+		s.WaitForShutdown()
+		if !s.Running() {
+			opts := c.opts[i]
+			s, o := RunServerWithConfig(opts.ConfigFile)
+			c.servers[i] = s
+			c.opts[i] = o
+		}
+		// Wait before restarting the next.
+		time.Sleep(10*time.Second)
+	}
+	c.waitOnClusterReady()
+	time.Sleep(10 * time.Second)
+
+	pctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
@@ -7131,7 +7152,7 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 		}()
 	}
 
-	// Rogue publisher that sends the same msg ID everytime.
+	// Rogue publishers that sends the same msg ID everytime.
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
@@ -7176,7 +7197,8 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 	ctx, cancel := context.WithTimeout(context.Background(), 2*60*time.Second)
 	defer cancel()
 
-	for i := 0; i < 10; i++ {
+	// First batch of pull subscribers which will eventually be disconnected.
+	for i := 0; i < 1; i++ {
 		subject := fmt.Sprintf("MSGS.EEEEE.*.H.100XY.*.*.WQ.00000000000%d", i)
 		consumer := fmt.Sprintf("consumer:EEEEE:%d", i)
 		for n := 0; n < 5; n++ {
@@ -7186,6 +7208,7 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 			psub, err := cpjs.PullSubscribe(subject, consumer, mp)
 			require_NoError(t, err)
 
+			// Disconnect some of these clients potentially leaving unacked messages.
 			time.AfterFunc(15*time.Second, func() {
 				cpnc.Close()
 			})
@@ -7223,7 +7246,10 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 						if err != nil {
 							continue
 						}
-						for _, msg := range msgs {
+						for i, msg := range msgs {
+							if i == rand.Intn(len(msgs)) {
+								continue
+							}
 							msg.Ack()
 						}
 					}
@@ -7244,7 +7270,6 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 				t.Logf("ERROR: %v", err)
 				continue
 			}
-			// require_NoError(t, err)
 
 			wg.Add(1)
 			go func() {
@@ -7275,7 +7300,10 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 						if err != nil {
 							continue
 						}
-						for _, msg := range msgs {
+						for i, msg := range msgs {
+							if i == rand.Intn(len(msgs)) {
+								continue
+							}
 							msg.Ack()
 						}
 					}
@@ -7284,27 +7312,27 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 		}
 	}
 
-	time.AfterFunc(10*time.Second, func() {
-		if sc.Replicas == 1 {
-			// Find server leader of the stream and restart it.
-			leaderSrv := c.streamLeader("js", sc.Name)
-			leaderSrv.Shutdown()
-			c.restartServer(leaderSrv)
-		} else {
-			// NOTE (wq): For R=3, not sure which server causes the issue here
-			// so this may be have flaky behavior.
-			s := c.servers[0]
-			s.lameDuckMode()
-			s.WaitForShutdown()
-			if !s.Running() {
-				opts := c.opts[0]
-				s, o := RunServerWithConfig(opts.ConfigFile)
-				c.servers[0] = s
-				c.opts[0] = o
-			}
-			c.waitOnClusterReady()
-		}
-	})
+	// time.AfterFunc(10*time.Second, func() {
+	// 	if sc.Replicas == 1 {
+	// 		// Find server leader of the stream and restart it.
+	// 		leaderSrv := c.streamLeader("js", sc.Name)
+	// 		leaderSrv.Shutdown()
+	// 		c.restartServer(leaderSrv)
+	// 	} else {
+	// 		// NOTE (wq): For R=3, not sure which server causes the issue here
+	// 		// so this may be have flaky behavior.
+	// 		s := c.servers[0]
+	// 		s.lameDuckMode()
+	// 		s.WaitForShutdown()
+	// 		if !s.Running() {
+	// 			opts := c.opts[0]
+	// 			s, o := RunServerWithConfig(opts.ConfigFile)
+	// 			c.servers[0] = s
+	// 			c.opts[0] = o
+	// 		}
+	// 		c.waitOnClusterReady()
+	// 	}
+	// })
 
 	// Wait until context is done then check state.
 	<-ctx.Done()
@@ -7314,7 +7342,7 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 	require_NoError(t, err)
 
 	var consumerPending int
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 10; i++ {
 		ci, err := js.ConsumerInfo(sc.Name, fmt.Sprintf("consumer:EEEEE:%d", i))
 		require_NoError(t, err)
 		consumerPending += int(ci.NumPending)
