@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"net"
 	"os"
@@ -7040,8 +7041,16 @@ func TestJetStreamClusterConsumerPauseSurvivesRestart(t *testing.T) {
 }
 
 func TestJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T) {
+	debug := true
+	sleeps := false
+	restarts := 0
+	reconnects := true
 	t.Run("R1F", func(t *testing.T) {
-		testJetStreamClusterWorkQueueStreamOrphanIssue(t, &nats.StreamConfig{
+		preRestarts := false
+		inflightRestart := false
+		missAcks := true
+		restarts = 0
+		testJetStreamClusterWorkQueueStreamOrphanIssue(t, debug, preRestarts, inflightRestart, missAcks, sleeps, restarts, reconnects, &nats.StreamConfig{
 			Name:        "OWQTEST_R1F",
 			Subjects:    []string{"MSGS.>"},
 			Replicas:    1,
@@ -7056,7 +7065,11 @@ func TestJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T) {
 		})
 	})
 	t.Run("R3M", func(t *testing.T) {
-		testJetStreamClusterWorkQueueStreamOrphanIssue(t, &nats.StreamConfig{
+		preRestarts := false
+		inflightRestart := false
+		missAcks := false
+		restarts = 0
+		testJetStreamClusterWorkQueueStreamOrphanIssue(t, debug, preRestarts, inflightRestart, missAcks, sleeps, restarts, reconnects, &nats.StreamConfig{
 			Name:        "OWQTEST_R3M",
 			Subjects:    []string{"MSGS.>"},
 			Replicas:    3,
@@ -7073,7 +7086,11 @@ func TestJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T) {
 		})
 	})
 	t.Run("R3F_DN", func(t *testing.T) {
-		testJetStreamClusterWorkQueueStreamOrphanIssue(t, &nats.StreamConfig{
+		preRestarts := false
+		inflightRestart := true
+		missAcks := false
+		restarts = 1
+		testJetStreamClusterWorkQueueStreamOrphanIssue(t, debug, preRestarts, inflightRestart, missAcks, sleeps, restarts, reconnects, &nats.StreamConfig{
 			Name:        "OWQTEST_R3F_DN",
 			Subjects:    []string{"MSGS.>"},
 			Replicas:    3,
@@ -7089,7 +7106,11 @@ func TestJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T) {
 		})
 	})
 	t.Run("R3F_DO", func(t *testing.T) {
-		testJetStreamClusterWorkQueueStreamOrphanIssue(t, &nats.StreamConfig{
+		preRestarts := false
+		inflightRestart := true
+		missAcks := false
+		restarts = 1
+		testJetStreamClusterWorkQueueStreamOrphanIssue(t, debug, preRestarts, inflightRestart, missAcks, sleeps, restarts, reconnects, &nats.StreamConfig{
 			Name:        "OWQTEST_R3F_DO",
 			Subjects:    []string{"MSGS.>"},
 			Replicas:    3,
@@ -7106,9 +7127,10 @@ func TestJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T) {
 	})
 }
 
-func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.StreamConfig) {
+func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, debug, preRestarts, inflightRestart, missAcks, sleeps bool, restarts int, reconnects bool, sc *nats.StreamConfig) {
 	conf := `
 	listen: 127.0.0.1:-1
+        http: 127.0.0.1:-1
 	server_name: %s
 	jetstream: {
 		store_dir: '%s',
@@ -7140,23 +7162,138 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 	_, err := js.AddStream(sc)
 	require_NoError(t, err)
 
-	pctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	// Start producers
 	var wg sync.WaitGroup
+
+	reconnectClients := func(s *Server) {
+		// Pick the first one that shows.
+		for _, client := range s.clients {
+			client.closeConnection(Kicked)
+			break
+		}
+	}
 
 	// First call is just to create the pull subscribers.
 	mp := nats.MaxAckPending(10000)
 	mw := nats.PullMaxWaiting(1000)
+
+	// Do not create all of the pull subscribers so that some are not ready.
 	for i := 0; i < 10; i++ {
-		for _, partition := range []string{"EEEEE"} {
+		// partitions := []string{"AAA", "BBBB", "CCCCCCCC", "DD", "EEEEE"}
+		partitions := []string{"EEEEE"}
+		for _, partition := range partitions {
 			subject := fmt.Sprintf("MSGS.%s.*.H.100XY.*.*.WQ.00000000000%d", partition, i)
 			consumer := fmt.Sprintf("consumer:%s:%d", partition, i)
 			_, err := cjs.PullSubscribe(subject, consumer, mp, mw)
 			require_NoError(t, err)
 		}
 	}
+
+	var testDuration time.Duration
+	if sleeps || missAcks {
+		testDuration = 10 * time.Minute
+	} else {
+		testDuration = 2 * time.Minute
+	}
+
+	// Show a table of the results while debugging.
+	if debug {
+		tctx, cancel := context.WithTimeout(context.Background(), testDuration)
+		defer cancel()
+
+		wg.Add(1)
+		go func() {
+			prefix := "MSGS.EEEEE.P.H.100XY.1.100Z.WQ.00000000000%d"
+			for range time.NewTicker(1 * time.Second).C {
+				select {
+				case <-tctx.Done():
+					wg.Done()
+					return
+				default:
+				}
+				msg, err := nc.Request(fmt.Sprintf("$JS.API.STREAM.INFO.%s", sc.Name), []byte(`{"subjects_filter":">"}`), 2*time.Second)
+				if err != nil {
+					continue
+				}
+				var si *nats.StreamInfo
+				err = json.Unmarshal(msg.Data, &si)
+				if err != nil {
+					continue
+				}
+
+				// Then get the num pending from each.
+				var numPending, numAckPending int
+				for i := 0; i < 10; i++ {
+					ci, err := js.ConsumerInfo(sc.Name, fmt.Sprintf("consumer:EEEEE:%d", i))
+					if err != nil {
+						continue
+					}
+
+					is, ok := si.State.Subjects[fmt.Sprintf(prefix, i)]
+					if !ok {
+						continue
+					}
+					t.Logf("| %-20s | in_stream_subject:%-30d | num_pending: %-10d / ack_pending: %-10d | delivered(stream: %-6d, consumer: %-6d) | ackfloor(stream: %-6d, consumer: %-6d) |",
+						ci.Name, is, ci.NumPending, ci.NumAckPending, ci.Delivered.Stream, ci.Delivered.Consumer, ci.AckFloor.Stream, ci.AckFloor.Consumer)
+					numPending += int(ci.NumPending)
+					numAckPending += int(ci.NumAckPending)
+				}
+				if numPending > 0 || si.State.Msgs > 0 {
+					t.Logf("| %-20s | in_stream_subject:%-30d | num_pending: %-10d / ack_pending: %-10d |", "TOTAL", si.State.Msgs, numPending, numAckPending)
+					t.Logf("|------------------------------------------------------------------------ HOST: %-20s -----------------------|", nc.ConnectedUrl())
+
+				} else {
+					t.Logf("No orphan or pending messages found...")
+				}
+			}
+		}()
+	}
+
+	// Restart all servers before continuing.
+	if preRestarts {
+		time.Sleep(5 * time.Second)
+		for i, s := range c.servers {
+			t.Logf("Restarting: %v", s.Name())
+			if i == 2 {
+				// Do not restart one of them.
+				break
+			}
+			s.optsMu.Lock()
+			s.opts.LameDuckDuration = 15 * time.Second
+			s.opts.LameDuckGracePeriod = -15 * time.Second
+			s.optsMu.Unlock()
+			s.lameDuckMode()
+			s.WaitForShutdown()
+			c.restartServer(s)
+			c.waitOnClusterReady()
+			time.Sleep(10 * time.Second)
+		}
+		c.waitOnClusterReady()
+	}
+
+	if reconnects {
+		wg.Add(1)
+		go func() {
+			tctx, cancel := context.WithTimeout(context.Background(), testDuration)
+			defer cancel()
+
+			for range time.NewTicker(10 * time.Second).C {
+				select {
+				case <-tctx.Done():
+					wg.Done()
+					return
+				default:
+				}
+				for _, s := range c.servers {
+					reconnectClients(s)
+					time.Sleep(3 * time.Second)
+				}
+			}
+		}()
+	}
+
+	//  Publishers context
+	pctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
@@ -7237,9 +7374,10 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 	// Let enough messages into the stream then start consumers.
 	time.Sleep(30 * time.Second)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), testDuration)
 	defer cancel()
 
+	// These set of consumers will close their connections without draining.
 	for i := 0; i < 10; i++ {
 		subject := fmt.Sprintf("MSGS.EEEEE.*.H.100XY.*.*.WQ.00000000000%d", i)
 		consumer := fmt.Sprintf("consumer:EEEEE:%d", i)
@@ -7248,7 +7386,11 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 			defer cpnc.Close()
 
 			psub, err := cpjs.PullSubscribe(subject, consumer, mp)
-			require_NoError(t, err)
+			if err != nil {
+				t.Logf("Error: %v", err)
+				continue
+			}
+			// require_NoError(t, err)
 
 			time.AfterFunc(15*time.Second, func() {
 				cpnc.Close()
@@ -7257,6 +7399,9 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 			wg.Add(1)
 			go func() {
 				tick := time.NewTicker(1 * time.Millisecond)
+				mw := nats.MaxWait(200 * time.Millisecond)
+				phb := nats.PullHeartbeat(mw / 3)
+			NextTick:
 				for {
 					if cpnc.IsClosed() {
 						wg.Done()
@@ -7267,28 +7412,20 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 						wg.Done()
 						return
 					case <-tick.C:
-						// Fetch 1 first, then if no errors Fetch 100.
-						msgs, err := psub.Fetch(1, nats.MaxWait(200*time.Millisecond))
-						if err != nil {
-							continue
-						}
-						for _, msg := range msgs {
-							msg.Ack()
-						}
-						msgs, err = psub.Fetch(100, nats.MaxWait(200*time.Millisecond))
-						if err != nil {
-							continue
-						}
-						for _, msg := range msgs {
-							msg.Ack()
-						}
-
-						msgs, err = psub.Fetch(1000, nats.MaxWait(200*time.Millisecond))
-						if err != nil {
-							continue
-						}
-						for _, msg := range msgs {
-							msg.Ack()
+						for _, bs := range []int{1, 5, 100, 1000} {
+							msgs, err := psub.Fetch(bs, mw, phb)
+							if err != nil {
+								continue NextTick
+							}
+							for i, msg := range msgs {
+								if missAcks && i == rand.Intn(len(msgs)) {
+									continue
+								}
+								if sleeps {
+									time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
+								}
+								msg.Ack()
+							}
 						}
 					}
 				}
@@ -7296,95 +7433,222 @@ func testJetStreamClusterWorkQueueStreamOrphanIssue(t *testing.T, sc *nats.Strea
 		}
 	}
 
+	// These consumers will have their connections kicked by the server and
+	// then will recreate the connection from scratch.
 	for i := 0; i < 10; i++ {
-		subject := fmt.Sprintf("MSGS.EEEEE.*.H.100XY.*.*.WQ.00000000000%d", i)
-		consumer := fmt.Sprintf("consumer:EEEEE:%d", i)
+		subj := fmt.Sprintf("MSGS.EEEEE.*.H.100XY.*.*.WQ.00000000000%d", i)
+		cons := fmt.Sprintf("consumer:EEEEE:%d", i)
 		for n := 0; n < 10; n++ {
-			cpnc, cpjs := jsClientConnect(t, c.randomServer())
-			defer cpnc.Close()
-
-			psub, err := cpjs.PullSubscribe(subject, consumer, mp)
-			if err != nil {
-				t.Logf("ERROR: %v", err)
-				continue
-			}
-
+			// Make clients go away due to being slow consumers.
+			// cpnc, cpjs := jsClientConnect(t, c.randomServer(), nats.ReconnectWait(40*time.Second))
 			wg.Add(1)
-			go func() {
+			go func(subject, consumer string) {
+				cpnc, cpjs := jsClientConnect(t, c.randomServer(), nats.NoReconnect())
+				// defer cpnc.Close()
+
+				psub, err := cpjs.PullSubscribe(subject, consumer, mp)
+				if err != nil {
+					t.Logf("ERROR: %v", err)
+					return
+				}
 				tick := time.NewTicker(1 * time.Millisecond)
+				mw := nats.MaxWait(1000 * time.Millisecond)
+				phb := nats.PullHeartbeat(mw / 3)
+			NextTick:
 				for {
 					select {
 					case <-ctx.Done():
 						wg.Done()
+						if !cpnc.IsClosed() {
+							cpnc.Close()
+						}
 						return
 					case <-tick.C:
-						// Fetch 1 first, then if no errors Fetch 100.
-						msgs, err := psub.Fetch(1, nats.MaxWait(200*time.Millisecond))
-						if err != nil {
-							continue
+						if cpnc.IsClosed() {
+							cpnc, cpjs = jsClientConnect(t, c.randomServer(), nats.NoReconnect())
+							psub, err = cpjs.PullSubscribe(subject, consumer, mp)
+							if err != nil {
+								t.Logf("ERROR: %v", err)
+								continue
+							}
 						}
-						for _, msg := range msgs {
-							msg.Ack()
-						}
-						msgs, err = psub.Fetch(100, nats.MaxWait(200*time.Millisecond))
-						if err != nil {
-							continue
-						}
-						for _, msg := range msgs {
-							msg.Ack()
-						}
-
-						msgs, err = psub.Fetch(1000, nats.MaxWait(200*time.Millisecond))
-						if err != nil {
-							continue
-						}
-						for _, msg := range msgs {
-							msg.Ack()
+						for _, bs := range []int{1, 5, 100, 1000} {
+							msgs, err := psub.Fetch(bs, mw, phb)
+							if err != nil {
+								continue NextTick
+							}
+							for i, msg := range msgs {
+								if missAcks && i == rand.Intn(len(msgs)) {
+									continue
+								}
+								if sleeps {
+									time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
+								}
+								msg.Ack()
+							}
 						}
 					}
 				}
-			}()
+			}(subj, cons)
 		}
 	}
 
-	time.AfterFunc(10*time.Second, func() {
-		if sc.Replicas == 1 {
-			// Find server leader of the stream and restart it.
-			leaderSrv := c.streamLeader("js", sc.Name)
-			leaderSrv.Shutdown()
-			leaderSrv.WaitForShutdown()
-			c.restartServer(leaderSrv)
-		} else {
-			// NOTE (wq): For R=3, not sure which server causes the issue here
-			// so this may be have flaky behavior.
-			s := c.servers[0]
-			s.optsMu.Lock()
-			s.opts.LameDuckDuration = 5 * time.Second
-			s.opts.LameDuckGracePeriod = -5 * time.Second
-			s.optsMu.Unlock()
-			s.lameDuckMode()
-			s.WaitForShutdown()
-			c.restartServer(s)
-			c.waitOnClusterReady()
+	// This will periodically create a new set of PullSubscribers that will be fetching messages.
+	wg.Add(1)
+	go func() {
+		tctx, cancel := context.WithTimeout(context.Background(), testDuration)
+		defer cancel()
+		for range time.NewTicker(10 * time.Second).C {
+			select {
+			case <-tctx.Done():
+				wg.Done()
+				return
+			default:
+			}
+
+			for i := 0; i < 10; i++ {
+				subject := fmt.Sprintf("MSGS.EEEEE.*.H.100XY.*.*.WQ.00000000000%d", i)
+				consumer := fmt.Sprintf("consumer:EEEEE:%d", i)
+				for n := 0; n < 1; n++ {
+					wg.Add(1)
+					go func() {
+						cpnc, cpjs := jsClientConnect(t, c.randomServer())
+						defer cpnc.Close()
+
+						psub, err := cpjs.PullSubscribe(subject, consumer, mp)
+						if err != nil {
+							t.Logf("Error: %v", err)
+							return
+						}
+						tick := time.NewTicker(1 * time.Millisecond)
+						mw := nats.MaxWait(200 * time.Millisecond)
+						phb := nats.PullHeartbeat(mw / 3)
+					NextTick:
+						for {
+							if cpnc.IsClosed() {
+								wg.Done()
+								return
+							}
+							select {
+							case <-ctx.Done():
+								wg.Done()
+								return
+							case <-tick.C:
+								for _, bs := range []int{1, 5, 100, 1000} {
+									msgs, err := psub.Fetch(bs, mw, phb)
+									if err != nil {
+										continue NextTick
+									}
+									for i, msg := range msgs {
+										if missAcks && i == rand.Intn(len(msgs)) {
+											continue
+										}
+										if sleeps {
+											time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
+										}
+										msg.Ack()
+									}
+								}
+							}
+						}
+					}()
+				}
+			}
+
 		}
-	})
+	}()
+
+	checkOverflow := func(t *testing.T) bool {
+		for i := 0; i < 10; i++ {
+			ci, err := js.ConsumerInfo(sc.Name, fmt.Sprintf("consumer:EEEEE:%d", i))
+			if err != nil {
+				t.Logf("Error: %v", err)
+				continue
+			}
+			var limit uint64 = math.MaxUint64 - 1_000_000
+			if ci.Delivered.Stream > limit || ci.Delivered.Consumer > limit {
+				t.Errorf("Unexpected overflow in delivered: %d, %d", ci.Delivered.Stream, ci.Delivered.Consumer)
+				return true
+			}
+			if ci.AckFloor.Stream > limit || ci.AckFloor.Consumer > limit {
+				t.Errorf("Unexpected overflow in delivered: %d, %d", ci.Delivered.Stream, ci.Delivered.Consumer)
+				return true
+			}
+		}
+		return false
+	}
+
+	if inflightRestart {
+		for i := 0; i < restarts; i++ {
+			clusterReady := make(chan struct{}, 0)
+			time.AfterFunc(10*time.Second, func() {
+				if sc.Replicas == 1 {
+					// Find server leader of the stream and restart it.
+					leaderSrv := c.streamLeader("js", sc.Name)
+					leaderSrv.Shutdown()
+					leaderSrv.WaitForShutdown()
+					c.restartServer(leaderSrv)
+					// c.waitOnClusterReady()
+				} else {
+					// NOTE (wq): For R=3, not sure which server causes the issue here
+					// so this may be have flaky behavior.
+					s := c.servers[0]
+					s.optsMu.Lock()
+					s.opts.LameDuckDuration = 15 * time.Second
+					s.opts.LameDuckGracePeriod = -15 * time.Second
+					s.optsMu.Unlock()
+					s.lameDuckMode()
+					s.WaitForShutdown()
+					c.restartServer(s)
+					c.waitOnClusterReady()
+				}
+
+				// for j := 0; j < 10; j++ {
+				// 	checkOverflow(t)
+				// 	time.Sleep(1 * time.Second)
+				// }
+				// Leave running for a bit more before the next restart.
+				// time.Sleep(5 * time.Second)
+
+				clusterReady <- struct{}{}
+			})
+
+			select {
+			case <-clusterReady:
+			case <-time.After(1 * time.Minute):
+				t.Logf("WARN: Cluster was not ready before checking state")
+			}
+			checkOverflow(t)
+		}
+	}
 
 	// Wait until context is done then check state.
 	<-ctx.Done()
+
+	// Check state of streams and consumers.
+	si, err := js.StreamInfo(sc.Name)
+	require_NoError(t, err)
 
 	var consumerPending int
 	for i := 0; i < 10; i++ {
 		ci, err := js.ConsumerInfo(sc.Name, fmt.Sprintf("consumer:EEEEE:%d", i))
 		require_NoError(t, err)
 		consumerPending += int(ci.NumPending)
-	}
 
-	// Check state of streams and consumers.
-	si, err := js.StreamInfo(sc.Name)
-	require_NoError(t, err)
+		// Check that it has not accidentally overflown
+		var limit uint64 = math.MaxUint64 - 1_000_000
+		if ci.Delivered.Stream > limit || ci.Delivered.Consumer > limit {
+			t.Errorf("Unexpected overflow in delivered: %d, %d", ci.Delivered.Stream, ci.Delivered.Consumer)
+		}
+		if ci.AckFloor.Stream > limit || ci.AckFloor.Consumer > limit {
+			t.Errorf("Unexpected overflow in delivered: %d, %d", ci.Delivered.Stream, ci.Delivered.Consumer)
+		}
+	}
 
 	streamPending := int(si.State.Msgs)
 	if streamPending != consumerPending {
-		t.Fatalf("Unexpected number of pending messages, stream=%d, consumers=%d", streamPending, consumerPending)
+		t.Errorf("Unexpected number of pending messages, stream=%d, consumers=%d", streamPending, consumerPending)
 	}
+
+	wg.Wait()
 }
