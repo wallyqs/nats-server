@@ -23415,10 +23415,32 @@ func TestJetStreamDirectGetMultiPaging(t *testing.T) {
 }
 
 func TestPushConsumerNumPendingDeliverLastPerSubject(t *testing.T) {
-	s := RunBasicJetStreamServer(t)
-	defer s.Shutdown()
+	conf := `
+	listen: 127.0.0.1:-1
+	server_name: %s
+	jetstream: {
+		store_dir: '%s',
+	}
+	http: 127.0.0.1:-1
+	cluster {
+		name: %s
+		listen: 127.0.0.1:%d
+		routes = [%s]
+	}
+	server_tags: ["test"]
+	system_account: sys
+	no_auth_user: js
+	accounts {
+		sys { users = [ { user: sys, pass: sys } ] }
+		js {
+			jetstream = enabled
+			users = [ { user: js, pass: js } ]
+	    }
+	}`
+	c := createJetStreamClusterWithTemplate(t, conf, "LS", 3)
+	defer c.shutdown()
 
-	nc, js := jsClientConnect(t, s)
+	nc, js := jsClientConnect(t, c.randomServer())
 	defer nc.Close()
 
 	_, err := js.AddStream(&nats.StreamConfig{
@@ -23437,17 +23459,43 @@ func TestPushConsumerNumPendingDeliverLastPerSubject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	fmt.Printf("Stream info: %+v\n", si)
-
-	c, err := js.AddConsumer("TEST_STREAM", &nats.ConsumerConfig{
-		Name:           "TEST_CONSUMER",
-		FilterSubject:  "\"wrongsub.>\"",
-		DeliverPolicy:  nats.DeliverLastPerSubjectPolicy,
-		DeliverSubject: nats.NewInbox(),
-	})
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
+	if si.State.Msgs != 10 {
+		t.Errorf("Unexpected number of messages: %v", si.State.Msgs)
 	}
 
-	fmt.Printf("Info: %+v\n", c)
+	// Filter with a wildcard.
+	subjects := []string{"invalid", `"invalid.>"`, "invalid.>", `_`, `"invalid.*"`, `*`, `invalid.*`, `'invalid.>'`, `"invalid.*.>"`}
+	for i, subject := range subjects {
+		t.Run(subject, func(t *testing.T) {
+			cname := fmt.Sprintf("A%d", i)
+			cinfo, err := js.AddConsumer("TEST_STREAM", &nats.ConsumerConfig{
+				Name:          cname,
+				Durable:       cname,
+				FilterSubject: subject,
+				DeliverPolicy: nats.DeliverLastPerSubjectPolicy,
+			})
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+			if cinfo.NumPending > 0 {
+				t.Errorf("Invalid state for consumer, num pending is %d with no matching filters", cinfo.NumPending)
+			}
+			psub, err := js.PullSubscribe(subject, cname, nats.Bind("TEST_STREAM", cname))
+			if err != nil && !errors.Is(err, nats.ErrTimeout) {
+				t.Errorf("Unexpected error: %v", err)
+			}
+			if _, err := psub.Fetch(1, nats.MaxWait(200*time.Millisecond)); err == nil {
+				t.Errorf("Unexpected success")
+			}
+
+			// Check if consumer info now fixes changes the num pending.
+			cinfo, err = psub.ConsumerInfo()
+			if err != nil {
+				t.Errorf("Unexpected error %v", err)
+			}
+			if cinfo.NumPending > 0 {
+				t.Errorf("Invalid state for consumer, num pending is %d with no matching filters", cinfo.NumPending)
+			}
+		})
+	}
 }
