@@ -2979,12 +2979,26 @@ func (n *raft) runAsCandidate() {
 // handleAppendEntry handles an append entry from the wire. This function
 // is an internal callback from the "asubj" append entry subscription.
 func (n *raft) handleAppendEntry(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
+	start := time.Now()
+	deadline := 1 * time.Second
+	defer func() {
+		if took := time.Since(start); took > deadline {
+			fmt.Println("APPEND ENTRY TOOK", took)
+		}
+	}()
 	msg = copyBytes(msg)
 	if ae, err := n.decodeAppendEntry(msg, sub, reply); err == nil {
+		if took := time.Since(start); took > deadline {
+			fmt.Println("DECODE APPEND ENTRY TOOK", took, len(msg), subject, reply)
+		}
+
 		// Push to the new entry channel. From here one of the worker
 		// goroutines (runAsLeader, runAsFollower, runAsCandidate) will
 		// pick it up.
 		n.entry.push(ae)
+		if took := time.Since(start); took > deadline {
+			fmt.Println("APPEND ENTRY PUSH TOOK", took)
+		}
 	} else {
 		n.warn("AppendEntry failed to be placed on internal channel: corrupt entry")
 	}

@@ -28,9 +28,11 @@ import (
 	"hash"
 	"io"
 	"math"
+	mrand "math/rand"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -1513,7 +1515,18 @@ func trackingStatesEqual(fs, mb *StreamState) bool {
 // recoverFullState will attempt to receover our last full state and re-process any state changes
 // that happened afterwards.
 func (fs *fileStore) recoverFullState() (rerr error) {
+	start := time.Now()
+	defer func() {
+		if took := time.Since(start); took > 5*time.Millisecond {
+			fmt.Println("RECOVER FULL STATE TOOK", took)
+		}
+	}()
+
 	fs.mu.Lock()
+	if took := time.Since(start); took > 5*time.Millisecond {
+		fmt.Println("RECOVER FULL STATE LOCK", took)
+	}
+
 	defer fs.mu.Unlock()
 
 	// Check for any left over purged messages.
@@ -1524,7 +1537,14 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 	}
 	// Grab our stream state file and load it in.
 	fn := filepath.Join(fs.fcfg.StoreDir, msgDir, streamStreamStateFile)
+
+	if took := time.Since(start); took > 5*time.Millisecond {
+		fmt.Println("RECOVER FULL STATE DIOS AND STATE TOOK", took)
+	}
 	buf, err := os.ReadFile(fn)
+	if took := time.Since(start); took > 5*time.Millisecond {
+		fmt.Println("RECOVER FULL STATE READ FILE", took)
+	}
 	dios <- struct{}{}
 
 	if err != nil {
@@ -1546,6 +1566,11 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 	buf = buf[:len(buf)-highwayhash.Size64]
 	fs.hh.Reset()
 	fs.hh.Write(buf)
+
+	if took := time.Since(start); took > 5*time.Millisecond {
+		fmt.Println("RECOVER FULL STATE WRITE HH", took)
+	}
+
 	if !bytes.Equal(h, fs.hh.Sum(nil)) {
 		os.Remove(fn)
 		fs.warn("Stream state checksum did not match")
@@ -1632,6 +1657,7 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 				subj := buf[bi : bi+lsubj]
 				// We had a bug that could cause memory corruption in the PSIM that could have gotten stored to disk.
 				// Only would affect subjects, so do quick check.
+				// subject := string(subj)
 				if !isValidSubject(string(subj), true) {
 					os.Remove(fn)
 					fs.warn("Stream state corrupt subject detected")
@@ -1748,7 +1774,7 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 		// We check first and last seq and number of msgs and bytes. If there is a difference,
 		// return and error so we rebuild from the message block state on disk.
 		if !trackingStatesEqual(&fs.state, &mstate) {
-			fs.warn("Stream state encountered internal inconsistency on recover")
+			fs.warn(fmt.Sprintf("Stream state encountered internal inconsistency on recover: %+v || %+v", fs.state, mstate))
 			os.Remove(fn)
 			return errCorruptState
 		}
@@ -1756,6 +1782,9 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 	}
 
 	// We may need to check other blocks. Even if we matched last checksum we will see if there is another block.
+	if took := time.Since(start); took > 5*time.Millisecond {
+		fmt.Println("RECOVER FULL STATE UP TO BLOCK RECOVERY", took)
+	}
 	for bi := blkIndex + 1; ; bi++ {
 		nmb, err := fs.recoverMsgBlock(bi)
 		if err != nil {
@@ -1781,6 +1810,9 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 			updateTrackingState(&mstate, nmb)
 		}
 	}
+	buf = nil
+
+	return
 }
 
 // adjustAccounting will be called when a stream state was only partially accounted for
@@ -5201,7 +5233,19 @@ func (mb *msgBlock) ensureRawBytesLoaded() error {
 
 // Sync msg and index files as needed. This is called from a timer.
 func (fs *fileStore) syncBlocks() {
+	start := time.Now()
+	deadline := time.Second
+	defer func() {
+		if took := time.Since(start); took > deadline {
+			fmt.Println("SYNC BLOCKS TOOK", took)
+		}
+	}()
+
+	// NOTE: Getting the stream lock was most of the time wasted.
 	fs.mu.RLock()
+	if took := time.Since(start); took > deadline {
+		fmt.Println("SYNC BLOCKS LOCK", took)
+	}
 	if fs.closed {
 		fs.mu.RUnlock()
 		return
@@ -5283,8 +5327,14 @@ func (fs *fileStore) syncBlocks() {
 			mb.mu.Unlock()
 		}
 	}
+	if took := time.Since(start); took > deadline {
+		fmt.Println("SYNC BLOCKS MSG BLOCKS", took)
+	}
 
 	fs.mu.Lock()
+	if took := time.Since(start); took > deadline {
+		fmt.Println("SYNC BLOCKS FS LOCK", took)
+	}
 	if fs.closed {
 		fs.mu.Unlock()
 		return
@@ -5293,16 +5343,35 @@ func (fs *fileStore) syncBlocks() {
 	if markDirty {
 		fs.dirty++
 	}
+	// fs.mu.Unlock()
 
 	// Sync state file if we are not running with sync always.
+	if took := time.Since(start); took > deadline {
+		fmt.Println("SYNC BLOCK PREV DIOS", took)
+	}
+
 	if !fs.fcfg.SyncAlways {
 		fn := filepath.Join(fs.fcfg.StoreDir, msgDir, streamStreamStateFile)
 		<-dios
+		if took := time.Since(start); took > deadline {
+			fmt.Println("SYNC BLOCKS DIOS", took)
+		}
 		fd, _ := os.OpenFile(fn, os.O_RDWR, defaultFilePerms)
+		if took := time.Since(start); took > deadline {
+			fmt.Println("SYNC BLOCKS DIOS OPEN", took)
+		}
+
 		dios <- struct{}{}
 		if fd != nil {
 			fd.Sync()
+			if took := time.Since(start); took > deadline {
+				fmt.Println("SYNC BLOCKS FS SYNC", took)
+			}
+
 			fd.Close()
+			if took := time.Since(start); took > deadline {
+				fmt.Println("SYNC BLOCKS CLOSE", took)
+			}
 		}
 	}
 	fs.mu.Unlock()
@@ -6334,7 +6403,18 @@ func (fs *fileStore) numConsumers() int {
 // FastState will fill in state with only the following.
 // Msgs, Bytes, First and Last Sequence and Time and NumDeleted.
 func (fs *fileStore) FastState(state *StreamState) {
+	start := time.Now()
+	deadline := 1 * time.Second
+	defer func() {
+		if took := time.Since(start); took > deadline {
+			fmt.Println("FAST STATE TOOK", took)
+		}
+	}()
+
 	fs.mu.RLock()
+	if took := time.Since(start); took > deadline {
+		fmt.Println("FAST STATE LOCK TOOK", took)
+	}
 	state.Msgs = fs.state.Msgs
 	state.Bytes = fs.state.Bytes
 	state.FirstSeq = fs.state.FirstSeq
@@ -6350,16 +6430,42 @@ func (fs *fileStore) FastState(state *StreamState) {
 		}
 	}
 	state.Consumers = fs.numConsumers()
+	if took := time.Since(start); took > deadline {
+		fmt.Println("FAST STATE NUM CONSUMERS TOOK", took)
+	}
+
 	state.NumSubjects = fs.numSubjects()
+	if took := time.Since(start); took > deadline {
+		fmt.Println("FAST STATE NUM SUBJECTS TOOK", took)
+	}
+
 	fs.mu.RUnlock()
 }
 
 // State returns the current state of the stream.
 func (fs *fileStore) State() StreamState {
+	start := time.Now()
+	deadline := 1 * time.Second
+	defer func() {
+		if took := time.Since(start); took > deadline {
+			fmt.Println("STATE TOOK", took)
+		}
+	}()
 	fs.mu.RLock()
+	if took := time.Since(start); took > deadline {
+		fmt.Println("STATE FS LOCK TOOK", took)
+	}
 	state := fs.state
 	state.Consumers = fs.numConsumers()
+	if took := time.Since(start); took > deadline {
+		fmt.Println("STATE FS NUM CONSUMERS TOOK", took)
+	}
+
 	state.NumSubjects = fs.numSubjects()
+	if took := time.Since(start); took > deadline {
+		fmt.Println("STATE FS NUM SUBJECTS TOOK", took)
+	}
+
 	state.Deleted = nil // make sure.
 
 	if numDeleted := int((state.LastSeq - state.FirstSeq + 1) - state.Msgs); numDeleted > 0 {
@@ -7658,7 +7764,19 @@ func timestampNormalized(t time.Time) int64 {
 // 3. MBs - Index, Bytes, First and Last Sequence and Timestamps, and the deleted map (avl.seqset).
 // 4. Last block index and hash of record inclusive to this stream state.
 func (fs *fileStore) writeFullState() error {
+	id := mrand.Intn(1000)
+	start := time.Now()
+	deadline := time.Second
+	defer func() {
+		if took := time.Since(start); took > deadline {
+			debug.PrintStack()
+			fmt.Println(id, "WRITE FULL STATE TOOK", took)
+		}
+	}()
 	fs.mu.Lock()
+	if took := time.Since(start); took > deadline {
+		fmt.Println(id, "WRITE FULL STATE LOCK", took)
+	}
 	if fs.closed || fs.dirty == 0 {
 		fs.mu.Unlock()
 		return nil
@@ -7715,6 +7833,9 @@ func (fs *fileStore) writeFullState() error {
 			}
 		})
 	}
+	if took := time.Since(start); took > deadline {
+		fmt.Println("WRITE FULL STATE MATCH", took)
+	}
 
 	// Now walk all blocks and write out first and last and optional dmap encoding.
 	var lbi uint32
@@ -7731,6 +7852,7 @@ func (fs *fileStore) writeFullState() error {
 	var mstate StreamState
 
 	var dmapTotalLen int
+	blockstart := time.Now()
 	for _, mb := range fs.blks {
 		mb.mu.RLock()
 		buf = binary.AppendUvarint(buf, uint64(mb.index))
@@ -7757,6 +7879,10 @@ func (fs *fileStore) writeFullState() error {
 		updateTrackingState(&mstate, mb)
 		mb.mu.RUnlock()
 	}
+	if took := time.Since(start); took > deadline {
+		fmt.Println(id, "WRITE FULL STATE BLOCK READ", took, time.Since(blockstart))
+	}
+
 	if dmapTotalLen > 0 {
 		fs.adml = dmapTotalLen / len(fs.blks)
 	}
@@ -7795,7 +7921,7 @@ func (fs *fileStore) writeFullState() error {
 
 	// Check consistency here.
 	if !statesEqual {
-		fs.warn("Stream state encountered internal inconsistency on write")
+		fs.warn("Stream state encountered internal inconsistency on write", trackingStatesEqual(&fs.state, &mstate), len(fs.blks) > 0, fs.state, mstate)
 		// Rebuild our fs state from the mb state.
 		fs.rebuildState(nil)
 		// Make sure to reprocess.
@@ -7807,24 +7933,49 @@ func (fs *fileStore) writeFullState() error {
 		fs.debug("WriteFullState reallocated from %d to %d", sz, cap(buf))
 	}
 
+	iostart := time.Now()
+	<-dios
+
+	if took := time.Since(iostart); took > deadline {
+		fmt.Println(id, "WRITE FULL STATE UNLOCKED IO PARTS TOOK - dios", took)
+	}
+
 	// Write to a tmp file and rename.
 	const tmpPre = streamStreamStateFile + tsep
 	f, err := os.CreateTemp(filepath.Join(fs.fcfg.StoreDir, msgDir), tmpPre)
 	if err != nil {
 		return err
 	}
+	if took := time.Since(iostart); took > deadline {
+		fmt.Println(id, "WRITE FULL STATE UNLOCKED IO PARTS TOOK - create temp", took)
+	}
+
 	tmpName := f.Name()
 	defer os.Remove(tmpName)
 	if _, err = f.Write(buf); err == nil && fs.fcfg.SyncAlways {
 		f.Sync()
 	}
+	if took := time.Since(iostart); took > deadline {
+		fmt.Println(id, "WRITE FULL STATE UNLOCKED IO PARTS TOOK - write", took)
+	}
+
 	f.Close()
+	dios <- struct{}{}
+
 	if err != nil {
 		return err
 	}
+	if took := time.Since(iostart); took > deadline {
+		fmt.Println(id, "WRITE FULL STATE UNLOCKED IO PARTS TOOK ", took)
+	}
 
-	// Rename into position under our lock, clear prior dirty pending on success.
+	// rename into position under our lock, clear prior dirty pending on success.
+	lock2 := time.Now()
 	fs.mu.Lock()
+	if took := time.Since(start); took > deadline {
+		fmt.Println(id, "WRITE FULL STATE LOCK2", took, time.Since(lock2))
+	}
+
 	if !fs.closed {
 		if err := os.Rename(tmpName, fn); err != nil {
 			fs.mu.Unlock()

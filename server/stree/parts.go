@@ -15,6 +15,8 @@ package stree
 
 import (
 	"bytes"
+	"fmt"
+	"time"
 )
 
 // genParts will break a filter subject up into parts.
@@ -73,6 +75,12 @@ func genParts(filter []byte, parts [][]byte) [][]byte {
 
 // Match our parts against a fragment, which could be prefix for nodes or a suffix for leafs.
 func matchParts(parts [][]byte, frag []byte) ([][]byte, bool) {
+	start := time.Now()
+	defer func() {
+		if took := time.Since(start); took > 1*time.Millisecond {
+			fmt.Println(took, "STREE MATCH!!!!")
+		}
+	}()
 	lf := len(frag)
 	if lf == 0 {
 		return parts, true

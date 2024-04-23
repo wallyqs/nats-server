@@ -27,13 +27,15 @@ type leaf[T any] struct {
 }
 
 func newLeaf[T any](suffix []byte, value T) *leaf[T] {
-	return &leaf[T]{copyBytes(suffix), value}
+	// return &leaf[T]{copyBytes(suffix), value}
+	return &leaf[T]{suffix, value}
 }
 
 func (n *leaf[T]) isLeaf() bool                               { return true }
 func (n *leaf[T]) base() *meta                                { return nil }
 func (n *leaf[T]) match(subject []byte) bool                  { return bytes.Equal(subject, n.suffix) }
-func (n *leaf[T]) setSuffix(suffix []byte)                    { n.suffix = copyBytes(suffix) }
+// func (n *leaf[T]) setSuffix(suffix []byte)                    { n.suffix = copyBytes(suffix) }
+func (n *leaf[T]) setSuffix(suffix []byte)                    { n.suffix = suffix }
 func (n *leaf[T]) isFull() bool                               { return true }
 func (n *leaf[T]) matchParts(parts [][]byte) ([][]byte, bool) { return matchParts(parts, n.suffix) }
 func (n *leaf[T]) iter(f func(node) bool)                     {}

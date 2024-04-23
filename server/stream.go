@@ -1113,9 +1113,9 @@ func (mset *stream) sendUpdateAdvisoryLocked() {
 
 // Created returns created time.
 func (mset *stream) createdTime() time.Time {
-	mset.mu.RLock()
+	// mset.mu.RLock()
 	created := mset.created
-	mset.mu.RUnlock()
+	// mset.mu.RUnlock()
 	return created
 }
 
@@ -1546,8 +1546,8 @@ func (s *Server) checkStreamCfg(config *StreamConfig, acc *Account) (StreamConfi
 
 // Config returns the stream's configuration.
 func (mset *stream) config() StreamConfig {
-	mset.mu.RLock()
-	defer mset.mu.RUnlock()
+	// mset.mu.RLock()
+	// defer mset.mu.RUnlock()
 	return mset.cfg
 }
 
@@ -4382,6 +4382,13 @@ var (
 
 // processJetStreamMsg is where we try to actually process the stream msg.
 func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, lseq uint64, ts int64, mt *msgTrace) (retErr error) {
+	start := time.Now()
+	deadline := 1*time.Second
+	defer func() {
+		if took := time.Since(start); took > deadline {
+			fmt.Println("PROCESS JS MSG TOOK", took, subject, reply)
+		}
+	}()
 	if mt != nil {
 		// Only the leader/standalone will have mt!=nil. On exit, send the
 		// message trace event.
@@ -4393,8 +4400,16 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	if mset.closed.Load() {
 		return errStreamClosed
 	}
+	if took := time.Since(start); took > deadline {
+		fmt.Println("       A1", took, subject, reply)
+	}
 
 	mset.mu.Lock()
+
+	if took := time.Since(start); took > deadline {
+		fmt.Println("       A2", took, subject, reply)
+	}
+
 	s, store := mset.srv, mset.store
 
 	traceOnly := mt.traceOnly()
@@ -4416,6 +4431,9 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 			subject = ts
 		}
 	}
+	if took := time.Since(start); took > deadline {
+		fmt.Println("       A3", took, subject, reply)
+	}
 
 	var accName string
 	if mset.acc != nil {
@@ -4430,6 +4448,10 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	// Snapshot if we are the leader and if we can respond.
 	isLeader, isSealed := mset.isLeader(), mset.cfg.Sealed
 	canRespond := doAck && len(reply) > 0 && isLeader
+
+	if took := time.Since(start); took > deadline {
+		fmt.Println("       A4", took, subject, reply)
+	}
 
 	var resp = &JSPubAckResponse{}
 
@@ -4456,6 +4478,10 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		return nil
 	}
 
+	if took := time.Since(start); took > deadline {
+		fmt.Println("       A5", took, subject, reply)
+	}
+
 	// For clustering the lower layers will pass our expected lseq. If it is present check for that here.
 	if lseq > 0 && lseq != (mset.lseq+mset.clfs) {
 		isMisMatch := true
@@ -4470,6 +4496,11 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 				isMisMatch = false
 			}
 		}
+
+		if took := time.Since(start); took > deadline {
+			fmt.Println("       A6", took, subject, reply)
+		}
+
 		// Really is a mismatch.
 		if isMisMatch {
 			outq := mset.outq
@@ -4656,6 +4687,10 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		return ErrMaxPayload
 	}
 
+	if took := time.Since(start); took > deadline {
+		fmt.Println("       A7", took, subject, reply)
+	}
+
 	// Check to see if we have exceeded our limits.
 	if js.limitsExceeded(stype) {
 		s.resourcesExceededError()
@@ -4672,6 +4707,10 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 			node.StepDown()
 		}
 		return NewJSInsufficientResourcesError()
+	}
+
+	if took := time.Since(start); took > deadline {
+		fmt.Println("       A8", took, subject, reply)
 	}
 
 	var noInterest bool
@@ -4700,6 +4739,11 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	}
 
 	mt.updateJetStreamEvent(subject, noInterest)
+
+	if took := time.Since(start); took > deadline {
+		fmt.Println("       A9", took, subject, reply)
+	}
+
 	if traceOnly {
 		mset.mu.Unlock()
 		return nil
@@ -4766,9 +4810,18 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		}
 	}
 
+	if took := time.Since(start); took > deadline {
+		fmt.Println("       A10", took, subject, reply)
+	}
+
 	// Store actual msg.
 	if lseq == 0 && ts == 0 {
 		seq, ts, err = store.StoreMsg(subject, hdr, msg)
+
+		if took := time.Since(start); took > deadline {
+			fmt.Println("       A11", took, subject, reply)
+		}
+
 	} else {
 		// Make sure to take into account any message assignments that we had to skip (clfs).
 		seq = lseq + 1 - clfs
@@ -4779,12 +4832,25 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		} else {
 			err = store.StoreRawMsg(subject, hdr, msg, seq, ts)
 		}
+
+		if took := time.Since(start); took > deadline {
+			fmt.Println("       A12", took, subject, reply)
+		}
+	}
+
+	if took := time.Since(start); took > deadline {
+		fmt.Println("       A13", took, subject, reply)
 	}
 
 	if err != nil {
 		// If we did not succeed put those values back and increment clfs in case we are clustered.
 		var state StreamState
 		mset.store.FastState(&state)
+
+		if took := time.Since(start); took > deadline {
+			fmt.Println("       A14", took, subject, reply)
+		}
+
 		mset.lseq = state.LastSeq
 		mset.lmsgId = olmsgId
 		mset.mu.Unlock()
@@ -4830,6 +4896,10 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		mset.purge(&JSApiStreamPurgeRequest{Subject: subject, Keep: 1})
 	} else if rollupAll {
 		mset.purge(&JSApiStreamPurgeRequest{Keep: 1})
+	}
+
+	if took := time.Since(start); took > deadline {
+		fmt.Println("       A15", took, subject, reply)
 	}
 
 	// Check for republish.
@@ -5700,6 +5770,12 @@ func (mset *stream) state() StreamState {
 }
 
 func (mset *stream) stateWithDetail(details bool) StreamState {
+	start := time.Now()
+	defer func() {
+		if took := time.Since(start); took > 10*time.Millisecond {
+			fmt.Println("STATE WITH DETAIL TOOK ", details, took)
+		}
+	}()
 	// mset.store does not change once set, so ok to reference here directly.
 	// We do this elsewhere as well.
 	store := mset.store

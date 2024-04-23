@@ -1809,16 +1809,25 @@ func (s *Server) jsStreamListRequest(sub *subscription, c *client, _ *Account, s
 
 // Request for information about a stream.
 func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, subject, reply string, rmsg []byte) {
+	start := time.Now()
+	deadline := 1 * time.Second
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
+
+	if took := time.Since(start); took > deadline {
+		fmt.Println(took, "REQUEST INFO", subject)
+	}
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
 		return
 	}
 
 	streamName := streamNameFromSubject(subject)
+	if took := time.Since(start); took > deadline {
+		fmt.Println(took, "STREAM NAME FOR SUBJECT")
+	}
 
 	var resp = JSApiStreamInfoResponse{ApiResponse: ApiResponse{Type: JSApiStreamInfoResponseType}}
 
@@ -1834,10 +1843,18 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 	if js == nil {
 		return
 	}
+
+	if took := time.Since(start); took > deadline {
+		fmt.Println(took, "GET JETSTREAM CLUSTER", subject)
+	}
+
 	// If we are in clustered mode we need to be the stream leader to proceed.
 	if cc != nil {
 		// Check to make sure the stream is assigned.
 		js.mu.RLock()
+		if took := time.Since(start); took > deadline {
+			fmt.Println(took, "GOT JS MU RLOCK", subject)
+		}
 		isLeader, sa := cc.isLeader(), js.streamAssignment(acc.Name, streamName)
 		var offline bool
 		if sa != nil {
@@ -1931,6 +1948,9 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 	}
 
 	mset, err := acc.lookupStream(streamName)
+	if took := time.Since(start); took > deadline {
+		fmt.Println(took, "STREAM LOOKUP")
+	}
 	// Error is not to be expected at this point, but could happen if same stream trying to be created.
 	if err != nil {
 		if cc != nil {
@@ -1938,6 +1958,9 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 			// This will not be inline, so ok.
 			time.Sleep(10 * time.Millisecond)
 			mset, err = acc.lookupStream(streamName)
+			if took := time.Since(start); took > deadline {
+				fmt.Println(took, "STREAM RELOOKUP", subject)
+			}
 		}
 		// Check again.
 		if err != nil {
@@ -1948,18 +1971,61 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 	}
 
 	config := mset.config()
+	if took := time.Since(start); took > deadline {
+		fmt.Println(took, "STREAM CONFIG", subject)
+	}
+
+	aa := mset.createdTime()
+	if took := time.Since(start); took > deadline {
+		fmt.Println(took, "STREAM CREATED TIME", subject)
+	}
+
+	b := mset.stateWithDetail(details)
+	if took := time.Since(start); took > deadline {
+		fmt.Println(took, "STATE WITH DETAIL", subject)
+	}
+
+	c0 := mset.raftGroup()
+	if took := time.Since(start); took > deadline {
+		fmt.Println(took, "RAFT GROUP", subject)
+	}
+
+	// Up to 17 seconds
+	ccc := js.clusterInfo(c0)
+	if took := time.Since(start); took > deadline {
+		fmt.Println(took, "CLUSTER INFO", subject)
+	}
+
+	// d := mset.mirrorInfo()
+	// if took := time.Since(start); took > deadline {
+	// 	fmt.Println(took, "MIRROR INFO", subject)
+	// }
+
+	// e := mset.sourcesInfo()
+	// if took := time.Since(start); took > deadline {
+	// 	fmt.Println(took, "SOURCES INFO", subject)
+	// }
+
+	// f := js.streamAlternates(ci, config.Name)
+	// if took := time.Since(start); took > deadline {
+	// 	fmt.Println(took, "STREAM ALTERNATES", subject)
+	// }
 
 	resp.StreamInfo = &StreamInfo{
-		Created:    mset.createdTime(),
-		State:      mset.stateWithDetail(details),
+		Created:    aa,
+		State:      b,
 		Config:     config,
 		Domain:     s.getOpts().JetStreamDomain,
-		Cluster:    js.clusterInfo(mset.raftGroup()),
-		Mirror:     mset.mirrorInfo(),
-		Sources:    mset.sourcesInfo(),
-		Alternates: js.streamAlternates(ci, config.Name),
+		Cluster:    ccc,
+		// Mirror:     d,
+		// Sources:    e,
+		// Alternates: f,
 		TimeStamp:  time.Now().UTC(),
 	}
+	if took := time.Since(start); took > deadline {
+		fmt.Println(took, "STREAM INFO VALUES", subject)
+	}
+
 	if clusterWideConsCount > 0 {
 		resp.StreamInfo.State.Consumers = clusterWideConsCount
 	}
@@ -2007,7 +2073,9 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 	}
 	// Check for out of band catchups.
 	if mset.hasCatchupPeers() {
+		fmt.Println(time.Since(start), "OUT OF BAND CATCHUPS")
 		mset.checkClusterInfo(resp.StreamInfo.Cluster)
+		fmt.Println(time.Since(start), "FINAL CLUSTER INFO")
 	}
 
 	s.sendAPIResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(resp))
