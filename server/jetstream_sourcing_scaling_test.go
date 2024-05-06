@@ -244,7 +244,7 @@ func TestStreamSourcingScalingSourcingMany(t *testing.T) {
 // This test is being skipped by CI as it takes too long to run and is meant to test the scalability of sourcing
 // rather than being a unit test.
 func TestStreamSourcingScalingSourcingManyBenchmark(t *testing.T) {
-	t.Skip()
+	// t.Skip()
 
 	var numSourced = 500
 	var numMsgPerSource = uint64(10_000)
@@ -253,7 +253,31 @@ func TestStreamSourcingScalingSourcingManyBenchmark(t *testing.T) {
 
 	var err error
 
-	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	// c := createJetStreamClusterExplicit(t, "R3S", 3)
+	conf := `
+		listen: 127.0.0.1:-1
+		server_name: %s
+		jetstream: {
+			store_dir: '%s',
+		}
+		cluster {
+			name: %s
+			listen: 127.0.0.1:%d
+			routes = [%s]
+		}
+		server_tags: ["test"]
+		system_account: sys
+		no_auth_user: js
+		accounts {
+			sys { users = [ { user: sys, pass: sys } ] }
+			js {
+				jetstream = enabled
+				users = [ { user: js, pass: js } ]
+		    }
+		}`
+	c := createJetStreamClusterWithTemplate(t, conf, "R3S", 3)
+	defer c.shutdown()
+
 	defer c.shutdown()
 	s := c.randomServer()
 	urls := s.clientConnectURLs
@@ -344,10 +368,12 @@ func TestStreamSourcingScalingSourcingManyBenchmark(t *testing.T) {
 		MirrorDirect:         false,
 		DiscardNewPerSubject: false,
 	})
+	accountName := "js"
 	require_NoError(t, err)
-
-	sl := c.streamLeader(globalAccountName, "sourcing")
-	mset, err := sl.GlobalAccount().lookupStream("sourcing")
+	sl := c.streamLeader(accountName, "sourcing")
+	acc, err := sl.LookupAccount("js")
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("sourcing")
 	require_NoError(t, err)
 
 	start := time.Now()
@@ -375,9 +401,11 @@ func TestStreamSourcingScalingSourcingManyBenchmark(t *testing.T) {
 				mset.node.StepDown()
 				steppedDown = true
 				// Need to repull our data.
-				c.waitOnStreamLeader(globalAccountName, "sourcing")
-				sl = c.streamLeader(globalAccountName, "sourcing")
-				mset, err = sl.GlobalAccount().lookupStream("sourcing")
+				c.waitOnStreamLeader(accountName, "sourcing")
+				sl = c.streamLeader(accountName, "sourcing")
+				acc, err := sl.LookupAccount("js")
+				require_NoError(t, err)
+				mset, err = acc.lookupStream("sourcing")
 				require_NoError(t, err)
 			}
 			return fmt.Errorf("Expected %d messages, got %d", numMsgPerSource*uint64(numSourced), state.Msgs)
@@ -386,4 +414,5 @@ func TestStreamSourcingScalingSourcingManyBenchmark(t *testing.T) {
 			return fmt.Errorf("Too many messages: expected %d (retries=%d), got %d", numMsgPerSource*uint64(numSourced), retries, state.Msgs)
 		}
 	})
+	select {}
 }
