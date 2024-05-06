@@ -572,11 +572,19 @@ func (fs *fileStore) UpdateConfig(cfg *StreamConfig) error {
 	}
 
 	fs.mu.Lock()
+	if took := time.Since(start); took > time.Minute {
+		fs.warn("UpdateConfig::Lock took %v", took.Round(time.Millisecond))
+	}
+
 	new_cfg := FileStreamInfo{Created: fs.cfg.Created, StreamConfig: *cfg}
 	old_cfg := fs.cfg
 	// The reference story has changed here, so this full msg block lock
 	// may not be needed.
 	fs.lockAllMsgBlocks()
+	if took := time.Since(start); took > time.Minute {
+		fs.warn("UpdateConfig::LockAll took %v", took.Round(time.Millisecond))
+	}
+
 	fs.cfg = new_cfg
 	fs.unlockAllMsgBlocks()
 	if err := fs.writeStreamMeta(); err != nil {
@@ -586,18 +594,31 @@ func (fs *fileStore) UpdateConfig(cfg *StreamConfig) error {
 		fs.mu.Unlock()
 		return err
 	}
+	if took := time.Since(start); took > time.Minute {
+		fs.warn("UpdateConfig::WriteStream took %v", took.Round(time.Millisecond))
+	}
 
 	// Limits checks and enforcement.
 	fs.enforceMsgLimit()
 	fs.enforceBytesLimit()
+	if took := time.Since(start); took > time.Minute {
+		fs.warn("UpdateConfig::enforce took %v", took.Round(time.Millisecond))
+	}
 
 	// Do age timers.
 	if fs.ageChk == nil && fs.cfg.MaxAge != 0 {
 		fs.startAgeChk()
 	}
+	if took := time.Since(start); took > time.Minute {
+		fs.warn("UpdateConfig::agecheck took %v", took.Round(time.Millisecond))
+	}
+
 	if fs.ageChk != nil && fs.cfg.MaxAge == 0 {
 		fs.ageChk.Stop()
 		fs.ageChk = nil
+	}
+	if took := time.Since(start); took > time.Minute {
+		fs.warn("UpdateConfig::stopagecheck took %v", took.Round(time.Millisecond))
 	}
 
 	if fs.cfg.MaxMsgsPer > 0 && fs.cfg.MaxMsgsPer < old_cfg.MaxMsgsPer {
@@ -608,6 +629,10 @@ func (fs *fileStore) UpdateConfig(cfg *StreamConfig) error {
 	if cfg.MaxAge != 0 {
 		fs.expireMsgs()
 	}
+	if took := time.Since(start); took > time.Minute {
+		fs.warn("UpdateConfig::expiremsgs took %v", took.Round(time.Millisecond))
+	}
+
 	return nil
 }
 

@@ -244,7 +244,7 @@ func TestStreamSourcingScalingSourcingMany(t *testing.T) {
 // This test is being skipped by CI as it takes too long to run and is meant to test the scalability of sourcing
 // rather than being a unit test.
 func TestStreamSourcingScalingSourcingManyBenchmark(t *testing.T) {
-	t.Skip()
+	// t.Skip()
 
 	var numSourced = 500
 	var numMsgPerSource = uint64(10_000)
@@ -253,7 +253,29 @@ func TestStreamSourcingScalingSourcingManyBenchmark(t *testing.T) {
 
 	var err error
 
-	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	// c := createJetStreamClusterExplicit(t, "R3S", 3)
+	conf := `
+                listen: 127.0.0.1:-1
+                http: 127.0.0.1:-1
+                server_name: %s
+                jetstream: {
+                        store_dir: '%s',
+                }
+                cluster {
+                        name: %s
+                        listen: 127.0.0.1:%d
+                        routes = [%s]
+                }
+                server_tags: ["test"]
+                system_account: sys
+                no_auth_user: js
+                accounts {
+                        sys { users = [ { user: sys, pass: sys } ] }
+                        js  { jetstream = enabled
+                              users = [ { user: js, pass: js } ]
+                    }
+                }`
+	c := createJetStreamClusterWithTemplate(t, conf, "R3S", 3)
 	defer c.shutdown()
 	s := c.randomServer()
 	urls := s.clientConnectURLs
@@ -346,6 +368,13 @@ func TestStreamSourcingScalingSourcingManyBenchmark(t *testing.T) {
 	})
 	require_NoError(t, err)
 
+	checkFor(t, 10*time.Minute, 1*time.Second, func() error {
+		sl := c.streamLeader(globalAccountName, "sourcing")
+		if sl == nil {
+			return fmt.Errorf("Not ready yet")
+		}
+		return nil
+	})
 	sl := c.streamLeader(globalAccountName, "sourcing")
 	mset, err := sl.GlobalAccount().lookupStream("sourcing")
 	require_NoError(t, err)
@@ -386,4 +415,5 @@ func TestStreamSourcingScalingSourcingManyBenchmark(t *testing.T) {
 			return fmt.Errorf("Too many messages: expected %d (retries=%d), got %d", numMsgPerSource*uint64(numSourced), retries, state.Msgs)
 		}
 	})
+	select {}
 }
