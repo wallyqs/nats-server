@@ -1702,12 +1702,12 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 			stream := stream
 			subjects := stream.subjects
 
-			// Create publishers on different connections that sends messages
+			// Create publishers on different connections that send messages
 			// to all the consumers subjects.
-			n := 0
 			for i := 0; i < test.producers; i++ {
 				wg.Add(1)
 				go func() {
+					n := 0
 					defer wg.Done()
 					nc, js := jsClientConnect(t, c.randomServer())
 					defer nc.Close()
@@ -1720,10 +1720,8 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 						}
 
 						for _, subject := range subjects {
-							_, err := js.Publish(subject, payload, nats.AckWait(200*time.Millisecond))
-							if err == nil {
-								n++
-							}
+							js.Publish(subject, payload, nats.AckWait(200*time.Millisecond), nats.RetryWait(500*time.Millisecond), nats.RetryAttempts(5))
+							n++
 
 							if n >= test.producerMsgs {
 								return
@@ -2112,6 +2110,62 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 			duration:        testDuration,
 			producerMsgSize: 1024,
 			producerMsgs:    100_000,
+		})
+	})
+
+	t.Run("R3M/streams:30/limits", func(t *testing.T) {
+		testDuration := 3 * time.Minute
+		totalStreams := 30
+		consumersPerStream := 5
+		streams := make([]*streamSetup, totalStreams)
+		for i := 0; i < totalStreams; i++ {
+			name := fmt.Sprintf("test:%d", i)
+			st := &streamSetup{
+				config: &nats.StreamConfig{
+					Name:      name,
+					Subjects:  []string{fmt.Sprintf("test.%d.*", i)},
+					Replicas:  3,
+					Retention: nats.LimitsPolicy,
+					Storage:   nats.MemoryStorage,
+				},
+				consumers: make([]*nats.ConsumerConfig, 0),
+			}
+			for j := 0; j < consumersPerStream; j++ {
+				subject := fmt.Sprintf("test.%d.%d", i, j)
+				name := fmt.Sprintf("A:%d:%d", i, j)
+				cc := &nats.ConsumerConfig{
+					Name:          name,
+					Durable:       name,
+					FilterSubject: subject,
+					AckPolicy:     nats.AckExplicitPolicy,
+				}
+				st.consumers = append(st.consumers, cc)
+				st.subjects = append(st.subjects, subject)
+			}
+			streams[i] = st
+		}
+		expect := func(t *testing.T, nc *nats.Conn, js nats.JetStreamContext, c *cluster) {
+			time.Sleep(testDuration + time.Minute)
+			accName := "js"
+			for i := 0; i < totalStreams; i++ {
+				streamName := fmt.Sprintf("test:%d", i)
+				checkMsgsEqual(t, c, accName, streamName)
+			}
+		}
+		test(t, &testParams{
+			cluster:         t.Name(),
+			streams:         streams,
+			producers:       10,
+			consumers:       10,
+			restarts:        1,
+			rolloutRestart:  true,
+			ldmRestart:      true,
+			checkHealthz:    true,
+			restartWait:     45 * time.Second,
+			expect:          expect,
+			duration:        testDuration,
+			producerMsgSize: 512,
+			producerMsgs:    5_000,
 		})
 	})
 }
