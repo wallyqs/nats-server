@@ -10569,3 +10569,110 @@ func TestNoRaceLargeNumDeletesStreamCatchups(t *testing.T) {
 		return nil
 	})
 }
+
+func TestNoRaceJetStreamClusterMemoryWorkQueueLastSequenceResetAfterRestart(t *testing.T) {
+	// c := createJetStreamClusterExplicit(t, "R3S", 3)
+	// defer c.shutdown()
+	conf := `
+                listen: 127.0.0.1:-1
+                http: 127.0.0.1:-1
+                server_name: %s
+                jetstream: {
+                        # domain: "cloud"
+                        store_dir: '%s',
+                }
+                cluster {
+                        name: %s
+                        listen: 127.0.0.1:%d
+                        routes = [%s]
+                }
+                server_tags: ["test"]
+                system_account: sys
+
+                no_auth_user: js
+                accounts {
+                        sys { users = [ { user: sys, pass: sys } ] }
+
+                        js  { jetstream = enabled
+                              users = [ { user: js, pass: js } ]
+                        }
+                }`
+	c := createJetStreamClusterWithTemplate(t, conf, "R3S", 3)
+	defer c.shutdown()
+
+	numStreams := 50
+	var wg sync.WaitGroup
+	wg.Add(numStreams)
+
+	for i := 1; i <= numStreams; i++ {
+		go func(n int) {
+			defer wg.Done()
+
+			nc, js := jsClientConnect(t, c.randomServer())
+			defer nc.Close()
+
+			_, err := js.AddStream(&nats.StreamConfig{
+				Name:      fmt.Sprintf("TEST:%d", n),
+				Storage:   nats.MemoryStorage,
+				Retention: nats.WorkQueuePolicy,
+				Subjects:  []string{fmt.Sprintf("foo.%d.*", n)},
+				Replicas:  3,
+			}, nats.MaxWait(30*time.Second))
+			require_NoError(t, err)
+			subj := fmt.Sprintf("foo.%d.bar", n)
+			for i := 0; i < 22; i++ {
+				js.Publish(subj, nil)
+			}
+			// Now consumer them all as well.
+			sub, err := js.PullSubscribe(subj, "wq")
+			require_NoError(t, err)
+			msgs, err := sub.Fetch(22, nats.MaxWait(20*time.Second))
+			require_NoError(t, err)
+			require_Equal(t, len(msgs), 22)
+			for _, m := range msgs {
+				err := m.AckSync()
+				require_NoError(t, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// Do 2 rolling restarts waiting on healthz in between.
+	for i := 0; i < 2; i++ {
+		// Walk the servers and shut each down, and wipe the storage directory.
+		for _, s := range c.servers {
+			s.Shutdown()
+			s.WaitForShutdown()
+			s = c.restartServer(s)
+			checkFor(t, 30*time.Second, time.Second, func() error {
+				hs := s.healthz(nil)
+				if hs.Error != _EMPTY_ {
+					return errors.New(hs.Error)
+				}
+				return nil
+			})
+			fmt.Println(s.Addr().String())
+			// Make sure all streams are current after healthz returns ok.
+			// for i := 1; i <= numStreams; i++ {
+			// 	stream := fmt.Sprintf("TEST:%d", i)
+			// 	acc, err := s.LookupAccount("js")
+			// 	require_NoError(t, err)
+			// 	mset, err := acc.lookupStream(stream)
+			// 	require_NoError(t, err)
+			// 	var state StreamState
+			// 	checkFor(t, 20*time.Second, time.Second, func() error {
+			// 		mset.store.FastState(&state)
+			// 		if state.LastSeq != 22 {
+			// 			return fmt.Errorf("%v Wrong last sequence %d for %q - State  %+v", s, state.LastSeq, stream, state)
+			// 		}
+			// 		if state.FirstSeq != 23 {
+			// 			return fmt.Errorf("%v Wrong first sequence %d for %q - State  %+v", s, state.FirstSeq, stream, state)
+			// 		}
+			// 		return nil
+			// 	})
+			// }
+		}
+	}
+
+	select {}
+}

@@ -19,6 +19,7 @@ package server
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"math/rand"
 	"os"
@@ -1195,8 +1196,15 @@ NextServer:
 	}
 }
 
+// To enable long running tests:
+//
+// go test -v  --args --long-running
+var runLongRunningTests = flag.Bool("long-running", false, "Disables skipping long running tests")
+
 func TestJetStreamClusterBusyStreams(t *testing.T) {
-	t.Skip("Too long for CI at the moment")
+	if !*runLongRunningTests {
+		t.Skip("Skipping long running test")
+	}
 	type streamSetup struct {
 		config    *nats.StreamConfig
 		consumers []*nats.ConsumerConfig
@@ -1209,6 +1217,7 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 		producers       int
 		consumers       int
 		restartAny      bool
+		restartFirst    bool
 		restartWait     time.Duration
 		ldmRestart      bool
 		rolloutRestart  bool
@@ -1299,7 +1308,8 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 						}
 
 						for _, subject := range subjects {
-							_, err := js.Publish(subject, payload, nats.AckWait(200*time.Millisecond))
+							msgID := nats.MsgId(fmt.Sprintf("n:%d", n.Load()))
+							_, err := js.Publish(subject, payload, nats.AckWait(200*time.Millisecond), msgID)
 							if err == nil {
 								if nn := n.Add(1); int(nn) >= test.producerMsgs {
 									return
@@ -1371,6 +1381,15 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 				defer wg.Done()
 				for i := 0; i < test.restarts; i++ {
 					switch {
+					case test.restartFirst:
+						s := c.servers[0]
+						if test.ldmRestart {
+							s.lameDuckMode()
+						} else {
+							s.Shutdown()
+						}
+						s.WaitForShutdown()
+						c.restartServer(s)
 					case test.restartAny:
 						s := c.servers[rand.Intn(len(c.servers))]
 						if test.ldmRestart {
@@ -1417,6 +1436,7 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 		test.expect(t, nc, js, c)
 		cancel()
 		wg.Wait()
+		select {}
 	}
 	stepDown := func(nc *nats.Conn, streamName string) {
 		nc.Request(fmt.Sprintf(JSApiStreamLeaderStepDownT, streamName), nil, time.Second)
@@ -1424,6 +1444,9 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 	getStreamDetails := func(t *testing.T, c *cluster, accountName, streamName string) *StreamDetail {
 		t.Helper()
 		srv := c.streamLeader(accountName, streamName)
+		if srv == nil {
+			return nil
+		}
 		jsz, err := srv.Jsz(&JSzOptions{Accounts: true, Streams: true, Consumer: true})
 		require_NoError(t, err)
 		for _, acc := range jsz.AccountDetails {
@@ -1439,35 +1462,48 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 		return nil
 	}
 	checkMsgsEqual := func(t *testing.T, c *cluster, accountName, streamName string) {
-		state := getStreamDetails(t, c, accountName, streamName).State
-		var msets []*stream
+		details := getStreamDetails(t, c, accountName, streamName)
+		if details == nil {
+			// Nothing to do, can happen with deleted streams.
+			return
+		}
+		state := details.State
+
+		msets := make(map[*Server]*stream)
 		for _, s := range c.servers {
 			acc, err := s.LookupAccount(accountName)
 			require_NoError(t, err)
 			mset, err := acc.lookupStream(streamName)
 			require_NoError(t, err)
-			msets = append(msets, mset)
+			msets[s] = mset
 		}
 		for seq := state.FirstSeq; seq <= state.LastSeq; seq++ {
 			var msgId string
 			var smv StoreMsg
-			for _, mset := range msets {
+			for replica, mset := range msets {
 				mset.mu.RLock()
 				sm, err := mset.store.LoadMsg(seq, &smv)
 				mset.mu.RUnlock()
-				require_NoError(t, err)
+				if err != nil {
+					t.Logf("STATE: %+v", state)
+					t.Errorf("Unexpected error loading message (seq=%d) from stream %q on replica %q: %v", seq, streamName, replica, err)
+					continue
+				}
 				if msgId == _EMPTY_ {
 					msgId = string(sm.hdr)
 				} else if msgId != string(sm.hdr) {
-					t.Fatalf("MsgIds do not match for seq %d: %q vs %q", seq, msgId, sm.hdr)
+					t.Errorf("MsgIds do not match for seq %d: %q vs %q", seq, msgId, sm.hdr)
 				}
 			}
 		}
 	}
 	checkConsumer := func(t *testing.T, c *cluster, accountName, streamName, consumerName string) {
 		t.Helper()
-		var leader string
 		for _, s := range c.servers {
+			if s == nil {
+				// State no longer available to check.
+				continue
+			}
 			jsz, err := s.Jsz(&JSzOptions{Accounts: true, Streams: true, Consumer: true})
 			require_NoError(t, err)
 			for _, acc := range jsz.AccountDetails {
@@ -1475,11 +1511,9 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 					for _, stream := range acc.Streams {
 						if stream.Name == streamName {
 							for _, consumer := range stream.Consumer {
-								if leader == "" {
-									leader = consumer.Cluster.Leader
-								} else if leader != consumer.Cluster.Leader {
-									t.Errorf("There are two leaders for %s/%s: %s vs %s",
-										stream.Name, consumer.Name, leader, consumer.Cluster.Leader)
+								if stream.State.LastSeq < consumer.Delivered.Stream {
+									t.Errorf("Stream last sequence is behind consumer sequence, s:%d vs c:%d (stream: %+v, consumer: %+v)",
+										stream.State.LastSeq, consumer.Delivered.Stream, stream.Name, consumer.Name)
 								}
 							}
 						}
@@ -1639,58 +1673,194 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 		})
 	})
 
-	t.Run("R3F/streams:30/limits", func(t *testing.T) {
-		testDuration := 3 * time.Minute
-		totalStreams := 30
-		consumersPerStream := 5
-		streams := make([]*streamSetup, totalStreams)
-		for i := 0; i < totalStreams; i++ {
-			name := fmt.Sprintf("test:%d", i)
-			st := &streamSetup{
-				config: &nats.StreamConfig{
-					Name:      name,
-					Subjects:  []string{fmt.Sprintf("test.%d.*", i)},
-					Replicas:  3,
-					Retention: nats.LimitsPolicy,
-				},
-				consumers: make([]*nats.ConsumerConfig, 0),
-			}
-			for j := 0; j < consumersPerStream; j++ {
-				subject := fmt.Sprintf("test.%d.%d", i, j)
-				name := fmt.Sprintf("A:%d:%d", i, j)
-				cc := &nats.ConsumerConfig{
-					Name:          name,
-					Durable:       name,
-					FilterSubject: subject,
-					AckPolicy:     nats.AckExplicitPolicy,
-				}
-				st.consumers = append(st.consumers, cc)
-				st.subjects = append(st.subjects, subject)
-			}
-			streams[i] = st
-		}
-		expect := func(t *testing.T, nc *nats.Conn, js nats.JetStreamContext, c *cluster) {
-			time.Sleep(testDuration + 1*time.Minute)
-			accName := "js"
+	shared := func(t *testing.T, sc *nats.StreamConfig, tp *testParams) func(t *testing.T) {
+		return func(t *testing.T) {
+			testDuration := 3 * time.Minute
+			totalStreams := 30
+			consumersPerStream := 5
+			streams := make([]*streamSetup, totalStreams)
 			for i := 0; i < totalStreams; i++ {
-				streamName := fmt.Sprintf("test:%d", i)
-				checkMsgsEqual(t, c, accName, streamName)
+				name := fmt.Sprintf("test:%d", i)
+				st := &streamSetup{
+					config: &nats.StreamConfig{
+						Name:      name,
+						Subjects:  []string{fmt.Sprintf("test.%d.*", i)},
+						Replicas:  3,
+						Discard:   sc.Discard,
+						Retention: sc.Retention,
+						Storage:   sc.Storage,
+						MaxMsgs:   sc.MaxMsgs,
+						MaxBytes:  sc.MaxBytes,
+						MaxAge:    sc.MaxAge,
+					},
+					consumers: make([]*nats.ConsumerConfig, 0),
+				}
+				for j := 0; j < consumersPerStream; j++ {
+					subject := fmt.Sprintf("test.%d.%d", i, j)
+					name := fmt.Sprintf("A:%d:%d", i, j)
+					cc := &nats.ConsumerConfig{
+						Name:          name,
+						Durable:       name,
+						FilterSubject: subject,
+						AckPolicy:     nats.AckExplicitPolicy,
+					}
+					st.consumers = append(st.consumers, cc)
+					st.subjects = append(st.subjects, subject)
+				}
+				streams[i] = st
 			}
+			expect := func(t *testing.T, nc *nats.Conn, js nats.JetStreamContext, c *cluster) {
+				time.Sleep(testDuration + 1*time.Minute)
+				accName := "js"
+				for i := 0; i < totalStreams; i++ {
+					streamName := fmt.Sprintf("test:%d", i)
+					for j := 0; j < consumersPerStream; j++ {
+						consumerName := fmt.Sprintf("A:%d:%d", i, j)
+						checkConsumer(t, c, accName, streamName, consumerName)
+					}
+					checkMsgsEqual(t, c, accName, streamName)
+				}
+			}
+			test(t, &testParams{
+				cluster:         t.Name(),
+				streams:         streams,
+				producers:       tp.producers,
+				consumers:       tp.consumers,
+				restartFirst:    tp.restartFirst,
+				restartAny:      tp.restartAny,
+				restarts:        tp.restarts,
+				rolloutRestart:  tp.rolloutRestart,
+				ldmRestart:      tp.ldmRestart,
+				checkHealthz:    tp.checkHealthz,
+				restartWait:     tp.restartWait,
+				expect:          expect,
+				jobs:            tp.jobs,
+				duration:        testDuration,
+				producerMsgSize: tp.producerMsgSize,
+				producerMsgs:    tp.producerMsgs,
+			})
 		}
-		test(t, &testParams{
-			cluster:         t.Name(),
-			streams:         streams,
-			producers:       10,
-			consumers:       10,
-			restarts:        1,
-			rolloutRestart:  true,
-			ldmRestart:      true,
-			checkHealthz:    true,
-			restartWait:     45 * time.Second,
-			expect:          expect,
-			duration:        testDuration,
-			producerMsgSize: 1024,
-			producerMsgs:    100_000,
-		})
+	}
+
+	t.Run("rollouts", func(t *testing.T) {
+		for prefix, st := range map[string]nats.StorageType{"R3F": nats.FileStorage, "R3M": nats.MemoryStorage} {
+			t.Run(prefix, func(t *testing.T) {
+				for rolloutType, params := range map[string]*testParams{
+					// Rollouts using graceful restarts and checking healthz.
+					"ldm": {
+						restarts:        1,
+						rolloutRestart:  true,
+						ldmRestart:      true,
+						checkHealthz:    true,
+						restartWait:     45 * time.Second,
+						producers:       10,
+						consumers:       10,
+						producerMsgSize: 1024,
+						producerMsgs:    100_000,
+					},
+					// Non graceful restarts calling Shutdown, but using healthz on startup.
+					"term": {
+						restarts:        1,
+						rolloutRestart:  true,
+						ldmRestart:      false,
+						checkHealthz:    true,
+						restartWait:     45 * time.Second,
+						producers:       10,
+						consumers:       10,
+						producerMsgSize: 1024,
+						producerMsgs:    100_000,
+					},
+					// Do a few of non graceful restarts to first node.
+					"term:2": {
+						restarts:        2,
+						restartFirst:    true,
+						restartWait:     45 * time.Second,
+						producers:       10,
+						consumers:       10,
+						producerMsgSize: 1024,
+						producerMsgs:    100_000,
+					},
+					// Do a few of non graceful restarts to any nodes.
+					"term:3": {
+						restarts:        3,
+						restartAny:      true,
+						restartWait:     45 * time.Second,
+						producers:       10,
+						consumers:       10,
+						producerMsgSize: 1024,
+						producerMsgs:    100_000,
+					},
+				} {
+					t.Run(rolloutType, func(t *testing.T) {
+						t.Run("limits", shared(t, &nats.StreamConfig{
+							Retention: nats.LimitsPolicy,
+							Storage:   st,
+						}, params))
+						t.Run("wq", shared(t, &nats.StreamConfig{
+							Retention: nats.WorkQueuePolicy,
+							Storage:   st,
+						}, params))
+						t.Run("interest", shared(t, &nats.StreamConfig{
+							Retention: nats.InterestPolicy,
+							Storage:   st,
+						}, params))
+						t.Run("limits:dn:max-per-subject", shared(t, &nats.StreamConfig{
+							Retention:         nats.LimitsPolicy,
+							Storage:           st,
+							MaxMsgsPerSubject: 1,
+							Discard:           nats.DiscardNew,
+						}, params))
+						t.Run("wq:dn:max-msgs", shared(t, &nats.StreamConfig{
+							Retention: nats.WorkQueuePolicy,
+							Storage:   st,
+							MaxMsgs:   10_000,
+							Discard:   nats.DiscardNew,
+						}, params))
+						t.Run("wq:dn-per-subject:max-msgs", shared(t, &nats.StreamConfig{
+							Retention:            nats.WorkQueuePolicy,
+							Storage:              st,
+							MaxMsgs:              10_000,
+							MaxMsgsPerSubject:    100,
+							Discard:              nats.DiscardNew,
+							DiscardNewPerSubject: true,
+						}, params))
+					})
+				}
+			})
+		}
+	})
+
+	t.Run("short-streams", func(t *testing.T) {
+		for prefix, st := range map[string]nats.StorageType{"R3F": nats.FileStorage, "R3M": nats.MemoryStorage} {
+			// Do LDM but without healthz
+			params := &testParams{
+				restarts:        3,
+				rolloutRestart:  true,
+				ldmRestart:      true,
+				checkHealthz:    false,
+				restartWait:     45 * time.Second,
+				producers:       10,
+				consumers:       10,
+				producerMsgSize: 1024,
+				producerMsgs:    90,
+			}
+			t.Run(prefix, func(t *testing.T) {
+				t.Run("wq:dn:max-msgs", shared(t, &nats.StreamConfig{
+					Retention:  nats.WorkQueuePolicy,
+					Storage:    st,
+					MaxMsgs:    2_000,
+					Discard:    nats.DiscardNew,
+					Duplicates: 5 * time.Second,
+				}, params))
+
+				t.Run("limits:do:max-msgs", shared(t, &nats.StreamConfig{
+					Retention:  nats.LimitsPolicy,
+					Storage:    st,
+					MaxMsgs:    2_000,
+					Discard:    nats.DiscardOld,
+					Duplicates: 5 * time.Second,
+				}, params))
+			})
+		}
 	})
 }
