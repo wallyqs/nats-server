@@ -1032,7 +1032,7 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 			return
 		}
 	case "authorization":
-		auth, err := parseAuthorization(tk, errors)
+		auth, err := parseAuthorization(tk, errors, warnings)
 		if err != nil {
 			*errors = append(*errors, err)
 			return
@@ -1809,7 +1809,7 @@ func parseCluster(v any, opts *Options, errors *[]error, warnings *[]error) erro
 		case "host", "net":
 			opts.Cluster.Host = mv.(string)
 		case "authorization":
-			auth, err := parseAuthorization(tk, errors)
+			auth, err := parseAuthorization(tk, errors, warnings)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -2045,7 +2045,7 @@ func parseGateway(v any, o *Options, errors *[]error, warnings *[]error) error {
 		case "host", "net":
 			o.Gateway.Host = mv.(string)
 		case "authorization":
-			auth, err := parseAuthorization(tk, errors)
+			auth, err := parseAuthorization(tk, errors, warnings)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -4110,7 +4110,7 @@ func applyDefaultPermissions(users []*User, nkeys []*NkeyUser, defaultP *Permiss
 }
 
 // Helper function to parse Authorization configs.
-func parseAuthorization(v any, errors *[]error) (*authorization, error) {
+func parseAuthorization(v any, errors, warnings *[]error) (*authorization, error) {
 	var (
 		am   map[string]any
 		tk   token
@@ -4146,6 +4146,17 @@ func parseAuthorization(v any, errors *[]error) (*authorization, error) {
 			default:
 				return nil, &configErr{tk, "error parsing authorization config, 'timeout' wrong type"}
 			}
+			if at > 60*time.Second.Seconds() {
+				err := &configWarningErr{
+					field: mk,
+					configErr: configErr{
+						token:  tk,
+						reason: fmt.Sprintf("value %v is too long, maybe needs quotes? (e.g. timeout: '5s')", mv),
+					},
+				}
+				*warnings = append(*warnings, err)
+			}
+
 			auth.timeout = at
 		case "users":
 			nkeys, users, err := parseUsers(tk, errors)
