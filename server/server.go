@@ -158,6 +158,9 @@ type Info struct {
 	RemoteAccount string   `json:"remote_account,omitempty"` // Lets the other side know the remote account that they bind to.
 
 	XKey string `json:"xkey,omitempty"` // Public server's x25519 key.
+
+	// ConfiguredName is the configured name.
+	ConfiguredName string `json:"configured_name,omitempty"`
 }
 
 // Server is our main struct.

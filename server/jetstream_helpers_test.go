@@ -157,14 +157,17 @@ var jsClusterTempl = `
 		listen: 127.0.0.1:-1
 	}
 
+        max_payload = 8mib
+
 	cluster {
 		name: %s
 		listen: 127.0.0.1:%d
 		routes = [%s]
+                pool_size = -1
 	}
 
 	# For access to system account.
-	accounts { $SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] } }
+	accounts { $SYS { users = [ { user: "admin", pass: "s3cr3t!" }, { user: "sys", pass: "sys" } ] } }
 `
 
 var jsClusterEncryptedTempl = `

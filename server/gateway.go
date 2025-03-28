@@ -792,6 +792,7 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 	// Are we creating the gateway based on the configuration
 	solicit := cfg != nil
 	var tlsRequired bool
+	var ncs string
 
 	s.gateway.RLock()
 	infoJSON := s.gateway.infoJSON
@@ -814,7 +815,7 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 		// Since we are delaying the connect until after receiving
 		// the remote's INFO protocol, save the URL we need to connect to.
 		c.gw.connectURL = url
-
+		ncs = fmt.Sprintf("%s:out", cfgName)
 		c.Noticef("Creating outbound gateway connection to %q", cfgName)
 	} else {
 		c.flags.set(expectConnect)
@@ -824,6 +825,9 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 		tlsRequired = opts.Gateway.TLSConfig != nil
 		// We expect a CONNECT from the accepted connection.
 		c.setAuthTimer(secondsToDuration(opts.Gateway.AuthTimeout))
+	}
+	if ncs != _EMPTY_ {
+		c.ncs.Store(fmt.Sprintf("%s - %s", c, ncs))
 	}
 
 	// Check for TLS
@@ -922,7 +926,9 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 	// that the connection is not stale until the first INFO from the remote
 	// is received.
 	if solicit {
-		c.watchForStaleConnection(adjustPingInterval(GATEWAY, opts.PingInterval), opts.MaxPingsOut)
+		c.watchForStaleConnection(
+			adjustPingInterval(GATEWAY, opts.PingInterval), opts.MaxPingsOut,
+		)
 	}
 
 	c.mu.Unlock()
@@ -1172,6 +1178,8 @@ func (c *client) processGatewayInfo(info *Info) {
 		}
 
 		s.registerInboundGatewayConnection(cid, c)
+		ncs := fmt.Sprintf("%s:%s:in", info.Gateway, info.Name)
+		c.ncs.Store(fmt.Sprintf("%s - %s", c, ncs))
 		c.Noticef("Inbound gateway connection from %q (%s) registered", info.Gateway, info.ID)
 
 		// Now that it is registered, we can remove from temp map.
@@ -2518,6 +2526,12 @@ var subPool = &sync.Pool{
 // regardless if it is a LEAF connection or not.
 // <Invoked from any client connection's readLoop>
 func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgroups [][]byte, checkLeafQF bool) bool {
+	start := time.Now()
+	defer func() {
+		if took := time.Since(start); took > 50*time.Millisecond {
+			c.Tracef("GW SEND: %v - %v - took:%v", string(subject), string(reply))
+		}
+	}()
 	// We had some times when we were sending across a GW with no subject, and the other side would break
 	// due to parser error. These need to be fixed upstream but also double check here.
 	if len(subject) == 0 {
@@ -2537,6 +2551,10 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 	thisClusterReplyPrefix := gw.replyPfx
 	thisClusterOldReplyPrefix := gw.oldReplyPfx
 	gw.RUnlock()
+	if took := time.Since(start); took > 50*time.Millisecond {
+		c.Tracef("1] GW SEND: %v - %v - took:%v", string(subject), string(reply))
+	}
+
 	if len(gws) == 0 {
 		return false
 	}
@@ -2546,6 +2564,9 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 		pa := c.pa
 		msg = mt.setOriginAccountHeaderIfNeeded(c, acc, msg)
 		defer func() { c.pa = pa }()
+	}
+	if took := time.Since(start); took > 50*time.Millisecond {
+		c.Tracef("2] GW SEND: %v - %v - took:%v", string(subject), string(reply))
 	}
 
 	var (
@@ -2563,6 +2584,10 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 
 	// Get a subscription from the pool
 	sub := subPool.Get().(*subscription)
+
+	if took := time.Since(start); took > 50*time.Millisecond {
+		c.Tracef("3] GW SEND: %v - %v - took:%v", string(subject), string(reply))
+	}
 
 	// Check if the subject is on the reply prefix, if so, we
 	// need to send that message directly to the origin cluster.
@@ -2636,6 +2661,10 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 				continue
 			}
 		}
+		if took := time.Since(start); took > 50*time.Millisecond {
+			c.Tracef("4] GW SEND: %v - %v - took:%v", string(subject), string(reply))
+		}
+
 		if checkReply {
 			// Check/map only once
 			checkReply = false
@@ -2655,9 +2684,15 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 				mreply = append(mreply, reply...)
 			}
 		}
+		if took := time.Since(start); took > 50*time.Millisecond {
+			c.Tracef("5] GW SEND: %v - %v - took:%v", string(subject), string(reply))
+		}
 
 		if mt != nil {
 			msg = mt.setHopHeader(c, msg)
+		}
+		if took := time.Since(start); took > 50*time.Millisecond {
+			c.Tracef("6] GW SEND: %v - %v - took:%v", string(subject), string(reply))
 		}
 
 		// Setup the message header.
@@ -2707,6 +2742,11 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 		sub.nm, sub.max = 0, 0
 		sub.client = gwc
 		sub.subject = subject
+
+		if took := time.Since(start); took > 50*time.Millisecond {
+			c.Tracef("7] GW SEND: %v - %v - took:%v", string(subject), string(reply))
+		}
+
 		if c.deliverMsg(prodIsMQTT, sub, acc, subject, mreply, mh, msg, false) {
 			// We don't count internal deliveries so count only if sub.icb is nil
 			if sub.icb == nil {
@@ -2714,7 +2754,14 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 			}
 			didDeliver = true
 		}
+		if took := time.Since(start); took > 50*time.Millisecond {
+			c.Tracef("8] GW SEND: %v - %v - took:%v", string(subject), string(reply))
+		}
 	}
+	if took := time.Since(start); took > 50*time.Millisecond {
+		c.Tracef("9 TOTAL] GW SEND: %v - %v - took:%v", string(subject), string(reply))
+	}
+
 	if dlvMsgs > 0 {
 		totalBytes := dlvMsgs * int64(len(msg))
 		// For non MQTT producers, remove the CR_LF * number of messages
@@ -2733,6 +2780,10 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 	// However, make sure to not hold a reference to a connection.
 	sub.client = nil
 	subPool.Put(sub)
+	if took := time.Since(start); took > 50*time.Millisecond {
+		c.Tracef("10 TOTAL] GW SEND: %v - %v - took:%v", string(subject), string(reply))
+	}
+
 	return didDeliver
 }
 
@@ -3064,6 +3115,11 @@ func (c *client) handleGatewayReply(msg []byte) (processed bool) {
 // an A-/RS- protocol may be send back.
 // <Invoked from inbound connection's readLoop>
 func (c *client) processInboundGatewayMsg(msg []byte) {
+	start := time.Now()
+	defer func() {
+		c.Tracef("GW INBOUND: %v - %v - took:%v", string(c.pa.subject), string(c.pa.reply), time.Since(start))
+	}()
+
 	// Update statistics
 	c.in.msgs++
 	// The msg includes the CR_LF, so pull back out for accounting.

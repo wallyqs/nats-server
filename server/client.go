@@ -1906,6 +1906,16 @@ func (c *client) traceMsg(msg []byte) {
 	}
 }
 
+func (c *client) traceMsgDelivery(msg []byte) {
+	maxTrace := c.srv.getOpts().MaxTracedMsgLen
+	if maxTrace > 0 && (len(msg)-LEN_CR_LF) > maxTrace {
+		tm := fmt.Sprintf("%q", msg[:maxTrace])
+		c.Tracef("->> MSG_DELIVER: [\"%s...\"]", tm[1:maxTrace+1])
+	} else {
+		c.Tracef("->> MSG_DELIVER: [%q]", msg[:len(msg)-LEN_CR_LF])
+	}
+}
+
 // Traces an incoming operation.
 // Will NOT check if tracing is enabled, does NOT need the client lock.
 func (c *client) traceInOp(op string, arg []byte) {
@@ -2059,7 +2069,8 @@ func (c *client) processConnect(arg []byte) error {
 	account := c.opts.Account
 	accountNew := c.opts.AccountNew
 
-	if c.kind == CLIENT {
+	switch c.kind {
+	case CLIENT:
 		var ncs string
 		if c.opts.Version != _EMPTY_ {
 			ncs = fmt.Sprintf("v%s", c.opts.Version)
@@ -2074,13 +2085,35 @@ func (c *client) processConnect(arg []byte) error {
 		if c.opts.Name != _EMPTY_ {
 			if c.opts.Version == _EMPTY_ && c.opts.Lang == _EMPTY_ {
 				ncs = c.opts.Name
+
 			} else {
 				ncs = fmt.Sprintf("%s:%s", ncs, c.opts.Name)
 			}
 		}
 		if ncs != _EMPTY_ {
-			c.ncs.CompareAndSwap(nil, fmt.Sprintf("%s - %q", c, ncs))
+			c.ncs.Store(fmt.Sprintf("%s - %s", c, ncs))
 		}
+	case GATEWAY:
+		// Better done at the createGateway section
+		// ----------------------------------------
+		// var ncs string
+		// if c.acc != nil {
+		// 	ncs = fmt.Sprintf("%s", c.acc.Name)
+		// }
+		// ncs = fmt.Sprintf("%s", c.gw.remoteName)
+		// ncs = fmt.Sprintf("%s", c.gw.name)
+
+		// var direction string
+		// if c.gw.outbound {
+		// 	direction = "outbound"
+		// } else {
+		// 	direction = "inbound"
+		// }
+		// ncs = fmt.Sprintf("%s", direction)
+		// fmt.Println(ncs)
+		// if ncs != _EMPTY_ {
+		// 	c.ncs.Store(fmt.Sprintf("%s - %q", c, ncs))
+		// }
 	}
 
 	// if websocket client, maybe some options through cookies
@@ -3694,6 +3727,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 
 	if client.trace {
 		client.traceOutOp(bytesToString(mh[:len(mh)-LEN_CR_LF]), nil)
+		client.traceMsgDelivery(msg)
 	}
 
 	client.mu.Unlock()
@@ -4119,6 +4153,14 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 		if len(c.pa.deliver) > 0 && c.kind == JETSTREAM && len(c.pa.reply) > 0 {
 			reply = append(reply, '@')
 			reply = append(reply, c.pa.deliver...)
+		}
+		// log sending to gateways
+		if len(reply) > 0 {
+			if strings.Contains(string(reply), "NRG") {
+				// skip
+			} else {
+				fmt.Println(">>>>>>>>>>>>>>>>>", string(reply))				
+			}
 		}
 		didDeliver = c.sendMsgToGateways(acc, msg, c.pa.subject, reply, qnames, false) || didDeliver
 	}
@@ -6076,6 +6118,7 @@ func (c *client) getRawAuthUser() string {
 	case c.opts.Nkey != _EMPTY_:
 		return c.opts.Nkey
 	case c.opts.Username != _EMPTY_:
+		fmt.Println("USING THIS: ", c.opts.Username)
 		return c.opts.Username
 	case c.opts.JWT != _EMPTY_:
 		return c.pubKey

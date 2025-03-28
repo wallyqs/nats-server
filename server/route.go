@@ -511,6 +511,7 @@ func (c *client) sendRouteConnect(clusterName string, tlsRequired bool) error {
 
 // Process the info message if we are a route.
 func (c *client) processRouteInfo(info *Info) {
+	fmt.Printf("............ %+v\n", info)
 
 	supportsHeaders := c.srv.supportsHeaders()
 	clusterName := c.srv.ClusterName()
@@ -839,6 +840,8 @@ func (c *client) processRouteInfo(info *Info) {
 
 	// Check to see if we have this remote already registered.
 	// This can happen when both servers have routes to each other.
+	ncs := fmt.Sprintf("%s:%s", clusterName, info.Name)
+	c.ncs.Store(fmt.Sprintf("%s - %s", c, ncs))
 	c.mu.Unlock()
 
 	if added := s.addRoute(c, didSolicit, sendDelayedInfo, gossipMode, info, accName); added {
@@ -2652,23 +2655,24 @@ func (s *Server) startRouteAcceptLoop() {
 	// Check for TLSConfig
 	tlsReq := opts.Cluster.TLSConfig != nil
 	info := Info{
-		ID:           s.info.ID,
-		Name:         s.info.Name,
-		Version:      s.info.Version,
-		GoVersion:    runtime.Version(),
-		AuthRequired: false,
-		TLSRequired:  tlsReq,
-		TLSVerify:    tlsReq,
-		MaxPayload:   s.info.MaxPayload,
-		JetStream:    s.info.JetStream,
-		Proto:        s.getServerProto(),
-		GatewayURL:   s.getGatewayURL(),
-		Headers:      s.supportsHeaders(),
-		Cluster:      s.info.Cluster,
-		Domain:       s.info.Domain,
-		Dynamic:      s.isClusterNameDynamic(),
-		LNOC:         true,
-		LNOCU:        true,
+		ID:             s.info.ID,
+		Name:           s.info.Name,
+		Version:        s.info.Version,
+		GoVersion:      runtime.Version(),
+		AuthRequired:   false,
+		TLSRequired:    tlsReq,
+		TLSVerify:      tlsReq,
+		MaxPayload:     s.info.MaxPayload,
+		JetStream:      s.info.JetStream,
+		Proto:          s.getServerProto(),
+		GatewayURL:     s.getGatewayURL(),
+		Headers:        s.supportsHeaders(),
+		Cluster:        s.info.Cluster,
+		Domain:         s.info.Domain,
+		Dynamic:        s.isClusterNameDynamic(),
+		LNOC:           true,
+		LNOCU:          true,
+		ConfiguredName: s.opts.ServerName,
 	}
 	// For tests that want to simulate old servers, do not set the compression
 	// on the INFO protocol if configured with CompressionNotSupported.
@@ -2931,7 +2935,7 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 	}
 	// Unmarshal as a route connect protocol
 	proto := &connectInfo{}
-
+	fmt.Println("PROTO :", string(arg))
 	if err := json.Unmarshal(arg, proto); err != nil {
 		return err
 	}
@@ -2990,6 +2994,10 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 	c.route.lnocu = proto.LNOCU
 	c.setRoutePermissions(perms)
 	c.headers = supportsHeaders && proto.Headers
+
+	// ncs := fmt.Sprintf(" in:%s:%s", clusterName, c.route.remoteName)
+	// c.ncs.Store(fmt.Sprintf("%s - %s", c, ncs))
+
 	c.mu.Unlock()
 	return nil
 }

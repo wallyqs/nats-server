@@ -4773,3 +4773,56 @@ func TestJetStreamSuperClusterConsumerPauseAdvisories(t *testing.T) {
 	checkAdvisory(msg, true, deadline)
 	require_Len(t, len(ch), 0) // Should only receive one advisory.
 }
+
+func TestJetStreamSuperClusterFetchBasics(t *testing.T) {
+	sc := createJetStreamSuperCluster(t, 3, 3)
+	defer sc.shutdown()
+
+	// Client based API
+	// s := sc.randomServer()
+	nc, js := jsClientConnect(t, sc.clusterForName("C1").randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{Name: "TEST", Replicas: 3})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	go func() {
+		for range time.NewTicker(5 * time.Second).C {
+			msg, toSend := []byte("Hello JS Clustering"), 10
+			for i := 0; i < toSend; i++ {
+				if _, err = js.Publish("TEST", msg); err != nil {
+					t.Fatalf("Unexpected publish error: %v", err)
+				}
+			}
+		}
+	}()
+
+	go func() {
+		nc3, js3 := jsClientConnect(t, sc.clusterForName("C3").randomServer())
+		defer nc3.Close()
+
+		psub, _ := js3.PullSubscribe("TEST", "test")
+
+		for range time.NewTicker(3 * time.Second).C {
+			msgs, err := psub.Fetch(100)
+			if err != nil {
+				continue
+			}
+			for _, msg := range msgs {
+				msg.Ack()
+			}
+		}
+	}()
+
+	nc2, js2 := jsClientConnect(t, sc.clusterForName("C3").randomServer())
+	defer nc2.Close()
+
+	for range time.NewTicker(1 * time.Second).C {
+		sinfo, _ := js2.StreamInfo("TEST")
+		t.Logf("---> %v", sinfo)
+	}
+
+	select {}
+}

@@ -1755,6 +1755,7 @@ func (s *Server) updateVarzRuntimeFields(v *Varz, forceUpdate bool, pcpu float64
 	for key, val := range s.httpReqStats {
 		v.HTTPReqStats[key] = val
 	}
+	v.Cluster.Name = s.info.Cluster
 
 	// Update Gateway remote urls if applicable
 	gw := s.gateway
