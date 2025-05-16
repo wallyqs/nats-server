@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -3813,4 +3814,32 @@ func TestJetStreamClusterDesyncAfterErrorDuringCatchup(t *testing.T) {
 			require_Equal(t, newStreamLeaderServer.Name(), clusterResetServerName)
 		})
 	}
+}
+
+func TestJetStreamClusterHeaderMessage(t *testing.T) {
+	// c := createJetStreamClusterExplicit(t, "R3S", 3)
+	// defer c.shutdown()
+
+	nc, _ := nats.Connect("127.0.0.1:4222")
+	defer nc.Close()
+
+	dc, err := net.Dial("tcp", "127.0.0.1:4222")
+	if err != nil {
+		t.Fatalf("Error on dial: %v", err)
+	}
+	defer dc.Close()
+	dc.Write([]byte("CONNECT {\"headers\":true,\"verbose\":false,\"name\":\"asdf\"}\r\n"))
+	dc.Write([]byte("HPUB dbchange.a.b.c.d.e _INBOX.IwAZmvJD3e6xHMUMYjepqs.hENdgkhm 27 30\r\n"))
+	// dc.Write([]byte("NATS/1.0\r\nasdf: asdf\r\n\r\n{ }\r\n"))
+	dc.Write([]byte("NATS/1.0\r\n\r\n{ }\r\n"))
+
+	msg := nats.NewMsg("dbchange.a.b.c.d.e")
+	msg.Header["asdf"] = []string{"asdffff"}
+	msg.Header["jk"] = []string{"jk"}
+	err = nc.PublishMsg(msg)
+	if err != nil {
+		t.Logf("::::::::::::;;; %v", err)
+	}
+	nc.Flush()
+	time.Sleep(2 * time.Second)
 }
