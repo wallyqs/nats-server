@@ -3249,3 +3249,85 @@ func TestClientRejectsNRGSubjects(t *testing.T) {
 		require_True(t, strings.HasPrefix(err.Error(), "nats: permissions violation"))
 	})
 }
+
+func TestNbPoolLargeMessageHandling(t *testing.T) {
+	// Scenario 1: Get and Put Large Buffer (dynamically allocated)
+	largeSize := nbPoolSizeLarge + 100
+	b1 := nbPoolGet(largeSize)
+	if cap(b1) != largeSize {
+		t.Errorf("Expected capacity for b1 to be %d, got %d", largeSize, cap(b1))
+	}
+	if len(b1) != 0 {
+		t.Errorf("Expected length for b1 to be 0, got %d", len(b1))
+	}
+	// This should not panic and the buffer should be ignored by the pool.
+	// We can't directly check if it was ignored, but absence of panic is a good sign.
+	nbPoolPut(b1)
+
+	// Scenario 2: Get and Put Small Buffer (from pool)
+	bSmall := nbPoolGet(nbPoolSizeSmall)
+	if cap(bSmall) != nbPoolSizeSmall {
+		t.Errorf("Expected capacity for bSmall to be %d, got %d", nbPoolSizeSmall, cap(bSmall))
+	}
+	if len(bSmall) != 0 {
+		t.Errorf("Expected length for bSmall to be 0, got %d", len(bSmall))
+	}
+	nbPoolPut(bSmall)
+
+	// Scenario 3: Get and Put Medium Buffer (from pool)
+	bMedium := nbPoolGet(nbPoolSizeMedium)
+	if cap(bMedium) != nbPoolSizeMedium {
+		t.Errorf("Expected capacity for bMedium to be %d, got %d", nbPoolSizeMedium, cap(bMedium))
+	}
+	if len(bMedium) != 0 {
+		t.Errorf("Expected length for bMedium to be 0, got %d", len(bMedium))
+	}
+	nbPoolPut(bMedium)
+
+	// Scenario 4: Get and Put Large Pool Buffer (from pool)
+	bLarge := nbPoolGet(nbPoolSizeLarge)
+	if cap(bLarge) != nbPoolSizeLarge {
+		t.Errorf("Expected capacity for bLarge to be %d, got %d", nbPoolSizeLarge, cap(bLarge))
+	}
+	if len(bLarge) != 0 {
+		t.Errorf("Expected length for bLarge to be 0, got %d", len(bLarge))
+	}
+	nbPoolPut(bLarge)
+
+	// Verify that putting a buffer with cap > nbPoolSizeLarge does not end up in nbPoolLarge
+	// This is implicitly tested by nbPoolPut's default case, but we can add an explicit check
+	// by trying to retrieve from nbPoolLarge after putting a very large buffer.
+	// This is a bit indirect, as we can't inspect the pool's internals easily.
+	// However, if nbPoolPut were to incorrectly place it in nbPoolLarge,
+	// a subsequent Get from nbPoolLarge *might* return it, though not guaranteed.
+	// The main check is that nbPoolPut doesn't panic and that the default case handles it.
+
+	// Get a buffer from the large pool to see its capacity (should be nbPoolSizeLarge)
+	b := nbPoolGet(nbPoolSizeLarge)
+	nbPoolPut(b) // Put it back
+
+	// Get another one
+	bCheck := nbPoolGet(nbPoolSizeLarge)
+	if cap(bCheck) != nbPoolSizeLarge {
+		t.Errorf("Expected buffer from nbPoolLarge to have capacity %d, got %d", nbPoolSizeLarge, cap(bCheck))
+	}
+	nbPoolPut(bCheck)
+
+	// Get a very large buffer (dynamically allocated)
+	veryLargeSize := nbPoolSizeLarge * 2
+	bVeryLarge := nbPoolGet(veryLargeSize)
+	if cap(bVeryLarge) != veryLargeSize {
+		t.Fatalf("Expected capacity for bVeryLarge to be %d, got %d", veryLargeSize, cap(bVeryLarge))
+	}
+	// "Put" it (it should be ignored by the pools)
+	nbPoolPut(bVeryLarge)
+
+	// Now, get from nbPoolLarge again. It should still give us a buffer of nbPoolSizeLarge capacity.
+	// If the veryLargeBuffer was incorrectly put into nbPoolLarge, this *might* fail,
+	// though pool behavior with Get can be complex.
+	bFromLargePool := nbPoolGet(nbPoolSizeLarge)
+	if cap(bFromLargePool) != nbPoolSizeLarge {
+		t.Errorf("Expected buffer from nbPoolLarge after putting a very large buffer to still have capacity %d, got %d", nbPoolSizeLarge, cap(bFromLargePool))
+	}
+	nbPoolPut(bFromLargePool)
+}

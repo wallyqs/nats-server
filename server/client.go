@@ -361,8 +361,10 @@ func nbPoolGet(sz int) []byte {
 		return nbPoolSmall.Get().(*[nbPoolSizeSmall]byte)[:0]
 	case sz <= nbPoolSizeMedium:
 		return nbPoolMedium.Get().(*[nbPoolSizeMedium]byte)[:0]
-	default:
+	case sz <= nbPoolSizeLarge:
 		return nbPoolLarge.Get().(*[nbPoolSizeLarge]byte)[:0]
+	default:
+		return make([]byte, 0, sz)
 	}
 }
 
