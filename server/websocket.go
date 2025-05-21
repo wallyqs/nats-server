@@ -1329,9 +1329,9 @@ func (c *client) wsCollapsePtoNB() (net.Buffers, int64) {
 				if mask {
 					wsMaskBuf(key, p[:lp])
 				}
-				new := nbPoolGet(wsFrameSizeForBrowsers)
-				lp = copy(new[:wsFrameSizeForBrowsers], p[:lp])
-				bufs = append(bufs, fh[:n], new[:lp])
+				fragmentSlice := p[:lp]
+				// The call to wsMaskBuf(key, fragmentSlice) (equivalent to p[:lp]) has already masked this slice in-place if mask was true.
+				bufs = append(bufs, fh[:n], fragmentSlice)
 				csz += n + lp
 				p = p[lp:]
 			}
