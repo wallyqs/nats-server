@@ -356,13 +356,17 @@ var nbPoolLarge = &sync.Pool{
 // Once a pooled frame is no longer needed, it should be recycled by passing
 // it to nbPoolPut.
 func nbPoolGet(sz int) []byte {
+	if sz <= 0 {
+		sz = nbPoolSizeSmall
+	}
+	
 	switch {
 	case sz <= nbPoolSizeSmall:
-		return nbPoolSmall.Get().(*[nbPoolSizeSmall]byte)[:0]
+		return nbPoolSmall.Get().(*[nbPoolSizeSmall]byte)[:0:nbPoolSizeSmall]
 	case sz <= nbPoolSizeMedium:
-		return nbPoolMedium.Get().(*[nbPoolSizeMedium]byte)[:0]
+		return nbPoolMedium.Get().(*[nbPoolSizeMedium]byte)[:0:nbPoolSizeMedium]
 	default:
-		return nbPoolLarge.Get().(*[nbPoolSizeLarge]byte)[:0]
+		return nbPoolLarge.Get().(*[nbPoolSizeLarge]byte)[:0:nbPoolSizeLarge]
 	}
 }
 
@@ -371,16 +375,32 @@ func nbPoolGet(sz int) []byte {
 // array as this may create overlaps when the buffers are returned to their
 // original size, resulting in race conditions.
 func nbPoolPut(b []byte) {
+	if b == nil || len(b) == 0 {
+		return
+	}
+	
+	// Validate buffer capacity and ensure we're not dealing with a sub-slice
+	// that might cause overlapping issues
 	switch cap(b) {
 	case nbPoolSizeSmall:
-		b := (*[nbPoolSizeSmall]byte)(b[0:nbPoolSizeSmall])
-		nbPoolSmall.Put(b)
+		// Ensure the slice points to the beginning of the underlying array
+		if cap(b)-len(b) > cap(b) {
+			return // Invalid buffer state
+		}
+		arr := (*[nbPoolSizeSmall]byte)(b[:nbPoolSizeSmall])
+		nbPoolSmall.Put(arr)
 	case nbPoolSizeMedium:
-		b := (*[nbPoolSizeMedium]byte)(b[0:nbPoolSizeMedium])
-		nbPoolMedium.Put(b)
+		if cap(b)-len(b) > cap(b) {
+			return
+		}
+		arr := (*[nbPoolSizeMedium]byte)(b[:nbPoolSizeMedium])
+		nbPoolMedium.Put(arr)
 	case nbPoolSizeLarge:
-		b := (*[nbPoolSizeLarge]byte)(b[0:nbPoolSizeLarge])
-		nbPoolLarge.Put(b)
+		if cap(b)-len(b) > cap(b) {
+			return
+		}
+		arr := (*[nbPoolSizeLarge]byte)(b[:nbPoolSizeLarge])
+		nbPoolLarge.Put(arr)
 	default:
 		// Ignore frames that are the wrong size, this might happen
 		// with WebSocket/MQTT messages as they are framed
@@ -1691,7 +1711,8 @@ func (c *client) flushOutbound() bool {
 	// buffers have been lopped off the beginning, so in order to return
 	// them to the pool, we need to look at the difference between "orig"
 	// and "wnb".
-	for i := 0; i < len(orig)-len(c.out.wnb); i++ {
+	consumed := len(orig) - len(c.out.wnb)
+	for i := 0; i < consumed && i < len(orig); i++ {
 		nbPoolPut(orig[i])
 	}
 
