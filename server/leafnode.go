@@ -553,9 +553,16 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 			}
 			remote.Lock()
 			// if we are using a delay to start migrating assets, kick off a migrate timer.
-			if remote.jsMigrateTimer == nil && jetstreamMigrateDelay > 0 {
+			if jetstreamMigrateDelay > 0 {
+				// Cancel any existing timer before creating a new one to prevent goroutine leaks
+				if remote.jsMigrateTimer != nil {
+					remote.jsMigrateTimer.Stop()
+				}
 				remote.jsMigrateTimer = time.AfterFunc(jetstreamMigrateDelay, func() {
 					s.checkJetStreamMigrate(remote)
+					remote.Lock()
+					remote.jsMigrateTimer = nil
+					remote.Unlock()
 				})
 			}
 			remote.Unlock()
@@ -1003,7 +1010,9 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 			// An account not existing is something that can happen with nats/http account resolver and the account
 			// has not yet been pushed, or the request failed for other reasons.
 			// remote needs to be set or retry won't happen
-			c.leaf.remote = remote
+			if c.leaf != nil {
+				c.leaf.remote = remote
+			}
 			c.closeConnection(MissingAccount)
 			s.Errorf("Unable to lookup account %s for solicited leafnode connection: %v", lacc, err)
 			return nil
@@ -1776,8 +1785,10 @@ func (s *Server) addLeafNodeConnection(c *client, srvName, clusterName string, c
 }
 
 func (s *Server) removeLeafNodeConnection(c *client) {
+	// First, handle all client-specific cleanup under client lock
 	c.mu.Lock()
 	cid := c.cid
+	var gwSub *subscription
 	if c.leaf != nil {
 		if c.leaf.tsubt != nil {
 			if !c.leaf.tsubt.Stop() {
@@ -1789,13 +1800,18 @@ func (s *Server) removeLeafNodeConnection(c *client) {
 			}
 			c.leaf.tsubt = nil
 		}
-		if c.leaf.gwSub != nil {
-			s.gwLeafSubs.Remove(c.leaf.gwSub)
-			// We need to set this to nil for GC to release the connection
-			c.leaf.gwSub = nil
-		}
+		// Capture gwSub to remove it outside of client lock to avoid deadlock
+		gwSub = c.leaf.gwSub
+		c.leaf.gwSub = nil
 	}
 	c.mu.Unlock()
+	
+	// Now handle the gwSub removal without holding client lock
+	if gwSub != nil {
+		s.gwLeafSubs.Remove(gwSub)
+	}
+	
+	// Finally, update server state
 	s.mu.Lock()
 	delete(s.leafs, cid)
 	s.mu.Unlock()
