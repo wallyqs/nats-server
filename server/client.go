@@ -383,23 +383,13 @@ func nbPoolPut(b []byte) {
 	// that might cause overlapping issues
 	switch cap(b) {
 	case nbPoolSizeSmall:
-		// Ensure the slice points to the beginning of the underlying array
-		if cap(b)-len(b) > cap(b) {
-			return // Invalid buffer state
-		}
-		arr := (*[nbPoolSizeSmall]byte)(b[:nbPoolSizeSmall])
+		arr := (*[nbPoolSizeSmall]byte)(b[:0])
 		nbPoolSmall.Put(arr)
 	case nbPoolSizeMedium:
-		if cap(b)-len(b) > cap(b) {
-			return
-		}
-		arr := (*[nbPoolSizeMedium]byte)(b[:nbPoolSizeMedium])
+		arr := (*[nbPoolSizeMedium]byte)(b[:0])
 		nbPoolMedium.Put(arr)
 	case nbPoolSizeLarge:
-		if cap(b)-len(b) > cap(b) {
-			return
-		}
-		arr := (*[nbPoolSizeLarge]byte)(b[:nbPoolSizeLarge])
+		arr := (*[nbPoolSizeLarge]byte)(b[:0])
 		nbPoolLarge.Put(arr)
 	default:
 		// Ignore frames that are the wrong size, this might happen
