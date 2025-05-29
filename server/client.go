@@ -359,7 +359,7 @@ func nbPoolGet(sz int) []byte {
 	if sz <= 0 {
 		sz = nbPoolSizeSmall
 	}
-	
+
 	switch {
 	case sz <= nbPoolSizeSmall:
 		return nbPoolSmall.Get().(*[nbPoolSizeSmall]byte)[:0:nbPoolSizeSmall]
@@ -378,7 +378,7 @@ func nbPoolPut(b []byte) {
 	if b == nil || len(b) == 0 {
 		return
 	}
-	
+
 	// Validate buffer capacity and ensure we're not dealing with a sub-slice
 	// that might cause overlapping issues
 	switch cap(b) {
@@ -1597,6 +1597,18 @@ func (c *client) flushOutbound() bool {
 	// of the client's lock, which is interesting in case of compression.
 	c.out.nb = nil
 
+	// Pre-allocate space if we know we'll need it
+	if cap(c.out.wnb) < len(c.out.wnb)+len(collapsed) {
+		// Allocate with some headroom to avoid frequent reallocations
+		newCap := len(c.out.wnb) + len(collapsed) + 16
+		if newCap > nbMaxVectorSize {
+			newCap = nbMaxVectorSize
+		}
+		newWnb := make(net.Buffers, len(c.out.wnb), newCap)
+		copy(newWnb, c.out.wnb)
+		c.out.wnb = newWnb
+	}
+
 	// In case it goes away after releasing the lock.
 	nc := c.nc
 
@@ -1619,9 +1631,15 @@ func (c *client) flushOutbound() bool {
 	// Compress outside of the lock
 	if cw != nil {
 		var err error
-		bb := bytes.Buffer{}
+		// Calculate total size to pre-allocate buffer
+		totalSize := 0
+		for _, buf := range collapsed {
+			totalSize += len(buf)
+		}
+		// Pre-allocate with some compression ratio estimate (start with 50%)
+		bb := bytes.NewBuffer(make([]byte, 0, totalSize/2))
 
-		cw.Reset(&bb)
+		cw.Reset(bb)
 		for _, buf := range collapsed {
 			if _, err = cw.Write(buf); err != nil {
 				break
@@ -1645,8 +1663,15 @@ func (c *client) flushOutbound() bool {
 	// referenced in c.out.nb (which can be modified in queueOutboud() while
 	// the lock is released).
 	c.out.wnb = append(c.out.wnb, collapsed...)
-	var _orig [nbMaxVectorSize][]byte
-	orig := append(_orig[:0], c.out.wnb...)
+	// Only allocate if we need more space than our stack buffer
+	var _orig [128][]byte // Reduced from 1024 to 128 for common case
+	var orig [][]byte
+	if len(c.out.wnb) <= len(_orig) {
+		orig = append(_orig[:0], c.out.wnb...)
+	} else {
+		orig = make([][]byte, len(c.out.wnb))
+		copy(orig, c.out.wnb)
+	}
 
 	// Since WriteTo is lopping things off the beginning, we need to remember
 	// the start position of the underlying array so that we can get back to it.
@@ -1717,9 +1742,15 @@ func (c *client) flushOutbound() bool {
 
 	// If we've written everything but the underlying array of our working
 	// buffer has grown excessively then free it — the GC will tidy it up
-	// and we can allocate a new one next time.
+	// and we can allocate a new one next time. Also reset if we have
+	// too much unused capacity relative to usage.
 	if len(c.out.wnb) == 0 && cap(c.out.wnb) > nbPoolSizeLarge*8 {
 		c.out.wnb = nil
+	} else if len(c.out.wnb) > 0 && cap(c.out.wnb) > len(c.out.wnb)*16 && cap(c.out.wnb) > nbPoolSizeLarge {
+		// Shrink if we're using less than 1/16th of capacity
+		newWnb := make(net.Buffers, len(c.out.wnb))
+		copy(newWnb, c.out.wnb)
+		c.out.wnb = newWnb
 	}
 
 	// Ignore ErrShortWrite errors, they will be handled as partials.
