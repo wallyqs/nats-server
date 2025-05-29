@@ -34,6 +34,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
@@ -381,19 +382,21 @@ func nbPoolPut(b []byte) {
 
 	// Validate buffer capacity and ensure we're not dealing with a sub-slice
 	// that might cause overlapping issues
-	switch cap(b) {
-	case nbPoolSizeSmall:
-		arr := (*[nbPoolSizeSmall]byte)(b[:0])
-		nbPoolSmall.Put(arr)
-	case nbPoolSizeMedium:
-		arr := (*[nbPoolSizeMedium]byte)(b[:0])
-		nbPoolMedium.Put(arr)
-	case nbPoolSizeLarge:
-		arr := (*[nbPoolSizeLarge]byte)(b[:0])
-		nbPoolLarge.Put(arr)
-	default:
-		// Ignore frames that are the wrong size, this might happen
-		// with WebSocket/MQTT messages as they are framed
+	if cap(b) > 0 && len(b) <= cap(b) {
+		switch cap(b) {
+		case nbPoolSizeSmall:
+			arr := (*[nbPoolSizeSmall]byte)(unsafe.Pointer(&b[0]))
+			nbPoolSmall.Put(arr)
+		case nbPoolSizeMedium:
+			arr := (*[nbPoolSizeMedium]byte)(unsafe.Pointer(&b[0]))
+			nbPoolMedium.Put(arr)
+		case nbPoolSizeLarge:
+			arr := (*[nbPoolSizeLarge]byte)(unsafe.Pointer(&b[0]))
+			nbPoolLarge.Put(arr)
+		default:
+			// Ignore frames that are the wrong size, this might happen
+			// with WebSocket/MQTT messages as they are framed
+		}
 	}
 }
 
