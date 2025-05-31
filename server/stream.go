@@ -2516,23 +2516,32 @@ func (mset *stream) processMirrorMsgs(mirror *sourceInfo, ready *sync.WaitGroup)
 			}
 			msgs.recycle(&ims)
 		case <-t.C:
-			mset.mu.RLock()
+			// Check health status and take action atomically to avoid races
+			mset.mu.Lock()
 			var stalled bool
 			if mset.mirror != nil {
 				stalled = time.Since(time.Unix(0, mset.mirror.last.Load())) > sourceHealthCheckInterval
 			}
 			isLeader := mset.isLeader()
-			mset.mu.RUnlock()
-			// No longer leader.
+			
+			// No longer leader - cancel and return
 			if !isLeader {
-				mset.mu.Lock()
 				mset.cancelMirrorConsumer()
 				mset.mu.Unlock()
 				return
 			}
-			// We are stalled.
+			
+			// We are stalled - retry the consumer
 			if stalled {
-				mset.retryMirrorConsumer()
+				mset.srv.Debugf("Retrying mirror consumer for '%s > %s'", mset.acc.Name, mset.cfg.Name)
+				mset.cancelMirrorConsumer()
+				err := mset.setupMirrorConsumer()
+				mset.mu.Unlock()
+				if err != nil {
+					mset.srv.Warnf("Failed to retry mirror consumer: %v", err)
+				}
+			} else {
+				mset.mu.Unlock()
 			}
 		}
 	}
