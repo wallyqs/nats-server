@@ -1991,34 +1991,50 @@ func (mset *stream) updateWithAdvisory(config *StreamConfig, sendAdvisory bool, 
 	}
 	jsa.mu.RUnlock()
 
-	mset.mu.Lock()
-	if mset.isLeader() {
-		// Now check for subject interest differences.
+	// Determine subscription changes needed without holding stream lock to avoid deadlock
+	var subsToAdd, subsToRemove []string
+	
+	mset.mu.RLock()
+	isLeader := mset.isLeader()
+	if isLeader {
+		// Check for subject interest differences.
 		current := make(map[string]struct{}, len(ocfg.Subjects))
 		for _, s := range ocfg.Subjects {
 			current[s] = struct{}{}
 		}
-		// Update config with new values. The store update will enforce any stricter limits.
 
-		// Now walk new subjects. All of these need to be added, but we will check
-		// the originals first, since if it is in there we can skip, already added.
+		// Collect subjects to add
 		for _, s := range cfg.Subjects {
 			if _, ok := current[s]; !ok {
-				if _, err := mset.subscribeInternal(s, mset.processInboundJetStreamMsg); err != nil {
-					mset.mu.Unlock()
-					return err
-				}
+				subsToAdd = append(subsToAdd, s)
 			}
 			delete(current, s)
 		}
-		// What is left in current needs to be deleted.
+		// Collect subjects to remove
 		for s := range current {
-			if err := mset.unsubscribeInternal(s); err != nil {
-				mset.mu.Unlock()
+			subsToRemove = append(subsToRemove, s)
+		}
+	}
+	mset.mu.RUnlock()
+
+	// Perform subscription operations without holding stream lock to avoid deadlock
+	if isLeader {
+		// Add new subscriptions
+		for _, s := range subsToAdd {
+			if _, err := mset.subscribeInternal(s, mset.processInboundJetStreamMsg); err != nil {
 				return err
 			}
 		}
+		// Remove old subscriptions  
+		for _, s := range subsToRemove {
+			if err := mset.unsubscribeInternal(s); err != nil {
+				return err
+			}
+		}
+	}
 
+	mset.mu.Lock()
+	if isLeader {
 		// Check for the Duplicates
 		if cfg.Duplicates != ocfg.Duplicates && mset.ddtmr != nil {
 			// Let it fire right away, it will adjust properly on purge.
