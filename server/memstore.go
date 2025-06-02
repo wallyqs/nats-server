@@ -473,9 +473,26 @@ func (ms *memStore) filteredStateLocked(sseq uint64, filter string, lastPerSubje
 	var totalSkipped uint64
 	// We will track start and end sequences as we go.
 	ms.fss.Match(stringToBytes(filter), func(subj []byte, fss *SimpleState) {
+		// Skip recalculation if we can determine the relationship without it.
+		// If we're searching from a sequence that's clearly after this subject's range,
+		// we can skip it entirely without needing exact first/last values.
+		if sseq > ms.state.LastSeq || (fss.Msgs == 0) {
+			totalSkipped += fss.Msgs
+			return
+		}
+
+		// Only recalculate if we actually need the exact first/last values
+		// to determine our position relative to sseq.
 		if fss.firstNeedsUpdate || fss.lastNeedsUpdate {
+			// If sseq is before the earliest possible sequence for this subject,
+			// we don't need exact values - we know we'll include everything.
+			if sseq <= ms.state.FirstSeq {
+				update(fss)
+				return
+			}
 			ms.recalculateForSubj(bytesToString(subj), fss)
 		}
+
 		if sseq <= fss.First {
 			update(fss)
 		} else if sseq <= fss.Last {
@@ -818,9 +835,26 @@ func (ms *memStore) NumPendingMulti(sseq uint64, sl *Sublist, lastPerSubject boo
 	var totalSkipped uint64
 	// We will track start and end sequences as we go.
 	IntersectStree[SimpleState](ms.fss, sl, func(subj []byte, fss *SimpleState) {
+		// Skip recalculation if we can determine the relationship without it.
+		// If we're searching from a sequence that's clearly after this subject's range,
+		// we can skip it entirely without needing exact first/last values.
+		if sseq > ms.state.LastSeq || (fss.Msgs == 0) {
+			totalSkipped += fss.Msgs
+			return
+		}
+
+		// Only recalculate if we actually need the exact first/last values
+		// to determine our position relative to sseq.
 		if fss.firstNeedsUpdate || fss.lastNeedsUpdate {
+			// If sseq is before the earliest possible sequence for this subject,
+			// we don't need exact values - we know we'll include everything.
+			if sseq <= ms.state.FirstSeq {
+				update(fss)
+				return
+			}
 			ms.recalculateForSubj(bytesToString(subj), fss)
 		}
+
 		if sseq <= fss.First {
 			update(fss)
 		} else if sseq <= fss.Last {
@@ -1753,6 +1787,45 @@ func (ms *memStore) removeSeqPerSubject(subj string, seq uint64) {
 // Will recalculate the first and/or last sequence for this subject.
 // Lock should be held.
 func (ms *memStore) recalculateForSubj(subj string, ss *SimpleState) {
+	// Optimization: When MaxMsgsPer is 1 or 2 and we have only 1 message,
+	// first and last are always the same
+	if (ms.maxp == 1 || ms.maxp == 2) && ss.Msgs == 1 {
+		// For a single message, First == Last
+		// If we know one value but not the other, we can copy it
+		if ss.firstNeedsUpdate && !ss.lastNeedsUpdate {
+			ss.First = ss.Last
+			ss.firstNeedsUpdate = false
+			return
+		}
+		if ss.lastNeedsUpdate && !ss.firstNeedsUpdate {
+			ss.Last = ss.First
+			ss.lastNeedsUpdate = false
+			return
+		}
+		// If both need update, we still need to find the message
+		// but the existing code already optimizes this case at lines 1837-1840 and 1855-1858
+	}
+
+	// Early exit if the subject's range is completely outside the store's range
+	if ss.First > ms.state.LastSeq {
+		// Subject starts after all messages in the store
+		ss.First = ss.Last
+		ss.firstNeedsUpdate = false
+		ss.lastNeedsUpdate = false
+		return
+	}
+	if ss.Last < ms.state.FirstSeq {
+		// Subject ends before all messages in the store
+		// This shouldn't normally happen, but handle it gracefully
+		return
+	}
+
+	// Check if the range is invalid (First > Last)
+	if ss.First > ss.Last {
+		// Invalid range, nothing to recalculate
+		return
+	}
+
 	if ss.firstNeedsUpdate {
 		tseq := ss.First + 1
 		if tseq < ms.state.FirstSeq {
