@@ -1787,6 +1787,10 @@ func (ms *memStore) removeSeqPerSubject(subj string, seq uint64) {
 // Will recalculate the first and/or last sequence for this subject.
 // Lock should be held.
 func (ms *memStore) recalculateForSubj(subj string, ss *SimpleState) {
+	start := time.Now()
+	defer func() {
+		fmt.Println("RECALCULATE TOOK", subj, time.Since(start))
+	}()
 	// Optimization: When MaxMsgsPer is 1 or 2 and we have only 1 message,
 	// first and last are always the same
 	if (ms.maxp == 1 || ms.maxp == 2) && ss.Msgs == 1 {

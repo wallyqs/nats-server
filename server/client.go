@@ -4166,6 +4166,11 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 		return false, true
 	}
 
+	// Convert subject to string once to avoid multiple conversions
+	// This is one of the most common operations and subject is used
+	// multiple times throughout this function
+	subjectStr := bytesToString(c.pa.subject)
+
 	// Mostly under testing scenarios.
 	c.mu.Lock()
 	if c.srv == nil || c.acc == nil {
@@ -4176,7 +4181,7 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 	genidAddr := &acc.sl.genid
 
 	// Check pub permissions
-	if c.perms != nil && (c.perms.pub.allow != nil || c.perms.pub.deny != nil) && !c.pubAllowedFullCheck(string(c.pa.subject), true, true) {
+	if c.perms != nil && (c.perms.pub.allow != nil || c.perms.pub.deny != nil) && !c.pubAllowedFullCheck(subjectStr, true, true) {
 		c.mu.Unlock()
 		c.pubPermissionViolation(c.pa.subject)
 		return false, true
@@ -4224,9 +4229,9 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 	// to see if we need to report the latency.
 	if c.rrTracking != nil {
 		c.mu.Lock()
-		rl := c.rrTracking.rmap[string(c.pa.subject)]
+		rl := c.rrTracking.rmap[subjectStr]
 		if rl != nil {
-			delete(c.rrTracking.rmap, bytesToString(c.pa.subject))
+			delete(c.rrTracking.rmap, subjectStr)
 		}
 		c.mu.Unlock()
 
@@ -4257,7 +4262,7 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 
 	genid := atomic.LoadUint64(genidAddr)
 	if genid == c.in.genid && c.in.results != nil {
-		r, ok = c.in.results[string(c.pa.subject)]
+		r, ok = c.in.results[subjectStr]
 	} else {
 		// Reset our L1 completely.
 		c.in.results = make(map[string]*SublistResult)
@@ -4267,7 +4272,7 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 	// Go back to the sublist data structure.
 	if !ok {
 		// Match may use the subject here to populate a cache, so can not use bytesToString here.
-		r = acc.sl.Match(string(c.pa.subject))
+		r = acc.sl.Match(subjectStr)
 		if len(r.psubs)+len(r.qsubs) > 0 {
 			// Prune the results cache. Keeps us from unbounded growth. Random delete.
 			if len(c.in.results) >= maxResultCacheSize {
@@ -4280,7 +4285,7 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 				}
 			}
 			// Then add the new cache entry.
-			c.in.results[string(c.pa.subject)] = r
+			c.in.results[subjectStr] = r
 		}
 	}
 
