@@ -4838,6 +4838,11 @@ func (o *consumer) deliverMsg(dsubj, ackReply string, pmsg *jsPubMsg, dc uint64,
 		return
 	}
 
+	// Increment the outbound JetStream messages counter
+	if o.srv != nil {
+		atomic.AddInt64(&o.srv.outJSMsgs, 1)
+	}
+
 	dseq := o.dseq
 	o.dseq++
 

@@ -168,6 +168,7 @@ type Server struct {
 	pinnedAccFail uint64
 	stats
 	scStats
+	staleStats
 	mu                  sync.RWMutex
 	reloadMu            sync.RWMutex // Write-locked when a config reload is taking place ONLY
 	kp                  nkeys.KeyPair
@@ -389,15 +390,26 @@ type nodeInfo struct {
 }
 
 type stats struct {
-	inMsgs        int64
-	outMsgs       int64
-	inBytes       int64
-	outBytes      int64
-	slowConsumers int64
+	inMsgs           int64
+	outMsgs          int64
+	inBytes          int64
+	outBytes         int64
+	slowConsumers    int64
+	inJSMsgs         int64
+	outJSMsgs        int64
+	staleConnections int64
 }
 
 // scStats includes the total and per connection counters of Slow Consumers.
 type scStats struct {
+	clients  atomic.Uint64
+	routes   atomic.Uint64
+	leafs    atomic.Uint64
+	gateways atomic.Uint64
+}
+
+// staleStats includes the total and per connection counters of Stale Connections.
+type staleStats struct {
 	clients  atomic.Uint64
 	routes   atomic.Uint64
 	leafs    atomic.Uint64

@@ -1237,6 +1237,9 @@ type Varz struct {
 	InBytes               int64                  `json:"in_bytes"`
 	OutBytes              int64                  `json:"out_bytes"`
 	SlowConsumers         int64                  `json:"slow_consumers"`
+	InJSMsgs              int64                  `json:"in_js_msgs"`
+	OutJSMsgs             int64                  `json:"out_js_msgs"`
+	StaleConnections      int64                  `json:"stale_connections"`
 	Subscriptions         uint32                 `json:"subscriptions"`
 	HTTPReqStats          map[string]uint64      `json:"http_req_stats"`
 	ConfigLoadTime        time.Time              `json:"config_load_time"`
@@ -1248,6 +1251,7 @@ type Varz struct {
 	PinnedAccountFail     uint64                 `json:"pinned_account_fails,omitempty"`
 	OCSPResponseCache     *OCSPResponseCacheVarz `json:"ocsp_peer_cache,omitempty"`
 	SlowConsumersStats    *SlowConsumersStats    `json:"slow_consumer_stats"`
+	StaleConnectionsStats *StaleConnectionsStats `json:"stale_connections_stats"`
 }
 
 // JetStreamVarz contains basic runtime information about jetstream
@@ -1370,6 +1374,14 @@ type VarzOptions struct{}
 
 // SlowConsumersStats contains information about the slow consumers from different type of connections.
 type SlowConsumersStats struct {
+	Clients  uint64 `json:"clients"`
+	Routes   uint64 `json:"routes"`
+	Gateways uint64 `json:"gateways"`
+	Leafs    uint64 `json:"leafs"`
+}
+
+// StaleConnectionsStats contains per connection type counters of stale connections
+type StaleConnectionsStats struct {
 	Clients  uint64 `json:"clients"`
 	Routes   uint64 `json:"routes"`
 	Gateways uint64 `json:"gateways"`
@@ -1746,14 +1758,23 @@ func (s *Server) updateVarzRuntimeFields(v *Varz, forceUpdate bool, pcpu float64
 	v.Leafs = len(s.leafs)
 	v.InMsgs = atomic.LoadInt64(&s.inMsgs)
 	v.InBytes = atomic.LoadInt64(&s.inBytes)
+	v.InJSMsgs = atomic.LoadInt64(&s.inJSMsgs)
 	v.OutMsgs = atomic.LoadInt64(&s.outMsgs)
 	v.OutBytes = atomic.LoadInt64(&s.outBytes)
+	v.OutJSMsgs = atomic.LoadInt64(&s.outJSMsgs)
 	v.SlowConsumers = atomic.LoadInt64(&s.slowConsumers)
 	v.SlowConsumersStats = &SlowConsumersStats{
 		Clients:  s.NumSlowConsumersClients(),
 		Routes:   s.NumSlowConsumersRoutes(),
 		Gateways: s.NumSlowConsumersGateways(),
 		Leafs:    s.NumSlowConsumersLeafs(),
+	}
+	v.StaleConnections = atomic.LoadInt64(&s.staleConnections)
+	v.StaleConnectionsStats = &StaleConnectionsStats{
+		Clients:  s.staleStats.clients.Load(),
+		Routes:   s.staleStats.routes.Load(),
+		Gateways: s.staleStats.gateways.Load(),
+		Leafs:    s.staleStats.leafs.Load(),
 	}
 	v.PinnedAccountFail = atomic.LoadUint64(&s.pinnedAccFail)
 
