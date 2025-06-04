@@ -1845,6 +1845,26 @@ func (c *client) markConnAsClosed(reason ClosedState) {
 		return
 	}
 	c.flags.set(connMarkedClosed)
+	
+	// Track stale connections
+	if reason == StaleConnection && c.srv != nil {
+		atomic.AddInt64(&c.srv.staleConnections, 1)
+		switch c.kind {
+		case CLIENT:
+			c.srv.staleStats.clients.Add(1)
+		case ROUTER:
+			c.srv.staleStats.routes.Add(1)
+		case GATEWAY:
+			c.srv.staleStats.gateways.Add(1)
+		case LEAF:
+			c.srv.staleStats.leafs.Add(1)
+		}
+		if c.acc != nil {
+			c.acc.mu.Lock()
+			c.acc.staleConnections++
+			c.acc.mu.Unlock()
+		}
+	}
 	// For a websocket client, unless we are told not to flush, enqueue
 	// a websocket CloseMessage based on the reason.
 	if !skipFlush && c.isWebsocket() && !c.ws.closeSent {

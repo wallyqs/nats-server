@@ -4765,6 +4765,10 @@ func (mset *stream) getDirectRequest(req *JSApiMsgGetRequest, reply string) {
 
 // processInboundJetStreamMsg handles processing messages bound for a stream.
 func (mset *stream) processInboundJetStreamMsg(_ *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
+	// Increment the inbound processed counter.
+	if c.srv != nil {
+		atomic.AddInt64(&c.srv.inJSMsgs, 1)
+	}
 	hdr, msg := c.msgParts(copyBytes(rmsg)) // Need to copy.
 	if mt, traceOnly := c.isMsgTraceEnabled(); mt != nil {
 		// If message is delivered, we need to disable the message trace headers
