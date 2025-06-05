@@ -319,6 +319,9 @@ type stream struct {
 	sourcesConsumerSetup *time.Timer
 	smsgs                *ipQueue[*inMsg] // Intra-process queue for all incoming sourced messages.
 
+	// Source sequence index - maps source iname to last sequence stored from that source
+	sourceSeqIndex map[string]uint64
+
 	// Indicates we have direct consumers.
 	directs int
 
@@ -674,6 +677,11 @@ func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileSt
 		mqch: make(chan struct{}),
 		uch:  make(chan struct{}, 4),
 		sch:  make(chan struct{}, 1),
+	}
+
+	// Initialize source sequence index if we have sources configured
+	if len(cfg.Sources) > 0 {
+		mset.sourceSeqIndex = make(map[string]uint64)
 	}
 
 	// Start our signaling routine to process consumers.
@@ -3516,10 +3524,18 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 	if dseq == si.dseq+1 {
 		si.dseq++
 		si.sseq = sseq
+		// Update the index
+		if mset.sourceSeqIndex != nil {
+			mset.sourceSeqIndex[si.iname] = sseq
+		}
 	} else if dseq > si.dseq {
 		if si.cname == _EMPTY_ {
 			si.cname = tokenAt(m.rply, 4)
 			si.dseq, si.sseq = dseq, sseq
+			// Update the index
+			if mset.sourceSeqIndex != nil {
+				mset.sourceSeqIndex[si.iname] = sseq
+			}
 		} else {
 			mset.retrySourceConsumerAtSeq(si.iname, si.sseq+1)
 			mset.mu.Unlock()
@@ -3746,6 +3762,7 @@ func (mset *stream) resetSourceInfo() {
 	// Reset if needed.
 	mset.stopSourceConsumers()
 	mset.sources = make(map[string]*sourceInfo)
+	// Don't reset sourceSeqIndex - we want to preserve it across resets
 
 	for _, ssi := range mset.cfg.Sources {
 		if ssi.iname == _EMPTY_ {
@@ -3785,6 +3802,19 @@ func (mset *stream) startingSequenceForSources() {
 	// Always reset here.
 	mset.resetSourceInfo()
 
+	// Try to use the in-memory index first if available
+	if mset.sourceSeqIndex != nil && len(mset.sourceSeqIndex) > 0 {
+		// Use the index to quickly set source sequences
+		for iname, sseq := range mset.sourceSeqIndex {
+			if si := mset.sources[iname]; si != nil {
+				si.sseq = sseq
+				si.dseq = 0
+			}
+		}
+		return
+	}
+
+	// Fall back to linear scan if no index available
 	var state StreamState
 	mset.store.FastState(&state)
 
@@ -3793,11 +3823,16 @@ func (mset *stream) startingSequenceForSources() {
 		return
 	}
 
+	// Initialize index if needed
+	if mset.sourceSeqIndex == nil {
+		mset.sourceSeqIndex = make(map[string]uint64)
+	}
+
 	// For short circuiting return.
 	expected := len(mset.cfg.Sources)
 	seqs := make(map[string]uint64)
 
-	// Stamp our si seq records on the way out.
+	// Stamp our si seq records on the way out and update index.
 	defer func() {
 		for sname, seq := range seqs {
 			// Ignore if not set.
@@ -3808,6 +3843,8 @@ func (mset *stream) startingSequenceForSources() {
 				si.sseq = seq
 				si.dseq = 0
 			}
+			// Update the index for next time
+			mset.sourceSeqIndex[sname] = seq
 		}
 	}()
 
