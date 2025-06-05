@@ -332,6 +332,9 @@ const (
 	// This is the full snapshotted state for the stream.
 	streamStreamStateFile = "index.db"
 
+	// This is the sources state file that tracks last sequences for each source.
+	streamSourcesStateFile = "sources.dat"
+
 	// This is the encoded time hash wheel for TTLs.
 	ttlStreamStateFile = "thw.db"
 

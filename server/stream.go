@@ -399,6 +399,18 @@ type sourceInfo struct {
 	trs   []*subjectTransform // The subject transforms.
 }
 
+// sourceState represents the persistent state of a source.
+type sourceState struct {
+	Iname string `json:"iname"` // The unique index name of this source
+	Sseq  uint64 `json:"sseq"`  // Last stream sequence seen from the source
+}
+
+// sourcesState represents the persistent state of all sources for a stream.
+type sourcesState struct {
+	Version int            `json:"version"`
+	Sources []*sourceState `json:"sources,omitempty"`
+}
+
 // For mirrors and direct get
 const (
 	dgetGroup          = sysGroup
@@ -3438,6 +3450,15 @@ func (mset *stream) processAllSourceMsgs() {
 					}
 				}()
 			}
+
+			// Periodically save source state to avoid expensive scans on restart
+			go func() {
+				mset.mu.Lock()
+				defer mset.mu.Unlock()
+				if err := mset.saveSourcesState(); err != nil && mset.srv != nil {
+					mset.srv.Warnf("Failed to save sources state for stream %q: %v", mset.cfg.Name, err)
+				}
+			}()
 		}
 	}
 }
@@ -3771,6 +3792,13 @@ func (mset *stream) resetSourceInfo() {
 		}
 		mset.sources[ssi.iname] = si
 	}
+
+	// Try to load persisted source state after initializing the sources map
+	if err := mset.loadSourcesState(); err != nil {
+		if mset.srv != nil {
+			mset.srv.Warnf("Error loading sources state for stream %q: %v", mset.cfg.Name, err)
+		}
+	}
 }
 
 // This will do a reverse scan on startup or leader election
@@ -3851,6 +3879,106 @@ func (mset *stream) startingSequenceForSources() {
 	}
 }
 
+// saveSourcesState persists the current source state to disk.
+// Lock should be held.
+func (mset *stream) saveSourcesState() error {
+	if mset.store == nil {
+		return nil
+	}
+
+	// Only save if we have sources configured
+	if len(mset.cfg.Sources) == 0 {
+		return nil
+	}
+
+	// Build the state to persist
+	state := &sourcesState{
+		Version: 1,
+		Sources: make([]*sourceState, 0, len(mset.sources)),
+	}
+
+	for iname, si := range mset.sources {
+		// Only save if we have a valid sequence
+		if si.sseq > 0 {
+			state.Sources = append(state.Sources, &sourceState{
+				Iname: iname,
+				Sseq:  si.sseq,
+			})
+		}
+	}
+
+	// If no sources have sequences, don't save anything
+	if len(state.Sources) == 0 {
+		return nil
+	}
+
+	b, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+
+	// Get the stream's storage directory
+	// For file stores, we need to access the directory directly
+	var storeDir string
+	if mset.store.Type() == FileStorage {
+		if fs, ok := mset.store.(*fileStore); ok && fs.fcfg.StoreDir != _EMPTY_ {
+			storeDir = fs.fcfg.StoreDir
+		} else {
+			return nil // Can't determine store directory
+		}
+	} else {
+		return nil // Memory store, nothing to persist
+	}
+
+	sourceStateFile := filepath.Join(storeDir, streamSourcesStateFile)
+	return os.WriteFile(sourceStateFile, b, defaultFilePerms)
+}
+
+// loadSourcesState loads the persisted source state from disk.
+// Lock should be held.
+func (mset *stream) loadSourcesState() error {
+	if mset.store == nil {
+		return nil
+	}
+
+	// Get the stream's storage directory
+	// For file stores, we need to access the directory directly
+	var storeDir string
+	if mset.store.Type() == FileStorage {
+		if fs, ok := mset.store.(*fileStore); ok && fs.fcfg.StoreDir != _EMPTY_ {
+			storeDir = fs.fcfg.StoreDir
+		} else {
+			return nil // Can't determine store directory
+		}
+	} else {
+		return nil // Memory store, nothing to load
+	}
+
+	sourceStateFile := filepath.Join(storeDir, streamSourcesStateFile)
+	data, err := os.ReadFile(sourceStateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // File doesn't exist yet, that's ok
+		}
+		return err
+	}
+
+	var state sourcesState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return err
+	}
+
+	// Apply the loaded state to our sources
+	for _, ss := range state.Sources {
+		if si := mset.sources[ss.Iname]; si != nil {
+			si.sseq = ss.Sseq
+			si.dseq = 0
+		}
+	}
+
+	return nil
+}
+
 // Setup our source consumers.
 // Lock should be held.
 func (mset *stream) setupSourceConsumers() error {
@@ -3869,7 +3997,19 @@ func (mset *stream) setupSourceConsumers() error {
 		return nil
 	}
 
-	mset.startingSequenceForSources()
+	// Check if we have any loaded state from resetSourceInfo
+	hasLoadedState := false
+	for _, si := range mset.sources {
+		if si.sseq > 0 {
+			hasLoadedState = true
+			break
+		}
+	}
+
+	// Only do the expensive scan if we didn't load any state
+	if !hasLoadedState {
+		mset.startingSequenceForSources()
+	}
 
 	// Setup our consumers at the proper starting position.
 	for _, ssi := range mset.cfg.Sources {
@@ -4010,6 +4150,11 @@ func (mset *stream) subscribeToMirrorDirect() error {
 // Stop our source consumers.
 // Lock should be held.
 func (mset *stream) stopSourceConsumers() {
+	// Save source state before stopping
+	if err := mset.saveSourcesState(); err != nil && mset.srv != nil {
+		mset.srv.Warnf("Failed to save sources state for stream %q before stopping: %v", mset.cfg.Name, err)
+	}
+
 	for _, si := range mset.sources {
 		mset.cancelSourceInfo(si)
 	}
