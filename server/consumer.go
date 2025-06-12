@@ -4849,6 +4849,11 @@ func (o *consumer) deliverMsg(dsubj, ackReply string, pmsg *jsPubMsg, dc uint64,
 	pmsg.dsubj, pmsg.reply, pmsg.o = dsubj, ackReply, o
 	psz := pmsg.size()
 
+	// Increment the outbound JetStream bytes counter
+	if o.srv != nil {
+		atomic.AddInt64(&o.srv.outJSByteMsgs, int64(psz))
+	}
+
 	if o.maxpb > 0 {
 		o.pbytes += psz
 	}

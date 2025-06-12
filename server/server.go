@@ -397,6 +397,8 @@ type stats struct {
 	slowConsumers    int64
 	inJSMsgs         int64
 	outJSMsgs        int64
+	inJSByteMsgs     int64
+	outJSByteMsgs    int64
 	staleConnections int64
 }
 

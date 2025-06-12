@@ -4003,6 +4003,7 @@ func (c *client) processInboundMsg(msg []byte) {
 	// Increment the inbound processed counter
 	if c.srv != nil {
 		atomic.AddInt64(&c.srv.inJSMsgs, 1)
+		atomic.AddInt64(&c.srv.inJSByteMsgs, int64(c.pa.size))
 	}
 	
 	switch c.kind {
