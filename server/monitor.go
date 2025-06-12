@@ -1239,8 +1239,8 @@ type Varz struct {
 	SlowConsumers         int64                  `json:"slow_consumers"`
 	InJSMsgs              int64                  `json:"in_js_msgs"`
 	OutJSMsgs             int64                  `json:"out_js_msgs"`
-	InJSByteMsgs          int64                  `json:"in_js_byte_msgs"`
-	OutJSByteMsgs         int64                  `json:"out_js_byte_msgs"`
+	InJSBytes             int64                  `json:"in_js_bytes"`
+	OutJSBytes            int64                  `json:"out_js_bytes"`
 	StaleConnections      int64                  `json:"stale_connections"`
 	Subscriptions         uint32                 `json:"subscriptions"`
 	HTTPReqStats          map[string]uint64      `json:"http_req_stats"`
@@ -1764,8 +1764,8 @@ func (s *Server) updateVarzRuntimeFields(v *Varz, forceUpdate bool, pcpu float64
 	v.OutMsgs = atomic.LoadInt64(&s.outMsgs)
 	v.OutBytes = atomic.LoadInt64(&s.outBytes)
 	v.OutJSMsgs = atomic.LoadInt64(&s.outJSMsgs)
-	v.InJSByteMsgs = atomic.LoadInt64(&s.inJSByteMsgs)
-	v.OutJSByteMsgs = atomic.LoadInt64(&s.outJSByteMsgs)
+	v.InJSBytes = atomic.LoadInt64(&s.inJSByteMsgs)
+	v.OutJSBytes = atomic.LoadInt64(&s.outJSByteMsgs)
 	v.SlowConsumers = atomic.LoadInt64(&s.slowConsumers)
 	v.SlowConsumersStats = &SlowConsumersStats{
 		Clients:  s.NumSlowConsumersClients(),
