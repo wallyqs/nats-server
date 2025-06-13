@@ -1237,6 +1237,7 @@ type Varz struct {
 	InBytes               int64                  `json:"in_bytes"`
 	OutBytes              int64                  `json:"out_bytes"`
 	SlowConsumers         int64                  `json:"slow_consumers"`
+	StaleConnections      int64                  `json:"stale_connections"`
 	Subscriptions         uint32                 `json:"subscriptions"`
 	HTTPReqStats          map[string]uint64      `json:"http_req_stats"`
 	ConfigLoadTime        time.Time              `json:"config_load_time"`
@@ -1248,6 +1249,7 @@ type Varz struct {
 	PinnedAccountFail     uint64                 `json:"pinned_account_fails,omitempty"`
 	OCSPResponseCache     *OCSPResponseCacheVarz `json:"ocsp_peer_cache,omitempty"`
 	SlowConsumersStats    *SlowConsumersStats    `json:"slow_consumer_stats"`
+	StaleConnectionStats  *StaleConnectionStats  `json:"stale_connection_stats"`
 }
 
 // JetStreamVarz contains basic runtime information about jetstream
@@ -1370,6 +1372,14 @@ type VarzOptions struct{}
 
 // SlowConsumersStats contains information about the slow consumers from different type of connections.
 type SlowConsumersStats struct {
+	Clients  uint64 `json:"clients"`
+	Routes   uint64 `json:"routes"`
+	Gateways uint64 `json:"gateways"`
+	Leafs    uint64 `json:"leafs"`
+}
+
+// StaleConnectionStats contains information about the stale connections from different type of connections.
+type StaleConnectionStats struct {
 	Clients  uint64 `json:"clients"`
 	Routes   uint64 `json:"routes"`
 	Gateways uint64 `json:"gateways"`
@@ -1754,6 +1764,17 @@ func (s *Server) updateVarzRuntimeFields(v *Varz, forceUpdate bool, pcpu float64
 		Routes:   s.NumSlowConsumersRoutes(),
 		Gateways: s.NumSlowConsumersGateways(),
 		Leafs:    s.NumSlowConsumersLeafs(),
+	}
+	v.StaleConnections = atomic.LoadInt64(&s.staleConnections)
+	// Evaluate the stale connection stats, but set it only if one of the value is not 0.
+	stcs := &StaleConnectionStats{
+		Clients:  s.NumStaleConnectionsClients(),
+		Routes:   s.NumStaleConnectionsRoutes(),
+		Gateways: s.NumStaleConnectionsGateways(),
+		Leafs:    s.NumStaleConnectionsLeafs(),
+	}
+	if stcs.Clients != 0 || stcs.Routes != 0 || stcs.Gateways != 0 || stcs.Leafs != 0 {
+		v.StaleConnectionStats = stcs
 	}
 	v.PinnedAccountFail = atomic.LoadUint64(&s.pinnedAccFail)
 
