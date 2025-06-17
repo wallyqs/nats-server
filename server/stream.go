@@ -739,7 +739,7 @@ func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileSt
 	fsCfg.Compression = config.Compression
 
 	// io_uring opt-in
-	fsCfg.UseIOUring = s.getOpts().UseIOUring
+	fsCfg.UseIOUring = true // s.getOpts().UseIOUring
 
 	if err := mset.setupStore(fsCfg); err != nil {
 		mset.stop(true, false)
