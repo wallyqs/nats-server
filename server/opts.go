@@ -346,6 +346,7 @@ type Options struct {
 	StoreDir                   string            `json:"-"`
 	SyncInterval               time.Duration     `json:"-"`
 	SyncAlways                 bool              `json:"-"`
+	UseIOUring                 bool              `json:"-"`
 	JsAccDefaultDomain         map[string]string `json:"-"` // account to domain name mapping
 	Websocket                  WebsocketOpts     `json:"-"`
 	MQTT                       MQTTOpts          `json:"-"`
@@ -2463,6 +2464,10 @@ func parseJetStream(v any, opts *Options, errors *[]error, warnings *[]error) er
 					return &configErr{tk, fmt.Sprintf("Expected a parseable size for %q, got %v", mk, mv)}
 				}
 				opts.JetStreamRequestQueueLimit = lim
+			case "use_io_uring", "io_uring":
+				if v, ok := mv.(bool); ok {
+					opts.UseIOUring = v
+				}
 			default:
 				if !tk.IsUsedVariable() {
 					err := &unknownConfigFieldErr{

@@ -738,6 +738,9 @@ func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileSt
 	fsCfg.SyncAlways = s.getOpts().SyncAlways
 	fsCfg.Compression = config.Compression
 
+	// io_uring opt-in
+	fsCfg.UseIOUring = s.getOpts().UseIOUring
+
 	if err := mset.setupStore(fsCfg); err != nil {
 		mset.stop(true, false)
 		return nil, NewJSStreamStoreFailedError(err)

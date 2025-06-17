@@ -7,6 +7,7 @@ toolchain go1.23.10
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.4.3-default-no-op
 	github.com/google/go-tpm v0.9.5
+	github.com/iceber/iouring-go v0.0.0-00010101000000-000000000000
 	github.com/klauspost/compress v1.18.0
 	github.com/minio/highwayhash v1.0.3
 	github.com/nats-io/jwt/v2 v2.7.4
@@ -18,3 +19,5 @@ require (
 	golang.org/x/sys v0.33.0
 	golang.org/x/time v0.12.0
 )
+
+replace github.com/iceber/iouring-go => github.com/paulcacheux/iouring-go v0.0.0-20241115154236-2c7785c40a0f

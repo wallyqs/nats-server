@@ -9627,3 +9627,63 @@ func TestFileStoreUpdateConfigTTLState(t *testing.T) {
 	require_NoError(t, fs.UpdateConfig(&cfg))
 	require_Equal(t, fs.ttls, nil)
 }
+
+func TestFileStoreIOUring(t *testing.T) {
+	// This test verifies io_uring functionality with graceful fallback
+	fcfg := FileStoreConfig{
+		StoreDir:          t.TempDir(),
+		UseIOUring:        true,
+		IOUringQueueDepth: 32,
+	}
+	
+	cfg := StreamConfig{
+		Name:     "test-iouring",
+		Storage:  FileStorage,
+	}
+	
+	fs, err := newFileStore(fcfg, cfg)
+	require_NoError(t, err)
+	defer fs.Stop()
+	
+	// Test basic operations with io_uring enabled
+	subj, msg := "test.subject", []byte("Hello io_uring World")
+	
+	// Store multiple messages
+	for i := 1; i <= 10; i++ {
+		seq, _, err := fs.StoreMsg(subj, nil, msg, 0)
+		require_NoError(t, err)
+		require_Equal(t, seq, uint64(i))
+	}
+	
+	// Verify state
+	state := fs.State()
+	require_Equal(t, state.Msgs, uint64(10))
+	
+	// Test message retrieval
+	var smv StoreMsg
+	for i := 1; i <= 10; i++ {
+		sm, err := fs.LoadMsg(uint64(i), &smv)
+		require_NoError(t, err)
+		require_Equal(t, string(sm.msg), string(msg))
+		require_Equal(t, sm.subj, subj)
+	}
+	
+	// Test with io_uring disabled for comparison
+	fcfg2 := FileStoreConfig{
+		StoreDir:   t.TempDir(),
+		UseIOUring: false,
+	}
+	
+	fs2, err := newFileStore(fcfg2, StreamConfig{Name: "test-no-iouring", Storage: FileStorage})
+	require_NoError(t, err)
+	defer fs2.Stop()
+	
+	// Store and retrieve should work the same way
+	seq, _, err := fs2.StoreMsg(subj, nil, msg, 0)
+	require_NoError(t, err)
+	require_Equal(t, seq, uint64(1))
+	
+	sm, err := fs2.LoadMsg(1, &smv)
+	require_NoError(t, err)
+	require_Equal(t, string(sm.msg), string(msg))
+}

@@ -51,6 +51,12 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
+// IOUring interface for async file operations (implementation varies by platform)
+type IOUring interface {
+	Close() error
+	// SubmitRequest is available only on Linux builds
+}
+
 type FileStoreConfig struct {
 	// Where the parent directory for all storage will be located.
 	StoreDir string
@@ -70,6 +76,10 @@ type FileStoreConfig struct {
 	Cipher StoreCipher
 	// Compression is the algorithm to use when compressing.
 	Compression StoreCompression
+	// UseIOUring enables io_uring for async file operations (Linux only).
+	UseIOUring bool
+	// IOUringQueueDepth controls the depth of the io_uring submission queue.
+	IOUringQueueDepth uint32
 
 	// Internal reference to our server.
 	srv *Server
@@ -198,6 +208,9 @@ type fileStore struct {
 	sips        int
 	dirty       int
 	closing     bool
+	// io_uring related fields
+	iour        IOUring
+	iourMu      sync.Mutex
 	closed      bool
 	fip         bool
 	receivedAny bool
@@ -588,6 +601,11 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 
 	// Setup our sync timer.
 	fs.setSyncTimer()
+
+	// Initialize io_uring if enabled
+	if err := fs.initIOUring(); err != nil {
+		return nil, err
+	}
 
 	// Spin up the go routine that will write out our full state stream index.
 	go fs.flushStreamStateLoop(fs.qch, fs.fsld)
@@ -5200,11 +5218,21 @@ func (mb *msgBlock) eraseMsg(seq uint64, ri, rl int) error {
 			return err
 		}
 		defer mfd.Close()
-		if _, err = mfd.WriteAt(nbytes, int64(ri)); err == nil {
+		
+		// Try io_uring async write if available
+		var werr error
+		if mb.fs != nil && mb.fs.fcfg.UseIOUring && mb.fs.iour != nil {
+			_, werr = mb.fs.asyncWriteAt(int(mfd.Fd()), nbytes, int64(ri))
+		} else {
+			// Fallback to synchronous write
+			_, werr = mfd.WriteAt(nbytes, int64(ri))
+		}
+		
+		if werr == nil {
 			mfd.Sync()
 		}
-		if err != nil {
-			return err
+		if werr != nil {
+			return werr
 		}
 	}
 	return nil
@@ -6727,7 +6755,16 @@ func (mb *msgBlock) writeAt(buf []byte, woff int64) (int, error) {
 		return 0, errors.New("mock write error")
 	}
 	<-dios
-	n, err := mb.mfd.WriteAt(buf, woff)
+	var n int
+	var err error
+	
+	// Try io_uring async write if available
+	if mb.fs != nil && mb.fs.fcfg.UseIOUring && mb.fs.iour != nil {
+		n, err = mb.fs.asyncWriteAt(int(mb.mfd.Fd()), buf, woff)
+	} else {
+		// Fallback to synchronous write
+		n, err = mb.mfd.WriteAt(buf, woff)
+	}
 	dios <- struct{}{}
 	return n, err
 }
@@ -6935,8 +6972,18 @@ func (mb *msgBlock) loadBlock(buf []byte) ([]byte, error) {
 	}
 
 	<-dios
-	n, err := io.ReadFull(f, buf)
+	var n int
+	var err error
+	
+	// Try io_uring async read if available
+	if mb.fs != nil && mb.fs.fcfg.UseIOUring && mb.fs.iour != nil {
+		n, err = mb.fs.asyncReadAt(int(f.Fd()), buf, 0)
+	} else {
+		// Fallback to synchronous read
+		n, err = io.ReadFull(f, buf)
+	}
 	dios <- struct{}{}
+	
 	// On success capture raw bytes size.
 	if err == nil {
 		mb.rbytes = uint64(n)
@@ -9516,6 +9563,9 @@ func (fs *fileStore) stop(delete, writeState bool) error {
 		fs.forceWriteFullState()
 		fs.mu.Lock()
 	}
+
+	// Clean up io_uring if initialized
+	fs.closeIOUring()
 
 	// Mark as closed. Last message block needs to be cleared after
 	// writeFullState has completed.
