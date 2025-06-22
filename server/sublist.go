@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/nats-io/nats-server/v2/server/stree"
@@ -941,31 +942,52 @@ func (s *Sublist) RemoveBatch(subs []*subscription) error {
 		return nil
 	}
 
+	const (
+		batchSize = 25           // Process this many before releasing lock
+		yieldDuration = 5 * time.Millisecond
+		maxLockHoldTime = 100 * time.Millisecond
+	)
+
+	var firstErr error
+
 	s.Lock()
-	defer s.Unlock()
-
-	// TODO(dlc) - We could try to be smarter here for a client going away but the account
-	// has a large number of subscriptions compared to this client. Quick and dirty testing
-	// though said just disabling all the time best for now.
-
-	// Turn off our cache if enabled.
 	wasEnabled := s.cache != nil
 	s.cache = nil
-	// We will try to remove all subscriptions but will report the first that caused
-	// an error. In other words, we don't bail out at the first error which would
-	// possibly leave a bunch of subscriptions that could have been removed.
-	var err error
-	for _, sub := range subs {
-		if lerr := s.remove(sub, false, false); lerr != nil && err == nil {
-			err = lerr
+	s.Unlock()
+
+	start := time.Now()
+
+	for i := 0; i < len(subs); i += batchSize {
+		end := i + batchSize
+		if end > len(subs) {
+			end = len(subs)
+		}
+
+		// Hold lock briefly for small batch
+		s.Lock()
+		for j := i; j < end; j++ {
+			if lerr := s.remove(subs[j], false, false); lerr != nil && firstErr == nil {
+				firstErr = lerr
+			}
+		}
+		s.Unlock()
+
+		// Yield if we've been running too long or have more work
+		if time.Since(start) > maxLockHoldTime && end < len(subs) {
+			time.Sleep(yieldDuration)
+			start = time.Now() // Reset timer
 		}
 	}
-	// Turn caching back on here.
+
+	// Restore cache
+	s.Lock()
 	atomic.AddUint64(&s.genid, 1)
 	if wasEnabled {
 		s.cache = make(map[string]*SublistResult)
 	}
-	return err
+	s.Unlock()
+
+	return firstErr
 }
 
 // pruneNode is used to prune an empty node from the tree.

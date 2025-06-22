@@ -5477,15 +5477,22 @@ func (mset *stream) signalConsumersLoop() {
 
 // This will update and signal all consumers that match.
 func (mset *stream) signalConsumers(subj string, seq uint64) {
+	// Collect matching consumers without holding clsMu during signal processing to avoid deadlock
+	var consumers []*consumer
+	
 	mset.clsMu.RLock()
-	defer mset.clsMu.RUnlock()
 	csl := mset.csl
-	if csl == nil {
-		return
+	if csl != nil {
+		csl.Match(subj, func(o *consumer) {
+			consumers = append(consumers, o)
+		})
 	}
-	csl.Match(subj, func(o *consumer) {
+	mset.clsMu.RUnlock()
+	
+	// Signal consumers without holding clsMu to avoid deadlock
+	for _, o := range consumers {
 		o.processStreamSignal(seq)
-	})
+	}
 }
 
 // Internal message for use by jetstream subsystem.
