@@ -1599,7 +1599,7 @@ func (o *consumer) unsubscribe(sub *subscription) {
 // We need to make sure we protect access to the outq.
 // Do all advisory sends here.
 func (o *consumer) sendAdvisory(subject string, e any) {
-	if o.acc == nil {
+	if o.acc == nil || o.srv.getOpts().DisableJetStreamAdvisories {
 		return
 	}
 

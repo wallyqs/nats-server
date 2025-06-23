@@ -1186,7 +1186,7 @@ func (mset *stream) sendCreateAdvisory() {
 	srv := mset.srv
 	mset.mu.RUnlock()
 
-	if outq == nil {
+	if outq == nil || srv.getOpts().DisableJetStreamAdvisories {
 		return
 	}
 
@@ -1213,7 +1213,7 @@ func (mset *stream) sendCreateAdvisory() {
 }
 
 func (mset *stream) sendDeleteAdvisoryLocked() {
-	if mset.outq == nil {
+	if mset.outq == nil || mset.srv.getOpts().DisableJetStreamAdvisories {
 		return
 	}
 
@@ -1237,7 +1237,7 @@ func (mset *stream) sendDeleteAdvisoryLocked() {
 }
 
 func (mset *stream) sendUpdateAdvisoryLocked() {
-	if mset.outq == nil {
+	if mset.outq == nil || mset.srv.getOpts().DisableJetStreamAdvisories {
 		return
 	}
 

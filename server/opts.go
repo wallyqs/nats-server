@@ -347,6 +347,8 @@ type Options struct {
 	SyncInterval               time.Duration     `json:"-"`
 	SyncAlways                 bool              `json:"-"`
 	JsAccDefaultDomain         map[string]string `json:"-"` // account to domain name mapping
+	DisableJetStreamAdvisories bool              `json:"-"` // disable JetStream advisory events
+	DisableSystemEvents        bool              `json:"-"` // disable system events
 	Websocket                  WebsocketOpts     `json:"-"`
 	MQTT                       MQTTOpts          `json:"-"`
 	ProfPort                   int               `json:"-"`

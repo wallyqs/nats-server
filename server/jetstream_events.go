@@ -21,6 +21,10 @@ import (
 // publishAdvisory sends the given advisory into the account. Returns true if
 // it was sent, false if not (i.e. due to lack of interest or a marshal error).
 func (s *Server) publishAdvisory(acc *Account, subject string, adv any) bool {
+	if s.getOpts().DisableJetStreamAdvisories {
+		return false
+	}
+	
 	if acc == nil {
 		acc = s.SystemAccount()
 		if acc == nil {

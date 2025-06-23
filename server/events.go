@@ -796,6 +796,9 @@ func (s *Server) EventsEnabled() bool {
 // eventsEnabled will report if events are enabled.
 // Lock should be held.
 func (s *Server) eventsEnabled() bool {
+	if s.getOpts().DisableSystemEvents {
+		return false
+	}
 	return s.sys != nil && s.sys.client != nil && s.sys.account != nil
 }
 
