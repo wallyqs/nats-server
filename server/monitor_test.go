@@ -1872,6 +1872,92 @@ func TestMonitorConnzWithNamedClient(t *testing.T) {
 	}
 }
 
+func TestMonitorConnzNetIO(t *testing.T) {
+	s := runMonitorServer()
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatalf("Error creating client: %v", err)
+	}
+	defer nc.Close()
+	cid, err := nc.GetClientID()
+	if err != nil {
+		t.Fatalf("Error getting client ID: %v", err)
+	}
+
+	// Publish a message from the client to the server.
+	if err := nc.Publish("foo", []byte("bar")); err != nil {
+		t.Fatalf("Error publishing message: %v", err)
+	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("Error flushing: %v", err)
+	}
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/", s.MonitorAddr().Port)
+	var c *Connz
+	var ci *ConnInfo
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		c = pollConnz(t, s, 0, url+fmt.Sprintf("connz?cid=%d", cid), nil)
+		if len(c.Conns) != 1 {
+			return fmt.Errorf("expected 1 connection, got %d", len(c.Conns))
+		}
+		ci = c.Conns[0]
+		if ci.NetIO == nil {
+			return errors.New("expected NetIO stats, got nil")
+		}
+		if ci.NetIO.Reads == 0 {
+			return errors.New("expected reads > 0")
+		}
+		if ci.NetIO.ReadBytes == 0 {
+			return errors.New("expected read_bytes > 0")
+		}
+		return nil
+	})
+
+	// Now have the server send a message to the client.
+	sub, err := nc.SubscribeSync("bar")
+	if err != nil {
+		t.Fatalf("Error subscribing: %v", err)
+	}
+	nc.Flush()
+
+	// Use another client to publish.
+	nc2, err := nats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatalf("Error creating client: %v", err)
+	}
+	defer nc2.Close()
+	if err := nc2.Publish("bar", []byte("front")); err != nil {
+		t.Fatalf("Error publishing message: %v", err)
+	}
+	if err := nc2.Flush(); err != nil {
+		t.Fatalf("Error flushing: %v", err)
+	}
+
+	if _, err := sub.NextMsg(time.Second); err != nil {
+		t.Fatalf("Error receiving message: %v", err)
+	}
+
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		c = pollConnz(t, s, 0, url+fmt.Sprintf("connz?cid=%d", cid), nil)
+		if len(c.Conns) != 1 {
+			return fmt.Errorf("expected 1 connection, got %d", len(c.Conns))
+		}
+		ci2 := c.Conns[0]
+		if ci2.NetIO == nil {
+			return errors.New("expected NetIO stats, got nil")
+		}
+		if ci2.NetIO.Writes <= ci.NetIO.Writes {
+			return fmt.Errorf("expected writes to increase, got %d <= %d", ci2.NetIO.Writes, ci.NetIO.Writes)
+		}
+		if ci2.NetIO.WriteBytes <= ci.NetIO.WriteBytes {
+			return fmt.Errorf("expected write_bytes to increase, got %d <= %d", ci2.NetIO.WriteBytes, ci.NetIO.WriteBytes)
+		}
+		return nil
+	})
+}
+
 func TestMonitorConnzWithStateForClosedConns(t *testing.T) {
 	s := runMonitorServer()
 	defer s.Shutdown()
