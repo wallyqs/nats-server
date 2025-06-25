@@ -1362,6 +1362,17 @@ func (c *client) readLoop(pre []byte) {
 			pre = nil
 		} else {
 			n, err = reader.Read(b)
+			// Update network read counters
+			atomic.AddInt64(&c.netIO.Reads, 1)
+			atomic.AddInt64(&s.netIO.Reads, 1)
+			if n > 0 {
+				atomic.AddInt64(&c.netIO.ReadBytes, int64(n))
+				atomic.AddInt64(&s.netIO.ReadBytes, int64(n))
+			}
+			if err != nil && err != io.EOF {
+				atomic.AddInt64(&c.netIO.ReadErrs, 1)
+				atomic.AddInt64(&s.netIO.ReadErrs, 1)
+			}
 			// If we have any data we will try to parse and exit at the end.
 			if n == 0 && err != nil {
 				c.closeConnection(closedStateForErr(err))
@@ -1675,6 +1686,24 @@ func (c *client) flushOutbound() bool {
 		nc.SetWriteDeadline(time.Now().Add(wdl))
 		wn, err = wnb.WriteTo(nc)
 		nc.SetWriteDeadline(time.Time{})
+		
+		// Update network write counters
+		atomic.AddInt64(&c.netIO.Writes, 1)
+		if s := c.srv; s != nil {
+			atomic.AddInt64(&s.netIO.Writes, 1)
+		}
+		if wn > 0 {
+			atomic.AddInt64(&c.netIO.WriteBytes, wn)
+			if s := c.srv; s != nil {
+				atomic.AddInt64(&s.netIO.WriteBytes, wn)
+			}
+		}
+		if err != nil && err != io.ErrShortWrite {
+			atomic.AddInt64(&c.netIO.WriteErrs, 1)
+			if s := c.srv; s != nil {
+				atomic.AddInt64(&s.netIO.WriteErrs, 1)
+			}
+		}
 
 		// Update accounting, move wnb slice onwards if needed, or stop
 		// if a write error was reported that wasn't a short write.
@@ -6360,4 +6389,18 @@ func (c *client) setFirstPingTimer() {
 		c.ping.tmr.Stop()
 	}
 	c.ping.tmr = time.AfterFunc(d, c.processPingTimer)
+}
+
+// Network I/O statistics getters
+
+// GetNetworkIOStats returns a copy of the network I/O statistics for this client
+func (c *client) GetNetworkIOStats() NetworkIOStats {
+	return NetworkIOStats{
+		Reads:      atomic.LoadInt64(&c.netIO.Reads),
+		Writes:     atomic.LoadInt64(&c.netIO.Writes),
+		ReadBytes:  atomic.LoadInt64(&c.netIO.ReadBytes),
+		WriteBytes: atomic.LoadInt64(&c.netIO.WriteBytes),
+		ReadErrs:   atomic.LoadInt64(&c.netIO.ReadErrs),
+		WriteErrs:  atomic.LoadInt64(&c.netIO.WriteErrs),
+	}
 }

@@ -388,12 +388,23 @@ type nodeInfo struct {
 	accountNRG      bool
 }
 
+// NetworkIOStats tracks network I/O statistics
+type NetworkIOStats struct {
+	Reads      int64 `json:"reads"`
+	Writes     int64 `json:"writes"`
+	ReadBytes  int64 `json:"read_bytes"`
+	WriteBytes int64 `json:"write_bytes"`
+	ReadErrs   int64 `json:"read_errs"`
+	WriteErrs  int64 `json:"write_errs"`
+}
+
 type stats struct {
 	inMsgs        int64
 	outMsgs       int64
 	inBytes       int64
 	outBytes      int64
 	slowConsumers int64
+	netIO         NetworkIOStats
 }
 
 // scStats includes the total and per connection counters of Slow Consumers.

@@ -146,6 +146,8 @@ type ConnInfo struct {
 	NameTag        string         `json:"name_tag,omitempty"`
 	Tags           jwt.TagList    `json:"tags,omitempty"`
 	MQTTClient     string         `json:"mqtt_client,omitempty"` // This is the MQTT client id
+	// Network I/O stats
+	NetIO          *NetworkIOStats `json:"net_io,omitempty"`
 
 	// Internal
 	rtt int64 // For fast sorting
@@ -571,6 +573,16 @@ func (ci *ConnInfo) fill(client *client, nc net.Conn, now time.Time, auth bool) 
 	// we need to use atomic here.
 	ci.InMsgs = atomic.LoadInt64(&client.inMsgs)
 	ci.InBytes = atomic.LoadInt64(&client.inBytes)
+	
+	// Network I/O stats
+	ci.NetIO = &NetworkIOStats{
+		Reads:      atomic.LoadInt64(&client.netIO.Reads),
+		Writes:     atomic.LoadInt64(&client.netIO.Writes),
+		ReadBytes:  atomic.LoadInt64(&client.netIO.ReadBytes),
+		WriteBytes: atomic.LoadInt64(&client.netIO.WriteBytes),
+		ReadErrs:   atomic.LoadInt64(&client.netIO.ReadErrs),
+		WriteErrs:  atomic.LoadInt64(&client.netIO.WriteErrs),
+	}
 
 	// If the connection is gone, too bad, we won't set TLSVersion and TLSCipher.
 	// Exclude clients that are still doing handshake so we don't block in
@@ -1237,6 +1249,7 @@ type Varz struct {
 	InBytes               int64                  `json:"in_bytes"`
 	OutBytes              int64                  `json:"out_bytes"`
 	SlowConsumers         int64                  `json:"slow_consumers"`
+	NetIO                 *NetworkIOStats        `json:"net_io,omitempty"`
 	Subscriptions         uint32                 `json:"subscriptions"`
 	HTTPReqStats          map[string]uint64      `json:"http_req_stats"`
 	ConfigLoadTime        time.Time              `json:"config_load_time"`
@@ -1756,6 +1769,16 @@ func (s *Server) updateVarzRuntimeFields(v *Varz, forceUpdate bool, pcpu float64
 		Leafs:    s.NumSlowConsumersLeafs(),
 	}
 	v.PinnedAccountFail = atomic.LoadUint64(&s.pinnedAccFail)
+	
+	// Use server-level network I/O stats (cumulative across all connections)
+	v.NetIO = &NetworkIOStats{
+		Reads:      atomic.LoadInt64(&s.netIO.Reads),
+		Writes:     atomic.LoadInt64(&s.netIO.Writes),
+		ReadBytes:  atomic.LoadInt64(&s.netIO.ReadBytes),
+		WriteBytes: atomic.LoadInt64(&s.netIO.WriteBytes),
+		ReadErrs:   atomic.LoadInt64(&s.netIO.ReadErrs),
+		WriteErrs:  atomic.LoadInt64(&s.netIO.WriteErrs),
+	}
 
 	// Make sure to reset in case we are re-using.
 	v.Subscriptions = 0
