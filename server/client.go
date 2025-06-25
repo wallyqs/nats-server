@@ -1872,11 +1872,7 @@ func (c *client) markConnAsClosed(reason ClosedState) {
 		case LEAF:
 			c.srv.staleStats.leafs.Add(1)
 		}
-		if c.acc != nil {
-			c.acc.mu.Lock()
-			c.acc.staleConnections++
-			c.acc.mu.Unlock()
-		}
+
 	}
 	// For a websocket client, unless we are told not to flush, enqueue
 	// a websocket CloseMessage based on the reason.
