@@ -52,6 +52,92 @@ func testAllStoreAllPermutations(t *testing.T, compressionAndEncryption bool, cf
 	})
 }
 
+// Helper function to compare results between SimpleSublist and old Sublist
+func compareWithOldSublist(t *testing.T, fs StreamStore, subjects []string, startSeq uint64) {
+	t.Helper()
+	
+	// Create new SimpleSublist
+	sl := gsl.NewSublist[struct{}]()
+	for _, subj := range subjects {
+		sl.Insert(subj, struct{}{})
+	}
+	
+	// Create old Sublist
+	oldSl := NewSublistNoCache()
+	for _, subj := range subjects {
+		oldSl.Insert(&subscription{subject: []byte(subj)})
+	}
+	
+	// For comparison, we'll collect all matching subjects from the old sublist
+	var oldMatches []string
+	for seq := startSeq; seq <= fs.State().LastSeq; seq++ {
+		var smv StoreMsg
+		sm, err := fs.LoadMsg(seq, &smv)
+		if err != nil {
+			continue
+		}
+		// Check if subject matches any in the old sublist
+		if r := oldSl.Match(sm.subj); len(r.psubs) > 0 || len(r.qsubs) > 0 {
+			oldMatches = append(oldMatches, sm.subj)
+		}
+	}
+	
+	// Collect all matches using the new SimpleSublist
+	var newMatches []string
+	var smv StoreMsg
+	for seq := startSeq; ; {
+		sm, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+		if err != nil {
+			break
+		}
+		newMatches = append(newMatches, sm.subj)
+		seq = nseq + 1
+	}
+	
+	// Compare results
+	require_Equal(t, len(newMatches), len(oldMatches))
+	for i := range newMatches {
+		require_Equal(t, newMatches[i], oldMatches[i])
+	}
+}
+
+// Helper function to compare NumPendingMulti results between SimpleSublist and old Sublist
+func compareNumPendingWithOldSublist(t *testing.T, fs StreamStore, subjects []string, startSeq uint64) {
+	t.Helper()
+	
+	// Create new SimpleSublist
+	sl := gsl.NewSublist[struct{}]()
+	for _, subj := range subjects {
+		sl.Insert(subj, struct{}{})
+	}
+	
+	// Create old Sublist
+	oldSl := NewSublistNoCache()
+	for _, subj := range subjects {
+		oldSl.Insert(&subscription{subject: []byte(subj)})
+	}
+	
+	// Count matches using old sublist
+	oldCount := uint64(0)
+	for seq := startSeq; seq <= fs.State().LastSeq; seq++ {
+		var smv StoreMsg
+		sm, err := fs.LoadMsg(seq, &smv)
+		if err != nil {
+			continue
+		}
+		// Check if subject matches any in the old sublist
+		if r := oldSl.Match(sm.subj); len(r.psubs) > 0 || len(r.qsubs) > 0 {
+			oldCount++
+		}
+	}
+	
+	// Get count using new SimpleSublist
+	newCount, _ := fs.NumPendingMulti(startSeq, sl, false)
+	
+	// Compare results
+	require_Equal(t, newCount, oldCount)
+}
+
 func TestStoreMsgLoadNextMsgMulti(t *testing.T) {
 	testAllStoreAllPermutations(
 		t, false,
@@ -74,12 +160,17 @@ func TestStoreMsgLoadNextMsgMulti(t *testing.T) {
 				require_Equal(t, nseq, seq)
 				seq++
 			}
+			
+			// Compare with old Sublist implementation
+			compareWithOldSublist(t, fs, []string{"foo.>"}, 1)
 
 			// Now do multi load next with 1000 literal subjects.
 			sl = gsl.NewSublist[struct{}]()
+			var literalSubjects []string
 			for i := 0; i < 1000; i++ {
 				subj := fmt.Sprintf("foo.%d", i)
 				sl.Insert(subj, struct{}{})
+				literalSubjects = append(literalSubjects, subj)
 			}
 			for i, seq := 0, uint64(1); i < 1000; i++ {
 				sm, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
@@ -88,12 +179,16 @@ func TestStoreMsgLoadNextMsgMulti(t *testing.T) {
 				require_Equal(t, nseq, seq)
 				seq++
 			}
+			
+			// Compare with old Sublist implementation for literals
+			compareWithOldSublist(t, fs, literalSubjects, 1)
 
 			// Check that we can pull out 3 individuals.
 			sl = gsl.NewSublist[struct{}]()
-			sl.Insert("foo.2", struct{}{})
-			sl.Insert("foo.222", struct{}{})
-			sl.Insert("foo.999", struct{}{})
+			threeSubjects := []string{"foo.2", "foo.222", "foo.999"}
+			for _, subj := range threeSubjects {
+				sl.Insert(subj, struct{}{})
+			}
 			sm, seq, err := fs.LoadNextMsgMulti(sl, 1, &smv)
 			require_NoError(t, err)
 			require_Equal(t, sm.subj, "foo.2")
@@ -109,6 +204,9 @@ func TestStoreMsgLoadNextMsgMulti(t *testing.T) {
 			_, seq, err = fs.LoadNextMsgMulti(sl, seq+1, &smv)
 			require_Error(t, err)
 			require_Equal(t, seq, 1000)
+			
+			// Compare with old Sublist implementation for specific subjects
+			compareWithOldSublist(t, fs, threeSubjects, 1)
 
 			// Test with mixed wildcards and literals
 			sl = gsl.NewSublist[struct{}]()
@@ -183,13 +281,20 @@ func TestStoreMsgLoadNextMsgMulti(t *testing.T) {
 			sl.Insert("foo.>", struct{}{})
 			total, _ := fs.NumPendingMulti(1, sl, false)
 			require_Equal(t, total, 1000)
+			
+			// Compare NumPendingMulti with old Sublist
+			compareNumPendingWithOldSublist(t, fs, []string{"foo.>"}, 1)
 
 			sl = gsl.NewSublist[struct{}]()
-			sl.Insert("foo.2", struct{}{})
-			sl.Insert("foo.20", struct{}{})
-			sl.Insert("foo.200", struct{}{})
+			specificSubjects := []string{"foo.2", "foo.20", "foo.200"}
+			for _, subj := range specificSubjects {
+				sl.Insert(subj, struct{}{})
+			}
 			total, _ = fs.NumPendingMulti(1, sl, false)
 			require_Equal(t, total, 3)
+			
+			// Compare NumPendingMulti with old Sublist
+			compareNumPendingWithOldSublist(t, fs, specificSubjects, 1)
 
 			// Test with specific subject that doesn't exist
 			sl = gsl.NewSublist[struct{}]()
@@ -255,6 +360,9 @@ func TestStoreMsgLoadNextMsgMultiHierarchical(t *testing.T) {
 			total, _ := fs.NumPendingMulti(1, sl, false)
 			require_Equal(t, total, uint64(len(subjects)))
 			
+			// Compare with old Sublist implementation
+			compareWithOldSublist(t, fs, []string{"events.>"}, 1)
+			
 			// Test with * wildcard (single level)
 			sl = gsl.NewSublist[struct{}]()
 			sl.Insert("events.user.*", struct{}{})
@@ -270,10 +378,15 @@ func TestStoreMsgLoadNextMsgMultiHierarchical(t *testing.T) {
 			}
 			require_Equal(t, count, 3) // login, logout, signup
 			
+			// Compare with old Sublist implementation
+			compareWithOldSublist(t, fs, []string{"events.user.*"}, 1)
+			
 			// Test with mixed hierarchical patterns
 			sl = gsl.NewSublist[struct{}]()
-			sl.Insert("events.order.*", struct{}{})
-			sl.Insert("events.payment.*", struct{}{})
+			mixedSubjects := []string{"events.order.*", "events.payment.*"}
+			for _, subj := range mixedSubjects {
+				sl.Insert(subj, struct{}{})
+			}
 			count = 0
 			for seq := uint64(1); seq <= uint64(len(subjects)); {
 				sm, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
@@ -286,11 +399,17 @@ func TestStoreMsgLoadNextMsgMultiHierarchical(t *testing.T) {
 			}
 			require_Equal(t, count, 4) // created, cancelled, success, failed
 			
+			// Compare with old Sublist implementation
+			compareWithOldSublist(t, fs, mixedSubjects, 1)
+			
 			// Test NumPendingMulti with hierarchical patterns
 			sl = gsl.NewSublist[struct{}]()
 			sl.Insert("events.user.*", struct{}{})
 			total, _ = fs.NumPendingMulti(1, sl, false)
 			require_Equal(t, total, uint64(3))
+			
+			// Compare NumPendingMulti with old Sublist
+			compareNumPendingWithOldSublist(t, fs, []string{"events.user.*"}, 1)
 			
 			sl = gsl.NewSublist[struct{}]()
 			sl.Insert("events.system.*", struct{}{})
