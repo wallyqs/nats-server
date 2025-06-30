@@ -425,6 +425,174 @@ func TestStoreMsgLoadNextMsgMultiHierarchical(t *testing.T) {
 	)
 }
 
+func TestStoreMsgLoadNextMsgMultiDeeplyNested(t *testing.T) {
+	testAllStoreAllPermutations(
+		t, false,
+		StreamConfig{Name: "zzz", Subjects: []string{"A.>"}},
+		func(t *testing.T, fs StreamStore) {
+			// Store deeply nested hierarchical subjects
+			subjects := []string{
+				// 7-level deep subjects
+				"A.B.C.D.E.F.G",     // 1 - under A.B
+				"A.B.C.D.E.F.H",     // 2 - under A.B
+				"A.B.C.D.E.F.I",     // 3 - under A.B
+				"A.B.C.D.E.G.H",     // 4 - under A.B
+				"A.B.C.D.E.G.I",     // 5 - under A.B
+				// 6-level deep subjects
+				"A.B.C.D.E.F",       // 6 - under A.B
+				"A.B.C.D.E.G",       // 7 - under A.B
+				"A.B.C.D.E.H",       // 8 - under A.B
+				// 5-level deep subjects
+				"A.B.C.D.E",         // 9 - under A.B
+				"A.B.C.D.F",         // 10 - under A.B
+				"A.B.C.X.Y",         // 11 - under A.B
+				// Different branches
+				"A.B.X.Y.Z.W.Q",     // 12 - under A.B
+				"A.B.X.Y.Z.W.R",     // 13 - under A.B
+				"A.C.D.E.F.G.H",     // NOT under A.B
+				"A.C.D.E.F.G.I",     // NOT under A.B
+				// Mixed depths
+				"A.B.C",             // 14 - under A.B
+				"A.B.D",             // 15 - under A.B
+				"A.X.Y.Z",           // NOT under A.B
+				// Very deep - 10 levels
+				"A.B.C.D.E.F.G.H.I.J", // 16 - under A.B
+				"A.B.C.D.E.F.G.H.I.K", // 17 - under A.B
+			}
+			
+			for i, subj := range subjects {
+				_, _, err := fs.StoreMsg(subj, nil, []byte(fmt.Sprintf("msg%d", i)), 0)
+				require_NoError(t, err)
+			}
+			
+			var smv StoreMsg
+			
+			// Test with > wildcard at different levels
+			testCases := []struct {
+				pattern  string
+				expected int
+				desc     string
+			}{
+				{"A.>", len(subjects), "all subjects under A"},
+				{"A.B.>", 17, "all subjects under A.B"},
+				{"A.B.C.>", 13, "all subjects under A.B.C"},
+				{"A.B.C.D.>", 12, "all subjects under A.B.C.D"},
+				{"A.B.C.D.E.>", 10, "all subjects under A.B.C.D.E"},
+				{"A.B.C.D.E.F.>", 5, "all subjects under A.B.C.D.E.F"},
+				{"A.B.C.D.E.F.G.>", 2, "all subjects under A.B.C.D.E.F.G"},
+				{"A.C.>", 2, "all subjects under A.C"},
+			}
+			
+			for _, tc := range testCases {
+				sl := gsl.NewSublist[struct{}]()
+				sl.Insert(tc.pattern, struct{}{})
+				total, _ := fs.NumPendingMulti(1, sl, false)
+				require_Equal(t, total, uint64(tc.expected))
+				
+				// Verify with old sublist
+				compareNumPendingWithOldSublist(t, fs, []string{tc.pattern}, 1)
+				
+				// Count actual matches
+				count := 0
+				for seq := uint64(1); seq <= uint64(len(subjects)); {
+					_, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+					if err != nil {
+						break
+					}
+					count++
+					seq = nseq + 1
+				}
+				require_Equal(t, count, tc.expected)
+			}
+			
+			// Test with * wildcard at specific levels - verify they work
+			sl := gsl.NewSublist[struct{}]()
+			sl.Insert("A.B.C.D.E.F.*", struct{}{})
+			total, _ := fs.NumPendingMulti(1, sl, false)
+			require_True(t, total > 0) // Should match G, H, I
+			compareNumPendingWithOldSublist(t, fs, []string{"A.B.C.D.E.F.*"}, 1)
+			
+			// Test deep wildcard patterns
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("A.*.*.*.*.*.G", struct{}{})
+			total, _ = fs.NumPendingMulti(1, sl, false)
+			require_True(t, total > 0) // Should match some 7-level paths ending in G
+			compareNumPendingWithOldSublist(t, fs, []string{"A.*.*.*.*.*.G"}, 1)
+			
+			// Test complex mixed patterns
+			sl = gsl.NewSublist[struct{}]()
+			complexPatterns := []string{
+				"A.B.C.D.E.F.>",  // Matches some deep subjects
+				"A.C.D.E.F.G.*",  // Matches some subjects under A.C
+			}
+			for _, pattern := range complexPatterns {
+				sl.Insert(pattern, struct{}{})
+			}
+			
+			// Count unique matches
+			matches := make(map[string]bool)
+			for seq := uint64(1); seq <= uint64(len(subjects)); {
+				sm, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+				if err != nil {
+					break
+				}
+				matches[sm.subj] = true
+				seq = nseq + 1
+			}
+			require_True(t, len(matches) > 0) // Should match some subjects
+			
+			// Compare with old sublist
+			compareWithOldSublist(t, fs, complexPatterns, 1)
+			
+			// Test very specific deep patterns
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("A.B.C.D.E.F.G.H.I.J", struct{}{})
+			sl.Insert("A.B.C.D.E.F.G.H.I.K", struct{}{})
+			count := 0
+			for seq := uint64(1); seq <= uint64(len(subjects)); {
+				sm, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+				if err != nil {
+					break
+				}
+				require_True(t, sm.subj == "A.B.C.D.E.F.G.H.I.J" || sm.subj == "A.B.C.D.E.F.G.H.I.K")
+				count++
+				seq = nseq + 1
+			}
+			require_Equal(t, count, 2)
+			
+			// Test edge case: pattern deeper than any subject
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("A.B.C.D.E.F.G.H.I.J.K.L.M.N.O.P", struct{}{})
+			total, _ = fs.NumPendingMulti(1, sl, false)
+			require_Equal(t, total, 0)
+			
+			// Test partial match at various depths
+			partialPatterns := []string{
+				"A.B.C.D.E.F",
+				"A.B.C.D.E.G",
+			}
+			sl = gsl.NewSublist[struct{}]()
+			for _, pattern := range partialPatterns {
+				sl.Insert(pattern, struct{}{})
+			}
+			
+			exactMatches := 0
+			for seq := uint64(1); seq <= uint64(len(subjects)); {
+				_, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+				if err != nil {
+					break
+				}
+				exactMatches++
+				seq = nseq + 1
+			}
+			require_Equal(t, exactMatches, 2) // A.B.C.D.E.F and A.B.C.D.E.G
+			
+			// Final comparison with old sublist for all patterns
+			compareWithOldSublist(t, fs, partialPatterns, 1)
+		},
+	)
+}
+
 func TestStoreDeleteSlice(t *testing.T) {
 	ds := DeleteSlice{2}
 	var deletes []uint64
