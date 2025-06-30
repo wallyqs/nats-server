@@ -47,6 +47,163 @@ import (
 	"github.com/nats-io/nuid"
 )
 
+func TestJetStreamReservedStorageCalculation(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	acc := s.GlobalAccount()
+	_, jsa, err := acc.checkForJetStream()
+	if err != nil {
+		t.Fatalf("Expected JetStream to be enabled: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		streams  []StreamConfig
+		tier     string
+		expMem   uint64
+		expStore uint64
+	}{
+		{
+			name: "no streams",
+			tier: "",
+			expMem: 0,
+			expStore: 0,
+		},
+		{
+			name: "single memory stream with limits",
+			streams: []StreamConfig{
+				{
+					Name:     "MEM_STREAM",
+					Subjects: []string{"mem.*"},
+					Storage:  MemoryStorage,
+					MaxBytes: 1024,
+					Replicas: 1,
+				},
+			},
+			tier:     "",
+			expMem:   1024,
+			expStore: 0,
+		},
+		{
+			name: "single file stream with limits",
+			streams: []StreamConfig{
+				{
+					Name:     "FILE_STREAM",
+					Subjects: []string{"file.*"},
+					Storage:  FileStorage,
+					MaxBytes: 2048,
+					Replicas: 1,
+				},
+			},
+			tier:     "",
+			expMem:   0,
+			expStore: 2048,
+		},
+		{
+			name: "stream without MaxBytes should not count",
+			streams: []StreamConfig{
+				{
+					Name:     "NO_LIMIT_STREAM",
+					Subjects: []string{"nolimit.*"},
+					Storage:  FileStorage,
+					MaxBytes: 0,
+					Replicas: 1,
+				},
+			},
+			tier:     "",
+			expMem:   0,
+			expStore: 0,
+		},
+		{
+			name: "mixed streams with and without limits",
+			streams: []StreamConfig{
+				{
+					Name:     "MEM_STREAM",
+					Subjects: []string{"mem.*"},
+					Storage:  MemoryStorage,
+					MaxBytes: 1024,
+					Replicas: 1,
+				},
+				{
+					Name:     "FILE_STREAM",
+					Subjects: []string{"file.*"},
+					Storage:  FileStorage,
+					MaxBytes: 2048,
+					Replicas: 1,
+				},
+				{
+					Name:     "NO_LIMIT_STREAM",
+					Subjects: []string{"nolimit.*"},
+					Storage:  FileStorage,
+					MaxBytes: 0,
+					Replicas: 1,
+				},
+			},
+			tier:     "",
+			expMem:   1024,
+			expStore: 2048,
+		},
+		{
+			name: "tier filtering - R1 only",
+			streams: []StreamConfig{
+				{
+					Name:     "R1_STREAM",
+					Subjects: []string{"r1.*"},
+					Storage:  FileStorage,
+					MaxBytes: 1000,
+					Replicas: 1,
+				},
+			},
+			tier:     "R1",
+			expMem:   0,
+			expStore: 1000,
+		},
+		{
+			name: "empty tier matches all streams",
+			streams: []StreamConfig{
+				{
+					Name:     "R1_STREAM",
+					Subjects: []string{"r1.*"},
+					Storage:  FileStorage,
+					MaxBytes: 1000,
+					Replicas: 1,
+				},
+			},
+			tier:     _EMPTY_,
+			expMem:   0,
+			expStore: 1000,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, stream := range jsa.streams {
+				stream.delete()
+			}
+			jsa.streams = make(map[string]*stream)
+
+			for _, cfg := range test.streams {
+				_, err := acc.addStream(&cfg)
+				if err != nil {
+					t.Fatalf("Failed to add stream %s: %v", cfg.Name, err)
+				}
+			}
+
+			jsa.mu.RLock()
+			mem, store := jsa.reservedStorage(test.tier)
+			jsa.mu.RUnlock()
+
+			if mem != test.expMem {
+				t.Errorf("Expected memory %d, got %d", test.expMem, mem)
+			}
+			if store != test.expStore {
+				t.Errorf("Expected storage %d, got %d", test.expStore, store)
+			}
+		})
+	}
+}
+
 func TestJetStreamBasicNilConfig(t *testing.T) {
 	s := RunRandClientPortServer(t)
 	defer s.Shutdown()
