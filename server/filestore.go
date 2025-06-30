@@ -5276,17 +5276,25 @@ func (mb *msgBlock) truncate(sm *StoreMsg) (nmsgs, nbytes uint64, err error) {
 	// Calculate new eof.
 	eof := int64(ri + rl)
 
-	// FIXME(dlc) - We could be smarter here.
-	if buf, _ := mb.bytesPending(); len(buf) > 0 {
-		ld, err := mb.flushPendingMsgsLocked()
-		if ld != nil && mb.fs != nil {
-			// We do not know if fs is locked or not at this point.
-			// This should be an exceptional condition so do so in Go routine.
-			go mb.fs.rebuildState(ld)
+	// Check if we have pending writes that would be affected by truncation.
+	// Only flush if pending writes extend beyond the new EOF.
+	if mb.cache != nil && mb.cache.wp < len(mb.cache.buf) {
+		// We have pending writes from cache.wp to len(cache.buf)
+		pendingStartsAt := mb.cache.wp
+		if pendingStartsAt < int(eof) {
+			// Pending writes start before our truncation point, so we need to flush
+			// to ensure we don't lose data that should be kept.
+			ld, err := mb.flushPendingMsgsLocked()
+			if ld != nil && mb.fs != nil {
+				// We do not know if fs is locked or not at this point.
+				// This should be an exceptional condition so do so in Go routine.
+				go mb.fs.rebuildState(ld)
+			}
+			if err != nil {
+				return 0, 0, err
+			}
 		}
-		if err != nil {
-			return 0, 0, err
-		}
+		// If pending writes start after EOF, they'll be discarded anyway during truncation
 	}
 
 	var purged, bytes uint64
@@ -7062,8 +7070,12 @@ checkCache:
 
 	mb.llts = ats.AccessTime()
 
-	// FIXME(dlc) - We could be smarter here.
-	if buf, _ := mb.bytesPending(); len(buf) > 0 {
+	// Check if we have pending writes. We only need to flush if:
+	// 1. We're loading the entire block (which would overwrite our in-memory cache)
+	// 2. The pending writes contain data that hasn't been persisted yet
+	if mb.cache != nil && mb.cache.wp < len(mb.cache.buf) {
+		// We have pending writes. Since loadMsgsWithLock will reload the entire block
+		// from disk, we need to flush to avoid losing the pending writes.
 		ld, err := mb.flushPendingMsgsLocked()
 		if ld != nil && mb.fs != nil {
 			// We do not know if fs is locked or not at this point.
