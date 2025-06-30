@@ -17,6 +17,7 @@ package server
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,6 +109,199 @@ func TestStoreMsgLoadNextMsgMulti(t *testing.T) {
 			_, seq, err = fs.LoadNextMsgMulti(sl, seq+1, &smv)
 			require_Error(t, err)
 			require_Equal(t, seq, 1000)
+
+			// Test with mixed wildcards and literals
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("foo.*", struct{}{}) // matches all foo.N subjects
+			sl.Insert("foo.5", struct{}{}) // specific literal (redundant but tests mixed usage)
+			sl.Insert("foo.999", struct{}{}) // specific literal (redundant but tests mixed usage)
+			// First match should be foo.0
+			sm, seq, err = fs.LoadNextMsgMulti(sl, 1, &smv)
+			require_NoError(t, err)
+			require_Equal(t, sm.subj, "foo.0")
+			require_Equal(t, seq, 1)
+			// Next match should be foo.1
+			sm, seq, err = fs.LoadNextMsgMulti(sl, seq+1, &smv)
+			require_NoError(t, err)
+			require_Equal(t, sm.subj, "foo.1")
+			require_Equal(t, seq, 2)
+
+			// Test with specific subject ranges
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("foo.20", struct{}{})
+			sl.Insert("foo.200", struct{}{})
+			sl.Insert("foo.299", struct{}{})
+			count := 0
+			for seq := uint64(1); seq <= 1000; {
+				_, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+				if err != nil {
+					break
+				}
+				count++
+				seq = nseq + 1
+			}
+			require_Equal(t, count, 3) // Should match exactly foo.20, foo.200, foo.299
+
+			// Test with full wildcard and specific exclusions
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("foo.*", struct{}{})
+			count = 0
+			for seq := uint64(1); seq <= 1000; {
+				_, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+				if err != nil {
+					break
+				}
+				count++
+				seq = nseq + 1
+			}
+			require_Equal(t, count, 1000)
+
+			// Test empty sublist
+			sl = gsl.NewSublist[struct{}]()
+			_, _, err = fs.LoadNextMsgMulti(sl, 1, &smv)
+			require_Error(t, err)
+
+			// Test with specific subjects in numeric ranges
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("foo.1", struct{}{})
+			sl.Insert("foo.10", struct{}{})
+			sl.Insert("foo.100", struct{}{})
+			matches := make(map[string]bool)
+			for seq := uint64(1); seq <= 1000; {
+				sm, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+				if err != nil {
+					break
+				}
+				matches[sm.subj] = true
+				seq = nseq + 1
+			}
+			// Should match exactly foo.1, foo.10, foo.100
+			require_Equal(t, len(matches), 3)
+
+			// Test NumPendingMulti with various patterns
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("foo.>", struct{}{})
+			total, _ := fs.NumPendingMulti(1, sl, false)
+			require_Equal(t, total, 1000)
+
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("foo.2", struct{}{})
+			sl.Insert("foo.20", struct{}{})
+			sl.Insert("foo.200", struct{}{})
+			total, _ = fs.NumPendingMulti(1, sl, false)
+			require_Equal(t, total, 3)
+
+			// Test with specific subject that doesn't exist
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("foo.1001", struct{}{})
+			total, _ = fs.NumPendingMulti(1, sl, false)
+			require_Equal(t, total, 0)
+
+			// Test edge cases and boundary conditions
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("foo.0", struct{}{}) // First subject
+			sl.Insert("foo.999", struct{}{}) // Last subject
+			count = 0
+			for seq := uint64(1); seq <= 1000; {
+				sm, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+				if err != nil {
+					break
+				}
+				require_True(t, sm.subj == "foo.0" || sm.subj == "foo.999")
+				count++
+				seq = nseq + 1
+			}
+			require_Equal(t, count, 2)
+
+			// Test with overlapping filters
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("foo.*", struct{}{}) // Matches all
+			sl.Insert("foo.5", struct{}{}) // Redundant specific match
+			total, _ = fs.NumPendingMulti(1, sl, false)
+			require_Equal(t, total, 1000) // Should still be 1000, not double-counted
+		},
+	)
+}
+
+func TestStoreMsgLoadNextMsgMultiHierarchical(t *testing.T) {
+	testAllStoreAllPermutations(
+		t, false,
+		StreamConfig{Name: "zzz", Subjects: []string{"events.>"}},
+		func(t *testing.T, fs StreamStore) {
+			// Store hierarchical subjects
+			subjects := []string{
+				"events.user.login",
+				"events.user.logout", 
+				"events.user.signup",
+				"events.order.created",
+				"events.order.cancelled",
+				"events.payment.success",
+				"events.payment.failed",
+				"events.system.startup",
+				"events.system.shutdown",
+				"events.metrics.cpu",
+			}
+			
+			for i, subj := range subjects {
+				_, _, err := fs.StoreMsg(subj, nil, []byte(fmt.Sprintf("msg%d", i)), 0)
+				require_NoError(t, err)
+			}
+			
+			var smv StoreMsg
+			
+			// Test with > wildcard (multi-level)
+			sl := gsl.NewSublist[struct{}]()
+			sl.Insert("events.>", struct{}{})
+			total, _ := fs.NumPendingMulti(1, sl, false)
+			require_Equal(t, total, uint64(len(subjects)))
+			
+			// Test with * wildcard (single level)
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("events.user.*", struct{}{})
+			count := 0
+			for seq := uint64(1); seq <= uint64(len(subjects)); {
+				sm, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+				if err != nil {
+					break
+				}
+				require_True(t, strings.HasPrefix(sm.subj, "events.user."))
+				count++
+				seq = nseq + 1
+			}
+			require_Equal(t, count, 3) // login, logout, signup
+			
+			// Test with mixed hierarchical patterns
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("events.order.*", struct{}{})
+			sl.Insert("events.payment.*", struct{}{})
+			count = 0
+			for seq := uint64(1); seq <= uint64(len(subjects)); {
+				sm, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+				if err != nil {
+					break
+				}
+				require_True(t, strings.HasPrefix(sm.subj, "events.order.") || strings.HasPrefix(sm.subj, "events.payment."))
+				count++
+				seq = nseq + 1
+			}
+			require_Equal(t, count, 4) // created, cancelled, success, failed
+			
+			// Test NumPendingMulti with hierarchical patterns
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("events.user.*", struct{}{})
+			total, _ = fs.NumPendingMulti(1, sl, false)
+			require_Equal(t, total, uint64(3))
+			
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("events.system.*", struct{}{})
+			total, _ = fs.NumPendingMulti(1, sl, false)
+			require_Equal(t, total, uint64(2))
+			
+			// Test with non-matching hierarchical pattern
+			sl = gsl.NewSublist[struct{}]()
+			sl.Insert("events.nonexistent.*", struct{}{})
+			total, _ = fs.NumPendingMulti(1, sl, false)
+			require_Equal(t, total, uint64(0))
 		},
 	)
 }
