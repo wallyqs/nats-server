@@ -1018,9 +1018,20 @@ func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 			return true
 		})
 
-		details := make([]SubDetail, 0, len(subs))
-		i := 0
-		// TODO(dlc) - may be inefficient and could just do normal match when total subs is large and filtering.
+		// Optimize allocation based on known limits
+		var details []SubDetail
+		if sz.Limit > 0 {
+			// When we have pagination, we might not need all subscriptions
+			estimatedNeeded := sz.Offset + sz.Limit
+			if estimatedNeeded < len(subs) {
+				details = make([]SubDetail, 0, estimatedNeeded)
+			} else {
+				details = make([]SubDetail, 0, len(subs))
+			}
+		} else {
+			details = make([]SubDetail, 0, len(subs))
+		}
+
 		for _, sub := range subs {
 			// Check for filter
 			if test && !matchLiteral(testSub, string(sub.subject)) {
@@ -1032,12 +1043,11 @@ func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 			sub.client.mu.Lock()
 			details = append(details, newSubDetail(sub))
 			sub.client.mu.Unlock()
-			i++
 		}
 		minoff := sz.Offset
 		maxoff := sz.Offset + sz.Limit
 
-		maxIndex := i
+		maxIndex := len(details)
 
 		// Make sure these are sane.
 		if minoff > maxIndex {
