@@ -434,6 +434,38 @@ func (p *parser) processItem(it item, fp string) error {
 			}
 			p.setValue(v)
 		}
+	case itemOptionalInclude:
+		var (
+			m   map[string]any
+			err error
+		)
+		filePath := filepath.Join(p.fp, it.val)
+
+		// Check if file exists before trying to parse it
+		if _, statErr := os.Stat(filePath); statErr != nil {
+			// File doesn't exist, skip silently
+			break
+		}
+
+		if p.pedantic {
+			m, err = ParseFileWithChecks(filePath)
+		} else {
+			m, err = ParseFile(filePath)
+		}
+		if err != nil {
+			return fmt.Errorf("error parsing optional include file '%s', %v", it.val, err)
+		}
+		for k, v := range m {
+			p.pushKey(k)
+
+			if p.pedantic {
+				switch tk := v.(type) {
+				case *token:
+					p.pushItemKey(tk.item)
+				}
+			}
+			p.setValue(v)
+		}
 	}
 
 	return nil

@@ -1043,3 +1043,63 @@ func TestOptionalVariable(t *testing.T) {
 	}
 	test(t, `debug = $TEST_DEBUG ? true`, ex4)
 }
+
+func TestOptionalInclude(t *testing.T) {
+	// Create a temporary directory for test files
+	tmpDir := t.TempDir()
+
+	// Test case 1: Optional include with existing file
+	existingFile := filepath.Join(tmpDir, "existing.conf")
+	err := os.WriteFile(existingFile, []byte("test_value = 42"), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Test including existing file
+	configWithExisting := fmt.Sprintf(`
+		base_value = "base"
+		include? "%s"
+		other_value = "other"
+	`, "existing.conf")
+
+	// Parse from the temp directory
+	originalDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(originalDir)
+
+	result, err := Parse(configWithExisting)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	expected := map[string]any{
+		"base_value":  "base",
+		"test_value":  int64(42),
+		"other_value": "other",
+	}
+
+	if !reflect.DeepEqual(result, expected) {
+		t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", result, expected)
+	}
+
+	// Test case 2: Optional include with non-existing file (should not error)
+	configWithNonExisting := `
+		base_value = "base"
+		include? "non-existing.conf"
+		other_value = "other"
+	`
+
+	result2, err := Parse(configWithNonExisting)
+	if err != nil {
+		t.Fatalf("Optional include of non-existing file should not error: %v", err)
+	}
+
+	expected2 := map[string]any{
+		"base_value":  "base",
+		"other_value": "other",
+	}
+
+	if !reflect.DeepEqual(result2, expected2) {
+		t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", result2, expected2)
+	}
+}
