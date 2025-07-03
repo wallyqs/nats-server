@@ -53,6 +53,7 @@ const (
 	itemMapEnd
 	itemCommentStart
 	itemVariable
+	itemOptionalVariable
 	itemInclude
 )
 
@@ -900,6 +901,56 @@ func (lx *lexer) isVariable() bool {
 	return false
 }
 
+// Check if this looks like an optional variable pattern and if so, continue lexing to capture the full expression
+func (lx *lexer) tryLexOptionalVariable() bool {
+	if lx.start >= len(lx.input) || lx.input[lx.start] != '$' {
+		return false
+	}
+
+	// Look ahead to see if we have the pattern: $VAR ? default
+	savedPos := lx.pos
+	savedStart := lx.start
+
+	// Skip past the variable name
+	for lx.pos < len(lx.input) && !isWhitespace(rune(lx.input[lx.pos])) && lx.input[lx.pos] != '?' {
+		lx.pos++
+	}
+
+	// Skip whitespace
+	for lx.pos < len(lx.input) && isWhitespace(rune(lx.input[lx.pos])) {
+		lx.pos++
+	}
+
+	// Check if we have '?'
+	if lx.pos < len(lx.input) && lx.input[lx.pos] == '?' {
+		// This looks like an optional variable, continue lexing to capture the full expression
+		lx.pos++
+
+		// Skip whitespace after ?
+		for lx.pos < len(lx.input) && isWhitespace(rune(lx.input[lx.pos])) {
+			lx.pos++
+		}
+
+		// Continue until we find a terminator (newline, EOF, semicolon, etc.)
+		for lx.pos < len(lx.input) {
+			r := rune(lx.input[lx.pos])
+			if isNL(r) || r == eof || r == ';' || r == ',' || r == '}' {
+				break
+			}
+			lx.pos++
+		}
+
+		// Skip the $ in the token value
+		lx.start += 1
+		return true
+	}
+
+	// Restore position if not an optional variable
+	lx.pos = savedPos
+	lx.start = savedStart
+	return false
+}
+
 // lexQuotedString consumes the inner contents of a string. It assumes that the
 // beginning '"' has already been consumed and ignored. It will not interpret any
 // internal contents.
@@ -964,6 +1015,8 @@ func lexString(lx *lexer) stateFn {
 			lx.emitString()
 		} else if lx.isBool() {
 			lx.emit(itemBool)
+		} else if lx.tryLexOptionalVariable() {
+			lx.emit(itemOptionalVariable)
 		} else if lx.isVariable() {
 			lx.emit(itemVariable)
 		} else {
@@ -1300,6 +1353,8 @@ func (itype itemType) String() string {
 		return "CommentStart"
 	case itemVariable:
 		return "Variable"
+	case itemOptionalVariable:
+		return "OptionalVariable"
 	case itemInclude:
 		return "Include"
 	}

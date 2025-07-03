@@ -1014,3 +1014,32 @@ func TestParseDigest(t *testing.T) {
 		})
 	}
 }
+
+func TestOptionalVariable(t *testing.T) {
+	// Test optional variable with default when env var is not set
+	ex := map[string]any{
+		"server_name": "default",
+	}
+	test(t, `server_name = $SERVER_NAME ? "default"`, ex)
+
+	// Test optional variable with environment variable set
+	os.Setenv("TEST_SERVER_NAME", "my-custom-server")
+	defer os.Unsetenv("TEST_SERVER_NAME")
+
+	ex2 := map[string]any{
+		"server_name": "my-custom-server",
+	}
+	test(t, `server_name = $TEST_SERVER_NAME ? "default"`, ex2)
+
+	// Test optional variable with numeric default
+	ex3 := map[string]any{
+		"port": int64(4222),
+	}
+	test(t, `port = $TEST_PORT ? 4222`, ex3)
+
+	// Test optional variable with boolean default
+	ex4 := map[string]any{
+		"debug": true,
+	}
+	test(t, `debug = $TEST_DEBUG ? true`, ex4)
+}

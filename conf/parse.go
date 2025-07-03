@@ -384,12 +384,27 @@ func (p *parser) processItem(it item, fp string) error {
 		if p.pedantic {
 			switch tk := value.(type) {
 			case *token:
-				// Mark the looked up variable as used, and make
-				// the variable reference become handled as a token.
 				tk.usedVariable = true
 				p.setValue(&token{it, tk.Value(), false, fp})
 			default:
-				// Special case to add position context to bcrypt references.
+				p.setValue(&token{it, value, false, fp})
+			}
+		} else {
+			p.setValue(value)
+		}
+	case itemOptionalVariable:
+		value, err := p.lookupOptionalVariable(it.val)
+		if err != nil {
+			return fmt.Errorf("optional variable reference for '%s' on line %d could not be parsed: %s",
+				it.val, it.line, err)
+		}
+
+		if p.pedantic {
+			switch tk := value.(type) {
+			case *token:
+				tk.usedVariable = true
+				p.setValue(&token{it, tk.Value(), false, fp})
+			default:
 				p.setValue(&token{it, value, false, fp})
 			}
 		} else {
@@ -464,6 +479,40 @@ func (p *parser) lookupVariable(varReference string) (any, bool, error) {
 		}
 	}
 	return nil, false, nil
+}
+
+// lookupOptionalVariable processes an optional variable token.
+// The token value contains the full expression like "VAR_NAME ? default_value".
+func (p *parser) lookupOptionalVariable(optionalVarReference string) (any, error) {
+	// Split the reference into variable name and default value
+	parts := strings.SplitN(optionalVarReference, " ? ", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid optional variable syntax: expected 'VAR_NAME ? default_value'")
+	}
+
+	varName := strings.TrimSpace(parts[0])
+	defaultValue := strings.TrimSpace(parts[1])
+
+	// Try to lookup the variable first
+	value, found, err := p.lookupVariable(varName)
+	if err != nil {
+		return nil, err
+	}
+
+	if found {
+		return value, nil
+	}
+
+	// Variable not found, parse and return the default value
+	if vmap, err := Parse(fmt.Sprintf("%s=%s", pkey, defaultValue)); err == nil {
+		v, ok := vmap[pkey]
+		if !ok {
+			return nil, fmt.Errorf("failed to parse default value for optional variable")
+		}
+		return v, nil
+	} else {
+		return nil, err
+	}
 }
 
 func (p *parser) setValue(val any) {
