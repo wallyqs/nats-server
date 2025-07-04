@@ -1401,6 +1401,15 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 	for _, asa := range cc.streams {
 		nsa += len(asa)
 	}
+
+	// Use sharded approach for large deployments
+	const shardThreshold = 0
+	if nsa >= shardThreshold {
+		fmt.Println("SHARDING!!!!!")
+		js.mu.RUnlock()
+		return js.metaSnapshotSharded()
+	}
+
 	streams := make([]writeableStreamAssignment, 0, nsa)
 	for _, asa := range cc.streams {
 		for _, sa := range asa {
@@ -1460,15 +1469,30 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 }
 
 func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecovering bool) error {
+	if len(buf) == 0 {
+		return nil
+	}
+
+	// Check if this is a sharded snapshot by looking for the header
+	if len(buf) >= 4 {
+		headerLen := binary.LittleEndian.Uint32(buf[:4])
+		if int(headerLen+4) <= len(buf) {
+			// Try to parse as sharded snapshot
+			var header shardedSnapshotHeader
+			if err := json.Unmarshal(buf[4:4+headerLen], &header); err == nil && header.Magic == shardedSnapshotMagic {
+				return js.applyMetaSnapshotSharded(buf, ru, isRecovering)
+			}
+		}
+	}
+
+	// Fall back to legacy format
 	var wsas []writeableStreamAssignment
-	if len(buf) > 0 {
-		jse, err := s2.Decode(nil, buf)
-		if err != nil {
-			return err
-		}
-		if err = json.Unmarshal(jse, &wsas); err != nil {
-			return err
-		}
+	jse, err := s2.Decode(nil, buf)
+	if err != nil {
+		return err
+	}
+	if err = json.Unmarshal(jse, &wsas); err != nil {
+		return err
 	}
 
 	// Build our new version here outside of js.
