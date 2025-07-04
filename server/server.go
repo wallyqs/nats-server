@@ -783,7 +783,7 @@ func NewServer(opts *Options) (*Server, error) {
 			opts.JetStreamDomain,
 			info.ID,
 			opts.Tags,
-			&JetStreamConfig{MaxMemory: opts.JetStreamMaxMemory, MaxStore: opts.JetStreamMaxStore, CompressOK: true},
+			&JetStreamConfig{MaxMemory: opts.JetStreamMaxMemory, MaxStore: opts.JetStreamMaxStore, CompressOK: true, ShardThreshold: opts.JetStreamShardThreshold},
 			nil,
 			false, true, true, true,
 		})
@@ -2348,15 +2348,16 @@ func (s *Server) Start() {
 			s.Fatalf("Not allowed to enable JetStream on the system account")
 		}
 		cfg := &JetStreamConfig{
-			StoreDir:     opts.StoreDir,
-			SyncInterval: opts.SyncInterval,
-			SyncAlways:   opts.SyncAlways,
-			Strict:       opts.JetStreamStrict,
-			MaxMemory:    opts.JetStreamMaxMemory,
-			MaxStore:     opts.JetStreamMaxStore,
-			Domain:       opts.JetStreamDomain,
-			CompressOK:   true,
-			UniqueTag:    opts.JetStreamUniqueTag,
+			StoreDir:       opts.StoreDir,
+			SyncInterval:   opts.SyncInterval,
+			SyncAlways:     opts.SyncAlways,
+			Strict:         opts.JetStreamStrict,
+			MaxMemory:      opts.JetStreamMaxMemory,
+			MaxStore:       opts.JetStreamMaxStore,
+			Domain:         opts.JetStreamDomain,
+			CompressOK:     true,
+			UniqueTag:      opts.JetStreamUniqueTag,
+			ShardThreshold: opts.JetStreamShardThreshold,
 		}
 		if err := s.EnableJetStream(cfg); err != nil {
 			s.Fatalf("Can't start JetStream: %v", err)

@@ -341,6 +341,7 @@ type Options struct {
 	JetStreamTpm               JSTpmOpts
 	JetStreamMaxCatchup        int64
 	JetStreamRequestQueueLimit int64
+	JetStreamShardThreshold    int
 	StreamMaxBufferedMsgs      int               `json:"-"`
 	StreamMaxBufferedSize      int64             `json:"-"`
 	StoreDir                   string            `json:"-"`
@@ -2457,6 +2458,15 @@ func parseJetStream(v any, opts *Options, errors *[]error, warnings *[]error) er
 					return &configErr{tk, fmt.Sprintf("Expected a parseable size for %q, got %v", mk, mv)}
 				}
 				opts.StreamMaxBufferedMsgs = int(mlen)
+			case "shard_threshold":
+				threshold, ok := mv.(int64)
+				if !ok {
+					return &configErr{tk, fmt.Sprintf("Expected an integer for %q, got %v", mk, mv)}
+				}
+				if threshold < 0 {
+					return &configErr{tk, fmt.Sprintf("shard_threshold must be >= 0, got %d", threshold)}
+				}
+				opts.JetStreamShardThreshold = int(threshold)
 			case "request_queue_limit":
 				lim, ok := mv.(int64)
 				if !ok {
