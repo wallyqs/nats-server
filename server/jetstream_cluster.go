@@ -779,7 +779,8 @@ func (js *jetStream) setupMetaGroup() error {
 	c := s.createInternalJetStreamClient()
 
 	// Open metadata store for CoW B-tree based storage
-	metaStoreDir := filepath.Join(js.config.StoreDir, sysAcc.Name, "metadata")
+	// Include server name to ensure unique path per server
+	metaStoreDir := filepath.Join(js.config.StoreDir, sysAcc.Name, "metadata", s.Name())
 	metaStore, err := OpenMetadataStore(metaStoreDir)
 	if err != nil {
 		s.Errorf("Error creating metadata store: %v", err)
