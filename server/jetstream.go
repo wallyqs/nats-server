@@ -1023,6 +1023,10 @@ func (s *Server) shutdownJetStream() {
 			cc.c = nil
 		}
 		cc.meta = nil
+		if cc.metaStore != nil {
+			cc.metaStore.Close()
+			cc.metaStore = nil
+		}
 		// Set our atomic bool to false.
 		s.jsClustered.Store(false)
 	}

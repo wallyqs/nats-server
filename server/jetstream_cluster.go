@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"os"
@@ -56,6 +57,8 @@ type jetStreamCluster struct {
 	s *Server
 	// Internal client.
 	c *client
+	// Metadata store for CoW B-tree based storage
+	metaStore *MetadataStore
 	// Processing assignment results.
 	streamResults   *subscription
 	consumerResults *subscription
@@ -775,14 +778,23 @@ func (js *jetStream) setupMetaGroup() error {
 
 	c := s.createInternalJetStreamClient()
 
+	// Open metadata store for CoW B-tree based storage
+	metaStoreDir := filepath.Join(js.config.StoreDir, sysAcc.Name, "metadata")
+	metaStore, err := OpenMetadataStore(metaStoreDir)
+	if err != nil {
+		s.Errorf("Error creating metadata store: %v", err)
+		return err
+	}
+
 	js.mu.Lock()
 	defer js.mu.Unlock()
 	js.cluster = &jetStreamCluster{
-		meta:    n,
-		streams: make(map[string]map[string]*streamAssignment),
-		s:       s,
-		c:       c,
-		qch:     make(chan struct{}),
+		meta:      n,
+		streams:   make(map[string]map[string]*streamAssignment),
+		s:         s,
+		c:         c,
+		qch:       make(chan struct{}),
+		metaStore: metaStore,
 	}
 	atomic.StoreInt32(&js.clustered, 1)
 	c.registerWithAccount(sysAcc)
@@ -1396,105 +1408,82 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 	js.mu.RLock()
 	s := js.srv
 	cc := js.cluster
-	nsa := 0
-	nca := 0
-	for _, asa := range cc.streams {
-		nsa += len(asa)
-	}
-	streams := make([]writeableStreamAssignment, 0, nsa)
-	for _, asa := range cc.streams {
-		for _, sa := range asa {
-			wsa := writeableStreamAssignment{
-				Client:    sa.Client.forAssignmentSnap(),
-				Created:   sa.Created,
-				Config:    sa.Config,
-				Group:     sa.Group,
-				Sync:      sa.Sync,
-				Consumers: make([]*consumerAssignment, 0, len(sa.consumers)),
-			}
-			for _, ca := range sa.consumers {
-				// Skip if the consumer is pending, we can't include it in our snapshot.
-				// If the proposal fails after we marked it pending, it would result in a ghost consumer.
-				if ca.pending {
-					continue
-				}
-				cca := *ca
-				cca.Stream = wsa.Config.Name // Needed for safe roll-backs.
-				cca.Client = cca.Client.forAssignmentSnap()
-				cca.Subject, cca.Reply = _EMPTY_, _EMPTY_
-				wsa.Consumers = append(wsa.Consumers, &cca)
-				nca++
-			}
-			streams = append(streams, wsa)
-		}
-	}
-
-	if len(streams) == 0 {
-		js.mu.RUnlock()
-		return nil, nil
-	}
-
-	// Track how long it took to marshal the JSON
-	mstart := time.Now()
-	b, err := json.Marshal(streams)
-	mend := time.Since(mstart)
-
+	metaStore := cc.metaStore
 	js.mu.RUnlock()
 
-	// Must not be possible for a JSON marshaling error to result
-	// in an empty snapshot.
+	if metaStore == nil {
+		return nil, errors.New("metadata store not initialized")
+	}
+
+	// Create a CoW snapshot using the metadata store
+	reader, err := metaStore.CreateSnapshot()
 	if err != nil {
 		return nil, err
 	}
+	defer reader.Close()
 
-	// Track how long it took to compress the JSON
+	// Read the snapshot data
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, reader); err != nil {
+		return nil, err
+	}
+
+	// Compress the snapshot
 	cstart := time.Now()
-	snap := s2.Encode(nil, b)
+	snap := s2.Encode(nil, buf.Bytes())
 	cend := time.Since(cstart)
 
 	if took := time.Since(start); took > time.Second {
-		s.rateLimitFormatWarnf("Metalayer snapshot took %.3fs (streams: %d, consumers: %d, marshal: %.3fs, s2: %.3fs, uncompressed: %d, compressed: %d)",
-			took.Seconds(), nsa, nca, mend.Seconds(), cend.Seconds(), len(b), len(snap))
+		s.rateLimitFormatWarnf("Metalayer snapshot took %.3fs (s2: %.3fs, uncompressed: %d, compressed: %d)",
+			took.Seconds(), cend.Seconds(), buf.Len(), len(snap))
 	}
 	return snap, nil
 }
 
 func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecovering bool) error {
-	var wsas []writeableStreamAssignment
+	js.mu.Lock()
+	cc := js.cluster
+	metaStore := cc.metaStore
+	js.mu.Unlock()
+
+	if metaStore == nil {
+		return errors.New("metadata store not initialized")
+	}
+
+	// Build our new version from snapshot
+	var streams map[string]map[string]*streamAssignment
+
 	if len(buf) > 0 {
+		// Decompress the snapshot
 		jse, err := s2.Decode(nil, buf)
 		if err != nil {
 			return err
 		}
-		if err = json.Unmarshal(jse, &wsas); err != nil {
+
+		// Apply the snapshot to the metadata store
+		reader := bytes.NewReader(jse)
+		if err := metaStore.ApplySnapshot(reader); err != nil {
 			return err
 		}
-	}
 
-	// Build our new version here outside of js.
-	streams := make(map[string]map[string]*streamAssignment)
-	for _, wsa := range wsas {
-		fixCfgMirrorWithDedupWindow(wsa.Config)
-		as := streams[wsa.Client.serviceAccount()]
-		if as == nil {
-			as = make(map[string]*streamAssignment)
-			streams[wsa.Client.serviceAccount()] = as
+		// Load all assignments from the metadata store
+		streams, err = metaStore.AllStreamAssignments()
+		if err != nil {
+			return err
 		}
-		sa := &streamAssignment{Client: wsa.Client, Created: wsa.Created, Config: wsa.Config, Group: wsa.Group, Sync: wsa.Sync}
-		if len(wsa.Consumers) > 0 {
-			sa.consumers = make(map[string]*consumerAssignment)
-			for _, ca := range wsa.Consumers {
-				if ca.Stream == _EMPTY_ {
-					ca.Stream = sa.Config.Name // Rehydrate from the stream name.
-				}
-				sa.consumers[ca.Name] = ca
+
+		// Apply fixes to loaded configs
+		for _, asa := range streams {
+			for _, sa := range asa {
+				fixCfgMirrorWithDedupWindow(sa.Config)
 			}
 		}
-		as[wsa.Config.Name] = sa
+	} else {
+		streams = make(map[string]map[string]*streamAssignment)
 	}
 
 	js.mu.Lock()
-	cc := js.cluster
+	cc = js.cluster
 
 	var saAdd, saDel, saChk []*streamAssignment
 	// Walk through the old list to generate the delete list.
@@ -3457,6 +3446,12 @@ func (js *jetStream) processStreamAssignment(sa *streamAssignment) bool {
 	// Update our state.
 	accStreams[stream] = sa
 	cc.streams[accName] = accStreams
+	// Update metadata store
+	if cc.metaStore != nil {
+		if err := cc.metaStore.PutStreamAssignment(accName, sa); err != nil {
+			s.Errorf("Failed to update metadata store for stream %s: %v", stream, err)
+		}
+	}
 	hasResponded := sa.responded
 	js.mu.Unlock()
 
@@ -3553,6 +3548,12 @@ func (js *jetStream) processUpdateStreamAssignment(sa *streamAssignment) {
 	// Update our state.
 	accStreams[stream] = sa
 	cc.streams[accName] = accStreams
+	// Update metadata store
+	if cc.metaStore != nil {
+		if err := cc.metaStore.PutStreamAssignment(accName, sa); err != nil {
+			s.Errorf("Failed to update metadata store for stream %s: %v", stream, err)
+		}
+	}
 
 	// Make sure we respond if we are a member.
 	if isMember {
@@ -4039,6 +4040,12 @@ func (js *jetStream) processStreamRemoval(sa *streamAssignment) {
 		if len(accStreams) == 0 {
 			delete(cc.streams, sa.Client.serviceAccount())
 		}
+		// Update metadata store
+		if cc.metaStore != nil {
+			if err := cc.metaStore.DeleteStreamAssignment(sa.Client.serviceAccount(), stream); err != nil {
+				s.Errorf("Failed to delete from metadata store for stream %s: %v", stream, err)
+			}
+		}
 	}
 	js.mu.Unlock()
 
@@ -4199,6 +4206,12 @@ func (js *jetStream) processConsumerAssignment(ca *consumerAssignment) {
 	// Ok to replace an existing one, we check on process call below.
 	sa.consumers[ca.Name] = ca
 	ca.pending = false
+	// Update metadata store
+	if cc.metaStore != nil {
+		if err := cc.metaStore.PutConsumerAssignment(accName, ca); err != nil {
+			s.Errorf("Failed to update metadata store for consumer %s: %v", ca.Name, err)
+		}
+	}
 	js.mu.Unlock()
 
 	acc, err := s.LookupAccount(accName)
@@ -4306,6 +4319,12 @@ func (js *jetStream) processConsumerRemoval(ca *consumerAssignment) {
 				needDelete = true
 				oca.deleted = true
 				delete(sa.consumers, ca.Name)
+				// Update metadata store
+				if cc.metaStore != nil {
+					if err := cc.metaStore.DeleteConsumerAssignment(ca.Client.serviceAccount(), ca.Stream, ca.Name); err != nil {
+						s.Errorf("Failed to delete consumer from metadata store %s: %v", ca.Name, err)
+					}
+				}
 			}
 		}
 	}
