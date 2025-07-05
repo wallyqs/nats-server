@@ -778,13 +778,17 @@ func (js *jetStream) setupMetaGroup() error {
 
 	c := s.createInternalJetStreamClient()
 
-	// Open metadata store for CoW B-tree based storage
-	// Include server name to ensure unique path per server
-	metaStoreDir := filepath.Join(js.config.StoreDir, sysAcc.Name, "metadata", s.Name())
-	metaStore, err := OpenMetadataStore(metaStoreDir)
-	if err != nil {
-		s.Errorf("Error creating metadata store: %v", err)
-		return err
+	// Open metadata store for CoW B-tree based storage if not disabled
+	var metaStore *MetadataStore
+	if !js.config.DisableSnapshotDB {
+		// Include server name to ensure unique path per server
+		metaStoreDir := filepath.Join(js.config.StoreDir, sysAcc.Name, "metadata", s.Name())
+		var err error
+		metaStore, err = OpenMetadataStore(metaStoreDir)
+		if err != nil {
+			s.Errorf("Error creating metadata store: %v", err)
+			return err
+		}
 	}
 
 	js.mu.Lock()
@@ -1404,7 +1408,86 @@ func (js *jetStream) clusterStreamConfig(accName, streamName string) (StreamConf
 	return StreamConfig{}, false
 }
 
+// metaSnapshotInMemory is the original in-memory implementation
+func (js *jetStream) metaSnapshotInMemory() ([]byte, error) {
+	start := time.Now()
+	js.mu.RLock()
+	s := js.srv
+	cc := js.cluster
+	nsa := 0
+	nca := 0
+	for _, asa := range cc.streams {
+		nsa += len(asa)
+	}
+	streams := make([]writeableStreamAssignment, 0, nsa)
+	for _, asa := range cc.streams {
+		for _, sa := range asa {
+			wsa := writeableStreamAssignment{
+				Client:    sa.Client.forAssignmentSnap(),
+				Created:   sa.Created,
+				Config:    sa.Config,
+				Group:     sa.Group,
+				Sync:      sa.Sync,
+				Consumers: make([]*consumerAssignment, 0, len(sa.consumers)),
+			}
+			for _, ca := range sa.consumers {
+				// Skip if the consumer is pending, we can't include it in our snapshot.
+				// If the proposal fails after we marked it pending, it would result in a ghost consumer.
+				if ca.pending {
+					continue
+				}
+				cca := *ca
+				cca.Stream = wsa.Config.Name // Needed for safe roll-backs.
+				cca.Client = cca.Client.forAssignmentSnap()
+				cca.Subject, cca.Reply = _EMPTY_, _EMPTY_
+				wsa.Consumers = append(wsa.Consumers, &cca)
+				nca++
+			}
+			streams = append(streams, wsa)
+		}
+	}
+
+	if len(streams) == 0 {
+		js.mu.RUnlock()
+		return nil, nil
+	}
+
+	// Track how long it took to marshal the JSON
+	mstart := time.Now()
+	b, err := json.Marshal(streams)
+	mend := time.Since(mstart)
+
+	js.mu.RUnlock()
+
+	// Must not be possible for a JSON marshaling error to result
+	// in an empty snapshot.
+	if err != nil {
+		return nil, err
+	}
+
+	// Track how long it took to compress the JSON
+	cstart := time.Now()
+	snap := s2.Encode(nil, b)
+	cend := time.Since(cstart)
+
+	if took := time.Since(start); took > time.Second {
+		s.rateLimitFormatWarnf("Metalayer snapshot took %.3fs (streams: %d, consumers: %d, marshal: %.3fs, s2: %.3fs, uncompressed: %d, compressed: %d)",
+			took.Seconds(), nsa, nca, mend.Seconds(), cend.Seconds(), len(b), len(snap))
+	}
+	return snap, nil
+}
+
 func (js *jetStream) metaSnapshot() ([]byte, error) {
+	// Check if we should use the old in-memory implementation
+	js.mu.RLock()
+	useInMemory := js.config.DisableSnapshotDB || js.cluster.metaStore == nil
+	js.mu.RUnlock()
+
+	if useInMemory {
+		return js.metaSnapshotInMemory()
+	}
+
+	// Use the new metadata store implementation
 	start := time.Now()
 	js.mu.RLock()
 	s := js.srv
@@ -1441,7 +1524,101 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 	return snap, nil
 }
 
+// applyMetaSnapshotInMemory is the original in-memory implementation
+func (js *jetStream) applyMetaSnapshotInMemory(buf []byte, ru *recoveryUpdates, isRecovering bool) error {
+	var wsas []writeableStreamAssignment
+	if len(buf) > 0 {
+		jse, err := s2.Decode(nil, buf)
+		if err != nil {
+			return err
+		}
+		if err = json.Unmarshal(jse, &wsas); err != nil {
+			return err
+		}
+	}
+
+	// Build our new version here outside of js.
+	streams := make(map[string]map[string]*streamAssignment)
+	for _, wsa := range wsas {
+		fixCfgMirrorWithDedupWindow(wsa.Config)
+		as := streams[wsa.Client.serviceAccount()]
+		if as == nil {
+			as = make(map[string]*streamAssignment)
+			streams[wsa.Client.serviceAccount()] = as
+		}
+		sa := &streamAssignment{Client: wsa.Client, Created: wsa.Created, Config: wsa.Config, Group: wsa.Group, Sync: wsa.Sync}
+		if len(wsa.Consumers) > 0 {
+			sa.consumers = make(map[string]*consumerAssignment)
+			for _, ca := range wsa.Consumers {
+				if ca.Stream == _EMPTY_ {
+					ca.Stream = sa.Config.Name // Rehydrate from the stream name.
+				}
+				sa.consumers[ca.Name] = ca
+			}
+		}
+		as[wsa.Config.Name] = sa
+	}
+
+	js.mu.Lock()
+	cc := js.cluster
+
+	var saAdd, saDel, saChk []*streamAssignment
+	// Walk through the old list to generate the delete list.
+	for account, asa := range cc.streams {
+		nasa := streams[account]
+		for sn, sa := range asa {
+			if nsa := nasa[sn]; nsa == nil {
+				saDel = append(saDel, sa)
+			} else {
+				saChk = append(saChk, nsa)
+			}
+		}
+	}
+	// Walk through the new list to generate the add list.
+	for account, nasa := range streams {
+		asa := cc.streams[account]
+		for sn, sa := range nasa {
+			if asa[sn] == nil {
+				saAdd = append(saAdd, sa)
+			}
+		}
+	}
+
+	// Now walk the ones to check and process consumers.
+	var caAdd, caDel []*consumerAssignment
+	for _, sa := range saChk {
+		// Make sure to add in all the new ones from sa.
+		for _, ca := range sa.consumers {
+			caAdd = append(caAdd, ca)
+		}
+		if osa := js.streamAssignment(sa.Client.serviceAccount(), sa.Config.Name); osa != nil {
+			for _, ca := range osa.consumers {
+				// Consumer was either removed, or recreated with a different raft group.
+				if nca := sa.consumers[ca.Name]; nca == nil {
+					caDel = append(caDel, ca)
+				} else if nca.Group != nil && ca.Group != nil && nca.Group.Name != ca.Group.Name {
+					caDel = append(caDel, ca)
+				}
+			}
+		}
+	}
+	js.mu.Unlock()
+
+	// Process the rest of the snapshot application
+	return js.processMetaSnapshotChanges(saAdd, saDel, saChk, caAdd, caDel, ru, isRecovering)
+}
+
 func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecovering bool) error {
+	// Check if we should use the old in-memory implementation
+	js.mu.RLock()
+	useInMemory := js.config.DisableSnapshotDB || js.cluster.metaStore == nil
+	js.mu.RUnlock()
+
+	if useInMemory {
+		return js.applyMetaSnapshotInMemory(buf, ru, isRecovering)
+	}
+
+	// Use the new metadata store implementation
 	js.mu.Lock()
 	cc := js.cluster
 	metaStore := cc.metaStore
@@ -1528,6 +1705,12 @@ func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecove
 	}
 	js.mu.Unlock()
 
+	// Process the rest of the snapshot application
+	return js.processMetaSnapshotChanges(saAdd, saDel, saChk, caAdd, caDel, ru, isRecovering)
+}
+
+// processMetaSnapshotChanges handles the common logic for processing stream and consumer changes
+func (js *jetStream) processMetaSnapshotChanges(saAdd, saDel, saChk []*streamAssignment, caAdd, caDel []*consumerAssignment, ru *recoveryUpdates, isRecovering bool) error {
 	// Do removals first.
 	for _, sa := range saDel {
 		js.setStreamAssignmentRecovering(sa)
@@ -3447,7 +3630,7 @@ func (js *jetStream) processStreamAssignment(sa *streamAssignment) bool {
 	// Update our state.
 	accStreams[stream] = sa
 	cc.streams[accName] = accStreams
-	// Update metadata store
+	// Update metadata store if enabled
 	if cc.metaStore != nil {
 		if err := cc.metaStore.PutStreamAssignment(accName, sa); err != nil {
 			s.Errorf("Failed to update metadata store for stream %s: %v", stream, err)
@@ -3549,7 +3732,7 @@ func (js *jetStream) processUpdateStreamAssignment(sa *streamAssignment) {
 	// Update our state.
 	accStreams[stream] = sa
 	cc.streams[accName] = accStreams
-	// Update metadata store
+	// Update metadata store if enabled
 	if cc.metaStore != nil {
 		if err := cc.metaStore.PutStreamAssignment(accName, sa); err != nil {
 			s.Errorf("Failed to update metadata store for stream %s: %v", stream, err)

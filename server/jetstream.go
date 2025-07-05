@@ -40,15 +40,16 @@ import (
 // JetStreamConfig determines this server's configuration.
 // MaxMemory and MaxStore are in bytes.
 type JetStreamConfig struct {
-	MaxMemory    int64         `json:"max_memory"`
-	MaxStore     int64         `json:"max_storage"`
-	StoreDir     string        `json:"store_dir,omitempty"`
-	SyncInterval time.Duration `json:"sync_interval,omitempty"`
-	SyncAlways   bool          `json:"sync_always,omitempty"`
-	Domain       string        `json:"domain,omitempty"`
-	CompressOK   bool          `json:"compress_ok,omitempty"`
-	UniqueTag    string        `json:"unique_tag,omitempty"`
-	Strict       bool          `json:"strict,omitempty"`
+	MaxMemory         int64         `json:"max_memory"`
+	MaxStore          int64         `json:"max_storage"`
+	StoreDir          string        `json:"store_dir,omitempty"`
+	SyncInterval      time.Duration `json:"sync_interval,omitempty"`
+	SyncAlways        bool          `json:"sync_always,omitempty"`
+	Domain            string        `json:"domain,omitempty"`
+	CompressOK        bool          `json:"compress_ok,omitempty"`
+	UniqueTag         string        `json:"unique_tag,omitempty"`
+	Strict            bool          `json:"strict,omitempty"`
+	DisableSnapshotDB bool          `json:"disable_snapshot_db,omitempty"`
 }
 
 // Statistics about JetStream for this server.

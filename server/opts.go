@@ -337,6 +337,7 @@ type Options struct {
 	JetStreamOldKey            string        `json:"-"`
 	JetStreamCipher            StoreCipher   `json:"-"`
 	JetStreamUniqueTag         string
+	JetStreamDisableSnapshotDB bool `json:"-"`
 	JetStreamLimits            JSLimitOpts
 	JetStreamTpm               JSTpmOpts
 	JetStreamMaxCatchup        int64
@@ -2484,6 +2485,12 @@ func parseJetStream(v any, opts *Options, errors *[]error, warnings *[]error) er
 					return &configErr{tk, fmt.Sprintf("Expected a parseable size for %q, got %v", mk, mv)}
 				}
 				opts.JetStreamRequestQueueLimit = lim
+			case "disable_snapshot_db":
+				if v, ok := mv.(bool); ok {
+					opts.JetStreamDisableSnapshotDB = v
+				} else {
+					return &configErr{tk, fmt.Sprintf("Expected 'true' or 'false' for bool value, got '%s'", mv)}
+				}
 			default:
 				if !tk.IsUsedVariable() {
 					err := &unknownConfigFieldErr{
