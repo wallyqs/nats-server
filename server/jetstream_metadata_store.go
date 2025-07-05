@@ -352,47 +352,95 @@ func (ms *MetadataStore) CreateSnapshot() (io.ReadCloser, error) {
 		return nil, ErrMetadataStoreNotOpen
 	}
 
-	// Get all stream assignments to create snapshot in the expected format
-	streams, err := ms.AllStreamAssignments()
+	// Create a pipe for streaming
+	pr, pw := io.Pipe()
+
+	// Start a read transaction - this gives us a consistent CoW snapshot
+	tx, err := ms.db.Begin(false)
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert to writeableStreamAssignment format
-	var wsas []writeableStreamAssignment
-	for _, asa := range streams {
-		for _, sa := range asa {
-			wsa := writeableStreamAssignment{
-				Client:    sa.Client.forAssignmentSnap(),
-				Created:   sa.Created,
-				Config:    sa.Config,
-				Group:     sa.Group,
-				Sync:      sa.Sync,
-				Consumers: make([]*consumerAssignment, 0, len(sa.consumers)),
+	// Stream the data in a goroutine
+	go func() {
+		defer tx.Rollback()
+		defer pw.Close()
+
+		// Write opening bracket
+		if _, err := pw.Write([]byte("[")); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+
+		first := true
+		streamsBkt := tx.Bucket(streamsBucket)
+		consumersBkt := tx.Bucket(consumersBucket)
+
+		// Iterate through all streams
+		err := streamsBkt.ForEach(func(k, v []byte) error {
+			var wsa writeableStreamAssignment
+			if err := json.Unmarshal(v, &wsa); err != nil {
+				return err
 			}
-			for _, ca := range sa.consumers {
-				// Skip if the consumer is pending
+
+			// Prepare for snapshot
+			wsa.Client = wsa.Client.forAssignmentSnap()
+			wsa.Consumers = make([]*consumerAssignment, 0)
+
+			// Find all consumers for this stream
+			account := wsa.Client.serviceAccount()
+			prefix := []byte(fmt.Sprintf("%s:%s:", account, wsa.Config.Name))
+
+			c := consumersBkt.Cursor()
+			for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+				var ca consumerAssignment
+				if err := json.Unmarshal(v, &ca); err != nil {
+					continue
+				}
+				// Skip pending consumers
 				if ca.pending {
 					continue
 				}
-				cca := *ca
-				cca.Stream = wsa.Config.Name // Needed for safe roll-backs.
-				cca.Client = cca.Client.forAssignmentSnap()
-				cca.Subject, cca.Reply = _EMPTY_, _EMPTY_
-				wsa.Consumers = append(wsa.Consumers, &cca)
+				// Prepare consumer for snapshot
+				ca.Stream = wsa.Config.Name
+				ca.Client = ca.Client.forAssignmentSnap()
+				ca.Subject, ca.Reply = _EMPTY_, _EMPTY_
+				wsa.Consumers = append(wsa.Consumers, &ca)
 			}
-			wsas = append(wsas, wsa)
+
+			// Write comma if not first
+			if !first {
+				if _, err := pw.Write([]byte(",")); err != nil {
+					return err
+				}
+			}
+			first = false
+
+			// Marshal this stream assignment
+			wsaData, err := json.Marshal(wsa)
+			if err != nil {
+				return err
+			}
+			if _, err := pw.Write(wsaData); err != nil {
+				return err
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			pw.CloseWithError(err)
+			return
 		}
-	}
 
-	// Marshal to JSON
-	data, err := json.Marshal(wsas)
-	if err != nil {
-		return nil, err
-	}
+		// Write closing bracket
+		if _, err := pw.Write([]byte("]")); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+	}()
 
-	// Return a reader for the data
-	return &MetadataSnapshot{data: data}, nil
+	return pr, nil
 }
 
 // ApplySnapshot restores from a snapshot
