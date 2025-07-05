@@ -82,6 +82,7 @@ type RaftNode interface {
 	Delete()
 	RecreateInternalSubs() error
 	IsSystemAccount() bool
+	GetProtectionMetrics() *ProtectionMetrics
 }
 
 type WAL interface {
@@ -225,6 +226,14 @@ type raft struct {
 	votes *ipQueue[*voteResponse]        // Vote responses
 	leadc chan bool                      // Leader changes
 	quit  chan struct{}                  // Raft group shutdown
+
+	// Protection metrics for observability
+	protectionMetrics struct {
+		voteRejections      uint64    // Count of vote rejections due to empty log
+		candidacyRejections uint64    // Count of candidacy rejections due to empty log
+		recoveryRejections  uint64    // Count of candidacy rejections due to recovery state
+		lastProtectionTime  time.Time // Last time any protection was triggered
+	}
 }
 
 type proposedEntry struct {
@@ -1079,7 +1088,12 @@ func (n *raft) Recovered() {
 }
 
 func (n *raft) recoveredLocked() {
-	n.recovered = true
+	if !n.recovered {
+		n.recovered = true
+		// Log recovery completion for observability
+		elapsed := time.Since(n.created)
+		n.warn("Node recovery completed after %.2f seconds (pterm=%d, pindex=%d)", elapsed.Seconds(), n.pterm, n.pindex)
+	}
 }
 
 // Applied is a callback that must be called by the upper layer when it
@@ -1731,6 +1745,34 @@ func (n *raft) ID() string {
 	}
 	// Lock not needed as n.id is never changed after creation.
 	return n.id
+}
+
+// ProtectionMetrics returns the current protection metrics for observability.
+type ProtectionMetrics struct {
+	VoteRejections      uint64    `json:"vote_rejections"`
+	CandidacyRejections uint64    `json:"candidacy_rejections"`
+	RecoveryRejections  uint64    `json:"recovery_rejections"`
+	LastProtectionTime  time.Time `json:"last_protection_time,omitempty"`
+	LogProtectionEnabled bool     `json:"log_protection_enabled"`
+	Recovered           bool      `json:"recovered"`
+	EmptyLog            bool      `json:"empty_log"`
+	PreferredLeader     string    `json:"preferred_leader,omitempty"`
+}
+
+// GetProtectionMetrics returns the current protection metrics.
+func (n *raft) GetProtectionMetrics() *ProtectionMetrics {
+	n.RLock()
+	defer n.RUnlock()
+	return &ProtectionMetrics{
+		VoteRejections:      n.protectionMetrics.voteRejections,
+		CandidacyRejections: n.protectionMetrics.candidacyRejections,
+		RecoveryRejections:  n.protectionMetrics.recoveryRejections,
+		LastProtectionTime:  n.protectionMetrics.lastProtectionTime,
+		LogProtectionEnabled: n.logProtection,
+		Recovered:           n.recovered,
+		EmptyLog:            n.pterm == 0,
+		PreferredLeader:     n.preferred,
+	}
 }
 
 func (n *raft) Group() string {
@@ -4255,7 +4297,16 @@ func (n *raft) processVoteRequest(vr *voteRequest) error {
 	// If we've got an empty log, we could vote for anyone.
 	// Protect us from voting for anything.
 	if voteOk && n.rejectOnEmptyLog(vr.candidate) {
-		n.debug("Rejected voteRequest, detected empty log")
+		// Enhanced logging for observability
+		rejectionReason := "empty log"
+		if n.preferred != _EMPTY_ && n.preferred != vr.candidate {
+			rejectionReason = fmt.Sprintf("empty log with preferred leader %q", n.preferred)
+		} else if n.preferred == _EMPTY_ {
+			rejectionReason = fmt.Sprintf("empty log within timeout window (%.1f minutes elapsed)", time.Since(n.created).Minutes())
+		}
+		n.warn("Rejected vote request from %q: %s (pterm=%d, recovered=%v)", vr.candidate, rejectionReason, n.pterm, n.recovered)
+		n.protectionMetrics.voteRejections++
+		n.protectionMetrics.lastProtectionTime = time.Now()
 		voteOk = false
 	}
 
@@ -4427,6 +4478,9 @@ func (n *raft) switchToCandidate() {
 
 	// If we're still recovering on startup, we can't become leader yet.
 	if !n.recovered {
+		n.debug("Cannot become candidate: still recovering from startup (elapsed=%.1f seconds)", time.Since(n.created).Seconds())
+		n.protectionMetrics.recoveryRejections++
+		n.protectionMetrics.lastProtectionTime = time.Now()
 		n.resetElect(minElectionTimeout / 4)
 		return
 	}
@@ -4440,6 +4494,16 @@ func (n *raft) switchToCandidate() {
 
 	// Optionally, we can't switch if we have an entirely empty log.
 	if n.rejectOnEmptyLog(n.id) {
+		// Enhanced logging for observability
+		rejectionReason := "empty log"
+		if n.preferred != _EMPTY_ && n.preferred != n.id {
+			rejectionReason = fmt.Sprintf("empty log, not preferred leader (preferred=%q)", n.preferred)
+		} else if n.preferred == _EMPTY_ {
+			rejectionReason = fmt.Sprintf("empty log within timeout window (%.1f minutes elapsed)", time.Since(n.created).Minutes())
+		}
+		n.warn("Cannot become candidate: %s (pterm=%d, recovered=%v)", rejectionReason, n.pterm, n.recovered)
+		n.protectionMetrics.candidacyRejections++
+		n.protectionMetrics.lastProtectionTime = time.Now()
 		n.resetElect(minElectionTimeout / 4)
 		return
 	}
