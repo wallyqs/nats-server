@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -33,12 +34,12 @@ func TestStdLogger(t *testing.T) {
 		t.Fatalf("Expected %q, received %q\n", 0, flags)
 	}
 
-	if logger.debug {
-		t.Fatalf("Expected %t, received %t\n", false, logger.debug)
+	if atomic.LoadInt32(&logger.debug) != 0 {
+		t.Fatalf("Expected %t, received %t\n", false, atomic.LoadInt32(&logger.debug) != 0)
 	}
 
-	if logger.trace {
-		t.Fatalf("Expected %t, received %t\n", false, logger.trace)
+	if atomic.LoadInt32(&logger.trace) != 0 {
+		t.Fatalf("Expected %t, received %t\n", false, atomic.LoadInt32(&logger.trace) != 0)
 	}
 }
 
@@ -50,12 +51,12 @@ func TestStdLoggerWithDebugTraceAndTime(t *testing.T) {
 		t.Fatalf("Expected %d, received %d\n", log.LstdFlags, flags)
 	}
 
-	if !logger.debug {
-		t.Fatalf("Expected %t, received %t\n", true, logger.debug)
+	if atomic.LoadInt32(&logger.debug) == 0 {
+		t.Fatalf("Expected %t, received %t\n", true, atomic.LoadInt32(&logger.debug) != 0)
 	}
 
-	if !logger.trace {
-		t.Fatalf("Expected %t, received %t\n", true, logger.trace)
+	if atomic.LoadInt32(&logger.trace) == 0 {
+		t.Fatalf("Expected %t, received %t\n", true, atomic.LoadInt32(&logger.trace) != 0)
 	}
 }
 

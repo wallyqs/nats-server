@@ -23,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 // Default file permissions for log files.
@@ -32,8 +33,8 @@ const defaultLogPerms = os.FileMode(0640)
 type Logger struct {
 	sync.Mutex
 	logger     *log.Logger
-	debug      bool
-	trace      bool
+	debug      int32
+	trace      int32
 	infoLabel  string
 	warnLabel  string
 	errorLabel string
@@ -81,8 +82,12 @@ func NewStdLogger(time, debug, trace, colors, pid bool, opts ...LogOption) *Logg
 
 	l := &Logger{
 		logger: log.New(os.Stderr, pre, flags),
-		debug:  debug,
-		trace:  trace,
+	}
+	if debug {
+		atomic.StoreInt32(&l.debug, 1)
+	}
+	if trace {
+		atomic.StoreInt32(&l.trace, 1)
 	}
 
 	if colors {
@@ -111,9 +116,13 @@ func NewFileLogger(filename string, time, debug, trace, pid bool, opts ...LogOpt
 
 	l := &Logger{
 		logger: log.New(fl, pre, flags),
-		debug:  debug,
-		trace:  trace,
 		fl:     fl,
+	}
+	if debug {
+		atomic.StoreInt32(&l.debug, 1)
+	}
+	if trace {
+		atomic.StoreInt32(&l.trace, 1)
 	}
 	fl.Lock()
 	fl.l = l
@@ -137,10 +146,11 @@ type fileLogger struct {
 	f           writerAndCloser
 	limit       int64
 	olimit      int64
-	pid         string
+	pid         []byte
 	time        bool
 	closed      bool
 	maxNumFiles int
+	timeBuffer  []byte
 }
 
 func newFileLogger(filename, pidPrefix string, time bool) (*fileLogger, error) {
@@ -158,8 +168,9 @@ func newFileLogger(filename, pidPrefix string, time bool) (*fileLogger, error) {
 		canRotate: 0,
 		f:         f,
 		out:       stats.Size(),
-		pid:       pidPrefix,
+		pid:       *(*[]byte)(unsafe.Pointer(&pidPrefix)),
 		time:      time,
+		timeBuffer: make([]byte, 0, 32),
 	}
 	return fl, nil
 }
@@ -182,9 +193,9 @@ func (l *fileLogger) setMaxNumFiles(max int) {
 }
 
 func (l *fileLogger) logDirect(label, format string, v ...any) int {
-	var entrya = [256]byte{}
+	var entrya = [512]byte{}
 	var entry = entrya[:0]
-	if l.pid != "" {
+	if len(l.pid) > 0 {
 		entry = append(entry, l.pid...)
 	}
 	if l.time {
@@ -192,8 +203,9 @@ func (l *fileLogger) logDirect(label, format string, v ...any) int {
 		year, month, day := now.Date()
 		hour, min, sec := now.Clock()
 		microsec := now.Nanosecond() / 1000
-		entry = append(entry, fmt.Sprintf("%04d/%02d/%02d %02d:%02d:%02d.%06d ",
-			year, month, day, hour, min, sec, microsec)...)
+		l.timeBuffer = l.timeBuffer[:0]
+		l.timeBuffer = appendTime(l.timeBuffer, year, month, day, hour, min, sec, microsec)
+		entry = append(entry, l.timeBuffer...)
 	}
 	entry = append(entry, label...)
 	entry = append(entry, fmt.Sprintf(format, v...)...)
@@ -329,9 +341,9 @@ func NewTestLogger(prefix string, time bool) *Logger {
 	}
 	l := &Logger{
 		logger: log.New(os.Stderr, prefix, flags),
-		debug:  true,
-		trace:  true,
 	}
+	atomic.StoreInt32(&l.debug, 1)
+	atomic.StoreInt32(&l.trace, 1)
 	setColoredLabelFormats(l)
 	return l
 }
@@ -344,6 +356,50 @@ func (l *Logger) Close() error {
 		return l.fl.close()
 	}
 	return nil
+}
+
+// appendTime is an optimized time formatting function
+func appendTime(b []byte, year int, month time.Month, day, hour, min, sec, microsec int) []byte {
+	b = appendInt(b, year, 4)
+	b = append(b, '/')
+	b = appendInt(b, int(month), 2)
+	b = append(b, '/')
+	b = appendInt(b, day, 2)
+	b = append(b, ' ')
+	b = appendInt(b, hour, 2)
+	b = append(b, ':')
+	b = appendInt(b, min, 2)
+	b = append(b, ':')
+	b = appendInt(b, sec, 2)
+	b = append(b, '.')
+	b = appendInt(b, microsec, 6)
+	b = append(b, ' ')
+	return b
+}
+
+// appendInt appends an integer to a byte slice with zero-padding
+func appendInt(b []byte, i, width int) []byte {
+	if i < 0 {
+		i = -i
+		b = append(b, '-')
+		width--
+	}
+	var buf [20]byte
+	n := 0
+	for i > 0 || n == 0 {
+		buf[n] = byte(i%10) + '0'
+		i /= 10
+		n++
+	}
+	for n < width {
+		b = append(b, '0')
+		width--
+	}
+	for n > 0 {
+		n--
+		b = append(b, buf[n])
+	}
+	return b
 }
 
 // Generate the pid prefix string
@@ -392,14 +448,14 @@ func (l *Logger) Fatalf(format string, v ...any) {
 
 // Debugf logs a debug statement
 func (l *Logger) Debugf(format string, v ...any) {
-	if l.debug {
+	if atomic.LoadInt32(&l.debug) != 0 {
 		l.logger.Printf(l.debugLabel+format, v...)
 	}
 }
 
 // Tracef logs a trace statement
 func (l *Logger) Tracef(format string, v ...any) {
-	if l.trace {
+	if atomic.LoadInt32(&l.trace) != 0 {
 		l.logger.Printf(l.traceLabel+format, v...)
 	}
 }
