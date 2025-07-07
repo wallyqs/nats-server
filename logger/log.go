@@ -165,11 +165,11 @@ func newFileLogger(filename, pidPrefix string, time bool) (*fileLogger, error) {
 		return nil, err
 	}
 	fl := &fileLogger{
-		canRotate: 0,
-		f:         f,
-		out:       stats.Size(),
-		pid:       *(*[]byte)(unsafe.Pointer(&pidPrefix)),
-		time:      time,
+		canRotate:  0,
+		f:          f,
+		out:        stats.Size(),
+		pid:        *(*[]byte)(unsafe.Pointer(&pidPrefix)),
+		time:       time,
 		timeBuffer: make([]byte, 0, 32),
 	}
 	return fl, nil
