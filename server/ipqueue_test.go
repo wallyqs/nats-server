@@ -568,6 +568,233 @@ func Benchmark_IPQueueWithLim5Prod5ConsPopAll(b *testing.B) {
 	benchIPQueue(b, 5, 5, false, true)
 }
 
+func TestIPQueueSizeCalculationEdgeCases(t *testing.T) {
+	type testType = [8]byte
+	var testValue testType
+	calc := ipqSizeCalculation[testType](func(e testType) uint64 {
+		return uint64(len(e))
+	})
+	s := &Server{}
+
+	t.Run("SizeAccuracyWithMixedOperations", func(t *testing.T) {
+		q := newIPQueue[testType](s, "test", calc)
+
+		// Push some elements
+		q.push(testValue)
+		q.push(testValue)
+		q.push(testValue)
+		require_Equal(t, q.size(), uint64(3*len(testValue)))
+		require_Equal(t, q.len(), 3)
+
+		// PopOne first element
+		_, ok := q.popOne()
+		require_True(t, ok)
+		require_Equal(t, q.size(), uint64(2*len(testValue)))
+		require_Equal(t, q.len(), 2)
+
+		// Push another element
+		q.push(testValue)
+		require_Equal(t, q.size(), uint64(3*len(testValue)))
+		require_Equal(t, q.len(), 3)
+
+		// PopOne until only one left
+		q.popOne()
+		require_Equal(t, q.size(), uint64(2*len(testValue)))
+		q.popOne()
+		require_Equal(t, q.size(), uint64(1*len(testValue)))
+
+		// PopOne the last element - this should reset to 0
+		_, ok = q.popOne()
+		require_True(t, ok)
+		require_Equal(t, q.size(), uint64(0))
+		require_Equal(t, q.len(), 0)
+	})
+
+	t.Run("SizeLimitReachedDoesNotCorruptSize", func(t *testing.T) {
+		limit := uint64(2 * len(testValue))
+		q := newIPQueue[testType](s, "test", calc, ipqLimitBySize[testType](limit))
+
+		// Push up to the limit
+		n, err := q.push(testValue)
+		require_NoError(t, err)
+		require_Equal(t, n, 1)
+		require_Equal(t, q.size(), uint64(len(testValue)))
+
+		n, err = q.push(testValue)
+		require_NoError(t, err)
+		require_Equal(t, n, 2)
+		require_Equal(t, q.size(), uint64(2*len(testValue)))
+
+		// This should fail and not affect the size
+		n, err = q.push(testValue)
+		require_Error(t, err, errIPQSizeLimitReached)
+		require_Equal(t, n, 2)
+		require_Equal(t, q.size(), uint64(2*len(testValue)))
+
+		// Pop one element and verify size is correct
+		_, ok := q.popOne()
+		require_True(t, ok)
+		require_Equal(t, q.size(), uint64(len(testValue)))
+
+		// Should be able to push again now
+		n, err = q.push(testValue)
+		require_NoError(t, err)
+		require_Equal(t, n, 2)
+		require_Equal(t, q.size(), uint64(2*len(testValue)))
+	})
+
+	t.Run("VaryingElementSizes", func(t *testing.T) {
+		type varType = []byte
+		varCalc := ipqSizeCalculation[varType](func(e varType) uint64 {
+			return uint64(len(e))
+		})
+		q := newIPQueue[varType](s, "test", varCalc)
+
+		// Push elements of different sizes
+		small := make([]byte, 5)
+		medium := make([]byte, 10)
+		large := make([]byte, 20)
+
+		q.push(small)
+		require_Equal(t, q.size(), uint64(5))
+
+		q.push(medium)
+		require_Equal(t, q.size(), uint64(15))
+
+		q.push(large)
+		require_Equal(t, q.size(), uint64(35))
+
+		// PopOne and verify sizes are correctly tracked
+		v, ok := q.popOne()
+		require_True(t, ok)
+		require_Equal(t, len(v), 5)
+		require_Equal(t, q.size(), uint64(30))
+
+		v, ok = q.popOne()
+		require_True(t, ok)
+		require_Equal(t, len(v), 10)
+		require_Equal(t, q.size(), uint64(20))
+
+		v, ok = q.popOne()
+		require_True(t, ok)
+		require_Equal(t, len(v), 20)
+		require_Equal(t, q.size(), uint64(0))
+	})
+
+	t.Run("DrainResetsSize", func(t *testing.T) {
+		q := newIPQueue[testType](s, "test", calc)
+
+		// Push several elements
+		for i := 0; i < 5; i++ {
+			q.push(testValue)
+		}
+		require_Equal(t, q.size(), uint64(5*len(testValue)))
+		require_Equal(t, q.len(), 5)
+
+		// Drain should reset both len and size to 0
+		drained := q.drain()
+		require_Equal(t, drained, 5)
+		require_Equal(t, q.size(), uint64(0))
+		require_Equal(t, q.len(), 0)
+	})
+}
+
+func TestIPQueueConcurrentSizeCalculation(t *testing.T) {
+	type testType = [4]byte
+	var testValue testType
+	calc := ipqSizeCalculation[testType](func(e testType) uint64 {
+		return uint64(len(e))
+	})
+	s := &Server{}
+	q := newIPQueue[testType](s, "test", calc)
+
+	const numGoroutines = 10
+	const opsPerGoroutine = 100
+
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines * 2) // producers and consumers
+
+	// Start producers
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < opsPerGoroutine; j++ {
+				q.push(testValue)
+			}
+		}()
+	}
+
+	// Start consumers
+	consumedCount := int64(0)
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for atomic.LoadInt64(&consumedCount) < numGoroutines*opsPerGoroutine {
+				if _, ok := q.popOne(); ok {
+					atomic.AddInt64(&consumedCount, 1)
+				}
+				time.Sleep(time.Microsecond) // Small delay to allow interleaving
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// All elements should be consumed
+	require_Equal(t, atomic.LoadInt64(&consumedCount), int64(numGoroutines*opsPerGoroutine))
+	require_Equal(t, q.len(), 0)
+	require_Equal(t, q.size(), uint64(0))
+}
+
+func TestIPQueueSizeBoundaryConditions(t *testing.T) {
+	type testType = [1]byte
+	var testValue testType
+	calc := ipqSizeCalculation[testType](func(e testType) uint64 {
+		return 1
+	})
+	s := &Server{}
+
+	t.Run("ExactSizeLimit", func(t *testing.T) {
+		q := newIPQueue[testType](s, "test", calc, ipqLimitBySize[testType](3))
+
+		// Push exactly to the limit
+		n, err := q.push(testValue)
+		require_NoError(t, err)
+		require_Equal(t, n, 1)
+
+		n, err = q.push(testValue)
+		require_NoError(t, err)
+		require_Equal(t, n, 2)
+
+		n, err = q.push(testValue)
+		require_NoError(t, err)
+		require_Equal(t, n, 3)
+		require_Equal(t, q.size(), uint64(3))
+
+		// Next push should fail
+		n, err = q.push(testValue)
+		require_Error(t, err, errIPQSizeLimitReached)
+		require_Equal(t, n, 3)
+		require_Equal(t, q.size(), uint64(3)) // Size should remain unchanged
+	})
+
+	t.Run("ZeroSizeLimit", func(t *testing.T) {
+		q := newIPQueue[testType](s, "test", calc, ipqLimitBySize[testType](0))
+
+		// Zero size limit is treated as "no limit" in current implementation
+		n, err := q.push(testValue)
+		require_NoError(t, err)
+		require_Equal(t, n, 1)
+		require_Equal(t, q.size(), uint64(1))
+
+		// Should be able to push more
+		n, err = q.push(testValue)
+		require_NoError(t, err)
+		require_Equal(t, n, 2)
+		require_Equal(t, q.size(), uint64(2))
+	})
+}
+
 func benchIPQueue(b *testing.B, numProd, numCons int, popOne, withLimits bool) {
 	var count atomic.Int64
 	var sum atomic.Int64
