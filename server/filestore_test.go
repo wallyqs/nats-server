@@ -9908,3 +9908,486 @@ func TestFileStoreAsyncFlushOnSkipMsgs(t *testing.T) {
 		})
 	}
 }
+
+// TestCompressionStateChanges tests changing compression algorithms on existing message blocks
+func TestCompressionStateChanges(t *testing.T) {
+	storeDir := t.TempDir()
+
+	tests := []struct {
+		name        string
+		fromComp    StoreCompression
+		toComp      StoreCompression
+		cipher      StoreCipher
+		expectError bool
+	}{
+		{"NoCompression to S2", NoCompression, S2Compression, NoCipher, false},
+		{"S2 to NoCompression", S2Compression, NoCompression, NoCipher, false},
+		{"NoCompression to S2 with AES", NoCompression, S2Compression, AES, false},
+		{"S2 to NoCompression with ChaCha", S2Compression, NoCompression, ChaCha, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create initial filestore with fromComp compression
+			fcfg := FileStoreConfig{
+				StoreDir:    storeDir + "/" + tt.name,
+				BlockSize:   64 * 1024,
+				Cipher:      tt.cipher,
+				Compression: tt.fromComp,
+			}
+
+			cfg := StreamConfig{Name: "TEST", Subjects: []string{"foo"}, Storage: FileStorage}
+			fs, err := newFileStore(fcfg, cfg)
+			require_NoError(t, err)
+			defer fs.Stop()
+
+			// Set up encryption key if cipher is enabled
+			if tt.cipher != NoCipher {
+				fs.prf = func(context []byte) ([]byte, error) {
+					h := hmac.New(sha256.New, []byte("test-key"))
+					h.Write(context)
+					return h.Sum(nil), nil
+				}
+			}
+
+			// Add some test messages
+			testData := []byte("This is test data that should compress well when using S2 compression algorithm. " +
+				"Repeated data like this: AAAAAAAAAA BBBBBBBBBB CCCCCCCCCC should compress significantly.")
+
+			var seqs []uint64
+			for i := 0; i < 5; i++ {
+				seq, _, err := fs.StoreMsg("foo", nil, testData, 0)
+				require_NoError(t, err)
+				seqs = append(seqs, seq)
+			}
+
+			// Get the message block to test recompression
+			var mb *msgBlock
+			fs.mu.RLock()
+			if len(fs.blks) > 0 {
+				mb = fs.blks[1] // Get first block (1-indexed)
+			}
+			fs.mu.RUnlock()
+			require_True(t, mb != nil)
+
+			// Wait for initial compression if enabled
+			time.Sleep(100 * time.Millisecond)
+
+			// Record original file size and compression state
+			origInfo, err := os.Stat(mb.mfn)
+			require_NoError(t, err)
+			origSize := origInfo.Size()
+
+			// Change compression setting
+			fs.fcfg.Compression = tt.toComp
+			mb.fs.fcfg.Compression = tt.toComp
+
+			// Trigger recompression
+			err = mb.recompressOnDiskIfNeeded()
+			if tt.expectError {
+				require_Error(t, err)
+				return
+			}
+			require_NoError(t, err)
+
+			// Verify compression state changed
+			require_Equal(t, mb.cmp, tt.toComp)
+
+			// Check file size changed appropriately
+			newInfo, err := os.Stat(mb.mfn)
+			require_NoError(t, err)
+			newSize := newInfo.Size()
+
+			if tt.fromComp == NoCompression && tt.toComp == S2Compression {
+				// Should be smaller after compression (for our test data)
+				require_True(t, newSize < origSize)
+			} else if tt.fromComp == S2Compression && tt.toComp == NoCompression {
+				// Should be larger after decompression
+				require_True(t, newSize > origSize)
+			}
+
+			// Verify we can still read all messages correctly
+			for _, seq := range seqs {
+				sm, err := fs.LoadMsg(seq, nil)
+				require_NoError(t, err)
+				require_Equal(t, string(sm.msg), string(testData))
+			}
+
+			// Verify metadata headers are correct
+			if tt.toComp != NoCompression {
+				// Read raw file and check compression metadata
+				rawData, err := os.ReadFile(mb.mfn)
+				require_NoError(t, err)
+
+				// Decrypt if necessary
+				if mb.bek != nil && len(rawData) > 0 {
+					bek, err := genBlockEncryptionKey(tt.cipher, mb.seed, mb.nonce)
+					require_NoError(t, err)
+					bek.XORKeyStream(rawData, rawData)
+				}
+
+				// Check compression metadata
+				var meta CompressionInfo
+				n, err := meta.UnmarshalMetadata(rawData)
+				require_NoError(t, err)
+				require_True(t, n > 0) // Should have metadata
+				require_Equal(t, meta.Algorithm, tt.toComp)
+				require_True(t, meta.OriginalSize > 0)
+			}
+		})
+	}
+}
+
+// TestCorruptedCompressionMetadata tests handling of corrupted compression metadata
+func TestCorruptedCompressionMetadata(t *testing.T) {
+	storeDir := t.TempDir()
+
+	fcfg := FileStoreConfig{
+		StoreDir:    storeDir,
+		BlockSize:   64 * 1024,
+		Cipher:      NoCipher,
+		Compression: S2Compression,
+	}
+
+	cfg := StreamConfig{Name: "TEST", Subjects: []string{"foo"}, Storage: FileStorage}
+	fs, err := newFileStore(fcfg, cfg)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	// Add a message to create a compressed block
+	testData := []byte("Test data for compression metadata corruption test")
+	seq, _, err := fs.StoreMsg("foo", nil, testData, 0)
+	require_NoError(t, err)
+
+	// Get the message block
+	var mb *msgBlock
+	fs.mu.RLock()
+	if len(fs.blks) > 0 {
+		mb = fs.blks[1] // Get first block (1-indexed)
+	}
+	fs.mu.RUnlock()
+	require_True(t, mb != nil)
+
+	// Wait for compression to complete
+	time.Sleep(100 * time.Millisecond)
+
+	tests := []struct {
+		name           string
+		corruptFunc    func([]byte) []byte
+		expectError    bool
+		expectFallback bool
+	}{
+		{
+			name: "Invalid magic bytes",
+			corruptFunc: func(data []byte) []byte {
+				if len(data) >= 3 {
+					data[0], data[1], data[2] = 'x', 'x', 'x'
+				}
+				return data
+			},
+			expectError:    false, // Should treat as uncompressed
+			expectFallback: true,
+		},
+		{
+			name: "Truncated metadata",
+			corruptFunc: func(data []byte) []byte {
+				if len(data) >= 4 {
+					return data[:3] // Too short for valid metadata
+				}
+				return data
+			},
+			expectError:    false, // Should treat as uncompressed
+			expectFallback: true,
+		},
+		{
+			name: "Invalid compression algorithm",
+			corruptFunc: func(data []byte) []byte {
+				if len(data) >= 4 {
+					data[3] = 255 // Invalid compression algorithm
+				}
+				return data
+			},
+			expectError:    true, // Should error on invalid algorithm
+			expectFallback: false,
+		},
+		{
+			name: "Corrupted uvarint",
+			corruptFunc: func(data []byte) []byte {
+				if len(data) >= 5 {
+					// Make the uvarint invalid
+					for i := 4; i < len(data) && i < 14; i++ {
+						data[i] = 0xFF // Invalid uvarint continuation
+					}
+				}
+				return data
+			},
+			expectError:    true, // Should error on invalid uvarint
+			expectFallback: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Read original file content
+			origData, err := os.ReadFile(mb.mfn)
+			require_NoError(t, err)
+
+			// Corrupt the data according to test case
+			corruptedData := tt.corruptFunc(append([]byte(nil), origData...))
+
+			// Write corrupted data back
+			err = os.WriteFile(mb.mfn, corruptedData, 0644)
+			require_NoError(t, err)
+
+			// Try to decompress the corrupted data
+			var meta CompressionInfo
+			n, err := meta.UnmarshalMetadata(corruptedData)
+
+			if tt.expectError {
+				require_Error(t, err)
+			} else {
+				require_NoError(t, err)
+				if tt.expectFallback {
+					require_Equal(t, n, 0) // Should indicate no metadata
+					require_Equal(t, meta.Algorithm, NoCompression)
+				}
+			}
+
+			// Try to read the message - this should work for fallback cases
+			if !tt.expectError && tt.expectFallback {
+				// Reset compression to NoCompression for fallback test
+				mb.cmp = NoCompression
+				_, err := fs.LoadMsg(seq, nil)
+				// This might fail due to corruption, but shouldn't crash
+				_ = err
+			}
+
+			// Restore original data for next test
+			err = os.WriteFile(mb.mfn, origData, 0644)
+			require_NoError(t, err)
+		})
+	}
+}
+
+// TestAtomicCompressionChange tests the atomicity of compression changes
+func TestAtomicCompressionChange(t *testing.T) {
+	storeDir := t.TempDir()
+
+	fcfg := FileStoreConfig{
+		StoreDir:    storeDir,
+		BlockSize:   64 * 1024,
+		Cipher:      NoCipher,
+		Compression: NoCompression,
+	}
+
+	cfg := StreamConfig{Name: "TEST", Subjects: []string{"foo"}, Storage: FileStorage}
+	fs, err := newFileStore(fcfg, cfg)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	// Add test data
+	testData := []byte("Test data for atomic compression change test - this should compress well")
+	var seqs []uint64
+	for i := 0; i < 3; i++ {
+		seq, _, err := fs.StoreMsg("foo", nil, testData, 0)
+		require_NoError(t, err)
+		seqs = append(seqs, seq)
+	}
+
+	// Get the message block
+	var mb *msgBlock
+	fs.mu.RLock()
+	if len(fs.blks) > 0 {
+		mb = fs.blks[1] // Get first block (1-indexed)
+	}
+	fs.mu.RUnlock()
+	require_True(t, mb != nil)
+
+	// Verify original file exists and messages are readable
+	origInfo, err := os.Stat(mb.mfn)
+	require_NoError(t, err)
+	for _, seq := range seqs {
+		sm, err := fs.LoadMsg(seq, nil)
+		require_NoError(t, err)
+		require_Equal(t, string(sm.msg), string(testData))
+	}
+
+	// Change compression and trigger recompression
+	fs.fcfg.Compression = S2Compression
+	mb.fs.fcfg.Compression = S2Compression
+
+	// Test atomicity by checking temp file creation and cleanup
+	tempFile := mb.mfn + compressTmpSuffix
+
+	// Verify temp file doesn't exist before
+	_, err = os.Stat(tempFile)
+	require_True(t, os.IsNotExist(err))
+
+	// Perform recompression
+	err = mb.recompressOnDiskIfNeeded()
+	require_NoError(t, err)
+
+	// Verify temp file doesn't exist after (should be cleaned up)
+	_, err = os.Stat(tempFile)
+	require_True(t, os.IsNotExist(err))
+
+	// Verify original file still exists
+	newInfo, err := os.Stat(mb.mfn)
+	require_NoError(t, err)
+
+	// Verify file was actually changed (different size due to compression)
+	require_True(t, newInfo.Size() != origInfo.Size())
+
+	// Verify all messages are still readable after compression
+	for _, seq := range seqs {
+		sm, err := fs.LoadMsg(seq, nil)
+		require_NoError(t, err)
+		require_Equal(t, string(sm.msg), string(testData))
+	}
+
+	// Test error cleanup by simulating permission error
+	// Make directory read-only to force temp file creation to fail
+	err = os.Chmod(filepath.Dir(mb.mfn), 0555)
+	require_NoError(t, err)
+	defer os.Chmod(filepath.Dir(mb.mfn), 0755) // Restore permissions
+
+	// Try to recompress again - should fail but not leave temp files
+	err = mb.recompressOnDiskIfNeeded()
+	require_Error(t, err) // Should fail due to permissions
+
+	// Verify no temp file left behind
+	_, err = os.Stat(tempFile)
+	require_True(t, os.IsNotExist(err))
+
+	// Restore permissions and verify original file is intact
+	err = os.Chmod(filepath.Dir(mb.mfn), 0755)
+	require_NoError(t, err)
+
+	for _, seq := range seqs {
+		sm, err := fs.LoadMsg(seq, nil)
+		require_NoError(t, err)
+		require_Equal(t, string(sm.msg), string(testData))
+	}
+}
+
+// TestCipherCompressionConversion tests the exact scenario fixed in commit 1d951ce7
+func TestCipherCompressionConversion(t *testing.T) {
+	storeDir := t.TempDir()
+
+	// Test the cipher conversion with compressed blocks scenario
+	cipherTests := []struct {
+		name        string
+		fromCipher  StoreCipher
+		toCipher    StoreCipher
+		compression StoreCompression
+	}{
+		{"ChaCha to AES with compression", ChaCha, AES, S2Compression},
+		{"AES to ChaCha with compression", AES, ChaCha, S2Compression},
+		{"ChaCha to AES without compression", ChaCha, AES, NoCompression},
+		{"AES to ChaCha without compression", AES, ChaCha, NoCompression},
+	}
+
+	for _, tt := range cipherTests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create filestore with original cipher and compression
+			fcfg := FileStoreConfig{
+				StoreDir:    storeDir + "/" + tt.name,
+				BlockSize:   64 * 1024,
+				Cipher:      tt.fromCipher,
+				Compression: tt.compression,
+			}
+
+			cfg := StreamConfig{Name: "TEST", Subjects: []string{"foo"}, Storage: FileStorage}
+			fs, err := newFileStore(fcfg, cfg)
+			require_NoError(t, err)
+
+			// Set up encryption key
+			if tt.fromCipher != NoCipher {
+				fs.prf = func(context []byte) ([]byte, error) {
+					h := hmac.New(sha256.New, []byte("test-key"))
+					h.Write(context)
+					return h.Sum(nil), nil
+				}
+			}
+
+			// Add compressible test data
+			testData := []byte("This is highly compressible test data: " + strings.Repeat("ABCD", 256))
+			var seqs []uint64
+			for i := 0; i < 3; i++ {
+				seq, _, err := fs.StoreMsg("foo", nil, testData, 0)
+				require_NoError(t, err)
+				seqs = append(seqs, seq)
+			}
+
+			// Get the message block
+			var mb *msgBlock
+			fs.mu.RLock()
+			if len(fs.blks) > 0 {
+				mb = fs.blks[1] // Get first block (1-indexed)
+			}
+			fs.mu.RUnlock()
+			require_True(t, mb != nil)
+
+			// Wait for initial compression if enabled
+			if tt.compression != NoCompression {
+				time.Sleep(200 * time.Millisecond)
+			}
+
+			// Verify messages are readable with original cipher
+			for _, seq := range seqs {
+				sm, err := fs.LoadMsg(seq, nil)
+				require_NoError(t, err)
+				require_Equal(t, string(sm.msg), string(testData))
+			}
+
+			// Change cipher configuration
+			fs.fcfg.Cipher = tt.toCipher
+			mb.fs.fcfg.Cipher = tt.toCipher
+
+			// Set up new key generator for the new cipher
+			if tt.toCipher != NoCipher {
+				fs.oldprf = fs.prf // Keep old PRF for conversion
+				fs.prf = func(context []byte) ([]byte, error) {
+					h := hmac.New(sha256.New, []byte("new-test-key"))
+					h.Write(context)
+					return h.Sum(nil), nil
+				}
+			}
+
+			// This is the critical test: cipher conversion on compressed blocks
+			// This is what was failing before commit 1d951ce7
+			err = mb.convertCipher()
+			require_NoError(t, err)
+
+			// Verify messages are still readable after cipher conversion
+			for _, seq := range seqs {
+				sm, err := fs.LoadMsg(seq, nil)
+				require_NoError(t, err)
+				require_Equal(t, string(sm.msg), string(testData))
+			}
+
+			// If compression was enabled, verify the block is still properly compressed
+			if tt.compression != NoCompression {
+				// Read raw file and verify compression metadata exists
+				rawData, err := os.ReadFile(mb.mfn)
+				require_NoError(t, err)
+
+				// Decrypt with new cipher
+				if mb.bek != nil && len(rawData) > 0 {
+					bek, err := genBlockEncryptionKey(tt.toCipher, mb.seed, mb.nonce)
+					require_NoError(t, err)
+					bek.XORKeyStream(rawData, rawData)
+				}
+
+				// Verify compression metadata is intact
+				var meta CompressionInfo
+				n, err := meta.UnmarshalMetadata(rawData)
+				require_NoError(t, err)
+				require_True(t, n > 0) // Should have metadata
+				require_Equal(t, meta.Algorithm, tt.compression)
+			}
+
+			fs.Stop()
+		})
+	}
+}
