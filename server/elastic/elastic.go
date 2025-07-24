@@ -29,6 +29,9 @@ type Pointer[T any] struct {
 }
 
 func (e *Pointer[T]) Set(ptr *T) {
+	if e == nil {
+		return
+	}
 	e.weak = weak.Make(ptr)
 	if e.strong != nil {
 		e.strong = ptr
@@ -68,5 +71,8 @@ func (e *Pointer[T]) Value() *T {
 }
 
 func (e *Pointer[T]) Strong() bool {
+	if e == nil {
+		return false
+	}
 	return e.strong != nil
 }
