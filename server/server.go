@@ -714,6 +714,11 @@ func NewServer(opts *Options) (*Server, error) {
 		return nil, err
 	}
 
+	// Initialize dios channel with configured capacity
+	if opts.DiosCapacity > 0 {
+		initDios(opts.DiosCapacity)
+	}
+
 	info := Info{
 		ID:           pub,
 		XKey:         xpub,
@@ -1139,6 +1144,10 @@ func validateOptions(o *Options) error {
 	}
 	if err := validateJetStreamOptions(o); err != nil {
 		return err
+	}
+	// Validate DiosCapacity option.
+	if o.DiosCapacity < 0 {
+		return fmt.Errorf("dios_capacity (%d) must be non-negative", o.DiosCapacity)
 	}
 	// Finally check websocket options.
 	return validateWebsocketOptions(o)

@@ -260,6 +260,7 @@ type JSLimitOpts struct {
 	MaxAckPending   int           `json:"max_ack_pending,omitempty"`
 	MaxHAAssets     int           `json:"max_ha_assets,omitempty"`
 	Duplicates      time.Duration `json:"max_duplicate_window,omitempty"`
+	DiskIO          int           `json:"disk_io,omitempty"`
 }
 
 type JSTpmOpts struct {
@@ -467,6 +468,11 @@ type Options struct {
 
 	// configDigest represents the state of configuration.
 	configDigest string
+
+	// DiosCapacity sets the capacity of the dios channel used to limit
+	// concurrent disk I/O operations. If 0, uses the default calculation
+	// based on CPU cores.
+	DiosCapacity int `json:"dios_capacity"`
 }
 
 // WebsocketOpts are options for websocket
@@ -2318,6 +2324,8 @@ func parseJetStreamLimits(v any, opts *Options, errors *[]error) error {
 			if err != nil {
 				*errors = append(*errors, err)
 			}
+		case "disk_io":
+			lim.DiskIO = int(mv.(int64))
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -2332,6 +2340,12 @@ func parseJetStreamLimits(v any, opts *Options, errors *[]error) error {
 		}
 	}
 	opts.JetStreamLimits = lim
+
+	// If disk_io is set in jetstream limits, use it for DiosCapacity
+	if lim.DiskIO > 0 {
+		opts.DiosCapacity = lim.DiskIO
+	}
+
 	return nil
 }
 

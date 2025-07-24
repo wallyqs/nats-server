@@ -10580,14 +10580,25 @@ var dios chan struct{}
 // Used to setup our simplistic counting semaphore using buffered channels.
 // golang.org's semaphore seemed a bit heavy.
 func init() {
-	// Limit ourselves to a sensible number of blocking I/O calls. Range between
-	// 4-16 concurrent disk I/Os based on CPU cores, or 50% of cores if greater
-	// than 32 cores.
-	mp := runtime.GOMAXPROCS(-1)
-	nIO := min(16, max(4, mp))
-	if mp > 32 {
-		// If the system has more than 32 cores then limit dios to 50% of cores.
-		nIO = max(16, min(mp, mp/2))
+	initDios(0) // Use default capacity calculation
+}
+
+// initDios initializes the dios channel with the specified capacity.
+// If capacity is 0, uses the default calculation based on CPU cores.
+func initDios(capacity int) {
+	var nIO int
+	if capacity > 0 {
+		nIO = capacity
+	} else {
+		// Limit ourselves to a sensible number of blocking I/O calls. Range between
+		// 4-16 concurrent disk I/Os based on CPU cores, or 50% of cores if greater
+		// than 32 cores.
+		mp := runtime.GOMAXPROCS(-1)
+		nIO = min(16, max(4, mp))
+		if mp > 32 {
+			// If the system has more than 32 cores then limit dios to 50% of cores.
+			nIO = max(16, min(mp, mp/2))
+		}
 	}
 	dios = make(chan struct{}, nIO)
 	// Fill it up to start.
