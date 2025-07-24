@@ -1293,10 +1293,16 @@ func (mb *msgBlock) convertCipher() error {
 
 		buf, _ := mb.loadBlock(nil)
 		bek.XORKeyStream(buf, buf)
-		// Make sure we can parse with old cipher and key file.
-		if err = mb.indexCacheBuf(buf); err != nil {
+		// Check for compression.
+		nbuf := buf
+		if nbuf, err = mb.decompressIfNeeded(nbuf); err != nil {
 			return err
 		}
+		// Make sure we can parse with old cipher and key file.
+		if err = mb.indexCacheBuf(nbuf); err != nil {
+			return err
+		}
+
 		// Reset the cache since we just read everything in.
 		mb.cache = nil
 
