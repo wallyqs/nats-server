@@ -171,35 +171,38 @@ type psi struct {
 }
 
 type fileStore struct {
-	srv         *Server
-	mu          sync.RWMutex
-	state       StreamState
-	tombs       []uint64
-	ld          *LostStreamData
-	scb         StorageUpdateHandler
-	rmcb        StorageRemoveMsgHandler
-	sdmcb       SubjectDeleteMarkerUpdateHandler
-	ageChk      *time.Timer
-	syncTmr     *time.Timer
-	cfg         FileStreamInfo
-	fcfg        FileStoreConfig
-	prf         keyGen
-	oldprf      keyGen
-	aek         cipher.AEAD
-	lmb         *msgBlock
-	blks        []*msgBlock
-	bim         map[uint32]*msgBlock
-	psim        *stree.SubjectTree[psi]
-	tsl         int
-	adml        int
-	hh          hash.Hash64
-	qch         chan struct{}
-	fsld        chan struct{}
-	cmu         sync.RWMutex
-	cfs         []ConsumerStore
-	sips        int
-	dirty       int
-	closing     bool
+	srv     *Server
+	mu      sync.RWMutex
+	state   StreamState
+	tombs   []uint64
+	ld      *LostStreamData
+	scb     StorageUpdateHandler
+	rmcb    StorageRemoveMsgHandler
+	sdmcb   SubjectDeleteMarkerUpdateHandler
+	ageChk  *time.Timer
+	syncTmr *time.Timer
+	cfg     FileStreamInfo
+	fcfg    FileStoreConfig
+	prf     keyGen
+	oldprf  keyGen
+	aek     cipher.AEAD
+	lmb     *msgBlock
+	blks    []*msgBlock
+	bim     map[uint32]*msgBlock
+	psim    *stree.SubjectTree[psi]
+	tsl     int
+	adml    int
+	hh      hash.Hash64
+	qch     chan struct{}
+	fsld    chan struct{}
+	cmu     sync.RWMutex
+	cfs     []ConsumerStore
+	sips    int
+	dirty   int
+	closing bool
+
+	// Cache metrics
+	cmetrics    *FilestoreCacheMetrics
 	closed      bool
 	fip         bool
 	receivedAny bool
@@ -413,15 +416,16 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 	dios <- struct{}{}
 
 	fs = &fileStore{
-		fcfg:   fcfg,
-		psim:   stree.NewSubjectTree[psi](),
-		bim:    make(map[uint32]*msgBlock),
-		cfg:    FileStreamInfo{Created: created, StreamConfig: cfg},
-		prf:    prf,
-		oldprf: oldprf,
-		qch:    make(chan struct{}),
-		fsld:   make(chan struct{}),
-		srv:    fcfg.srv,
+		fcfg:     fcfg,
+		psim:     stree.NewSubjectTree[psi](),
+		bim:      make(map[uint32]*msgBlock),
+		cfg:      FileStreamInfo{Created: created, StreamConfig: cfg},
+		prf:      prf,
+		oldprf:   oldprf,
+		qch:      make(chan struct{}),
+		fsld:     make(chan struct{}),
+		srv:      fcfg.srv,
+		cmetrics: NewFilestoreCacheMetrics(cfg.Name),
 	}
 
 	// Register with access time service.

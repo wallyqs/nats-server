@@ -14,18 +14,29 @@
 package elastic
 
 import (
+	"time"
 	"weak"
 )
 
 func Make[T any](ptr *T) *Pointer[T] {
-	return &Pointer[T]{
-		weak: weak.Make(ptr),
+	return MakeWithMetrics(ptr, GetGlobalMetrics())
+}
+
+func MakeWithMetrics[T any](ptr *T, metrics *CacheMetrics) *Pointer[T] {
+	p := &Pointer[T]{
+		weak:    weak.Make(ptr),
+		metrics: metrics,
 	}
+	if metrics != nil {
+		metrics.UpdateRefCounts(0, 1) // Start as weak reference
+	}
+	return p
 }
 
 type Pointer[T any] struct {
-	weak   weak.Pointer[T]
-	strong *T
+	weak    weak.Pointer[T]
+	strong  *T
+	metrics *CacheMetrics // Optional metrics collection
 }
 
 func (e *Pointer[T]) Set(ptr *T) {
@@ -45,7 +56,15 @@ func (e *Pointer[T]) Strengthen() *T {
 	if e.strong != nil {
 		return e.strong
 	}
+
+	start := time.Now()
 	e.strong = e.weak.Value()
+	duration := time.Since(start)
+
+	if e.metrics != nil {
+		e.metrics.RecordStrengthen(duration)
+	}
+
 	return e.strong
 }
 
@@ -56,7 +75,15 @@ func (e *Pointer[T]) Weaken() bool {
 	if e.strong == nil {
 		return false
 	}
+
+	start := time.Now()
 	e.strong = nil
+	duration := time.Since(start)
+
+	if e.metrics != nil {
+		e.metrics.RecordWeaken(duration)
+	}
+
 	return true
 }
 
@@ -64,10 +91,25 @@ func (e *Pointer[T]) Value() *T {
 	if e == nil {
 		return nil
 	}
+
+	start := time.Now()
+	var result *T
 	if e.strong != nil {
-		return e.strong
+		result = e.strong
+	} else {
+		result = e.weak.Value()
 	}
-	return e.weak.Value()
+	duration := time.Since(start)
+
+	if e.metrics != nil {
+		if result != nil {
+			e.metrics.RecordHit(duration)
+		} else {
+			e.metrics.RecordMiss()
+		}
+	}
+
+	return result
 }
 
 func (e *Pointer[T]) Strong() bool {
