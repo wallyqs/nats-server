@@ -101,18 +101,57 @@ func (s *Server) startQUICServer() {
 
 // acceptQUICConnections accepts QUIC connections and creates clients
 func (s *Server) acceptQUICConnections(listener *quic.Listener) {
+	tmpDelay := time.Duration(10) * time.Millisecond
+	const ACCEPT_MIN_SLEEP = time.Duration(10) * time.Millisecond
+	const ACCEPT_MAX_SLEEP = time.Duration(1) * time.Second
+
 	for {
-		conn, err := listener.Accept(context.Background())
+		// Check if server is shutting down
+		if !s.isRunning() {
+			break
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		conn, err := listener.Accept(ctx)
+		cancel()
+
 		if err != nil {
+			// Check for lame duck mode
+			if s.isLameDuckMode() {
+				s.ldmCh <- true
+				<-s.quitCh
+				break
+			}
+
+			// Check quit channel
 			select {
 			case <-s.quitCh:
-				return
+				break
 			default:
 			}
 
+			// Handle error with exponential backoff
+			if !s.isRunning() {
+				break
+			}
+
 			s.Errorf("Error accepting QUIC connection: %v", err)
+			
+			// Exponential backoff on errors
+			select {
+			case <-time.After(tmpDelay):
+			case <-s.quitCh:
+				break
+			}
+			tmpDelay *= 2
+			if tmpDelay > ACCEPT_MAX_SLEEP {
+				tmpDelay = ACCEPT_MAX_SLEEP
+			}
 			continue
 		}
+
+		// Reset delay on successful accept
+		tmpDelay = ACCEPT_MIN_SLEEP
 
 		// Create client in goroutine
 		if !s.startGoRoutine(func() {
@@ -124,12 +163,18 @@ func (s *Server) acceptQUICConnections(listener *quic.Listener) {
 			conn.CloseWithError(0, "server shutdown")
 		}
 	}
+	
+	s.Debugf("QUIC accept loop exiting..")
+	s.done <- true
 }
 
 // createQUICClient creates a new NATS client from a QUIC connection
 func (s *Server) createQUICClient(conn quic.Connection) {
-	// Open a bidirectional stream for the NATS protocol
-	stream, err := conn.AcceptStream(context.Background())
+	// Open a bidirectional stream for the NATS protocol with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
 		s.Errorf("Error accepting QUIC stream: %v", err)
 		conn.CloseWithError(0, "failed to accept stream")

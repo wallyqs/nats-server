@@ -2618,6 +2618,13 @@ func (s *Server) Shutdown() {
 		s.mqtt.listener = nil
 	}
 
+	// Kick QUIC accept loop
+	if s.quic.listener != nil {
+		doneExpected++
+		(*s.quic.listener).Close()
+		s.quic.listener = nil
+	}
+
 	// Kick leafnodes AcceptLoop()
 	if s.leafNodeListener != nil {
 		doneExpected++
