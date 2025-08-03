@@ -101,21 +101,20 @@ func (s *Server) startQUICServer() {
 
 // acceptQUICConnections accepts QUIC connections and creates clients
 func (s *Server) acceptQUICConnections(listener *quic.Listener) {
-	tmpDelay := time.Duration(10) * time.Millisecond
-	const ACCEPT_MIN_SLEEP = time.Duration(10) * time.Millisecond
-	const ACCEPT_MAX_SLEEP = time.Duration(1) * time.Second
-
 	for {
-		// Check if server is shutting down
+		// Check if server is shutting down before accepting
 		if !s.isRunning() {
 			break
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		conn, err := listener.Accept(ctx)
-		cancel()
-
+		conn, err := listener.Accept(context.Background())
 		if err != nil {
+			// Check if we're shutting down - this is the most common case
+			// when the listener is closed
+			if !s.isRunning() {
+				break
+			}
+
 			// Check for lame duck mode
 			if s.isLameDuckMode() {
 				s.ldmCh <- true
@@ -130,28 +129,14 @@ func (s *Server) acceptQUICConnections(listener *quic.Listener) {
 			default:
 			}
 
-			// Handle error with exponential backoff
-			if !s.isRunning() {
-				break
-			}
-
-			s.Errorf("Error accepting QUIC connection: %v", err)
-			
-			// Exponential backoff on errors
-			select {
-			case <-time.After(tmpDelay):
-			case <-s.quitCh:
-				break
-			}
-			tmpDelay *= 2
-			if tmpDelay > ACCEPT_MAX_SLEEP {
-				tmpDelay = ACCEPT_MAX_SLEEP
+			// If we're still running, this might be a real error
+			if s.isRunning() {
+				s.Errorf("Error accepting QUIC connection: %v", err)
+				// Brief pause to avoid tight loop on persistent errors
+				time.Sleep(10 * time.Millisecond)
 			}
 			continue
 		}
-
-		// Reset delay on successful accept
-		tmpDelay = ACCEPT_MIN_SLEEP
 
 		// Create client in goroutine
 		if !s.startGoRoutine(func() {
