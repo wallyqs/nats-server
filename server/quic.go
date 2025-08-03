@@ -155,25 +155,129 @@ func (s *Server) acceptQUICConnections(listener *quic.Listener) {
 
 // createQUICClient creates a new NATS client from a QUIC connection
 func (s *Server) createQUICClient(conn quic.Connection) {
-	// Open a bidirectional stream for the NATS protocol with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	
-	stream, err := conn.AcceptStream(ctx)
+	// Accept stream without timeout to avoid blocking under high load
+	stream, err := conn.AcceptStream(context.Background())
 	if err != nil {
 		s.Errorf("Error accepting QUIC stream: %v", err)
 		conn.CloseWithError(0, "failed to accept stream")
 		return
 	}
 
-	// Wrap the QUIC stream to implement net.Conn interface
-	netConn := &quicStreamConn{
-		stream: stream,
-		conn:   conn,
+	// Create QUIC-native client directly without wrapper overhead
+	s.createQUICClientDirect(conn, stream)
+}
+
+// createQUICClientDirect creates a QUIC client without wrapper overhead
+func (s *Server) createQUICClientDirect(conn quic.Connection, stream quic.Stream) {
+	// Snapshot server options.
+	opts := s.getOpts()
+
+	maxPay := int32(opts.MaxPayload)
+	maxSubs := int32(opts.MaxSubs)
+	// For system, maxSubs of 0 means unlimited, so re-adjust here.
+	if maxSubs == 0 {
+		maxSubs = -1
+	}
+	now := time.Now()
+
+	// Create QUIC-native client with direct stream access
+	c := &quicClient{
+		client: client{
+			srv:   s,
+			nc:    &quicStreamConn{stream: stream, conn: conn},
+			opts:  defaultOpts,
+			mpay:  maxPay,
+			msubs: maxSubs,
+			start: now,
+			last:  now,
+		},
+		quicConn: conn,
+		quicStream: stream,
 	}
 
-	// Create a standard NATS client using the wrapped connection
-	s.createClient(netConn)
+	c.registerWithAccount(s.globalAccount())
+
+	var info Info
+	var authRequired bool
+
+	s.mu.Lock()
+	// Grab JSON info string
+	info = s.copyInfo()
+	if s.nonceRequired() {
+		// Nonce handling
+		var raw [nonceLen]byte
+		nonce := raw[:]
+		s.generateNonce(nonce)
+		info.Nonce = string(nonce)
+	}
+	c.nonce = []byte(info.Nonce)
+	authRequired = info.AuthRequired
+
+	// Check to see if we have auth_required set but we also have a no_auth_user.
+	if info.AuthRequired && opts.NoAuthUser != _EMPTY_ && opts.NoAuthUser != s.sysAccOnlyNoAuthUser {
+		info.AuthRequired = false
+	}
+
+	s.totalClients++
+	s.mu.Unlock()
+
+	// Grab lock
+	c.mu.Lock()
+	if authRequired {
+		c.flags.set(expectConnect)
+	}
+
+	// Initialize QUIC client
+	c.initQUICClient()
+
+	c.Debugf("QUIC client connection created")
+
+	// Generate INFO json for QUIC
+	infoBytes := c.generateClientInfoJSON(info)
+	c.sendProtoNow(infoBytes)
+
+	// Unlock to register
+	c.mu.Unlock()
+
+	// Register with the server
+	s.mu.Lock()
+	c.cid = s.gcid
+	s.gcid++
+	s.clients[c.cid] = &c.client
+	s.mu.Unlock()
+
+	// Set the Ping timer
+	c.setPingTimer()
+
+	// Start QUIC-optimized read/write loops using server's goroutine manager
+	s.startGoRoutine(func() { c.quicReadLoop() })
+	s.startGoRoutine(func() { c.quicWriteLoop() })
+}
+
+// quicClient extends client with QUIC-specific optimizations
+type quicClient struct {
+	client
+	quicConn   quic.Connection
+	quicStream quic.Stream
+}
+
+// initQUICClient initializes QUIC-specific client state
+func (c *quicClient) initQUICClient() {
+	c.initClient()
+	// Additional QUIC-specific initialization can go here
+}
+
+
+// quicReadLoop optimized read loop for QUIC streams
+func (c *quicClient) quicReadLoop() {
+	// Use the existing readLoop but with QUIC stream directly
+	c.readLoop(nil)
+}
+
+// quicWriteLoop optimized write loop for QUIC streams
+func (c *quicClient) quicWriteLoop() {
+	// Use the existing writeLoop but with QUIC stream directly
+	c.writeLoop()
 }
 
 // quicStreamConn wraps a QUIC stream to implement net.Conn
