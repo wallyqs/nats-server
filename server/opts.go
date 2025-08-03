@@ -361,6 +361,7 @@ type Options struct {
 	SyncAlways                 bool              `json:"-"`
 	JsAccDefaultDomain         map[string]string `json:"-"` // account to domain name mapping
 	Websocket                  WebsocketOpts     `json:"-"`
+	QUIC                       QUICOpts          `json:"-"`
 	MQTT                       MQTTOpts          `json:"-"`
 	ProfPort                   int               `json:"-"`
 	ProfBlockRate              int               `json:"-"`
@@ -559,6 +560,40 @@ type WebsocketOpts struct {
 	// Headers to be added to the upgrade response.
 	// Useful for adding custom headers like Strict-Transport-Security.
 	Headers map[string]string
+
+	// Snapshot of configured TLS options.
+	tlsConfigOpts *TLSConfigOpts
+}
+
+// QUICOpts are options for QUIC
+type QUICOpts struct {
+	// The server will accept QUIC client connections on this hostname/IP.
+	Host string
+	// The server will accept QUIC client connections on this port.
+	Port int
+	// The host:port to advertise to QUIC clients in the cluster.
+	Advertise string
+
+	// If no user name is provided when a client connects, will default to the
+	// matching user from the global list of users in `Options.Users`.
+	NoAuthUser string
+
+	// Authentication section. If anything is configured in this section,
+	// it will override the authorization configuration of regular clients.
+	Username string
+	Password string
+	Token    string
+
+	// Timeout for the authentication process.
+	AuthTimeout float64
+
+	// TLS configuration is required for QUIC.
+	TLSConfig *tls.Config
+	// If true, map certificate values for authentication purposes.
+	TLSMap bool
+
+	// When present, accepted client certificates (verify/verify_and_map) must be in this list
+	TLSPinnedCerts PinnedCertSet
 
 	// Snapshot of configured TLS options.
 	tlsConfigOpts *TLSConfigOpts
@@ -1633,6 +1668,11 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		}
 	case "mqtt":
 		if err := parseMQTT(tk, o, errors, warnings); err != nil {
+			*errors = append(*errors, err)
+			return
+		}
+	case "quic":
+		if err := parseQUIC(tk, o, errors, warnings); err != nil {
 			*errors = append(*errors, err)
 			return
 		}
@@ -5222,6 +5262,72 @@ func parseWebsocket(v any, o *Options, errors *[]error) error {
 					o.Websocket.Headers[key] = headerValue
 				}
 			}
+		default:
+			if !tk.IsUsedVariable() {
+				err := &unknownConfigFieldErr{
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
+				}
+				*errors = append(*errors, err)
+				continue
+			}
+		}
+	}
+	return nil
+}
+
+func parseQUIC(v any, o *Options, errors *[]error, warnings *[]error) error {
+	var lt token
+	defer convertPanicToErrorList(&lt, errors)
+
+	tk, v := unwrapValue(v, &lt)
+	gm, ok := v.(map[string]any)
+	if !ok {
+		return &configErr{tk, fmt.Sprintf("Expected quic to be a map, got %T", v)}
+	}
+	for mk, mv := range gm {
+		// Again, unwrap token value if line check is required.
+		tk, mv = unwrapValue(mv, &lt)
+		switch strings.ToLower(mk) {
+		case "listen":
+			hp, err := parseListen(mv)
+			if err != nil {
+				err := &configErr{tk, err.Error()}
+				*errors = append(*errors, err)
+				continue
+			}
+			o.QUIC.Host = hp.host
+			o.QUIC.Port = hp.port
+		case "port":
+			o.QUIC.Port = int(mv.(int64))
+		case "host", "net":
+			o.QUIC.Host = mv.(string)
+		case "advertise":
+			o.QUIC.Advertise = mv.(string)
+		case "tls":
+			tc, err := parseTLS(tk, true)
+			if err != nil {
+				*errors = append(*errors, err)
+				continue
+			}
+			if o.QUIC.TLSConfig, err = GenTLSConfig(tc); err != nil {
+				err := &configErr{tk, err.Error()}
+				*errors = append(*errors, err)
+				continue
+			}
+			o.QUIC.TLSMap = tc.Map
+			o.QUIC.TLSPinnedCerts = tc.PinnedCerts
+			o.QUIC.tlsConfigOpts = tc
+		case "authorization", "authentication":
+			auth := parseSimpleAuth(tk, errors)
+			o.QUIC.Username = auth.user
+			o.QUIC.Password = auth.pass
+			o.QUIC.Token = auth.token
+			o.QUIC.AuthTimeout = auth.timeout
+		case "no_auth_user":
+			o.QUIC.NoAuthUser = mv.(string)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{

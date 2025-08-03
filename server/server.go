@@ -310,6 +310,9 @@ type Server struct {
 	// MQTT structure
 	mqtt srvMQTT
 
+	// QUIC structure
+	quic srvQUIC
+
 	// OCSP monitoring
 	ocsps []*OCSPMonitor
 
@@ -2449,6 +2452,13 @@ func (s *Server) Start() {
 	// information can be sent to other routes.
 	if opts.Websocket.Port != 0 {
 		s.startWebsocketServer()
+	}
+
+	// Start QUIC server if needed. Do this before starting the routes and
+	// leaf node because we want to resolve the host:port so that this
+	// information can be sent to other routes.
+	if opts.QUIC.Port != 0 {
+		s.startQUICServer()
 	}
 
 	// Start up listen if we want to accept leaf node connections.
