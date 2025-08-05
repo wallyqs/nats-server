@@ -1358,9 +1358,7 @@ func (n *raft) loadLastSnapshot() (*snapshot, error) {
 		return nil, errNoSnapAvailable
 	}
 
-	<-dios
 	buf, err := os.ReadFile(n.snapfile)
-	dios <- struct{}{}
 
 	if err != nil {
 		n.warn("Error reading snapshot: %v", err)
@@ -4075,9 +4073,7 @@ func writePeerState(sd string, ps *peerState) error {
 }
 
 func readPeerState(sd string) (ps *peerState, err error) {
-	<-dios
 	buf, err := os.ReadFile(filepath.Join(sd, peerStateFile))
-	dios <- struct{}{}
 
 	if err != nil {
 		return nil, err
@@ -4101,9 +4097,7 @@ func writeTermVote(sd string, wtv []byte) error {
 // readTermVote will read the largest term and who we voted from to stable storage.
 // Lock should be held.
 func (n *raft) readTermVote() (term uint64, voted string, err error) {
-	<-dios
 	buf, err := os.ReadFile(filepath.Join(n.sd, termVoteFile))
-	dios <- struct{}{}
 
 	if err != nil {
 		return 0, noVote, err
