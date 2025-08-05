@@ -5966,24 +5966,37 @@ func (mb *msgBlock) writeMsgRecordLocked(rl, seq uint64, subj string, mhdr, msg 
 		l |= hbit
 	}
 
-	// Reserve space for the header on the underlying buffer.
-	mb.cache.buf = append(mb.cache.buf, make([]byte, msgHdrSize)...)
-	hdr := mb.cache.buf[len(mb.cache.buf)-msgHdrSize : len(mb.cache.buf)]
+	// Pre-calculate total size needed to avoid multiple allocations
+	totalSize := msgHdrSize + len(subj) + len(msg) + 8 // 8 bytes for checksum
+	if hasHeaders {
+		totalSize += 4 + len(mhdr) // 4 bytes for header length + header data
+	}
+
+	// Reserve space for the entire message in one allocation
+	startIdx := len(mb.cache.buf)
+	mb.cache.buf = append(mb.cache.buf, make([]byte, totalSize)...)
+	buf := mb.cache.buf[startIdx:]
+
+	// Write header directly to pre-allocated buffer
+	hdr := buf[0:msgHdrSize]
 	le.PutUint32(hdr[0:], l)
 	le.PutUint64(hdr[4:], seq)
 	le.PutUint64(hdr[12:], uint64(ts))
 	le.PutUint16(hdr[20:], uint16(len(subj)))
 
-	// Now write to underlying buffer.
-	mb.cache.buf = append(mb.cache.buf, subj...)
+	// Write remaining data to pre-allocated buffer
+	offset := msgHdrSize
+	copy(buf[offset:], subj)
+	offset += len(subj)
 
 	if hasHeaders {
-		var hlen [4]byte
-		le.PutUint32(hlen[0:], uint32(len(mhdr)))
-		mb.cache.buf = append(mb.cache.buf, hlen[:]...)
-		mb.cache.buf = append(mb.cache.buf, mhdr...)
+		le.PutUint32(buf[offset:], uint32(len(mhdr)))
+		offset += 4
+		copy(buf[offset:], mhdr)
+		offset += len(mhdr)
 	}
-	mb.cache.buf = append(mb.cache.buf, msg...)
+	copy(buf[offset:], msg)
+	offset += len(msg)
 
 	// Calculate hash.
 	mb.hh.Reset()
@@ -5996,9 +6009,8 @@ func (mb *msgBlock) writeMsgRecordLocked(rl, seq uint64, subj string, mhdr, msg 
 	checksum := mb.hh.Sum(mb.lchk[:0:highwayhash.Size64])
 	copy(mb.lchk[0:], checksum)
 
-	// Update write through cache.
-	// Write to msg record.
-	mb.cache.buf = append(mb.cache.buf, checksum...)
+	// Write checksum to pre-allocated buffer
+	copy(buf[offset:], checksum)
 	mb.cache.lrl = uint32(rl)
 
 	// Set cache timestamp for last store.
