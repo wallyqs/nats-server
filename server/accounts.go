@@ -50,13 +50,12 @@ var maxSubLimitReportThreshold = defaultMaxSubLimitReportThreshold
 // Account are subject namespace definitions. By default no messages are shared between accounts.
 // You can share via Exports and Imports of Streams and Services.
 type Account struct {
-	// Total stats for the account.
+	// Total stats for the account. Using atomics for lock-free performance.
 	stats struct {
-		sync.Mutex
-		stats       // Totals
-		gw    stats // Gateways
-		rt    stats // Routes
-		ln    stats // Leafnodes
+		stats       // Totals (atomic)
+		gw    stats // Gateways (atomic)
+		rt    stats // Routes (atomic)
+		ln    stats // Leafnodes (atomic)
 	}
 
 	gwReplyMapping

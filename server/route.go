@@ -474,12 +474,10 @@ func (c *client) processInboundRoutedMsg(msg []byte) {
 		return
 	}
 
-	acc.stats.Lock()
-	acc.stats.inMsgs++
-	acc.stats.inBytes += int64(size)
-	acc.stats.rt.inMsgs++
-	acc.stats.rt.inBytes += int64(size)
-	acc.stats.Unlock()
+	atomic.AddInt64(&acc.stats.inMsgs, 1)
+	atomic.AddInt64(&acc.stats.inBytes, int64(size))
+	atomic.AddInt64(&acc.stats.rt.inMsgs, 1)
+	atomic.AddInt64(&acc.stats.rt.inBytes, int64(size))
 
 	// Check for no interest, short circuit if so.
 	// This is the fanout scale.
