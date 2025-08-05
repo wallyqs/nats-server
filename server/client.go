@@ -1453,14 +1453,13 @@ func (c *client) readLoop(pre []byte) {
 			atomic.AddInt64(&c.inBytes, inBytes)
 
 			if acc != nil {
-				acc.stats.Lock()
-				acc.stats.inMsgs += inMsgs
-				acc.stats.inBytes += inBytes
+				// Use batched stats update to reduce mutex contention
+				var lnInMsgs, lnInBytes int64
 				if c.kind == LEAF {
-					acc.stats.ln.inMsgs += int64(inMsgs)
-					acc.stats.ln.inBytes += int64(inBytes)
+					lnInMsgs = int64(inMsgs)
+					lnInBytes = int64(inBytes)
 				}
-				acc.stats.Unlock()
+				acc.updateBatchedStatsIn(inMsgs, inBytes, lnInMsgs, lnInBytes)
 			}
 
 			atomic.AddInt64(&s.inMsgs, inMsgs)
@@ -1817,9 +1816,8 @@ func (c *client) handleWriteTimeout(written, attempted int64, numChunks int) boo
 		c.srv.scStats.leafs.Add(1)
 	}
 	if c.acc != nil {
-		c.acc.stats.Lock()
-		c.acc.stats.slowConsumers++
-		c.acc.stats.Unlock()
+		// Use atomic increment for slow consumer count to reduce mutex contention
+		c.acc.batchedStats.slowConsumers.Add(1)
 	}
 	c.Noticef("Slow Consumer %s: WriteDeadline of %v exceeded with %d chunks of %d total bytes.",
 		scState, c.out.wdl, numChunks, attempted)
@@ -2369,9 +2367,8 @@ func (c *client) queueOutbound(data []byte) {
 		atomic.AddInt64(&c.srv.slowConsumers, 1)
 		c.srv.scStats.clients.Add(1)
 		if c.acc != nil {
-			c.acc.stats.Lock()
-			c.acc.stats.slowConsumers++
-			c.acc.stats.Unlock()
+			// Use atomic increment for slow consumer count to reduce mutex contention
+			c.acc.batchedStats.slowConsumers.Add(1)
 		}
 		c.Noticef("Slow Consumer Detected: MaxPending of %d Exceeded", c.out.mp)
 		c.markConnAsClosed(SlowConsumerPendingBytes)
@@ -4774,18 +4771,8 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 		}
 
 		if acc != nil {
-			acc.stats.Lock()
-			acc.stats.outMsgs += dlvMsgs
-			acc.stats.outBytes += totalBytes
-			if dlvRouteMsgs > 0 {
-				acc.stats.rt.outMsgs += dlvRouteMsgs
-				acc.stats.rt.outBytes += routeBytes
-			}
-			if dlvLeafMsgs > 0 {
-				acc.stats.ln.outMsgs += dlvLeafMsgs
-				acc.stats.ln.outBytes += leafBytes
-			}
-			acc.stats.Unlock()
+			// Use batched stats update to reduce mutex contention
+			acc.updateBatchedStatsOut(dlvMsgs, totalBytes, dlvRouteMsgs, routeBytes, dlvLeafMsgs, leafBytes)
 		}
 
 		if srv := c.srv; srv != nil {

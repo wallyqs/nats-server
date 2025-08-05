@@ -59,6 +59,22 @@ type Account struct {
 		ln    stats // Leafnodes
 	}
 
+	// Atomic counters for batched stats updates to reduce mutex contention
+	batchedStats struct {
+		outMsgs       atomic.Int64
+		outBytes      atomic.Int64
+		rtOutMsgs     atomic.Int64
+		rtOutBytes    atomic.Int64
+		lnOutMsgs     atomic.Int64
+		lnOutBytes    atomic.Int64
+		inMsgs        atomic.Int64
+		inBytes       atomic.Int64
+		lnInMsgs      atomic.Int64
+		lnInBytes     atomic.Int64
+		slowConsumers atomic.Int64
+		lastFlush     atomic.Int64 // timestamp of last batch flush
+	}
+
 	gwReplyMapping
 	Name         string
 	Nkey         string
@@ -4741,4 +4757,114 @@ func (dr *CacheDirAccResolver) Start(s *Server) error {
 
 func (dr *CacheDirAccResolver) Reload() error {
 	return dr.DirAccResolver.Reload()
+}
+
+// Batched stats update constants
+const (
+	batchStatsFlushInterval = 100 * time.Millisecond // Flush batched stats every 100ms
+	batchStatsThreshold     = 1000                   // Flush if counters exceed this threshold
+)
+
+// updateBatchedStatsOut atomically updates outbound message stats without mutex contention
+func (acc *Account) updateBatchedStatsOut(outMsgs, outBytes, rtOutMsgs, rtOutBytes, lnOutMsgs, lnOutBytes int64) {
+	if outMsgs > 0 {
+		acc.batchedStats.outMsgs.Add(outMsgs)
+		acc.batchedStats.outBytes.Add(outBytes)
+	}
+	if rtOutMsgs > 0 {
+		acc.batchedStats.rtOutMsgs.Add(rtOutMsgs)
+		acc.batchedStats.rtOutBytes.Add(rtOutBytes)
+	}
+	if lnOutMsgs > 0 {
+		acc.batchedStats.lnOutMsgs.Add(lnOutMsgs)
+		acc.batchedStats.lnOutBytes.Add(lnOutBytes)
+	}
+	
+	// Check if we need to flush based on volume or time
+	now := time.Now().UnixNano()
+	lastFlush := acc.batchedStats.lastFlush.Load()
+	
+	if acc.batchedStats.outMsgs.Load() >= batchStatsThreshold || 
+	   now-lastFlush >= int64(batchStatsFlushInterval) {
+		acc.flushBatchedStats()
+	}
+}
+
+// updateBatchedStatsIn atomically updates inbound message stats without mutex contention
+func (acc *Account) updateBatchedStatsIn(inMsgs, inBytes, lnInMsgs, lnInBytes int64) {
+	if inMsgs > 0 {
+		acc.batchedStats.inMsgs.Add(inMsgs)
+		acc.batchedStats.inBytes.Add(inBytes)
+	}
+	if lnInMsgs > 0 {
+		acc.batchedStats.lnInMsgs.Add(lnInMsgs)
+		acc.batchedStats.lnInBytes.Add(lnInBytes)
+	}
+	
+	// Check if we need to flush based on volume or time
+	now := time.Now().UnixNano()
+	lastFlush := acc.batchedStats.lastFlush.Load()
+	
+	if acc.batchedStats.inMsgs.Load() >= batchStatsThreshold || 
+	   now-lastFlush >= int64(batchStatsFlushInterval) {
+		acc.flushBatchedStats()
+	}
+}
+
+// flushBatchedStats moves accumulated atomic counters to the mutex-protected stats
+func (acc *Account) flushBatchedStats() {
+	// Try to acquire the flush timestamp atomically to prevent multiple flushes
+	now := time.Now().UnixNano()
+	if !acc.batchedStats.lastFlush.CompareAndSwap(acc.batchedStats.lastFlush.Load(), now) {
+		return // Another goroutine is flushing or just flushed
+	}
+	
+	// Extract all atomic values
+	outMsgs := acc.batchedStats.outMsgs.Swap(0)
+	outBytes := acc.batchedStats.outBytes.Swap(0)
+	rtOutMsgs := acc.batchedStats.rtOutMsgs.Swap(0)
+	rtOutBytes := acc.batchedStats.rtOutBytes.Swap(0)
+	lnOutMsgs := acc.batchedStats.lnOutMsgs.Swap(0)
+	lnOutBytes := acc.batchedStats.lnOutBytes.Swap(0)
+	inMsgs := acc.batchedStats.inMsgs.Swap(0)
+	inBytes := acc.batchedStats.inBytes.Swap(0)
+	lnInMsgs := acc.batchedStats.lnInMsgs.Swap(0)
+	lnInBytes := acc.batchedStats.lnInBytes.Swap(0)
+	slowConsumers := acc.batchedStats.slowConsumers.Swap(0)
+	
+	// Only take the mutex if we have data to update
+	if outMsgs > 0 || inMsgs > 0 || slowConsumers > 0 {
+		acc.stats.Lock()
+		
+		// Update outbound stats
+		if outMsgs > 0 {
+			acc.stats.outMsgs += outMsgs
+			acc.stats.outBytes += outBytes
+		}
+		if rtOutMsgs > 0 {
+			acc.stats.rt.outMsgs += rtOutMsgs
+			acc.stats.rt.outBytes += rtOutBytes
+		}
+		if lnOutMsgs > 0 {
+			acc.stats.ln.outMsgs += lnOutMsgs
+			acc.stats.ln.outBytes += lnOutBytes
+		}
+		
+		// Update inbound stats
+		if inMsgs > 0 {
+			acc.stats.inMsgs += inMsgs
+			acc.stats.inBytes += inBytes
+		}
+		if lnInMsgs > 0 {
+			acc.stats.ln.inMsgs += lnInMsgs
+			acc.stats.ln.inBytes += lnInBytes
+		}
+		
+		// Update slow consumer count
+		if slowConsumers > 0 {
+			acc.stats.slowConsumers += slowConsumers
+		}
+		
+		acc.stats.Unlock()
+	}
 }
