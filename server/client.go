@@ -327,6 +327,10 @@ type outbound struct {
 	mp  int64         // Snapshot of max pending for client.
 	lft time.Duration // Last flush time for Write.
 	stc chan struct{} // Stall chan we create to slow down producers on overrun, e.g. fan-in.
+	
+	// Optimization fields to reduce condition variable blocking
+	signalPending atomic.Bool   // Indicates if a signal is already pending
+	lastSignalTime atomic.Int64 // Timestamp of last signal to prevent excessive signaling
 	cw  *s2.Writer
 }
 
@@ -1234,11 +1238,18 @@ func (c *client) writeLoop() {
 		c.mu.Lock()
 		if closed = c.isClosed(); !closed {
 			owtf := c.out.fsp > 0 && c.out.pb < maxBufSize && c.out.fsp < maxFlushPending
+			// Optimized waiting logic to reduce condition variable blocking
 			if waitOk && (c.out.pb == 0 || owtf) {
-				c.out.sg.Wait()
-				// Check that connection has not been closed while lock was released
-				// in the conditional wait.
-				closed = c.isClosed()
+				// Clear any pending signal flag before waiting
+				c.out.signalPending.Store(false)
+				
+				// Check one more time if we have data to avoid unnecessary wait
+				if c.out.pb == 0 {
+					c.out.sg.Wait()
+					// Check that connection has not been closed while lock was released
+					// in the conditional wait.
+					closed = c.isClosed()
+				}
 			}
 		}
 		if closed {
@@ -1913,8 +1924,50 @@ func (c *client) markConnAsClosed(reason ClosedState) {
 func (c *client) flushSignal() {
 	// Check that sg is not nil, which will happen if the connection is closed.
 	if c.out.sg != nil {
-		c.out.sg.Signal()
+		// Optimized signaling to reduce condition variable blocking
+		c.flushSignalOptimized()
 	}
+}
+
+// Optimized flush signaling to reduce condition variable contention
+// Lock must be held.
+func (c *client) flushSignalOptimized() {
+	// Check if a signal is already pending to avoid excessive signaling
+	if c.out.signalPending.CompareAndSwap(false, true) {
+		now := time.Now().UnixNano()
+		lastSignal := c.out.lastSignalTime.Load()
+		
+		// Rate limit signals to prevent excessive condition variable wake-ups
+		// Only signal if enough time has passed (10 microseconds) or no previous signal
+		if lastSignal == 0 || now-lastSignal > 10000 { // 10us threshold
+			c.out.lastSignalTime.Store(now)
+			c.out.sg.Signal()
+		} else {
+			// Reset the pending flag if we're rate-limiting
+			c.out.signalPending.Store(false)
+		}
+	}
+}
+
+// Smart flush signaling decision based on buffer state and timing
+// Lock must be held.
+func (c *client) shouldSignalFlush() bool {
+	// Always signal if buffer is getting full (> 50% of max pending)
+	if c.out.pb > c.out.mp/2 {
+		return true
+	}
+	
+	// Signal if we have any data and enough time has passed since last signal
+	if c.out.pb > 0 {
+		lastSignal := c.out.lastSignalTime.Load()
+		if lastSignal == 0 {
+			return true // First signal
+		}
+		// Signal if 100 microseconds have passed since last signal
+		return time.Now().UnixNano()-lastSignal > 100000 // 100us threshold
+	}
+	
+	return false
 }
 
 // Traces a message.
@@ -2387,6 +2440,12 @@ func (c *client) queueOutbound(data []byte) {
 	if c.out.pb > c.out.mp/4*3 && c.out.stc == nil {
 		c.out.stc = make(chan struct{})
 	}
+	
+	// Optimization: Smart batching for flush signals
+	// Signal immediately if buffer is getting full or if significant time has passed
+	if c.shouldSignalFlush() {
+		c.flushSignal()
+	}
 }
 
 // Assume the lock is held upon entry.
@@ -2396,7 +2455,11 @@ func (c *client) enqueueProtoAndFlush(proto []byte, doFlush bool) {
 	}
 	c.queueOutbound(proto)
 	if !(doFlush && c.flushOutbound()) {
-		c.flushSignal()
+		// The queueOutbound call already includes smart signaling logic
+		// Only signal here if it wasn't already handled by queueOutbound
+		if c.out.pb > 0 && !c.out.signalPending.Load() {
+			c.flushSignal()
+		}
 	}
 }
 
