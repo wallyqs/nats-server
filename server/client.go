@@ -331,6 +331,12 @@ type outbound struct {
 	// Optimization fields to reduce condition variable blocking
 	signalPending atomic.Bool   // Indicates if a signal is already pending
 	lastSignalTime atomic.Int64 // Timestamp of last signal to prevent excessive signaling
+	
+	// Advanced batching for high-frequency operations
+	batchBuffer    []byte        // Temporary buffer for batching small writes
+	batchSize      atomic.Int64  // Current batch size
+	batchThreshold int64         // Threshold for automatic batch flush
+	lastBatchFlush atomic.Int64  // Timestamp of last batch flush
 	cw  *s2.Writer
 }
 
@@ -684,6 +690,8 @@ func (c *client) initClient() {
 	// Snapshots to avoid mutex access in fast paths.
 	c.out.wdl = opts.WriteDeadline
 	c.out.mp = opts.MaxPending
+	// Initialize batch threshold for outbound batching optimization
+	c.out.batchThreshold = 2048 // Enable 2KB batching for small messages
 	// Snapshot max control line since currently can not be changed on reload and we
 	// were checking it on each call to parse. If this changes and we allow MaxControlLine
 	// to be reloaded without restart, this code will need to change.
@@ -1968,6 +1976,53 @@ func (c *client) shouldSignalFlush() bool {
 	}
 	
 	return false
+}
+
+// Advanced batching for small outbound operations to reduce system call overhead
+// Lock must be held.
+func (c *client) queueOutboundBatched(data []byte) {
+	// For small data chunks, try to batch them together
+	if len(data) <= 256 && c.out.batchThreshold > 0 {
+		// Initialize batch buffer if needed
+		if c.out.batchBuffer == nil {
+			c.out.batchBuffer = make([]byte, 0, 4096) // 4KB batch buffer
+			c.out.batchThreshold = 2048 // Flush when batch reaches 2KB
+		}
+		
+		// Add to batch buffer
+		c.out.batchBuffer = append(c.out.batchBuffer, data...)
+		c.out.batchSize.Add(int64(len(data)))
+		
+		// Check if we should flush the batch
+		batchSize := c.out.batchSize.Load()
+		lastFlush := c.out.lastBatchFlush.Load()
+		now := time.Now().UnixNano()
+		
+		// Flush if batch is full or 50μs have passed
+		if batchSize >= c.out.batchThreshold || (lastFlush > 0 && now-lastFlush > 50000) {
+			c.flushBatchBuffer()
+		}
+		return
+	}
+	
+	// For larger data, use normal queueing
+	c.queueOutbound(data)
+}
+
+// Flush the batch buffer to the normal outbound queue
+// Lock must be held.
+func (c *client) flushBatchBuffer() {
+	if len(c.out.batchBuffer) == 0 {
+		return
+	}
+	
+	// Queue the entire batch as one operation
+	c.queueOutbound(c.out.batchBuffer)
+	
+	// Reset batch buffer
+	c.out.batchBuffer = c.out.batchBuffer[:0]
+	c.out.batchSize.Store(0)
+	c.out.lastBatchFlush.Store(time.Now().UnixNano())
 }
 
 // Traces a message.
@@ -5800,6 +5855,8 @@ func (c *client) closeConnection(reason ClosedState) {
 	if srv != nil {
 		// Flush any remaining batched delivery stats before removing client
 		c.flushBatchedDeliveryStats()
+		// Flush any remaining batched outbound data
+		c.flushBatchBuffer()
 		
 		// Unregister
 		srv.removeClient(c)

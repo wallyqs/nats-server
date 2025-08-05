@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/nats-io/nats-server/v2/server/stree"
 )
@@ -62,6 +63,21 @@ type SublistResult struct {
 	qsubs [][]*subscription // don't make this a map, too expensive to iterate
 }
 
+// Lock-free cache entry with atomic pointer operations
+type cacheEntry struct {
+	result *SublistResult
+	valid  int64 // atomic flag indicating if entry is valid
+}
+
+// Lock-free cache implementation to reduce RWMutex contention
+type lockFreeCache struct {
+	entries     unsafe.Pointer // *map[string]*cacheEntry
+	size        int64          // atomic counter for cache size
+	generation  int64          // atomic generation counter for invalidation
+	maxSize     int64
+	sweepTarget int64
+}
+
 // A Sublist stores and efficiently retrieves subscriptions.
 type Sublist struct {
 	sync.RWMutex
@@ -71,10 +87,14 @@ type Sublist struct {
 	inserts   uint64
 	removes   uint64
 	root      *level
-	cache     map[string]*SublistResult
+	cache     map[string]*SublistResult // Legacy cache for compatibility
 	ccSweep   int32
 	notify    *notifyMaps
 	count     uint32
+	
+	// Lock-free cache to reduce RWMutex contention
+	lfCache    *lockFreeCache
+	useLfCache int32 // atomic flag to enable lock-free cache
 }
 
 // notifyMaps holds maps of arrays of channels for notifications
@@ -116,10 +136,13 @@ func newLevel() *level {
 
 // NewSublist will create a default sublist with caching enabled per the flag.
 func NewSublist(enableCache bool) *Sublist {
+	sl := &Sublist{root: newLevel()}
 	if enableCache {
-		return &Sublist{root: newLevel(), cache: make(map[string]*SublistResult)}
+		sl.cache = make(map[string]*SublistResult)
+		// Initialize lock-free cache to reduce RWMutex contention
+		sl.initLockFreeCache()
 	}
-	return &Sublist{root: newLevel()}
+	return sl
 }
 
 // NewSublistWithCache will create a default sublist with caching enabled.
@@ -558,18 +581,32 @@ func (s *Sublist) matchNoLock(subject string) *SublistResult {
 func (s *Sublist) match(subject string, doLock bool, doCopyOnCache bool) *SublistResult {
 	atomic.AddUint64(&s.matches, 1)
 
-	// Check cache first.
-	if doLock {
-		s.RLock()
+	// Try lock-free cache first if enabled
+	if atomic.LoadInt32(&s.useLfCache) == 1 && s.lfCache != nil {
+		if result, found := s.lfCache.get(subject); found {
+			atomic.AddUint64(&s.cacheHits, 1)
+			return result
+		}
 	}
-	cacheEnabled := s.cache != nil
-	r, ok := s.cache[subject]
-	if doLock {
-		s.RUnlock()
-	}
-	if ok {
-		atomic.AddUint64(&s.cacheHits, 1)
-		return r
+
+	// Fallback to legacy cache if lock-free cache is not enabled
+	if atomic.LoadInt32(&s.useLfCache) == 0 {
+		// Check legacy cache first.
+		if doLock {
+			s.RLock()
+		}
+		if s.cache != nil {
+			if r, ok := s.cache[subject]; ok {
+				if doLock {
+					s.RUnlock()
+				}
+				atomic.AddUint64(&s.cacheHits, 1)
+				return r
+			}
+		}
+		if doLock {
+			s.RUnlock()
+		}
 	}
 
 	tsa := [32]string{}
@@ -592,44 +629,85 @@ func (s *Sublist) match(subject string, doLock bool, doCopyOnCache bool) *Sublis
 	// FIXME(dlc) - Make shared pool between sublist and client readLoop?
 	result := &SublistResult{}
 
-	// Get result from the main structure and place into the shared cache.
-	// Hold the read lock to avoid race between match and store.
-	var n int
-
-	if doLock {
-		if cacheEnabled {
-			s.Lock()
-		} else {
+	// Cache miss - perform tree traversal with optimized locking
+	if atomic.LoadInt32(&s.useLfCache) == 1 && s.lfCache != nil {
+		// Lock-free cache path: only need read lock for tree traversal
+		if doLock {
 			s.RLock()
 		}
-	}
-
-	matchLevel(s.root, tokens, result)
-	// Check for empty result.
-	if len(result.psubs) == 0 && len(result.qsubs) == 0 {
-		result = emptyResult
-	}
-	if cacheEnabled {
+		matchLevel(s.root, tokens, result)
+		if doLock {
+			s.RUnlock()
+		}
+		
+		// Check for empty result
+		if len(result.psubs) == 0 && len(result.qsubs) == 0 {
+			result = emptyResult
+		}
+		
+		// Update lock-free cache (no locks needed)
 		if doCopyOnCache {
 			subject = copyString(subject)
 		}
-		s.cache[subject] = result
-		n = len(s.cache)
-	}
-	if doLock {
+		s.lfCache.set(subject, result)
+	} else {
+		// Legacy cache path with full mutex protection
+		var n int
+		cacheEnabled := s.cache != nil
+		
+		if doLock {
+			if cacheEnabled {
+				s.Lock()
+			} else {
+				s.RLock()
+			}
+		}
+		
+		matchLevel(s.root, tokens, result)
+		// Check for empty result.
+		if len(result.psubs) == 0 && len(result.qsubs) == 0 {
+			result = emptyResult
+		}
 		if cacheEnabled {
-			s.Unlock()
-		} else {
-			s.RUnlock()
+			if doCopyOnCache {
+				subject = copyString(subject)
+			}
+			s.cache[subject] = result
+			n = len(s.cache)
+		}
+		if doLock {
+			if cacheEnabled {
+				s.Unlock()
+			} else {
+				s.RUnlock()
+			}
+		}
+		
+		// Reduce the cache count if we have exceeded our set maximum.
+		if cacheEnabled && n > slCacheMax && atomic.CompareAndSwapInt32(&s.ccSweep, 0, 1) {
+			go s.reduceCacheCount()
 		}
 	}
 
-	// Reduce the cache count if we have exceeded our set maximum.
-	if cacheEnabled && n > slCacheMax && atomic.CompareAndSwapInt32(&s.ccSweep, 0, 1) {
-		go s.reduceCacheCount()
-	}
-
 	return result
+}
+
+// EnableLockFreeCache enables or disables the lock-free cache at runtime
+func (s *Sublist) EnableLockFreeCache(enable bool) {
+	if enable {
+		if s.lfCache == nil {
+			s.initLockFreeCache()
+		} else {
+			atomic.StoreInt32(&s.useLfCache, 1)
+		}
+	} else {
+		atomic.StoreInt32(&s.useLfCache, 0)
+	}
+}
+
+// IsLockFreeCacheEnabled returns true if lock-free cache is currently enabled
+func (s *Sublist) IsLockFreeCacheEnabled() bool {
+	return atomic.LoadInt32(&s.useLfCache) == 1
 }
 
 func (s *Sublist) hasInterest(subject string, doLock bool, np, nq *int) bool {
@@ -694,6 +772,153 @@ func (s *Sublist) reduceCacheCount() {
 		}
 	}
 	s.Unlock()
+}
+
+// Lock-free cache implementation methods to reduce RWMutex contention
+
+// Initialize lock-free cache
+func (s *Sublist) initLockFreeCache() {
+	if s.lfCache != nil {
+		return
+	}
+	initialMap := make(map[string]*cacheEntry)
+	s.lfCache = &lockFreeCache{
+		entries:     unsafe.Pointer(&initialMap),
+		size:        0,
+		generation:  0,
+		maxSize:     slCacheMax,
+		sweepTarget: slCacheSweep,
+	}
+	atomic.StoreInt32(&s.useLfCache, 1)
+}
+
+// Lock-free cache lookup
+func (lfc *lockFreeCache) get(subject string) (*SublistResult, bool) {
+	entriesPtr := atomic.LoadPointer(&lfc.entries)
+	if entriesPtr == nil {
+		return nil, false
+	}
+	
+	entries := *(*map[string]*cacheEntry)(entriesPtr)
+	entry, exists := entries[subject]
+	if !exists {
+		return nil, false
+	}
+	
+	// Check if entry is still valid
+	if atomic.LoadInt64(&entry.valid) == 0 {
+		return nil, false
+	}
+	
+	return entry.result, true
+}
+
+// Lock-free cache update using copy-on-write
+func (lfc *lockFreeCache) set(subject string, result *SublistResult) {
+	for {
+		oldPtr := atomic.LoadPointer(&lfc.entries)
+		if oldPtr == nil {
+			return
+		}
+		
+		oldEntries := *(*map[string]*cacheEntry)(oldPtr)
+		
+		// Create new map with updated entry
+		newEntries := make(map[string]*cacheEntry, len(oldEntries)+1)
+		for k, v := range oldEntries {
+			newEntries[k] = v
+		}
+		
+		// Add new entry
+		newEntries[subject] = &cacheEntry{
+			result: result,
+			valid:  1,
+		}
+		
+		// Atomic swap
+		if atomic.CompareAndSwapPointer(&lfc.entries, oldPtr, unsafe.Pointer(&newEntries)) {
+			atomic.AddInt64(&lfc.size, 1)
+			break
+		}
+		// Retry if CAS failed
+	}
+	
+	// Check if we need to reduce cache size
+	if atomic.LoadInt64(&lfc.size) > lfc.maxSize {
+		go lfc.reduceCacheSize()
+	}
+}
+
+// Reduce cache size using copy-on-write
+func (lfc *lockFreeCache) reduceCacheSize() {
+	for {
+		oldPtr := atomic.LoadPointer(&lfc.entries)
+		if oldPtr == nil {
+			return
+		}
+		
+		oldEntries := *(*map[string]*cacheEntry)(oldPtr)
+		if int64(len(oldEntries)) <= lfc.sweepTarget {
+			return // Already small enough
+		}
+		
+		// Create smaller map
+		newEntries := make(map[string]*cacheEntry, lfc.sweepTarget)
+		count := int64(0)
+		for k, v := range oldEntries {
+			if count >= lfc.sweepTarget {
+				break
+			}
+			newEntries[k] = v
+			count++
+		}
+		
+		// Atomic swap
+		if atomic.CompareAndSwapPointer(&lfc.entries, oldPtr, unsafe.Pointer(&newEntries)) {
+			atomic.StoreInt64(&lfc.size, count)
+			break
+		}
+		// Retry if CAS failed
+	}
+}
+
+// Optimized match function using lock-free cache
+func (s *Sublist) matchWithLockFreeCache(subject string, doCopyOnCache, doLock bool) *SublistResult {
+	// Try lock-free cache first if enabled
+	if atomic.LoadInt32(&s.useLfCache) == 1 && s.lfCache != nil {
+		if result, found := s.lfCache.get(subject); found {
+			atomic.AddUint64(&s.cacheHits, 1)
+			return result
+		}
+	}
+	
+	// Cache miss - need to compute result
+	result := &SublistResult{}
+	
+	// Only need read lock for tree traversal, not for cache operations
+	if doLock {
+		s.RLock()
+	}
+	tokens := strings.Split(subject, tsep)
+	matchLevel(s.root, tokens, result)
+	if doLock {
+		s.RUnlock()
+	}
+	
+	// Check for empty result
+	if len(result.psubs) == 0 && len(result.qsubs) == 0 {
+		result = emptyResult
+	}
+	
+	// Update lock-free cache (no locks needed)
+	if atomic.LoadInt32(&s.useLfCache) == 1 && s.lfCache != nil {
+		if doCopyOnCache {
+			subject = copyString(subject)
+		}
+		s.lfCache.set(subject, result)
+	}
+	
+	return result
 }
 
 // Helper function for auto-expanding remote qsubs.
