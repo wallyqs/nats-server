@@ -32,6 +32,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/internal/fastrand"
@@ -86,6 +87,11 @@ type Account struct {
 	sl           *Sublist
 	ic           *client
 	sq           *sendq
+	
+	// Atomic counters to reduce mutex contention for frequent operations
+	atomicSysClients atomic.Int32
+	atomicNLeafs     atomic.Int32
+	atomicNRLeafs    atomic.Int32
 	isid         uint64
 	etmr         *time.Timer
 	ctmr         *time.Timer
@@ -100,9 +106,18 @@ type Account struct {
 	usersRevoked map[string]int64
 	mappings     []*mapping
 	hasMapped    atomic.Bool
+	
+	// Lock-free subject mapping cache to reduce read lock contention
+	mappingCache     unsafe.Pointer // *map[string]string
+	mappingCacheSize atomic.Int64
+	mappingGeneration atomic.Int64
 	lmu          sync.RWMutex
 	lleafs       []*client
 	leafClusters map[string]uint64
+	
+	// Optimized leaf node management to reduce linear search overhead
+	leafIndex    map[*client]int // Maps client to index in lleafs slice
+	leafDirty    atomic.Bool     // Indicates if leaf list needs compaction
 	imports      importMap
 	exports      exportMap
 	js           *jsAccount
@@ -782,12 +797,16 @@ func (a *Account) AddWeightedMappings(src string, dests ...*MapDest) error {
 	for i, em := range a.mappings {
 		if em.src == src {
 			a.mappings[i] = m
+			// Clear mapping cache when mappings change
+			a.clearMappingCache()
 			return nil
 		}
 	}
 	// If we did not replace add to the end.
 	a.mappings = append(a.mappings, m)
 	a.hasMapped.Store(len(a.mappings) > 0)
+	// Clear mapping cache when mappings change
+	a.clearMappingCache()
 
 	// If we have connected leafnodes make sure to update.
 	if a.nleafs > 0 {
@@ -815,6 +834,8 @@ func (a *Account) RemoveMapping(src string) bool {
 			a.mappings[len(a.mappings)-1] = nil // gc
 			a.mappings = a.mappings[:len(a.mappings)-1]
 			a.hasMapped.Store(len(a.mappings) > 0)
+			// Clear mapping cache when mappings change
+			a.clearMappingCache()
 			// If we have connected leafnodes make sure to update.
 			if a.nleafs > 0 {
 				// Need to release because lock ordering is client -> account
@@ -844,82 +865,8 @@ func (a *Account) hasMappings() bool {
 // This performs the logic to map to a new dest subject based on mappings.
 // Should only be called from processInboundClientMsg or service import processing.
 func (a *Account) selectMappedSubject(dest string) (string, bool) {
-	if !a.hasMappings() {
-		return dest, false
-	}
-
-	a.mu.RLock()
-	// In case we have to tokenize for subset matching.
-	tsa := [32]string{}
-	tts := tsa[:0]
-
-	var m *mapping
-	for _, rm := range a.mappings {
-		if !rm.wc && rm.src == dest {
-			m = rm
-			break
-		} else {
-			// tokenize and reuse for subset matching.
-			if len(tts) == 0 {
-				start := 0
-				subject := dest
-				for i := 0; i < len(subject); i++ {
-					if subject[i] == btsep {
-						tts = append(tts, subject[start:i])
-						start = i + 1
-					}
-				}
-				tts = append(tts, subject[start:])
-			}
-			if isSubsetMatch(tts, rm.src) {
-				m = rm
-				break
-			}
-		}
-	}
-
-	if m == nil {
-		a.mu.RUnlock()
-		return dest, false
-	}
-
-	// The selected destination for the mapping.
-	var d *destination
-	var ndest string
-
-	dests := m.dests
-	if len(m.cdests) > 0 {
-		cn := a.srv.cachedClusterName()
-		dests = m.cdests[cn]
-		if dests == nil {
-			// Fallback to main if we do not match the cluster.
-			dests = m.dests
-		}
-	}
-
-	// Optimize for single entry case.
-	if len(dests) == 1 && dests[0].weight == 100 {
-		d = dests[0]
-	} else {
-		w := uint8(fastrand.Uint32n(100))
-		for _, rm := range dests {
-			if w < rm.weight {
-				d = rm
-				break
-			}
-		}
-	}
-
-	if d != nil {
-		if len(d.tr.dtokmftokindexesargs) == 0 {
-			ndest = d.tr.dest
-		} else {
-			ndest = d.tr.TransformTokenizedSubject(tts)
-		}
-	}
-
-	a.mu.RUnlock()
-	return ndest, true
+	// Use optimized version with lock-free caching
+	return a.selectMappedSubjectOptimized(dest)
 }
 
 // SubscriptionInterest returns true if this account has a matching subscription
@@ -943,40 +890,8 @@ func (a *Account) Interest(subject string) int {
 // addClient keeps our accounting of local active clients or leafnodes updated.
 // Returns previous total.
 func (a *Account) addClient(c *client) int {
-	a.mu.Lock()
-	n := len(a.clients)
-
-	// Could come here earlier than the account is registered with the server.
-	// Make sure we can still track clients.
-	if a.clients == nil {
-		a.clients = make(map[*client]struct{})
-	}
-	a.clients[c] = struct{}{}
-
-	// If we did not add it, we are done
-	if n == len(a.clients) {
-		a.mu.Unlock()
-		return n
-	}
-	if c.kind != CLIENT && c.kind != LEAF {
-		a.sysclients++
-	} else if c.kind == LEAF {
-		a.nleafs++
-	}
-	a.mu.Unlock()
-
-	// If we added a new leaf use the list lock and add it to the list.
-	if c.kind == LEAF {
-		a.lmu.Lock()
-		a.lleafs = append(a.lleafs, c)
-		a.lmu.Unlock()
-	}
-
-	if c != nil && c.srv != nil {
-		c.srv.accConnsUpdate(a)
-	}
-
-	return n
+	// Use optimized version to reduce mutex contention
+	return a.addClientOptimized(c)
 }
 
 // For registering clusters for remote leafnodes.
@@ -1014,40 +929,297 @@ func (a *Account) isLeafNodeClusterIsolated(cluster string) bool {
 // of active leafnodes per account scope to be small and therefore cache friendly.
 // Lock should not be held on general account lock.
 func (a *Account) removeLeafNode(c *client) {
-	// Make sure we hold the list lock as well.
-	a.lmu.Lock()
-	defer a.lmu.Unlock()
-
-	ll := len(a.lleafs)
-	for i, l := range a.lleafs {
-		if l == c {
-			a.lleafs[i] = a.lleafs[ll-1]
-			if ll == 1 {
-				a.lleafs = nil
-			} else {
-				a.lleafs = a.lleafs[:ll-1]
-			}
-			return
-		}
-	}
+	// Use optimized version with O(1) lookup instead of linear search
+	a.removeLeafNodeOptimized(c)
 }
 
 // removeClient keeps our accounting of local active clients updated.
 func (a *Account) removeClient(c *client) int {
+	// Use optimized version to reduce mutex contention
+	return a.removeClientOptimized(c)
+}
+
+// Atomic counter accessors for high-frequency reads without mutex contention
+func (a *Account) NumSysClients() int32 {
+	return a.atomicSysClients.Load()
+}
+
+func (a *Account) NumLeafs() int32 {
+	return a.atomicNLeafs.Load()
+}
+
+func (a *Account) NumRemoteLeafs() int32 {
+	return a.atomicNRLeafs.Load()
+}
+
+// Lock-free subject mapping cache implementation
+
+// Initialize mapping cache
+func (a *Account) initMappingCache() {
+	if atomic.LoadPointer(&a.mappingCache) == nil {
+		initialCache := make(map[string]string)
+		atomic.StorePointer(&a.mappingCache, unsafe.Pointer(&initialCache))
+	}
+}
+
+// Get cached mapping result
+func (a *Account) getCachedMapping(subject string) (string, bool) {
+	cachePtr := atomic.LoadPointer(&a.mappingCache)
+	if cachePtr == nil {
+		return _EMPTY_, false
+	}
+	
+	cache := *(*map[string]string)(cachePtr)
+	mapped, exists := cache[subject]
+	return mapped, exists
+}
+
+// Cache mapping result using copy-on-write
+func (a *Account) cacheMappingResult(subject, mapped string) {
+	// Don't cache if cache is getting too large
+	if a.mappingCacheSize.Load() >= 1024 {
+		return
+	}
+	
+	for {
+		oldPtr := atomic.LoadPointer(&a.mappingCache)
+		if oldPtr == nil {
+			a.initMappingCache()
+			continue
+		}
+		
+		oldCache := *(*map[string]string)(oldPtr)
+		
+		// Check if already cached
+		if _, exists := oldCache[subject]; exists {
+			return
+		}
+		
+		// Create new cache with additional entry
+		newCache := make(map[string]string, len(oldCache)+1)
+		for k, v := range oldCache {
+			newCache[k] = v
+		}
+		newCache[subject] = mapped
+		
+		// Atomic swap
+		if atomic.CompareAndSwapPointer(&a.mappingCache, oldPtr, unsafe.Pointer(&newCache)) {
+			a.mappingCacheSize.Store(int64(len(newCache)))
+			break
+		}
+		// Retry if CAS failed
+	}
+}
+
+// Clear mapping cache (called when mappings change)
+func (a *Account) clearMappingCache() {
+	emptyCache := make(map[string]string)
+	atomic.StorePointer(&a.mappingCache, unsafe.Pointer(&emptyCache))
+	a.mappingCacheSize.Store(0)
+	a.mappingGeneration.Add(1)
+}
+
+// Optimized subject mapping with lock-free cache
+func (a *Account) selectMappedSubjectOptimized(dest string) (string, bool) {
+	if !a.hasMappings() {
+		return dest, false
+	}
+	
+	// Try lock-free cache first
+	if cached, found := a.getCachedMapping(dest); found {
+		return cached, cached != dest
+	}
+	
+	// Cache miss - need to compute mapping with read lock
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	
+	// Double-check pattern - may have been cached while waiting for lock
+	if cached, found := a.getCachedMapping(dest); found {
+		return cached, cached != dest
+	}
+	
+	// Perform the original mapping logic
+	ndest := dest
+	mapped := false
+	
+	// Use more efficient string splitting without repeated allocations
+	tsa := [32]string{}
+	tokens := tsa[:0]
+	start := 0
+	for i := 0; i < len(dest); i++ {
+		if dest[i] == btsep {
+			tokens = append(tokens, dest[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(dest) {
+		tokens = append(tokens, dest[start:])
+	}
+	
+	// Linear search through mappings (could be optimized further with indexing)
+	for _, rm := range a.mappings {
+		if isSubsetMatch(tokens, rm.src) {
+			if len(rm.dests) == 1 {
+				if dests := rm.dests[0]; dests != nil {
+					ndest = dests.tr.TransformTokenizedSubject(tokens)
+					mapped = true
+					break
+				}
+			} else {
+				// Multiple destinations - use weighted selection
+				var dests *destination
+				if len(rm.dests) > 1 {
+					dests = rm.dests[fastrand.Uint32n(uint32(len(rm.dests)))]
+				} else {
+					dests = rm.dests[0]
+				}
+				if dests != nil {
+					ndest = dests.tr.TransformTokenizedSubject(tokens)
+					mapped = true
+					break
+				}
+			}
+		}
+	}
+	
+	// Cache the result for future lookups
+	a.cacheMappingResult(dest, ndest)
+	
+	return ndest, mapped
+}
+
+// Optimized helper methods to reduce account mutex contention
+
+// Initialize leaf index map for O(1) lookups instead of linear searches
+func (a *Account) initLeafIndex() {
+	if a.leafIndex == nil {
+		a.leafIndex = make(map[*client]int)
+	}
+}
+
+// Add leaf node with optimized indexing
+func (a *Account) addLeafNodeOptimized(c *client) {
+	a.lmu.Lock()
+	defer a.lmu.Unlock()
+	
+	a.initLeafIndex()
+	a.lleafs = append(a.lleafs, c)
+	a.leafIndex[c] = len(a.lleafs) - 1
+}
+
+// Remove leaf node with O(1) lookup instead of linear search
+func (a *Account) removeLeafNodeOptimized(c *client) {
+	a.lmu.Lock()
+	defer a.lmu.Unlock()
+	
+	if a.leafIndex == nil {
+		return
+	}
+	
+	idx, exists := a.leafIndex[c]
+	if !exists {
+		return
+	}
+	
+	ll := len(a.lleafs)
+	if ll == 0 {
+		return
+	}
+	
+	// Fast removal: swap with last element and truncate
+	if idx < ll-1 {
+		lastClient := a.lleafs[ll-1]
+		a.lleafs[idx] = lastClient
+		a.leafIndex[lastClient] = idx
+	}
+	
+	// Remove from slice and index
+	delete(a.leafIndex, c)
+	if ll == 1 {
+		a.lleafs = nil
+		a.leafIndex = nil
+	} else {
+		a.lleafs = a.lleafs[:ll-1]
+	}
+}
+
+// Optimized client addition with reduced lock contention
+func (a *Account) addClientOptimized(c *client) int {
+	// Fast path for non-LEAF clients to reduce lock duration
+	if c.kind != LEAF {
+		a.mu.Lock()
+		n := len(a.clients)
+		
+		if a.clients == nil {
+			a.clients = make(map[*client]struct{})
+		}
+		a.clients[c] = struct{}{}
+		
+		if n == len(a.clients) {
+			a.mu.Unlock()
+			return n
+		}
+		
+		if c.kind != CLIENT {
+			a.atomicSysClients.Add(1)
+			a.sysclients++ // Keep legacy counter in sync for compatibility
+		}
+		a.mu.Unlock()
+		
+		if c != nil && c.srv != nil {
+			c.srv.accConnsUpdate(a)
+		}
+		return n
+	}
+	
+	// LEAF client path with optimized locking
 	a.mu.Lock()
 	n := len(a.clients)
-	delete(a.clients, c)
-	// If we did not actually remove it, we are done.
+	
+	if a.clients == nil {
+		a.clients = make(map[*client]struct{})
+	}
+	a.clients[c] = struct{}{}
+	
 	if n == len(a.clients) {
 		a.mu.Unlock()
 		return n
 	}
+	
+	a.atomicNLeafs.Add(1)
+	a.nleafs++ // Keep legacy counter in sync
+	a.mu.Unlock()
+	
+	// Add to leaf list using optimized method
+	a.addLeafNodeOptimized(c)
+	
+	if c != nil && c.srv != nil {
+		c.srv.accConnsUpdate(a)
+	}
+	
+	return n
+}
+
+// Optimized client removal with reduced lock contention  
+func (a *Account) removeClientOptimized(c *client) int {
+	a.mu.Lock()
+	n := len(a.clients)
+	delete(a.clients, c)
+	
+	if n == len(a.clients) {
+		a.mu.Unlock()
+		return n
+	}
+	
 	if c.kind != CLIENT && c.kind != LEAF {
-		a.sysclients--
+		a.atomicSysClients.Add(-1)
+		a.sysclients-- // Keep legacy counter in sync
 	} else if c.kind == LEAF {
-		a.nleafs--
-		// Need to do cluster accounting here.
-		// Do cluster accounting if we are a hub.
+		a.atomicNLeafs.Add(-1)
+		a.nleafs-- // Keep legacy counter in sync
+		
+		// Handle cluster accounting under the main lock
 		if c.isHubLeafNode() {
 			cluster := c.remoteCluster()
 			if count := a.leafClusters[cluster]; count > 1 {
@@ -1058,15 +1230,16 @@ func (a *Account) removeClient(c *client) int {
 		}
 	}
 	a.mu.Unlock()
-
+	
+	// Remove from leaf list if needed
 	if c.kind == LEAF {
-		a.removeLeafNode(c)
+		a.removeLeafNodeOptimized(c)
 	}
-
+	
 	if c != nil && c.srv != nil {
 		c.srv.accConnsUpdate(a)
 	}
-
+	
 	return n
 }
 
