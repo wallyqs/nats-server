@@ -321,9 +321,9 @@ const (
 	// default expiration time for mb.fss when idle.
 	defaultFssExpiration = 2 * time.Minute
 	// coalesceMinimum
-	coalesceMinimum = 16 * 1024
+	coalesceMinimum = 1024 * 1024 // Increased from 16KB to 1MB for better batching
 	// maxFlushWait is maximum we will wait to gather messages to flush.
-	maxFlushWait = 8 * time.Millisecond
+	maxFlushWait = 50 * time.Millisecond // Increased from 8ms to 50ms for better batching
 
 	// Metafiles for streams and consumers.
 	JetStreamMetaFile    = "meta.inf"
