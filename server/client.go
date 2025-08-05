@@ -123,6 +123,12 @@ const (
 	stallClientMinDuration = 2 * time.Millisecond
 	stallClientMaxDuration = 5 * time.Millisecond
 	stallTotalAllowed      = 10 * time.Millisecond
+
+	// Adaptive write coalescing parameters
+	adaptiveWriteMinDelay     = 50 * time.Microsecond  // Minimum coalescing delay
+	adaptiveWriteMaxDelay     = 2 * time.Millisecond   // Maximum coalescing delay  
+	adaptiveWriteBatchTarget  = 8192                   // Target batch size in bytes
+	adaptiveWriteHighLoadFactor = 0.8                  // Load factor to trigger aggressive batching
 )
 
 var readLoopReportThreshold = readLoopReport
@@ -1222,6 +1228,7 @@ func (c *client) writeLoop() {
 	// Used to check that we did flush from last wake up.
 	waitOk := true
 	var closed bool
+	var adaptiveDelayTimer *time.Timer
 
 	// Main loop. Will wait to be signaled and then will use
 	// buffered outbound structure for efficient writev to the underlying socket.
@@ -1229,7 +1236,36 @@ func (c *client) writeLoop() {
 		c.mu.Lock()
 		if closed = c.isClosed(); !closed {
 			owtf := c.out.fsp > 0 && c.out.pb < maxBufSize && c.out.fsp < maxFlushPending
-			if waitOk && (c.out.pb == 0 || owtf) {
+			shouldWait := waitOk && (c.out.pb == 0 || owtf)
+			
+			// Adaptive write coalescing: if we have some data but not enough,
+			// wait a bit to see if more data arrives
+			if !shouldWait && c.out.pb > 0 && c.out.pb < adaptiveWriteBatchTarget {
+				// Calculate adaptive delay based on current load and buffer size
+				loadFactor := float64(c.out.pb) / float64(adaptiveWriteBatchTarget)
+				delay := adaptiveWriteMaxDelay - time.Duration(loadFactor*float64(adaptiveWriteMaxDelay-adaptiveWriteMinDelay))
+				
+				// For high-throughput connections, use shorter delays
+				if c.out.fsp > 3 {
+					delay = adaptiveWriteMinDelay
+				}
+				
+				if adaptiveDelayTimer == nil {
+					adaptiveDelayTimer = time.NewTimer(delay)
+				} else {
+					adaptiveDelayTimer.Reset(delay)
+				}
+				
+				c.mu.Unlock()
+				select {
+				case <-adaptiveDelayTimer.C:
+					// Timeout reached, proceed with flush
+				case <-time.After(delay):
+					// Fallback timer
+				}
+				c.mu.Lock()
+				closed = c.isClosed()
+			} else if shouldWait {
 				c.out.sg.Wait()
 				// Check that connection has not been closed while lock was released
 				// in the conditional wait.
@@ -1237,6 +1273,9 @@ func (c *client) writeLoop() {
 			}
 		}
 		if closed {
+			if adaptiveDelayTimer != nil {
+				adaptiveDelayTimer.Stop()
+			}
 			c.flushAndClose(false)
 			c.mu.Unlock()
 
@@ -1262,32 +1301,89 @@ func (c *client) writeLoop() {
 func (c *client) flushClients(budget time.Duration) time.Time {
 	last := time.Now()
 
-	// Check pending clients for flush.
+	// Enhanced flush coordination: batch clients by pending buffer size
+	// to optimize flush ordering and reduce total system calls
+	var smallBuf, mediumBuf, largeBuf []*client
+	totalPending := 0
+
+	// Categorize pending clients by buffer size for optimal batching
 	for cp := range c.pcd {
-		// TODO(dlc) - Wonder if it makes more sense to create a new map?
-		delete(c.pcd, cp)
-
-		// Queue up a flush for those in the set
 		cp.mu.Lock()
-		// Update last activity for message delivery
-		cp.last = last
-		// Remove ourselves from the pending list.
-		cp.out.fsp--
-
-		// Just ignore if this was closed.
 		if cp.isClosed() {
 			cp.mu.Unlock()
+			delete(c.pcd, cp)
 			continue
 		}
-
-		if budget > 0 && cp.out.lft < 2*budget && cp.flushOutbound() {
-			budget -= cp.out.lft
+		
+		pb := cp.out.pb
+		totalPending += int(pb)
+		
+		// Categorize by buffer size
+		if pb < 1024 {
+			smallBuf = append(smallBuf, cp)
+		} else if pb < 8192 {
+			mediumBuf = append(mediumBuf, cp)
 		} else {
-			cp.flushSignal()
+			largeBuf = append(largeBuf, cp)
 		}
-
 		cp.mu.Unlock()
 	}
+
+	// Process in order: large buffers first (most efficient), then medium, then small
+	clientSets := [][]*client{largeBuf, mediumBuf, smallBuf}
+	
+	for _, clients := range clientSets {
+		for _, cp := range clients {
+			delete(c.pcd, cp)
+			
+			// Queue up a flush for those in the set
+			cp.mu.Lock()
+			// Update last activity for message delivery
+			cp.last = last
+			// Remove ourselves from the pending list.
+			cp.out.fsp--
+
+			// Just ignore if this was closed.
+			if cp.isClosed() {
+				cp.mu.Unlock()
+				continue
+			}
+
+			// Enhanced budget management: adjust based on connection priority
+			// and current system load
+			effectiveBudget := budget
+			if totalPending > 65536 { // High load scenario
+				effectiveBudget = budget / 2 // More conservative with time
+			}
+
+			if effectiveBudget > 0 && cp.out.lft < 2*effectiveBudget && cp.flushOutbound() {
+				budget -= cp.out.lft
+			} else {
+				cp.flushSignal()
+			}
+
+			cp.mu.Unlock()
+			
+			// Early exit if budget exhausted
+			if budget <= 0 {
+				// Signal remaining clients for later processing
+				for remainingCP := range c.pcd {
+					remainingCP.mu.Lock()
+					if !remainingCP.isClosed() {
+						remainingCP.out.fsp--
+						remainingCP.flushSignal()
+					}
+					remainingCP.mu.Unlock()
+					delete(c.pcd, remainingCP)
+				}
+				break
+			}
+		}
+		if budget <= 0 {
+			break
+		}
+	}
+	
 	return last
 }
 
