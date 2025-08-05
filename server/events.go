@@ -2429,45 +2429,43 @@ func (a *Account) statz() *AccountStat {
 	localConns := a.numLocalConnections()
 	leafConns := a.numLocalLeafNodes()
 
-	a.stats.Lock()
 	received := DataStats{
 		dataStats: dataStats{
-			Msgs:  a.stats.inMsgs,
-			Bytes: a.stats.inBytes,
+			Msgs:  atomic.LoadInt64(&a.stats.inMsgs),
+			Bytes: atomic.LoadInt64(&a.stats.inBytes),
 		},
 		Gateways: dataStats{
-			Msgs:  a.stats.gw.inMsgs,
-			Bytes: a.stats.gw.inBytes,
+			Msgs:  atomic.LoadInt64(&a.stats.gw.inMsgs),
+			Bytes: atomic.LoadInt64(&a.stats.gw.inBytes),
 		},
 		Routes: dataStats{
-			Msgs:  a.stats.rt.inMsgs,
-			Bytes: a.stats.rt.inBytes,
+			Msgs:  atomic.LoadInt64(&a.stats.rt.inMsgs),
+			Bytes: atomic.LoadInt64(&a.stats.rt.inBytes),
 		},
 		Leafs: dataStats{
-			Msgs:  a.stats.ln.inMsgs,
-			Bytes: a.stats.ln.inBytes,
+			Msgs:  atomic.LoadInt64(&a.stats.ln.inMsgs),
+			Bytes: atomic.LoadInt64(&a.stats.ln.inBytes),
 		},
 	}
 	sent := DataStats{
 		dataStats: dataStats{
-			Msgs:  a.stats.outMsgs,
-			Bytes: a.stats.outBytes,
+			Msgs:  atomic.LoadInt64(&a.stats.outMsgs),
+			Bytes: atomic.LoadInt64(&a.stats.outBytes),
 		},
 		Gateways: dataStats{
-			Msgs:  a.stats.gw.outMsgs,
-			Bytes: a.stats.gw.outBytes,
+			Msgs:  atomic.LoadInt64(&a.stats.gw.outMsgs),
+			Bytes: atomic.LoadInt64(&a.stats.gw.outBytes),
 		},
 		Routes: dataStats{
-			Msgs:  a.stats.rt.outMsgs,
-			Bytes: a.stats.rt.outBytes,
+			Msgs:  atomic.LoadInt64(&a.stats.rt.outMsgs),
+			Bytes: atomic.LoadInt64(&a.stats.rt.outBytes),
 		},
 		Leafs: dataStats{
-			Msgs:  a.stats.ln.outMsgs,
-			Bytes: a.stats.ln.outBytes,
+			Msgs:  atomic.LoadInt64(&a.stats.ln.outMsgs),
+			Bytes: atomic.LoadInt64(&a.stats.ln.outBytes),
 		},
 	}
-	slowConsumers := a.stats.slowConsumers
-	a.stats.Unlock()
+	slowConsumers := atomic.LoadInt64(&a.stats.slowConsumers)
 
 	return &AccountStat{
 		Account:       a.Name,

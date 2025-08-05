@@ -2742,12 +2742,10 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 			totalBytes -= dlvMsgs * int64(LEN_CR_LF)
 		}
 		if acc != nil {
-			acc.stats.Lock()
-			acc.stats.outMsgs += dlvMsgs
-			acc.stats.outBytes += totalBytes
-			acc.stats.gw.outMsgs += dlvMsgs
-			acc.stats.gw.outBytes += totalBytes
-			acc.stats.Unlock()
+			atomic.AddInt64(&acc.stats.outMsgs, dlvMsgs)
+			atomic.AddInt64(&acc.stats.outBytes, totalBytes)
+			atomic.AddInt64(&acc.stats.gw.outMsgs, dlvMsgs)
+			atomic.AddInt64(&acc.stats.gw.outBytes, totalBytes)
 		}
 		atomic.AddInt64(&srv.outMsgs, dlvMsgs)
 		atomic.AddInt64(&srv.outBytes, totalBytes)
@@ -3117,12 +3115,10 @@ func (c *client) processInboundGatewayMsg(msg []byte) {
 		return
 	}
 
-	acc.stats.Lock()
-	acc.stats.inMsgs++
-	acc.stats.inBytes += int64(size)
-	acc.stats.gw.inMsgs++
-	acc.stats.gw.inBytes += int64(size)
-	acc.stats.Unlock()
+	atomic.AddInt64(&acc.stats.inMsgs, 1)
+	atomic.AddInt64(&acc.stats.inBytes, int64(size))
+	atomic.AddInt64(&acc.stats.gw.inMsgs, 1)
+	atomic.AddInt64(&acc.stats.gw.inBytes, int64(size))
 
 	// Check if this is a service reply subject (_R_)
 	noInterest := len(r.psubs) == 0

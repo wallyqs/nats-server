@@ -7149,11 +7149,9 @@ func (mset *stream) trackReplicationTraffic(node RaftNode, sz int, r int) {
 		outMsgs := int64(r - 1)
 		outBytes := int64(sz * (r - 1))
 
-		mset.acc.stats.Lock()
-		mset.acc.stats.outMsgs += outMsgs
-		mset.acc.stats.outBytes += outBytes
-		mset.acc.stats.rt.outMsgs += outMsgs
-		mset.acc.stats.rt.outBytes += outBytes
-		mset.acc.stats.Unlock()
+		atomic.AddInt64(&mset.acc.stats.outMsgs, outMsgs)
+		atomic.AddInt64(&mset.acc.stats.outBytes, outBytes)
+		atomic.AddInt64(&mset.acc.stats.rt.outMsgs, outMsgs)
+		atomic.AddInt64(&mset.acc.stats.rt.outBytes, outBytes)
 	}
 }
