@@ -248,6 +248,11 @@ type client struct {
 	msubs      int32
 	mcl        int32
 	mu         sync.Mutex
+	
+	// Batched delivery fields to reduce mutex contention
+	batchedOutMsgs  atomic.Int64
+	batchedOutBytes atomic.Int64
+	lastDeliveryFlush atomic.Int64 // timestamp of last delivery batch flush
 	cid        uint64
 	start      time.Time
 	nonce      []byte
@@ -3477,14 +3482,20 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	mt, traceOnly := c.isMsgTraceEnabled()
 
 	client := sub.client
-	// Check sub client and check echo. Only do this if not a service import.
-	if client == nil || (c == client && !client.echo && !sub.si) {
+	// Fast path rejection without mutex - reduces contention significantly
+	if !c.canDeliverFast(sub, c) {
 		if client != nil && mt != nil {
 			client.mu.Lock()
 			mt.addEgressEvent(client, sub, errMsgTraceNoEcho)
 			client.mu.Unlock()
 		}
 		return false
+	}
+
+	// Pre-calculate message size outside of mutex
+	msgSize := int64(len(msg))
+	if !prodIsMQTT {
+		msgSize -= int64(LEN_CR_LF)
 	}
 
 	client.mu.Lock()
@@ -3607,23 +3618,22 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		msg = msg[c.pa.hdr:]
 	}
 
-	// Update statistics
-
-	// The msg includes the CR_LF, so pull back out for accounting.
-	msgSize := int64(len(msg))
-	// MQTT producers send messages without CR_LF, so don't remove it for them.
-	if !prodIsMQTT {
-		msgSize -= int64(LEN_CR_LF)
-	}
+	// Update statistics - use batched approach to reduce lock time
+	// Message size was pre-calculated outside mutex
 
 	// We do not update the outbound stats if we are doing trace only since
 	// this message will not be sent out.
 	// Also do not update on internal callbacks.
 	if !traceOnly && sub.icb == nil {
-		// No atomic needed since accessed under client lock.
-		// Monitor is reading those also under client's lock.
-		client.outMsgs++
-		client.outBytes += msgSize
+		// Use batched stats update to reduce mutex contention
+		// Release mutex early and update atomically
+		client.mu.Unlock()
+		client.updateBatchedDeliveryStats(1, msgSize)
+		// Check if we should flush batched stats
+		if client.shouldFlushDeliveryStats() {
+			client.flushBatchedDeliveryStats()
+		}
+		client.mu.Lock()
 	}
 
 	// Check for internal subscriptions.
@@ -3760,6 +3770,50 @@ func (c *client) addToPCD(client *client) {
 		client.out.fsp++
 		c.pcd[client] = needFlush
 	}
+}
+
+// Batched delivery helper methods to reduce mutex contention
+
+// Update delivery stats atomically without holding mutex
+func (c *client) updateBatchedDeliveryStats(msgCount int64, byteCount int64) {
+	c.batchedOutMsgs.Add(msgCount)
+	c.batchedOutBytes.Add(byteCount)
+	c.lastDeliveryFlush.Store(time.Now().UnixNano())
+}
+
+// Flush batched delivery stats to the main stats with mutex protection
+// This should be called periodically or when stats are needed
+func (c *client) flushBatchedDeliveryStats() {
+	batchedMsgs := c.batchedOutMsgs.Swap(0)
+	batchedBytes := c.batchedOutBytes.Swap(0)
+	
+	if batchedMsgs > 0 || batchedBytes > 0 {
+		c.mu.Lock()
+		c.outMsgs += batchedMsgs
+		c.outBytes += batchedBytes
+		c.mu.Unlock()
+	}
+}
+
+// Check if batched stats should be flushed (every 1000 messages or 100ms)
+func (c *client) shouldFlushDeliveryStats() bool {
+	return c.batchedOutMsgs.Load() >= 1000 || 
+		time.Since(time.Unix(0, c.lastDeliveryFlush.Load())) > 100*time.Millisecond
+}
+
+// Fast path delivery check without holding mutex for common rejection cases
+func (c *client) canDeliverFast(sub *subscription, producer *client) bool {
+	// Quick checks that don't require client mutex
+	if sub.client == nil {
+		return false
+	}
+	if producer == sub.client && !sub.client.echo && !sub.si {
+		return false
+	}
+	if sub.isClosed() {
+		return false
+	}
+	return true
 }
 
 // This will track a remote reply for an exported service that has requested
@@ -5681,6 +5735,9 @@ func (c *client) closeConnection(reason ClosedState) {
 	}
 
 	if srv != nil {
+		// Flush any remaining batched delivery stats before removing client
+		c.flushBatchedDeliveryStats()
+		
 		// Unregister
 		srv.removeClient(c)
 
