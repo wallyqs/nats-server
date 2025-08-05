@@ -6771,6 +6771,41 @@ func (mb *msgBlock) writeAt(buf []byte, woff int64) (int, error) {
 	return n, err
 }
 
+// bulkWriteAt efficiently handles the entire buffer write with optimized partial write handling
+func (mb *msgBlock) bulkWriteAt(buf []byte, woff int64) error {
+	if mb.mockWriteErr {
+		mb.mockWriteErr = false
+		return errors.New("mock write error")
+	}
+
+	remaining := buf
+	offset := woff
+
+	// Try to write the entire buffer in larger chunks to reduce syscall overhead
+	for len(remaining) > 0 {
+		// For very large writes, break into reasonable chunks to avoid potential kernel limitations
+		chunkSize := len(remaining)
+		if chunkSize > 1024*1024 { // 1MB chunks
+			chunkSize = 1024 * 1024
+		}
+
+		chunk := remaining[:chunkSize]
+		n, err := mb.mfd.WriteAt(chunk, offset)
+		if err != nil {
+			return err
+		}
+
+		// Update for next iteration
+		remaining = remaining[n:]
+		offset += int64(n)
+
+		// If we wrote the entire chunk, continue to next chunk
+		// If partial write, the next iteration will handle the remainder
+	}
+
+	return nil
+}
+
 // flushPendingMsgsLocked writes out any messages for this message block.
 // Lock should be held.
 func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
@@ -6814,24 +6849,13 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 		buf = dst
 	}
 
-	// Append new data to the message block file.
-	for lbb := lob; lbb > 0; lbb = len(buf) {
-		n, err := mb.writeAt(buf, woff)
-		if err != nil {
-			mb.dirtyCloseWithRemove(false)
-			ld, _, _ := mb.rebuildStateLocked()
-			mb.werr = err
-			return ld, err
-		}
-		// Update our write offset.
-		woff += int64(n)
-		// Partial write.
-		if n != lbb {
-			buf = buf[n:]
-		} else {
-			// Done.
-			break
-		}
+	// Append new data to the message block file using optimized bulk write.
+	err = mb.bulkWriteAt(buf, woff)
+	if err != nil {
+		mb.dirtyCloseWithRemove(false)
+		ld, _, _ := mb.rebuildStateLocked()
+		mb.werr = err
+		return ld, err
 	}
 
 	// Clear any error.
