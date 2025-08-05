@@ -25,15 +25,16 @@ const ipQueueDefaultMaxRecycleSize = 4 * 1024
 type ipQueue[T any] struct {
 	inprogress int64
 	sync.Mutex
-	ch     chan struct{}
-	elts   []T
-	pos    int
-	pool   *sync.Pool
-	sz     uint64 // Calculated size (only if calc != nil)
-	name   string
-	m      *sync.Map
-	bs     int // batchSize: Number of elements to process before signaling
-	cbatch int // currentBatch: Current batch counter
+	ch      chan struct{}
+	elts    []T
+	pos     int
+	pool    *sync.Pool
+	sz      uint64 // Calculated size (only if calc != nil)
+	name    string
+	m       *sync.Map
+	bs      int   // batchSize: Number of elements to process before signaling
+	cbatch  int64 // currentBatch: Current batch counter (atomic)
+	lastSig bool  // lastSignal: Whether we signaled on last operation
 	ipQueueOpts[T]
 }
 
@@ -92,13 +93,13 @@ func newIPQueue[T any](s *Server, name string, opts ...ipQueueOpt[T]) *ipQueue[T
 			New: func() any {
 				// Reason we use pointer to slice instead of slice is explained
 				// here: https://staticcheck.io/docs/checks#SA6002
-				res := make([]T, 0, 64) // Increased initial capacity
+				res := make([]T, 0, 256) // Increased initial capacity for better batching
 				return &res
 			},
 		},
 		name: name,
 		m:    &s.ipQueues,
-		bs:   16, // Signal every 16 elements for better batching
+		bs:   64, // Signal every 64 elements for better batching
 		ipQueueOpts: ipQueueOpts[T]{
 			mrs: ipQueueDefaultMaxRecycleSize,
 		},
@@ -114,9 +115,13 @@ func newIPQueue[T any](s *Server, name string, opts ...ipQueueOpt[T]) *ipQueue[T
 // entry is the first to be added, and returns the length of the queue after
 // this element is added.
 func (q *ipQueue[T]) push(e T) (int, error) {
+	// Fast path: try atomic increment of batch counter first
+	currentBatch := atomic.AddInt64(&q.cbatch, 1)
+
 	q.Lock()
 	l := len(q.elts) - q.pos
 	if q.mlen > 0 && l == q.mlen {
+		atomic.AddInt64(&q.cbatch, -1) // rollback
 		q.Unlock()
 		return l, errIPQLenLimitReached
 	}
@@ -124,6 +129,7 @@ func (q *ipQueue[T]) push(e T) (int, error) {
 	if q.calc != nil {
 		sz = q.calc(e)
 		if q.msz > 0 && q.sz+sz > q.msz {
+			atomic.AddInt64(&q.cbatch, -1) // rollback
 			q.Unlock()
 			return l, errIPQSizeLimitReached
 		}
@@ -136,11 +142,13 @@ func (q *ipQueue[T]) push(e T) (int, error) {
 	if q.calc != nil {
 		q.sz += sz
 	}
-	needSignal := l == 0 || (q.cbatch >= q.bs)
-	if needSignal && q.cbatch >= q.bs {
-		q.cbatch = 0
-	} else if !needSignal {
-		q.cbatch++
+	firstElem := l == 0
+	needSignal := firstElem || (currentBatch >= int64(q.bs) && !q.lastSig)
+	if needSignal {
+		atomic.StoreInt64(&q.cbatch, 0)
+		q.lastSig = true
+	} else {
+		q.lastSig = false
 	}
 	q.Unlock()
 	if needSignal {
@@ -176,7 +184,8 @@ func (q *ipQueue[T]) pop() []T {
 	} else {
 		elts = q.elts[q.pos:]
 	}
-	q.elts, q.pos, q.sz, q.cbatch = nil, 0, 0, 0
+	q.elts, q.pos, q.sz, q.lastSig = nil, 0, 0, false
+	atomic.StoreInt64(&q.cbatch, 0)
 	atomic.AddInt64(&q.inprogress, int64(len(elts)))
 	q.Unlock()
 	return elts
@@ -210,7 +219,8 @@ func (q *ipQueue[T]) popOne() (T, bool) {
 		} else {
 			q.elts = nil
 		}
-		q.pos, q.sz, q.cbatch = 0, 0, 0
+		q.pos, q.sz, q.lastSig = 0, 0, false
+		atomic.StoreInt64(&q.cbatch, 0)
 	}
 	q.Unlock()
 	if needSignal {
@@ -271,7 +281,8 @@ func (q *ipQueue[T]) drain() int {
 	}
 	q.Lock()
 	olen := len(q.elts) - q.pos
-	q.elts, q.pos, q.sz, q.cbatch = nil, 0, 0, 0
+	q.elts, q.pos, q.sz, q.lastSig = nil, 0, 0, false
+	atomic.StoreInt64(&q.cbatch, 0)
 	// Consume the signal if it was present to reduce the chance of a reader
 	// routine to be think that there is something in the queue...
 	select {
