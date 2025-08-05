@@ -25,13 +25,15 @@ const ipQueueDefaultMaxRecycleSize = 4 * 1024
 type ipQueue[T any] struct {
 	inprogress int64
 	sync.Mutex
-	ch   chan struct{}
-	elts []T
-	pos  int
-	pool *sync.Pool
-	sz   uint64 // Calculated size (only if calc != nil)
-	name string
-	m    *sync.Map
+	ch     chan struct{}
+	elts   []T
+	pos    int
+	pool   *sync.Pool
+	sz     uint64 // Calculated size (only if calc != nil)
+	name   string
+	m      *sync.Map
+	bs     int // batchSize: Number of elements to process before signaling
+	cbatch int // currentBatch: Current batch counter
 	ipQueueOpts[T]
 }
 
@@ -90,12 +92,13 @@ func newIPQueue[T any](s *Server, name string, opts ...ipQueueOpt[T]) *ipQueue[T
 			New: func() any {
 				// Reason we use pointer to slice instead of slice is explained
 				// here: https://staticcheck.io/docs/checks#SA6002
-				res := make([]T, 0, 32)
+				res := make([]T, 0, 64) // Increased initial capacity
 				return &res
 			},
 		},
 		name: name,
 		m:    &s.ipQueues,
+		bs:   16, // Signal every 16 elements for better batching
 		ipQueueOpts: ipQueueOpts[T]{
 			mrs: ipQueueDefaultMaxRecycleSize,
 		},
@@ -117,21 +120,30 @@ func (q *ipQueue[T]) push(e T) (int, error) {
 		q.Unlock()
 		return l, errIPQLenLimitReached
 	}
+	var sz uint64
 	if q.calc != nil {
-		sz := q.calc(e)
+		sz = q.calc(e)
 		if q.msz > 0 && q.sz+sz > q.msz {
 			q.Unlock()
 			return l, errIPQSizeLimitReached
 		}
-		q.sz += sz
 	}
 	if q.elts == nil {
 		// What comes out of the pool is already of size 0, so no need for [:0].
 		q.elts = *(q.pool.Get().(*[]T))
 	}
 	q.elts = append(q.elts, e)
+	if q.calc != nil {
+		q.sz += sz
+	}
+	needSignal := l == 0 || (q.cbatch >= q.bs)
+	if needSignal && q.cbatch >= q.bs {
+		q.cbatch = 0
+	} else if !needSignal {
+		q.cbatch++
+	}
 	q.Unlock()
-	if l == 0 {
+	if needSignal {
 		select {
 		case q.ch <- struct{}{}:
 		default:
@@ -164,7 +176,7 @@ func (q *ipQueue[T]) pop() []T {
 	} else {
 		elts = q.elts[q.pos:]
 	}
-	q.elts, q.pos, q.sz = nil, 0, 0
+	q.elts, q.pos, q.sz, q.cbatch = nil, 0, 0, 0
 	atomic.AddInt64(&q.inprogress, int64(len(elts)))
 	q.Unlock()
 	return elts
@@ -184,16 +196,13 @@ func (q *ipQueue[T]) popOne() (T, bool) {
 		return empty, false
 	}
 	e := q.elts[q.pos]
+	var needSignal bool
 	if l--; l > 0 {
 		q.pos++
 		if q.calc != nil {
 			q.sz -= q.calc(e)
 		}
-		// We need to re-signal
-		select {
-		case q.ch <- struct{}{}:
-		default:
-		}
+		needSignal = true
 	} else {
 		// We have just emptied the queue, so we can reuse unless it is too big.
 		if cap(q.elts) <= q.mrs {
@@ -201,9 +210,15 @@ func (q *ipQueue[T]) popOne() (T, bool) {
 		} else {
 			q.elts = nil
 		}
-		q.pos, q.sz = 0, 0
+		q.pos, q.sz, q.cbatch = 0, 0, 0
 	}
 	q.Unlock()
+	if needSignal {
+		select {
+		case q.ch <- struct{}{}:
+		default:
+		}
+	}
 	return e, true
 }
 
@@ -256,7 +271,7 @@ func (q *ipQueue[T]) drain() int {
 	}
 	q.Lock()
 	olen := len(q.elts) - q.pos
-	q.elts, q.pos, q.sz = nil, 0, 0
+	q.elts, q.pos, q.sz, q.cbatch = nil, 0, 0, 0
 	// Consume the signal if it was present to reduce the chance of a reader
 	// routine to be think that there is something in the queue...
 	select {
