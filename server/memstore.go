@@ -31,6 +31,80 @@ import (
 	"github.com/nats-io/nats-server/v2/server/thw"
 )
 
+// Message buffer pool for reducing memory allocations
+var msgBufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 0, 1024) // Start with reasonable capacity
+	},
+}
+
+// Get a buffer from pool, ensuring minimum capacity
+func getMsgBuffer(minCap int) []byte {
+	buf := msgBufferPool.Get().([]byte)
+	if cap(buf) < minCap {
+		return make([]byte, 0, minCap)
+	}
+	return buf[:0]
+}
+
+// Return buffer to pool if it's reasonable size
+func putMsgBuffer(buf []byte) {
+	if cap(buf) <= 8192 { // Don't pool very large buffers
+		msgBufferPool.Put(buf)
+	}
+}
+
+// Add sequence to subject cache (maintains sorted order)
+func (ms *memStore) addSeqToSubjCache(subj string, seq uint64) {
+	cache := ms.subjSeqs[subj]
+	if cache == nil {
+		cache = &subjSeqCache{sequences: make([]uint64, 0, 16)}
+		ms.subjSeqs[subj] = cache
+	}
+
+	// Binary search insertion to maintain sorted order
+	seqs := cache.sequences
+	i := sort.Search(len(seqs), func(j int) bool { return seqs[j] >= seq })
+	if i < len(seqs) && seqs[i] == seq {
+		return // Already exists
+	}
+
+	// Insert at position i
+	cache.sequences = append(seqs[:i], append([]uint64{seq}, seqs[i:]...)...)
+}
+
+// Remove sequence from subject cache
+func (ms *memStore) removeSeqFromSubjCache(subj string, seq uint64) {
+	cache := ms.subjSeqs[subj]
+	if cache == nil {
+		return
+	}
+
+	seqs := cache.sequences
+	i := sort.Search(len(seqs), func(j int) bool { return seqs[j] >= seq })
+	if i < len(seqs) && seqs[i] == seq {
+		cache.sequences = append(seqs[:i], seqs[i+1:]...)
+		if len(cache.sequences) == 0 {
+			delete(ms.subjSeqs, subj)
+		}
+	}
+}
+
+// Get first and last sequences for subject from cache
+func (ms *memStore) getSubjFirstLastFromCache(subj string) (first, last uint64, ok bool) {
+	cache := ms.subjSeqs[subj]
+	if cache == nil || len(cache.sequences) == 0 {
+		return 0, 0, false
+	}
+	seqs := cache.sequences
+	return seqs[0], seqs[len(seqs)-1], true
+}
+
+// Subject sequence cache for faster lookups
+type subjSeqCache struct {
+	sequences []uint64 // sorted slice of sequences for this subject
+}
+
 // TODO(dlc) - This is a fairly simplistic approach but should do for now.
 type memStore struct {
 	mu          sync.RWMutex
@@ -48,6 +122,7 @@ type memStore struct {
 	receivedAny bool
 	ttls        *thw.HashWheel
 	sdm         *SDMMeta
+	subjSeqs    map[string]*subjSeqCache // subject -> sequence cache
 }
 
 func newMemStore(cfg *StreamConfig) (*memStore, error) {
@@ -58,10 +133,11 @@ func newMemStore(cfg *StreamConfig) (*memStore, error) {
 		return nil, fmt.Errorf("memStore requires memory storage type in config")
 	}
 	ms := &memStore{
-		msgs: make(map[uint64]*StoreMsg),
-		fss:  stree.NewSubjectTree[SimpleState](),
-		maxp: cfg.MaxMsgsPer,
-		cfg:  *cfg,
+		msgs:     make(map[uint64]*StoreMsg),
+		fss:      stree.NewSubjectTree[SimpleState](),
+		maxp:     cfg.MaxMsgsPer,
+		cfg:      *cfg,
+		subjSeqs: make(map[string]*subjSeqCache),
 	}
 	// Only create a THW if we're going to allow TTLs.
 	if cfg.AllowMsgTTL {
@@ -215,23 +291,20 @@ func (ms *memStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, tt
 		ms.state.FirstTime = now
 	}
 
-	// Make copies
-	// TODO(dlc) - Maybe be smarter here.
-	if len(msg) > 0 {
-		msg = copyBytes(msg)
-	}
-	if len(hdr) > 0 {
-		hdr = copyBytes(hdr)
-	}
+	// Optimized single buffer allocation with pooling
+	totalSize := len(hdr) + len(msg)
+	buf := getMsgBuffer(totalSize)
+	buf = append(buf, hdr...)
+	buf = append(buf, msg...)
 
-	// FIXME(dlc) - Could pool at this level?
-	sm := &StoreMsg{subj, nil, nil, make([]byte, 0, len(hdr)+len(msg)), seq, ts}
-	sm.buf = append(sm.buf, hdr...)
-	sm.buf = append(sm.buf, msg...)
+	// Create StoreMsg with single buffer allocation
+	sm := &StoreMsg{subj: subj, seq: seq, ts: ts, buf: buf}
 	if len(hdr) > 0 {
 		sm.hdr = sm.buf[:len(hdr)]
 	}
-	sm.msg = sm.buf[len(hdr):]
+	if len(msg) > 0 {
+		sm.msg = sm.buf[len(hdr):]
+	}
 	ms.msgs[seq] = sm
 	ms.state.Msgs++
 	ms.state.Bytes += memStoreMsgSize(subj, hdr, msg)
@@ -240,6 +313,9 @@ func (ms *memStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, tt
 
 	// Track per subject.
 	if len(subj) > 0 {
+		// Add to subject sequence cache
+		ms.addSeqToSubjCache(subj, seq)
+
 		if ss != nil {
 			ss.Msgs++
 			ss.Last = seq
@@ -1332,6 +1408,7 @@ func (ms *memStore) purge(fseq uint64) (uint64, error) {
 	ms.fss = stree.NewSubjectTree[SimpleState]()
 	ms.dmap.Empty()
 	ms.sdm.empty()
+	ms.subjSeqs = make(map[string]*subjSeqCache) // Clear subject sequence cache
 	ms.mu.Unlock()
 
 	if cb != nil {
@@ -1401,6 +1478,7 @@ func (ms *memStore) compact(seq uint64) (uint64, error) {
 		ms.fss = stree.NewSubjectTree[SimpleState]()
 		ms.dmap.Empty()
 		ms.sdm.empty()
+		ms.subjSeqs = make(map[string]*subjSeqCache) // Clear subject sequence cache
 	}
 	ms.mu.Unlock()
 
@@ -1436,6 +1514,7 @@ func (ms *memStore) reset() error {
 	ms.fss = stree.NewSubjectTree[SimpleState]()
 	ms.dmap.Empty()
 	ms.sdm.empty()
+	ms.subjSeqs = make(map[string]*subjSeqCache) // Clear subject sequence cache
 
 	ms.mu.Unlock()
 
@@ -1805,8 +1884,22 @@ func (ms *memStore) removeSeqPerSubject(subj string, seq uint64) {
 }
 
 // Will recalculate the first and/or last sequence for this subject.
-// Lock should be held.
+// Lock should be held. Now optimized with subject sequence cache.
 func (ms *memStore) recalculateForSubj(subj string, ss *SimpleState) {
+	// Try to get from cache first
+	if first, last, ok := ms.getSubjFirstLastFromCache(subj); ok {
+		if ss.firstNeedsUpdate {
+			ss.First = first
+			ss.firstNeedsUpdate = false
+		}
+		if ss.lastNeedsUpdate {
+			ss.Last = last
+			ss.lastNeedsUpdate = false
+		}
+		return
+	}
+
+	// Fallback to original linear scan if cache is not available
 	if ss.firstNeedsUpdate {
 		tseq := ss.First + 1
 		if tseq < ms.state.FirstSeq {
@@ -1875,10 +1968,17 @@ func (ms *memStore) removeMsg(seq uint64, secure bool) bool {
 			crand.Read(sm.msg)
 		}
 		sm.seq, sm.ts = 0, 0
+	} else {
+		// Return buffer to pool when not doing secure erase
+		if sm.buf != nil {
+			putMsgBuffer(sm.buf)
+		}
 	}
 
 	// Remove any per subject tracking.
 	ms.removeSeqPerSubject(sm.subj, seq)
+	// Remove from subject sequence cache
+	ms.removeSeqFromSubjCache(sm.subj, seq)
 
 	// Must delete message after updating per-subject info, to be consistent with file store.
 	delete(ms.msgs, seq)
