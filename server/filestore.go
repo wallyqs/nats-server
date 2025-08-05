@@ -5998,14 +5998,36 @@ func (mb *msgBlock) writeMsgRecordLocked(rl, seq uint64, subj string, mhdr, msg 
 	copy(buf[offset:], msg)
 	offset += len(msg)
 
-	// Calculate hash.
-	mb.hh.Reset()
-	mb.hh.Write(hdr[4:20])
-	mb.hh.Write(stringToBytes(subj))
+	// Calculate hash with optimized single-pass computation.
+	// Pre-calculate total size for hash data to minimize allocations
+	hashDataSize := 16 + len(subj) + len(msg) // hdr[4:20] is 16 bytes
 	if hasHeaders {
-		mb.hh.Write(mhdr)
+		hashDataSize += len(mhdr)
 	}
-	mb.hh.Write(msg)
+
+	// Use a temporary buffer for combined hash data (reuse if small enough)
+	var hashData []byte
+	if hashDataSize <= 1024 { // Use stack-allocated buffer for small data
+		var stackBuf [1024]byte
+		hashData = stackBuf[:hashDataSize]
+	} else {
+		hashData = make([]byte, hashDataSize)
+	}
+
+	// Copy all hash data into single buffer for one hash operation
+	copy(hashData[0:16], hdr[4:20])
+	hashOffset := 16
+	copy(hashData[hashOffset:], stringToBytes(subj))
+	hashOffset += len(subj)
+	if hasHeaders {
+		copy(hashData[hashOffset:], mhdr)
+		hashOffset += len(mhdr)
+	}
+	copy(hashData[hashOffset:], msg)
+
+	// Single hash operation instead of multiple Write calls
+	mb.hh.Reset()
+	mb.hh.Write(hashData)
 	checksum := mb.hh.Sum(mb.lchk[:0:highwayhash.Size64])
 	copy(mb.lchk[0:], checksum)
 
