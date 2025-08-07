@@ -180,6 +180,7 @@ const (
 	JSApiConsumerPauseT = "$JS.API.CONSUMER.PAUSE.%s.%s"
 
 	// JSApiRequestNextT is the prefix for the request next message(s) for a consumer in worker/pull mode.
+	JSApiRequestNext  = "$JS.API.CONSUMER.MSG.NEXT.*.*"
 	JSApiRequestNextT = "$JS.API.CONSUMER.MSG.NEXT.%s.%s"
 
 	// JSApiConsumerUnpinT is the prefix for unpinning subscription for a given consumer.
@@ -833,6 +834,108 @@ type jsAPIRoutedReq struct {
 	pa      pubArg
 }
 
+// getAPISubjectPattern returns the base API pattern for a subject to use for counting
+// Optimized version using hierarchical parsing instead of linear string prefix checks
+func (js *jetStream) getAPISubjectPattern(subject string) string {
+	// Quick length and prefix checks
+	if len(subject) < 10 || !strings.HasPrefix(subject, "$JS.API.") {
+		return "unknown"
+	}
+
+	// Skip "$JS.API." (8 chars) and parse the next component
+	rest := subject[8:]
+
+	switch {
+	case rest == "INFO":
+		return JSApiAccountInfo
+	case strings.HasPrefix(rest, "STREAM."):
+		return js.parseStreamAPI(rest[7:]) // Skip "STREAM."
+	case strings.HasPrefix(rest, "CONSUMER."):
+		return js.parseConsumerAPI(rest[9:]) // Skip "CONSUMER."
+	case strings.HasPrefix(rest, "DIRECT.GET."):
+		return JSDirectMsgGet
+	default:
+		return "unknown"
+	}
+}
+
+// parseStreamAPI parses stream-related API subjects
+func (js *jetStream) parseStreamAPI(rest string) string {
+	switch {
+	case strings.HasPrefix(rest, "CREATE."):
+		return JSApiStreamCreate
+	case strings.HasPrefix(rest, "UPDATE."):
+		return JSApiStreamUpdate
+	case rest == "NAMES":
+		return JSApiStreams
+	case rest == "LIST":
+		return JSApiStreamList
+	case strings.HasPrefix(rest, "INFO."):
+		return JSApiStreamInfo
+	case strings.HasPrefix(rest, "DELETE."):
+		return JSApiStreamDelete
+	case strings.HasPrefix(rest, "PURGE."):
+		return JSApiStreamPurge
+	case strings.HasPrefix(rest, "SNAPSHOT."):
+		return JSApiStreamSnapshot
+	case strings.HasPrefix(rest, "RESTORE."):
+		return JSApiStreamRestore
+	case strings.HasPrefix(rest, "MSG.DELETE."):
+		return JSApiMsgDelete
+	case strings.HasPrefix(rest, "MSG.GET."):
+		return JSApiMsgGet
+	case strings.HasPrefix(rest, "TEMPLATE.CREATE."):
+		return JSApiTemplateCreate
+	case rest == "TEMPLATE.NAMES":
+		return JSApiTemplates
+	case strings.HasPrefix(rest, "TEMPLATE.INFO."):
+		return JSApiTemplateInfo
+	case strings.HasPrefix(rest, "TEMPLATE.DELETE."):
+		return JSApiTemplateDelete
+	case strings.HasPrefix(rest, "PEER.REMOVE."):
+		return JSApiStreamRemovePeer
+	case strings.HasPrefix(rest, "LEADER.STEPDOWN."):
+		return JSApiStreamLeaderStepDown
+	default:
+		return "unknown"
+	}
+}
+
+// parseConsumerAPI parses consumer-related API subjects
+func (js *jetStream) parseConsumerAPI(rest string) string {
+	switch {
+	case strings.HasPrefix(rest, "CREATE."):
+		return JSApiConsumerCreate
+	case strings.HasPrefix(rest, "DURABLE.CREATE."):
+		return JSApiDurableCreate
+	case strings.HasPrefix(rest, "NAMES."):
+		return JSApiConsumers
+	case strings.HasPrefix(rest, "LIST."):
+		return JSApiConsumerList
+	case strings.HasPrefix(rest, "INFO."):
+		return JSApiConsumerInfo
+	case strings.HasPrefix(rest, "DELETE."):
+		return JSApiConsumerDelete
+	case strings.HasPrefix(rest, "PAUSE."):
+		return JSApiConsumerPause
+	case strings.HasPrefix(rest, "UNPIN."):
+		return JSApiConsumerUnpin
+	case strings.HasPrefix(rest, "MSG.NEXT."):
+		return JSApiRequestNext
+	case strings.HasPrefix(rest, "LEADER.STEPDOWN."):
+		return JSApiConsumerLeaderStepDown
+	default:
+		return "unknown"
+	}
+}
+
+// incrementAPISubjectCounter increments the counter for the given API subject pattern
+func (js *jetStream) incrementAPISubjectCounter(pattern string) {
+	counterVal, _ := js.apiSubjectCounters.LoadOrStore(pattern, new(int64))
+	counter := counterVal.(*int64)
+	atomic.AddInt64(counter, 1)
+}
+
 func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, subject, reply string, rmsg []byte) {
 	// Ignore system level directives meta stepdown and peer remove requests here.
 	if subject == JSApiLeaderStepDown ||
@@ -840,6 +943,11 @@ func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, sub
 		strings.HasPrefix(subject, jsAPIAccountPre) {
 		return
 	}
+
+	// Increment counter for this API subject
+	pattern := js.getAPISubjectPattern(subject)
+	js.incrementAPISubjectCounter(pattern)
+
 	// No lock needed, those are immutable.
 	s, rr := js.srv, js.apiSubs.Match(subject)
 
