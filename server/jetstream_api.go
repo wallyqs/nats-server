@@ -813,64 +813,92 @@ type jsAPIRoutedReq struct {
 }
 
 // getAPISubjectPattern returns the base API pattern for a subject to use for counting
+// Optimized version using hierarchical parsing instead of linear string prefix checks
 func (js *jetStream) getAPISubjectPattern(subject string) string {
-	// Map specific subjects to their patterns for counting
+	// Quick length and prefix checks
+	if len(subject) < 10 || !strings.HasPrefix(subject, "$JS.API.") {
+		return "unknown"
+	}
+
+	// Skip "$JS.API." (8 chars) and parse the next component
+	rest := subject[8:]
+
 	switch {
-	case subject == JSApiAccountInfo:
+	case rest == "INFO":
 		return JSApiAccountInfo
-	case strings.HasPrefix(subject, "$JS.API.STREAM.CREATE."):
-		return JSApiStreamCreate
-	case strings.HasPrefix(subject, "$JS.API.STREAM.UPDATE."):
-		return JSApiStreamUpdate
-	case subject == JSApiStreams:
-		return JSApiStreams
-	case subject == JSApiStreamList:
-		return JSApiStreamList
-	case strings.HasPrefix(subject, "$JS.API.STREAM.INFO."):
-		return JSApiStreamInfo
-	case strings.HasPrefix(subject, "$JS.API.STREAM.DELETE."):
-		return JSApiStreamDelete
-	case strings.HasPrefix(subject, "$JS.API.STREAM.PURGE."):
-		return JSApiStreamPurge
-	case strings.HasPrefix(subject, "$JS.API.STREAM.SNAPSHOT."):
-		return JSApiStreamSnapshot
-	case strings.HasPrefix(subject, "$JS.API.STREAM.RESTORE."):
-		return JSApiStreamRestore
-	case strings.HasPrefix(subject, "$JS.API.STREAM.MSG.DELETE."):
-		return JSApiMsgDelete
-	case strings.HasPrefix(subject, "$JS.API.STREAM.MSG.GET."):
-		return JSApiMsgGet
-	case strings.HasPrefix(subject, "$JS.API.DIRECT.GET."):
+	case strings.HasPrefix(rest, "STREAM."):
+		return js.parseStreamAPI(rest[7:]) // Skip "STREAM."
+	case strings.HasPrefix(rest, "CONSUMER."):
+		return js.parseConsumerAPI(rest[9:]) // Skip "CONSUMER."
+	case strings.HasPrefix(rest, "DIRECT.GET."):
 		return JSDirectMsgGet
-	case strings.HasPrefix(subject, "$JS.API.CONSUMER.CREATE."):
-		return JSApiConsumerCreate
-	case strings.HasPrefix(subject, "$JS.API.CONSUMER.DURABLE.CREATE."):
-		return JSApiDurableCreate
-	case strings.HasPrefix(subject, "$JS.API.CONSUMER.NAMES."):
-		return JSApiConsumers
-	case strings.HasPrefix(subject, "$JS.API.CONSUMER.LIST."):
-		return JSApiConsumerList
-	case strings.HasPrefix(subject, "$JS.API.CONSUMER.INFO."):
-		return JSApiConsumerInfo
-	case strings.HasPrefix(subject, "$JS.API.CONSUMER.DELETE."):
-		return JSApiConsumerDelete
-	case strings.HasPrefix(subject, "$JS.API.CONSUMER.PAUSE."):
-		return JSApiConsumerPause
-	case strings.HasPrefix(subject, "$JS.API.CONSUMER.UNPIN."):
-		return JSApiConsumerUnpin
-	case strings.HasPrefix(subject, "$JS.API.STREAM.TEMPLATE.CREATE."):
+	default:
+		return "unknown"
+	}
+}
+
+// parseStreamAPI parses stream-related API subjects
+func (js *jetStream) parseStreamAPI(rest string) string {
+	switch {
+	case strings.HasPrefix(rest, "CREATE."):
+		return JSApiStreamCreate
+	case strings.HasPrefix(rest, "UPDATE."):
+		return JSApiStreamUpdate
+	case rest == "NAMES":
+		return JSApiStreams
+	case rest == "LIST":
+		return JSApiStreamList
+	case strings.HasPrefix(rest, "INFO."):
+		return JSApiStreamInfo
+	case strings.HasPrefix(rest, "DELETE."):
+		return JSApiStreamDelete
+	case strings.HasPrefix(rest, "PURGE."):
+		return JSApiStreamPurge
+	case strings.HasPrefix(rest, "SNAPSHOT."):
+		return JSApiStreamSnapshot
+	case strings.HasPrefix(rest, "RESTORE."):
+		return JSApiStreamRestore
+	case strings.HasPrefix(rest, "MSG.DELETE."):
+		return JSApiMsgDelete
+	case strings.HasPrefix(rest, "MSG.GET."):
+		return JSApiMsgGet
+	case strings.HasPrefix(rest, "TEMPLATE.CREATE."):
 		return JSApiTemplateCreate
-	case subject == JSApiTemplates:
+	case rest == "TEMPLATE.NAMES":
 		return JSApiTemplates
-	case strings.HasPrefix(subject, "$JS.API.STREAM.TEMPLATE.INFO."):
+	case strings.HasPrefix(rest, "TEMPLATE.INFO."):
 		return JSApiTemplateInfo
-	case strings.HasPrefix(subject, "$JS.API.STREAM.TEMPLATE.DELETE."):
+	case strings.HasPrefix(rest, "TEMPLATE.DELETE."):
 		return JSApiTemplateDelete
-	case strings.HasPrefix(subject, "$JS.API.STREAM.PEER.REMOVE."):
+	case strings.HasPrefix(rest, "PEER.REMOVE."):
 		return JSApiStreamRemovePeer
-	case strings.HasPrefix(subject, "$JS.API.STREAM.LEADER.STEPDOWN."):
+	case strings.HasPrefix(rest, "LEADER.STEPDOWN."):
 		return JSApiStreamLeaderStepDown
-	case strings.HasPrefix(subject, "$JS.API.CONSUMER.LEADER.STEPDOWN."):
+	default:
+		return "unknown"
+	}
+}
+
+// parseConsumerAPI parses consumer-related API subjects
+func (js *jetStream) parseConsumerAPI(rest string) string {
+	switch {
+	case strings.HasPrefix(rest, "CREATE."):
+		return JSApiConsumerCreate
+	case strings.HasPrefix(rest, "DURABLE.CREATE."):
+		return JSApiDurableCreate
+	case strings.HasPrefix(rest, "NAMES."):
+		return JSApiConsumers
+	case strings.HasPrefix(rest, "LIST."):
+		return JSApiConsumerList
+	case strings.HasPrefix(rest, "INFO."):
+		return JSApiConsumerInfo
+	case strings.HasPrefix(rest, "DELETE."):
+		return JSApiConsumerDelete
+	case strings.HasPrefix(rest, "PAUSE."):
+		return JSApiConsumerPause
+	case strings.HasPrefix(rest, "UNPIN."):
+		return JSApiConsumerUnpin
+	case strings.HasPrefix(rest, "LEADER.STEPDOWN."):
 		return JSApiConsumerLeaderStepDown
 	default:
 		return "unknown"
