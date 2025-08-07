@@ -123,8 +123,8 @@ type jetStream struct {
 	// System level request to purge a stream move
 	accountPurge *subscription
 
-	// JetStream API subject counters
-	apiSubjectCounters map[string]*int64
+	// JetStream API subject counters.
+	apiSubjectCounters sync.Map
 
 	// Some bools regarding general state.
 	metaRecovering bool
@@ -141,15 +141,13 @@ type JSAPISubjectStats map[string]uint64
 
 // ApiSubjectStats returns the current API subject counter values
 func (js *jetStream) ApiSubjectStats() JSAPISubjectStats {
-	js.mu.RLock()
-	defer js.mu.RUnlock()
-
 	stats := make(JSAPISubjectStats)
-	for pattern, counter := range js.apiSubjectCounters {
-		if counter != nil {
-			stats[pattern] = uint64(atomic.LoadInt64(counter))
-		}
-	}
+	js.apiSubjectCounters.Range(func(key, value interface{}) bool {
+		pattern := key.(string)
+		counter := value.(*int64)
+		stats[pattern] = uint64(atomic.LoadInt64(counter))
+		return true
+	})
 	return stats
 }
 
@@ -431,11 +429,10 @@ func (s *Server) initJetStreamEncryption() (err error) {
 // enableJetStream will start up the JetStream subsystem.
 func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 	js := &jetStream{
-		srv:                s,
-		config:             cfg,
-		accounts:           make(map[string]*jsAccount),
-		apiSubs:            NewSublistNoCache(),
-		apiSubjectCounters: make(map[string]*int64),
+		srv:      s,
+		config:   cfg,
+		accounts: make(map[string]*jsAccount),
+		apiSubs:  NewSublistNoCache(),
 	}
 	s.gcbMu.Lock()
 	if s.gcbOutMax = s.getOpts().JetStreamMaxCatchup; s.gcbOutMax == 0 {

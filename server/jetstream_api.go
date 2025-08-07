@@ -879,13 +879,8 @@ func (js *jetStream) getAPISubjectPattern(subject string) string {
 
 // incrementAPISubjectCounter increments the counter for the given API subject pattern
 func (js *jetStream) incrementAPISubjectCounter(pattern string) {
-	js.mu.Lock()
-	counter := js.apiSubjectCounters[pattern]
-	if counter == nil {
-		counter = new(int64)
-		js.apiSubjectCounters[pattern] = counter
-	}
-	js.mu.Unlock()
+	counterVal, _ := js.apiSubjectCounters.LoadOrStore(pattern, new(int64))
+	counter := counterVal.(*int64)
 	atomic.AddInt64(counter, 1)
 }
 
