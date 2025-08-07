@@ -5036,20 +5036,20 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 			}
 		}
 
-		// Check for sent_at timestamp header
-		if sentAt := getSentAt(hdr); sentAt > 0 {
-			// Calculate the message age in nanoseconds
-			now := time.Now().UnixNano()
-			messageAge := now - sentAt
+		// // Check for sent_at timestamp header
+		// if sentAt := getSentAt(hdr); sentAt > 0 {
+		// 	// Calculate the message age in nanoseconds
+		// 	now := time.Now().UnixNano()
+		// 	messageAge := now - sentAt
 
-			// Only record delay if it's positive (message wasn't sent in the future)
-			if messageAge > 0 {
-				// Record the delay in our metrics system
-				if js.delayMetrics != nil {
-					js.delayMetrics.recordDelay(messageAge)
-				}
-			}
-		}
+		// 	// Only record delay if it's positive (message wasn't sent in the future)
+		// 	if messageAge > 0 {
+		// 		// Record the delay in our metrics system
+		// 		if js.delayMetrics != nil {
+		// 			js.delayMetrics.recordDelay(messageAge)
+		// 		}
+		// 	}
+		// }
 
 		// Expected last sequence per subject.
 		if seq, exists := getExpectedLastSeqPerSubject(hdr); exists {
@@ -5415,6 +5415,21 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		response = append(pubAck, strconv.FormatUint(seq, 10)...)
 		response = append(response, '}')
 		mset.outq.sendMsg(reply, response)
+	}
+
+	// Check for sent_at timestamp header.
+	if sentAt := getSentAt(hdr); sentAt > 0 {
+		// Calculate the message age in nanoseconds
+		now := time.Now().UnixNano()
+		messageAge := now - sentAt
+
+		// Only record delay if it's positive (message wasn't sent in the future)
+		if messageAge > 0 {
+			// Record the delay in our metrics system
+			if js.delayMetrics != nil {
+				js.delayMetrics.recordDelay(messageAge)
+			}
+		}
 	}
 
 	// Signal consumers for new messages.
