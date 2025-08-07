@@ -430,6 +430,7 @@ const (
 	JSResponseType            = "Nats-Response-Type"
 	JSMessageTTL              = "Nats-TTL"
 	JSMarkerReason            = "Nats-Marker-Reason"
+	JSSentAt                  = "Nats-Sent-At"
 )
 
 // Headers for published KV messages.
@@ -4383,6 +4384,21 @@ func getExpectedLastSeqPerSubjectForSubject(hdr []byte) string {
 	return string(getHeader(JSExpectedLastSubjSeqSubj, hdr))
 }
 
+// Fast lookup of sent_at timestamp from headers.
+// Returns the timestamp in nanoseconds since Unix epoch, or 0 if not present/invalid.
+func getSentAt(hdr []byte) int64 {
+	sentAtBytes := getHeader(JSSentAt, hdr)
+	if len(sentAtBytes) == 0 {
+		return 0
+	}
+	timestamp := parseInt64(sentAtBytes)
+	// parseInt64 returns -1 for invalid input, we want to return 0 for invalid timestamps
+	if timestamp < 0 {
+		return 0
+	}
+	return timestamp
+}
+
 // Fast lookup of the message TTL from headers:
 // - Positive return value: duration in seconds.
 // - Zero return value: no TTL or parse error.
@@ -5016,6 +5032,21 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 						outq.sendMsg(reply, response)
 					}
 					return errMsgIdDuplicate
+				}
+			}
+		}
+
+		// Check for sent_at timestamp header
+		if sentAt := getSentAt(hdr); sentAt > 0 {
+			// Calculate the message age in nanoseconds
+			now := time.Now().UnixNano()
+			messageAge := now - sentAt
+
+			// Only record delay if it's positive (message wasn't sent in the future)
+			if messageAge > 0 {
+				// Record the delay in our metrics system
+				if js.delayMetrics != nil {
+					js.delayMetrics.recordDelay(messageAge)
 				}
 			}
 		}

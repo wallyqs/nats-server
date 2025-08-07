@@ -60,6 +60,7 @@ type JetStreamStats struct {
 	Accounts       int               `json:"accounts"`
 	HAAssets       int               `json:"ha_assets"`
 	API            JetStreamAPIStats `json:"api"`
+	DelayMetrics   MessageDelayStats `json:"delay_metrics,omitempty"` // Message delay statistics
 }
 
 type JetStreamAccountLimits struct {
@@ -100,6 +101,38 @@ type JetStreamAPIStats struct {
 	Subjects map[string]uint64 `json:"subjects,omitempty"` // Per-subject API request counts
 }
 
+// MessageDelayMetrics tracks message delay statistics using atomic operations
+type MessageDelayMetrics struct {
+	// Rolling average components (atomic)
+	totalDelay  int64 // Sum of all delays in nanoseconds
+	sampleCount int64 // Number of samples
+
+	// Distribution counters (atomic) - small delays use "under", large delays use "over"
+	delayUnder100ms int64 // Count of messages with delay < 100ms
+	delay100ms      int64 // Count of messages with delay > 100ms
+	delay250ms      int64 // Count of messages with delay > 250ms
+	delay500ms      int64 // Count of messages with delay > 500ms
+	delay1s         int64 // Count of messages with delay > 1s
+
+	// Circular buffer for more accurate rolling average
+	mu         sync.Mutex
+	samples    []int64 // Circular buffer of delay samples
+	index      int     // Current index in circular buffer
+	bufferFull bool    // Whether buffer has been filled once
+}
+
+// MessageDelayStats contains delay statistics for external consumption
+type MessageDelayStats struct {
+	AverageDelayNs  int64   `json:"average_delay_ns"`  // Average delay in nanoseconds
+	AverageDelayMs  float64 `json:"average_delay_ms"`  // Average delay in milliseconds
+	SampleCount     uint64  `json:"sample_count"`      // Total number of samples
+	DelayUnder100ms uint64  `json:"delay_under_100ms"` // Count of messages < 100ms delay
+	DelayOver100ms  uint64  `json:"delay_over_100ms"`  // Count of messages > 100ms delay
+	DelayOver250ms  uint64  `json:"delay_over_250ms"`  // Count of messages > 250ms delay
+	DelayOver500ms  uint64  `json:"delay_over_500ms"`  // Count of messages > 500ms delay
+	DelayOver1s     uint64  `json:"delay_over_1s"`     // Count of messages > 1s delay
+}
+
 // This is for internal accounting for JetStream for this server.
 type jetStream struct {
 	// These are here first because of atomics on 32bit systems.
@@ -126,6 +159,9 @@ type jetStream struct {
 	// JetStream API subject counters.
 	apiSubjectCounters sync.Map
 
+	// Message delay metrics (lock-free)
+	delayMetrics *MessageDelayMetrics
+
 	// Some bools regarding general state.
 	metaRecovering bool
 	standAlone     bool
@@ -149,6 +185,91 @@ func (js *jetStream) ApiSubjectStats() JSAPISubjectStats {
 		return true
 	})
 	return stats
+}
+
+// newMessageDelayMetrics creates a new delay metrics tracker
+func newMessageDelayMetrics(bufferSize int) *MessageDelayMetrics {
+	if bufferSize <= 0 {
+		bufferSize = 1000 // Default buffer size
+	}
+	return &MessageDelayMetrics{
+		samples: make([]int64, bufferSize),
+	}
+}
+
+// recordDelay records a message delay and updates all metrics
+func (dm *MessageDelayMetrics) recordDelay(delayNs int64) {
+	// Update atomic counters for overall stats
+	atomic.AddInt64(&dm.totalDelay, delayNs)
+	atomic.AddInt64(&dm.sampleCount, 1)
+
+	// Update distribution counters based on delay thresholds
+	delayMs := delayNs / 1_000_000 // Convert to milliseconds
+
+	// Count delays under thresholds (for delays < 100ms)
+	if delayMs < 100 {
+		atomic.AddInt64(&dm.delayUnder100ms, 1)
+	}
+
+	// Count delays over thresholds (for delays > 100ms)
+	if delayMs > 100 {
+		atomic.AddInt64(&dm.delay100ms, 1)
+	}
+	if delayMs > 250 {
+		atomic.AddInt64(&dm.delay250ms, 1)
+	}
+	if delayMs > 500 {
+		atomic.AddInt64(&dm.delay500ms, 1)
+	}
+	if delayMs > 1000 {
+		atomic.AddInt64(&dm.delay1s, 1)
+	}
+
+	// Update circular buffer for rolling average
+	dm.mu.Lock()
+	oldValue := dm.samples[dm.index]
+	dm.samples[dm.index] = delayNs
+	dm.index = (dm.index + 1) % len(dm.samples)
+	if dm.index == 0 {
+		dm.bufferFull = true
+	}
+	dm.mu.Unlock()
+
+	// If buffer was full, subtract the old value from totals to maintain rolling average
+	if dm.bufferFull && oldValue != 0 {
+		atomic.AddInt64(&dm.totalDelay, -oldValue)
+		atomic.AddInt64(&dm.sampleCount, -1)
+	}
+}
+
+// getStats returns current delay statistics
+func (dm *MessageDelayMetrics) getStats() MessageDelayStats {
+	totalDelay := atomic.LoadInt64(&dm.totalDelay)
+	sampleCount := atomic.LoadInt64(&dm.sampleCount)
+
+	var avgDelayNs int64
+	if sampleCount > 0 {
+		avgDelayNs = totalDelay / sampleCount
+	}
+
+	return MessageDelayStats{
+		AverageDelayNs:  avgDelayNs,
+		AverageDelayMs:  float64(avgDelayNs) / 1_000_000.0,
+		SampleCount:     uint64(sampleCount),
+		DelayUnder100ms: uint64(atomic.LoadInt64(&dm.delayUnder100ms)),
+		DelayOver100ms:  uint64(atomic.LoadInt64(&dm.delay100ms)),
+		DelayOver250ms:  uint64(atomic.LoadInt64(&dm.delay250ms)),
+		DelayOver500ms:  uint64(atomic.LoadInt64(&dm.delay500ms)),
+		DelayOver1s:     uint64(atomic.LoadInt64(&dm.delay1s)),
+	}
+}
+
+// getDelayStats returns current delay statistics for the JetStream instance
+func (js *jetStream) getDelayStats() MessageDelayStats {
+	if js.delayMetrics == nil {
+		return MessageDelayStats{}
+	}
+	return js.delayMetrics.getStats()
 }
 
 type remoteUsage struct {
@@ -429,10 +550,11 @@ func (s *Server) initJetStreamEncryption() (err error) {
 // enableJetStream will start up the JetStream subsystem.
 func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 	js := &jetStream{
-		srv:      s,
-		config:   cfg,
-		accounts: make(map[string]*jsAccount),
-		apiSubs:  NewSublistNoCache(),
+		srv:          s,
+		config:       cfg,
+		accounts:     make(map[string]*jsAccount),
+		apiSubs:      NewSublistNoCache(),
+		delayMetrics: newMessageDelayMetrics(1000), // 1000 sample rolling buffer
 	}
 	s.gcbMu.Lock()
 	if s.gcbOutMax = s.getOpts().JetStreamMaxCatchup; s.gcbOutMax == 0 {
@@ -2438,6 +2560,7 @@ func (js *jetStream) usageStats() *JetStreamStats {
 	}
 	stats.Store = uint64(used)
 	stats.HAAssets = s.numRaftNodes()
+	stats.DelayMetrics = js.getDelayStats()
 	return &stats
 }
 
