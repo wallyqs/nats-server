@@ -419,6 +419,13 @@ type stream struct {
 
 	monitorWg sync.WaitGroup // Wait group for the monitor routine.
 
+	// Reset retry tracking
+	resetMu        sync.Mutex    // Mutex for reset retry state
+	resetAttempts  int           // Number of consecutive reset attempts
+	lastResetTime  time.Time     // Time of last reset attempt
+	resetBackoff   time.Duration // Current backoff duration
+	resetInProcess atomic.Bool   // Flag to prevent concurrent resets
+
 	batches *batching // Inflight batches prior to committing them.
 }
 

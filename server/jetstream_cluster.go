@@ -16,6 +16,7 @@ package server
 import (
 	"bytes"
 	"cmp"
+	"context"
 	crand "crypto/rand"
 	"encoding/binary"
 	"encoding/json"
@@ -2841,7 +2842,17 @@ func (mset *stream) isMigrating() bool {
 	return true
 }
 
+// Constants for reset retry logic
+const (
+	maxResetAttempts    = 5                 // Maximum number of consecutive reset attempts
+	initialResetBackoff = 1 * time.Second   // Initial backoff duration
+	maxResetBackoff     = 60 * time.Second  // Maximum backoff duration
+	resetCooldownPeriod = 300 * time.Second // Time after which reset attempts counter is reset
+	resetTimeout        = 30 * time.Second  // Maximum time allowed for a reset operation
+)
+
 // resetClusteredState is called when a clustered stream had an error (e.g sequence mismatch, bad snapshot) and needs to be reset.
+// Now includes retry logic with exponential backoff to prevent infinite reset loops.
 func (mset *stream) resetClusteredState(err error) bool {
 	mset.mu.RLock()
 	s, js, jsa, sa, acc, node := mset.srv, mset.js, mset.jsa, mset.sa, mset.acc, mset.node
@@ -2855,6 +2866,18 @@ func (mset *stream) resetClusteredState(err error) bool {
 		// Explicitly returning true here, we want the outside to break out of the monitoring loop as well.
 		return true
 	}
+
+	// Check retry logic to prevent infinite reset loops
+	if !mset.shouldAttemptReset(err, s) {
+		return false
+	}
+
+	// Prevent concurrent resets
+	if !mset.resetInProcess.CompareAndSwap(false, true) {
+		s.Debugf("Stream '%s > %s' reset already in progress, skipping", acc, mset.name())
+		return false
+	}
+	defer mset.resetInProcess.Store(false)
 
 	// Stepdown regardless if we are the leader here.
 	if node != nil {
@@ -2892,45 +2915,44 @@ func (mset *stream) resetClusteredState(err error) bool {
 	// Preserve our current state and messages unless we have a first sequence mismatch.
 	shouldDelete := err == errFirstSequenceMismatch
 
-	// Need to do the rest in a separate Go routine.
+	// Record the reset attempt
+	mset.recordResetAttempt()
+
+	// Need to do the rest in a separate Go routine with timeout protection.
 	go func() {
-		mset.monitorWg.Wait()
-		mset.resetAndWaitOnConsumers()
-		// Stop our stream.
-		mset.stop(shouldDelete, false)
+		// Create timeout context to prevent deadlocks
+		ctx, cancel := context.WithTimeout(context.Background(), resetTimeout)
+		defer cancel()
 
-		if sa != nil {
-			js.mu.Lock()
-			if js.shuttingDown {
-				js.mu.Unlock()
-				return
-			}
+		// Channel to signal completion
+		done := make(chan bool, 1)
 
-			s.Warnf("Resetting stream cluster state for '%s > %s'", sa.Client.serviceAccount(), sa.Config.Name)
-			// Mark stream assignment as resetting, so we don't double-account reserved resources.
-			// But only if we're not also releasing the resources as part of the delete.
-			sa.resetting = !shouldDelete
-			// Now wipe groups from assignments.
-			sa.Group.node = nil
-			var consumers []*consumerAssignment
-			if cc := js.cluster; cc != nil && cc.meta != nil {
-				ourID := cc.meta.ID()
-				for _, ca := range sa.consumers {
-					if rg := ca.Group; rg != nil && rg.isMember(ourID) {
-						rg.node = nil // Erase group raft/node state.
-						consumers = append(consumers, ca)
-					}
+		// Run reset operation in separate goroutine
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.Errorf("Stream '%s > %s' reset panic: %v", acc, mset.name(), r)
+					mset.resetCompleted(false)
+					done <- false
+					return
 				}
-			}
-			js.mu.Unlock()
+				// Mark reset as successful if we reach the end
+				mset.resetCompleted(true)
+				done <- true
+			}()
 
-			// This will reset the stream and consumers.
-			// Reset stream.
-			js.processClusterCreateStream(acc, sa)
-			// Reset consumers.
-			for _, ca := range consumers {
-				js.processClusterCreateConsumer(ca, nil, false)
+			mset.performReset(shouldDelete, sa, acc, js)
+		}()
+
+		// Wait for completion or timeout
+		select {
+		case success := <-done:
+			if !success {
+				s.Warnf("Stream '%s > %s' reset failed", acc, mset.name())
 			}
+		case <-ctx.Done():
+			s.Errorf("Stream '%s > %s' reset timed out after %v", acc, mset.name(), resetTimeout)
+			mset.resetCompleted(false)
 		}
 	}()
 
@@ -9637,3 +9659,109 @@ const (
 	jsaUpdatesSubT       = "$JSC.ARU.%s.*"
 	jsaUpdatesPubT       = "$JSC.ARU.%s.%s"
 )
+
+// shouldAttemptReset checks if a stream reset should be attempted based on retry logic
+func (mset *stream) shouldAttemptReset(err error, s *Server) bool {
+	mset.resetMu.Lock()
+	defer mset.resetMu.Unlock()
+
+	now := time.Now()
+	streamName := mset.name()
+	accName := mset.acc.GetName()
+
+	// Reset counter if enough time has passed since last reset
+	if now.Sub(mset.lastResetTime) > resetCooldownPeriod {
+		mset.resetAttempts = 0
+		mset.resetBackoff = 0
+	}
+
+	// Check if we've exceeded max attempts
+	if mset.resetAttempts >= maxResetAttempts {
+		s.Errorf("Stream '%s > %s' has exceeded maximum reset attempts (%d), giving up. Error: %v",
+			accName, streamName, maxResetAttempts, err)
+		return false
+	}
+
+	// Check if we need to wait for backoff period
+	if mset.resetBackoff > 0 && now.Sub(mset.lastResetTime) < mset.resetBackoff {
+		remaining := mset.resetBackoff - now.Sub(mset.lastResetTime)
+		s.Warnf("Stream '%s > %s' reset backoff in effect, waiting %v before next attempt. Error: %v",
+			accName, streamName, remaining, err)
+		return false
+	}
+
+	return true
+}
+
+// recordResetAttempt updates the reset attempt counter and backoff
+func (mset *stream) recordResetAttempt() {
+	mset.resetMu.Lock()
+	defer mset.resetMu.Unlock()
+
+	mset.resetAttempts++
+	mset.lastResetTime = time.Now()
+
+	// Calculate exponential backoff: 1s, 2s, 4s, 8s, 16s, then cap at maxResetBackoff
+	if mset.resetAttempts > 1 {
+		backoff := time.Duration(1<<uint(mset.resetAttempts-2)) * initialResetBackoff
+		if backoff > maxResetBackoff {
+			backoff = maxResetBackoff
+		}
+		mset.resetBackoff = backoff
+	}
+}
+
+// resetCompleted marks a reset operation as completed
+func (mset *stream) resetCompleted(successful bool) {
+	mset.resetMu.Lock()
+	defer mset.resetMu.Unlock()
+
+	if successful {
+		// Reset counter on successful reset
+		mset.resetAttempts = 0
+		mset.resetBackoff = 0
+	}
+}
+
+// performReset contains the actual reset logic extracted to enable timeout handling
+func (mset *stream) performReset(shouldDelete bool, sa *streamAssignment, acc *Account, js *jetStream) {
+	mset.monitorWg.Wait()
+	mset.resetAndWaitOnConsumers()
+	// Stop our stream.
+	mset.stop(shouldDelete, false)
+
+	if sa != nil {
+		js.mu.Lock()
+		if js.shuttingDown {
+			js.mu.Unlock()
+			return
+		}
+
+		s := mset.srv
+		s.Warnf("Resetting stream cluster state for '%s > %s'", sa.Client.serviceAccount(), sa.Config.Name)
+		// Mark stream assignment as resetting, so we don't double-account reserved resources.
+		// But only if we're not also releasing the resources as part of the delete.
+		sa.resetting = !shouldDelete
+		// Now wipe groups from assignments.
+		sa.Group.node = nil
+		var consumers []*consumerAssignment
+		if cc := js.cluster; cc != nil && cc.meta != nil {
+			ourID := cc.meta.ID()
+			for _, ca := range sa.consumers {
+				if rg := ca.Group; rg != nil && rg.isMember(ourID) {
+					rg.node = nil // Erase group raft/node state.
+					consumers = append(consumers, ca)
+				}
+			}
+		}
+		js.mu.Unlock()
+
+		// This will reset the stream and consumers.
+		// Reset stream.
+		js.processClusterCreateStream(acc, sa)
+		// Reset consumers.
+		for _, ca := range consumers {
+			js.processClusterCreateConsumer(ca, nil, false)
+		}
+	}
+}
