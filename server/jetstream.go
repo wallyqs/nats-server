@@ -93,10 +93,11 @@ type JetStreamAccountStats struct {
 
 // JetStreamAPIStats holds stats about the API usage for this server
 type JetStreamAPIStats struct {
-	Level    int    `json:"level"`              // Level is the active API level this server implements
-	Total    uint64 `json:"total"`              // Total is the total API requests received since start
-	Errors   uint64 `json:"errors"`             // Errors is the total API requests that resulted in error responses
-	Inflight uint64 `json:"inflight,omitempty"` // Inflight are the number of API requests currently being served
+	Level    int               `json:"level"`              // Level is the active API level this server implements
+	Total    uint64            `json:"total"`              // Total is the total API requests received since start
+	Errors   uint64            `json:"errors"`             // Errors is the total API requests that resulted in error responses
+	Inflight uint64            `json:"inflight,omitempty"` // Inflight are the number of API requests currently being served
+	Subjects map[string]uint64 `json:"subjects,omitempty"` // Per-subject API request counts
 }
 
 // This is for internal accounting for JetStream for this server.
@@ -122,6 +123,9 @@ type jetStream struct {
 	// System level request to purge a stream move
 	accountPurge *subscription
 
+	// JetStream API subject counters
+	apiSubjectCounters map[string]*int64
+
 	// Some bools regarding general state.
 	metaRecovering bool
 	standAlone     bool
@@ -130,6 +134,23 @@ type jetStream struct {
 
 	// Atomic versions
 	disabled atomic.Bool
+}
+
+// JSAPISubjectStats contains per-subject API statistics
+type JSAPISubjectStats map[string]uint64
+
+// ApiSubjectStats returns the current API subject counter values
+func (js *jetStream) ApiSubjectStats() JSAPISubjectStats {
+	js.mu.RLock()
+	defer js.mu.RUnlock()
+
+	stats := make(JSAPISubjectStats)
+	for pattern, counter := range js.apiSubjectCounters {
+		if counter != nil {
+			stats[pattern] = uint64(atomic.LoadInt64(counter))
+		}
+	}
+	return stats
 }
 
 type remoteUsage struct {
@@ -409,7 +430,13 @@ func (s *Server) initJetStreamEncryption() (err error) {
 
 // enableJetStream will start up the JetStream subsystem.
 func (s *Server) enableJetStream(cfg JetStreamConfig) error {
-	js := &jetStream{srv: s, config: cfg, accounts: make(map[string]*jsAccount), apiSubs: NewSublistNoCache()}
+	js := &jetStream{
+		srv:                s,
+		config:             cfg,
+		accounts:           make(map[string]*jsAccount),
+		apiSubs:            NewSublistNoCache(),
+		apiSubjectCounters: make(map[string]*int64),
+	}
 	s.gcbMu.Lock()
 	if s.gcbOutMax = s.getOpts().JetStreamMaxCatchup; s.gcbOutMax == 0 {
 		s.gcbOutMax = defaultMaxTotalCatchupOutBytes
@@ -1709,9 +1736,10 @@ func (a *Account) JetStreamUsage() JetStreamAccountStats {
 		stats.Memory, stats.Store = jsa.storageTotals()
 		stats.Domain = js.config.Domain
 		stats.API = JetStreamAPIStats{
-			Level:  JSApiLevel,
-			Total:  jsa.apiTotal,
-			Errors: jsa.apiErrors,
+			Level:    JSApiLevel,
+			Total:    jsa.apiTotal,
+			Errors:   jsa.apiErrors,
+			Subjects: js.ApiSubjectStats(),
 		}
 		if singleServer {
 			stats.ReservedMemory, stats.ReservedStore = jsa.reservedStorage(_EMPTY_)
@@ -2400,6 +2428,7 @@ func (js *jetStream) usageStats() *JetStreamStats {
 	stats.API.Total = uint64(atomic.LoadInt64(&js.apiTotal))
 	stats.API.Errors = uint64(atomic.LoadInt64(&js.apiErrors))
 	stats.API.Inflight = uint64(atomic.LoadInt64(&js.apiInflight))
+	stats.API.Subjects = js.ApiSubjectStats()
 	// Make sure we do not report negative.
 	used := atomic.LoadInt64(&js.memUsed)
 	if used < 0 {

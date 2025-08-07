@@ -812,6 +812,83 @@ type jsAPIRoutedReq struct {
 	pa      pubArg
 }
 
+// getAPISubjectPattern returns the base API pattern for a subject to use for counting
+func (js *jetStream) getAPISubjectPattern(subject string) string {
+	// Map specific subjects to their patterns for counting
+	switch {
+	case subject == JSApiAccountInfo:
+		return JSApiAccountInfo
+	case strings.HasPrefix(subject, "$JS.API.STREAM.CREATE."):
+		return JSApiStreamCreate
+	case strings.HasPrefix(subject, "$JS.API.STREAM.UPDATE."):
+		return JSApiStreamUpdate
+	case subject == JSApiStreams:
+		return JSApiStreams
+	case subject == JSApiStreamList:
+		return JSApiStreamList
+	case strings.HasPrefix(subject, "$JS.API.STREAM.INFO."):
+		return JSApiStreamInfo
+	case strings.HasPrefix(subject, "$JS.API.STREAM.DELETE."):
+		return JSApiStreamDelete
+	case strings.HasPrefix(subject, "$JS.API.STREAM.PURGE."):
+		return JSApiStreamPurge
+	case strings.HasPrefix(subject, "$JS.API.STREAM.SNAPSHOT."):
+		return JSApiStreamSnapshot
+	case strings.HasPrefix(subject, "$JS.API.STREAM.RESTORE."):
+		return JSApiStreamRestore
+	case strings.HasPrefix(subject, "$JS.API.STREAM.MSG.DELETE."):
+		return JSApiMsgDelete
+	case strings.HasPrefix(subject, "$JS.API.STREAM.MSG.GET."):
+		return JSApiMsgGet
+	case strings.HasPrefix(subject, "$JS.API.DIRECT.GET."):
+		return JSDirectMsgGet
+	case strings.HasPrefix(subject, "$JS.API.CONSUMER.CREATE."):
+		return JSApiConsumerCreate
+	case strings.HasPrefix(subject, "$JS.API.CONSUMER.DURABLE.CREATE."):
+		return JSApiDurableCreate
+	case strings.HasPrefix(subject, "$JS.API.CONSUMER.NAMES."):
+		return JSApiConsumers
+	case strings.HasPrefix(subject, "$JS.API.CONSUMER.LIST."):
+		return JSApiConsumerList
+	case strings.HasPrefix(subject, "$JS.API.CONSUMER.INFO."):
+		return JSApiConsumerInfo
+	case strings.HasPrefix(subject, "$JS.API.CONSUMER.DELETE."):
+		return JSApiConsumerDelete
+	case strings.HasPrefix(subject, "$JS.API.CONSUMER.PAUSE."):
+		return JSApiConsumerPause
+	case strings.HasPrefix(subject, "$JS.API.CONSUMER.UNPIN."):
+		return JSApiConsumerUnpin
+	case strings.HasPrefix(subject, "$JS.API.STREAM.TEMPLATE.CREATE."):
+		return JSApiTemplateCreate
+	case subject == JSApiTemplates:
+		return JSApiTemplates
+	case strings.HasPrefix(subject, "$JS.API.STREAM.TEMPLATE.INFO."):
+		return JSApiTemplateInfo
+	case strings.HasPrefix(subject, "$JS.API.STREAM.TEMPLATE.DELETE."):
+		return JSApiTemplateDelete
+	case strings.HasPrefix(subject, "$JS.API.STREAM.PEER.REMOVE."):
+		return JSApiStreamRemovePeer
+	case strings.HasPrefix(subject, "$JS.API.STREAM.LEADER.STEPDOWN."):
+		return JSApiStreamLeaderStepDown
+	case strings.HasPrefix(subject, "$JS.API.CONSUMER.LEADER.STEPDOWN."):
+		return JSApiConsumerLeaderStepDown
+	default:
+		return "unknown"
+	}
+}
+
+// incrementAPISubjectCounter increments the counter for the given API subject pattern
+func (js *jetStream) incrementAPISubjectCounter(pattern string) {
+	js.mu.Lock()
+	counter := js.apiSubjectCounters[pattern]
+	if counter == nil {
+		counter = new(int64)
+		js.apiSubjectCounters[pattern] = counter
+	}
+	js.mu.Unlock()
+	atomic.AddInt64(counter, 1)
+}
+
 func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, subject, reply string, rmsg []byte) {
 	// Ignore system level directives meta stepdown and peer remove requests here.
 	if subject == JSApiLeaderStepDown ||
@@ -819,6 +896,11 @@ func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, sub
 		strings.HasPrefix(subject, jsAPIAccountPre) {
 		return
 	}
+
+	// Increment counter for this API subject
+	pattern := js.getAPISubjectPattern(subject)
+	js.incrementAPISubjectCounter(pattern)
+
 	// No lock needed, those are immutable.
 	s, rr := js.srv, js.apiSubs.Match(subject)
 
