@@ -3880,6 +3880,14 @@ func (o *consumer) processNextMsgReq(_ *subscription, c *client, _ *Account, _, 
 	}
 
 	_, msg = c.msgParts(msg)
+
+	// Track MSG.NEXT API calls in counters
+	if mset := o.mset; mset != nil {
+		if js := mset.js; js != nil {
+			js.incrementAPISubjectCounter(JSApiRequestNext)
+		}
+	}
+
 	o.nextMsgReqs.push(newNextMsgReq(reply, copyBytes(msg)))
 }
 

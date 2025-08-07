@@ -16,6 +16,7 @@ package server
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 )
@@ -30,7 +31,7 @@ func TestJetStreamAPISubjectCounters(t *testing.T) {
 	// Get initial stats - should be empty
 	jsInstance := s.getJetStream()
 	require_True(t, jsInstance != nil)
-	
+
 	initialStats := jsInstance.ApiSubjectStats()
 	require_Equal(t, len(initialStats), 0)
 
@@ -62,7 +63,7 @@ func TestJetStreamAPISubjectCounters(t *testing.T) {
 
 	// Check that counters have been incremented
 	stats := jsInstance.ApiSubjectStats()
-	
+
 	// Should have at least these counters with non-zero values
 	expectedCounters := []string{
 		JSApiStreamCreate,
@@ -112,7 +113,7 @@ func TestJetStreamAPISubjectCountersConcurrency(t *testing.T) {
 			if id%2 == 0 {
 				pattern = JSApiConsumerCreate
 			}
-			
+
 			for j := 0; j < incrementsPerGoroutine; j++ {
 				jsInstance.incrementAPISubjectCounter(pattern)
 			}
@@ -136,7 +137,7 @@ func TestJetStreamAPISubjectCountersConcurrency(t *testing.T) {
 
 	// Verify final counts
 	stats := jsInstance.ApiSubjectStats()
-	
+
 	streamCreateCount := stats[JSApiStreamCreate]
 	consumerCreateCount := stats[JSApiConsumerCreate]
 
@@ -182,6 +183,7 @@ func TestJetStreamAPISubjectPatternMapping(t *testing.T) {
 		{"$JS.API.STREAM.PEER.REMOVE.mystream", JSApiStreamRemovePeer},
 		{"$JS.API.STREAM.LEADER.STEPDOWN.mystream", JSApiStreamLeaderStepDown},
 		{"$JS.API.CONSUMER.LEADER.STEPDOWN.mystream.myconsumer", JSApiConsumerLeaderStepDown},
+		{"$JS.API.CONSUMER.MSG.NEXT.mystream.myconsumer", JSApiRequestNext},
 		{"$JS.API.UNKNOWN.PATTERN", "unknown"},
 	}
 
@@ -228,4 +230,56 @@ func TestJetStreamAPISubjectCountersInAPIStats(t *testing.T) {
 	accountStreamCreateCount, exists := accountStats.API.Subjects[JSApiStreamCreate]
 	require_True(t, exists)
 	require_True(t, accountStreamCreateCount > 0)
+}
+
+func TestJetStreamMsgNextAPISubjectCounters(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create a stream and consumer for MSG.NEXT testing
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "MSG_NEXT_COUNTER_TEST",
+		Subjects: []string{"msgnext.counter.*"},
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("MSG_NEXT_COUNTER_TEST", &nats.ConsumerConfig{
+		Durable:   "test-consumer",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Publish some messages
+	for i := 0; i < 3; i++ {
+		_, err := js.Publish("msgnext.counter.test", []byte("test message"))
+		require_NoError(t, err)
+	}
+
+	// Get JetStream instance to check initial counter state
+	jsInstance := s.getJetStream()
+	require_True(t, jsInstance != nil)
+
+	// Get initial MSG.NEXT counter (should be 0)
+	initialStats := jsInstance.ApiSubjectStats()
+	initialMsgNextCount := initialStats[JSApiRequestNext]
+
+	// Make 2 MSG.NEXT requests directly
+	subject := "$JS.API.CONSUMER.MSG.NEXT.MSG_NEXT_COUNTER_TEST.test-consumer"
+	for i := 0; i < 2; i++ {
+		_, err := nc.Request(subject, []byte(`{"batch": 1}`), time.Second)
+		require_NoError(t, err)
+	}
+
+	// Wait a moment for counter updates
+	time.Sleep(50 * time.Millisecond)
+
+	// Check that MSG.NEXT counter increased by 2
+	finalStats := jsInstance.ApiSubjectStats()
+	finalMsgNextCount := finalStats[JSApiRequestNext]
+
+	t.Logf("MSG.NEXT counter: initial=%d, final=%d", initialMsgNextCount, finalMsgNextCount)
+	require_True(t, finalMsgNextCount == initialMsgNextCount+2)
 }

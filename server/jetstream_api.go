@@ -172,6 +172,7 @@ const (
 	JSApiConsumerPauseT = "$JS.API.CONSUMER.PAUSE.%s.%s"
 
 	// JSApiRequestNextT is the prefix for the request next message(s) for a consumer in worker/pull mode.
+	JSApiRequestNext  = "$JS.API.CONSUMER.MSG.NEXT.*.*"
 	JSApiRequestNextT = "$JS.API.CONSUMER.MSG.NEXT.%s.%s"
 
 	// JSApiConsumerUnpinT is the prefix for unpinning subscription for a given consumer.
@@ -898,6 +899,8 @@ func (js *jetStream) parseConsumerAPI(rest string) string {
 		return JSApiConsumerPause
 	case strings.HasPrefix(rest, "UNPIN."):
 		return JSApiConsumerUnpin
+	case strings.HasPrefix(rest, "MSG.NEXT."):
+		return JSApiRequestNext
 	case strings.HasPrefix(rest, "LEADER.STEPDOWN."):
 		return JSApiConsumerLeaderStepDown
 	default:
