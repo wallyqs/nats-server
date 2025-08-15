@@ -169,6 +169,18 @@ type StreamState struct {
 	Deleted     []uint64          `json:"deleted,omitempty"`
 	Lost        *LostStreamData   `json:"lost,omitempty"`
 	Consumers   int               `json:"consumer_count"`
+	
+	// Stream message lag statistics (clustered mode only)
+	ClusterLag  *StreamLagMetrics `json:"cluster_lag,omitempty"`
+}
+
+// StreamLagMetrics contains lag statistics for clustered streams
+type StreamLagMetrics struct {
+	Current      uint64    `json:"current"`         // Current lag value
+	Average      uint64    `json:"average"`         // Rolling average lag
+	Max          uint64    `json:"max"`             // Maximum lag in current window
+	SampleCount  uint64    `json:"sample_count"`    // Number of samples collected
+	LastUpdate   time.Time `json:"last_update"`     // Time of last lag measurement
 }
 
 // SimpleState for filtered subject specific state.

@@ -38,6 +38,87 @@ import (
 	"github.com/nats-io/nuid"
 )
 
+// StreamLagStats contains rolling average statistics for stream message lag.
+type StreamLagStats struct {
+	mu           sync.RWMutex
+	samples      []uint64     // Ring buffer of lag samples
+	index        int          // Current index in ring buffer
+	count        uint64       // Total number of samples recorded
+	sum          uint64       // Sum of current samples in buffer
+	maxSamples   int          // Maximum number of samples to keep (window size)
+	currentLag   uint64       // Most recent lag value
+	averageLag   float64      // Current rolling average
+	maxLag       uint64       // Maximum lag seen in current window
+	lastUpdate   time.Time    // Time of last update
+}
+
+// newStreamLagStats creates a new StreamLagStats with the specified window size.
+func newStreamLagStats(windowSize int) *StreamLagStats {
+	if windowSize <= 0 {
+		windowSize = 100 // Default to 100 samples
+	}
+	return &StreamLagStats{
+		samples:    make([]uint64, windowSize),
+		maxSamples: windowSize,
+		lastUpdate: time.Now(),
+	}
+}
+
+// addSample adds a new lag sample and updates the rolling average.
+func (s *StreamLagStats) addSample(lag uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	s.currentLag = lag
+	s.lastUpdate = time.Now()
+	
+	// Remove old value from sum if buffer is full
+	if s.count >= uint64(s.maxSamples) {
+		s.sum -= s.samples[s.index]
+	}
+	
+	// Add new sample
+	s.samples[s.index] = lag
+	s.sum += lag
+	s.index = (s.index + 1) % s.maxSamples
+	
+	if s.count < uint64(s.maxSamples) {
+		s.count++
+	}
+	
+	// Update rolling average
+	if s.count > 0 {
+		s.averageLag = float64(s.sum) / float64(s.count)
+	}
+	
+	// Update max lag in current window
+	if lag > s.maxLag || s.count == 1 {
+		s.maxLag = lag
+		// Recalculate max if this was the first sample
+		if s.count > 1 {
+			max := uint64(0)
+			samples := int(s.count)
+			if samples > s.maxSamples {
+				samples = s.maxSamples
+			}
+			for i := 0; i < samples; i++ {
+				if s.samples[i] > max {
+					max = s.samples[i]
+				}
+			}
+			s.maxLag = max
+		}
+	}
+}
+
+// getStats returns the current lag statistics.
+func (s *StreamLagStats) getStats() (current, average, max uint64, sampleCount uint64, lastUpdate time.Time) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	return s.currentLag, uint64(s.averageLag), s.maxLag, s.count, s.lastUpdate
+}
+
 // StreamConfigRequest is used to create or update a stream.
 type StreamConfigRequest struct {
 	StreamConfig
@@ -401,6 +482,7 @@ type stream struct {
 	clMu      sync.Mutex        // The mutex for clseq and clfs.
 	clseq     uint64            // The current last seq being proposed to the NRG layer.
 	clfs      uint64            // The count (offset) of the number of failed NRG sequences used to compute clseq.
+	lagStats  *StreamLagStats   // Rolling average lag statistics for clustered streams.
 	lqsent    time.Time         // The time at which the last lost quorum advisory was sent. Used to rate limit.
 	uch       chan struct{}     // The channel to signal updates to the monitor routine.
 	inMonitor bool              // True if the monitor routine has been started.
@@ -970,6 +1052,11 @@ func (mset *stream) setStreamAssignment(sa *streamAssignment) {
 	mset.node = node
 	if mset.node != nil {
 		mset.node.UpdateKnownPeers(peers)
+	}
+
+	// Initialize lag stats for clustered streams
+	if mset.lagStats == nil && sa != nil {
+		mset.lagStats = newStreamLagStats(100) // 100-sample rolling window
 	}
 
 	// Setup our info sub here as well for all stream members. This is now by design.
@@ -6193,9 +6280,15 @@ func (mset *stream) processJetStreamBatchMsg(batchId, subject, reply string, hdr
 
 		// Check to see if we are being overrun.
 		// TODO(dlc) - Make this a limit where we drop messages to protect ourselves, but allow to be configured.
-		if mset.clseq-(lseq+mset.clfs) > streamLagWarnThreshold {
+		currentLag := mset.clseq - (lseq + mset.clfs)
+		if currentLag > streamLagWarnThreshold {
 			lerr := fmt.Errorf("JetStream stream '%s > %s' has high message lag", jsa.acc().Name, name)
 			s.RateLimitWarnf("%s", lerr.Error())
+		}
+		
+		// Track lag statistics for JSZ API
+		if mset.lagStats != nil {
+			mset.lagStats.addSample(currentLag)
 		}
 	}
 	mset.clMu.Unlock()
@@ -6952,13 +7045,33 @@ func (mset *stream) stateWithDetail(details bool) StreamState {
 		return StreamState{}
 	}
 
+	var state StreamState
 	// Currently rely on store for details.
 	if details {
-		return store.State()
+		state = store.State()
+	} else {
+		// Here we do the fast version.
+		store.FastState(&state)
 	}
-	// Here we do the fast version.
-	var state StreamState
-	store.FastState(&state)
+	
+	// Add cluster lag statistics if available
+	mset.mu.RLock()
+	lagStats := mset.lagStats
+	mset.mu.RUnlock()
+	
+	if lagStats != nil {
+		current, average, max, sampleCount, lastUpdate := lagStats.getStats()
+		if sampleCount > 0 {
+			state.ClusterLag = &StreamLagMetrics{
+				Current:     current,
+				Average:     average,
+				Max:         max,
+				SampleCount: sampleCount,
+				LastUpdate:  lastUpdate,
+			}
+		}
+	}
+	
 	return state
 }
 
