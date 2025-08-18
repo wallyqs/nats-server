@@ -32,6 +32,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2022,6 +2023,155 @@ func TestConfigReloadMaxConnections(t *testing.T) {
 	_, err = nats.Connect(addr)
 	if err == nil {
 		t.Fatal("Expected error on connect")
+	}
+}
+
+// Test that max connections reload uses proper randomness when disconnecting clients.
+func TestConfigReloadMaxConnectionsRandomness(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		before   string
+		after    string
+		userPass string
+	}{
+		{
+			"GLOBAL MAX CONNS",
+			`
+                        listen = "127.0.0.1:-1"
+			`,
+			`
+                        listen = "127.0.0.1:-1"
+                        max_connections = 5
+                        `,
+			"",
+		},
+		{
+			"ACCOUNT MAX CONNS",
+			`
+                        listen: "127.0.0.1:-1"
+                        accounts {
+                           dummy {
+                            users = [{user: dummy, pass: foo}]
+                            limits { }
+                            }
+                        }
+			`,
+			`
+                        listen = "127.0.0.1:-1"
+                        accounts {
+                           dummy {
+                             users = [{user: dummy, pass: foo}]
+                             limits {
+                               max_connections: 5
+                             }
+                           }
+                        }
+                        `,
+			"dummy:foo",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, opts, config := runReloadServerWithContent(t, []byte(test.before))
+			defer s.Shutdown()
+
+			// Create many connections to test randomness.
+			numConnections := 20
+			keepConnections := 5
+			times := 10
+
+			addr := fmt.Sprintf("nats://%s@%s:%d", test.userPass, opts.Host, s.Addr().(*net.TCPAddr).Port)
+
+			// Track which connection positions get disconnected.
+			disconnectionCounts := make([]int, numConnections)
+
+			for i := 0; i < times; i++ {
+				var (
+					connections           []*nats.Conn
+					disconnectedCount     int32
+					disconnectedPositions = make([]bool, numConnections)
+				)
+				for ci := 0; ci < numConnections; ci++ {
+					nc, err := nats.Connect(addr)
+					if err != nil {
+						t.Fatalf("Error creating client %d: %v", ci, err)
+					}
+
+					// Set up disconnect handler to track which position was disconnected.
+					pos := ci
+					nc.SetDisconnectHandler(func(*nats.Conn) {
+						disconnectedPositions[pos] = true
+						atomic.AddInt32(&disconnectedCount, 1)
+					})
+					connections = append(connections, nc)
+				}
+
+				if s.NumClients() != numConnections {
+					t.Fatalf("Expected %d clients, got %d", numConnections, s.NumClients())
+				}
+
+				// Reload to reduce max connections.
+				reloadUpdateConfig(t, s, config, test.after)
+
+				// Wait for disconnections to complete.
+				checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+					if atomic.LoadInt32(&disconnectedCount) >= int32(numConnections-keepConnections) {
+						return nil
+					}
+					return fmt.Errorf("Timeout waiting for disconnections. Expected %d, got %d",
+						numConnections-keepConnections, atomic.LoadInt32(&disconnectedCount))
+				})
+
+				// Record which positions were disconnected
+				for i, disconnected := range disconnectedPositions {
+					if disconnected {
+						disconnectionCounts[i]++
+					}
+				}
+
+				// Clean up remaining connections.
+				for _, nc := range connections {
+					if !nc.IsClosed() {
+						nc.Close()
+					}
+				}
+
+				// Reset config for next iteration.
+				reloadUpdateConfig(t, s, config, test.before)
+				checkClientsCount(t, s, 0)
+			}
+
+			// Verify randomness: each connection should have a reasonable chance of being disconnected,
+			// since we disconnect 15 out of 20 connections each time, expected chance is 75%.
+			expectedDisconnections := float64(times) * 0.75
+
+			// Ensure no position is completely avoiding disconnection or always being disconnected.
+			minCount := times
+			maxCount := 0
+			tolerance := 3.0
+			totalDisconnections := 0
+			for i, count := range disconnectionCounts {
+				totalDisconnections += count
+				if count < minCount {
+					minCount = count
+				}
+				if count > maxCount {
+					maxCount = count
+				}
+
+				if float64(count) < (expectedDisconnections-tolerance) || float64(count) > (expectedDisconnections+tolerance) {
+					t.Logf("Position %d disconnected %d times (expected ~%.1f with +/- %.0f tolerance)", i, count, expectedDisconnections, tolerance)
+				}
+			}
+			// Confirm results approach uniform distribution.
+			if maxCount-minCount < 2 {
+				t.Errorf("Too uniform distribution, suggests poor randomness. Min: %d, Max: %d", minCount, maxCount)
+			}
+			// Verify total disconnections.
+			expectedTotal := times * (numConnections - keepConnections)
+			if totalDisconnections != expectedTotal {
+				t.Errorf("Total disconnections %d doesn't match expected %d", totalDisconnections, expectedTotal)
+			}
+		})
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"reflect"
 	"slices"
@@ -568,7 +569,9 @@ func (m *maxConnOption) Apply(server *Server) {
 		clients = make([]*client, len(server.clients))
 		i       = 0
 	)
-	// Map iteration is random, which allows us to close random connections.
+	// Collect all clients then shuffle with rand package rather
+	// than depending on map iteration order so that it follows a
+	// uniform distribution.
 	for _, client := range server.clients {
 		clients[i] = client
 		i++
@@ -576,6 +579,10 @@ func (m *maxConnOption) Apply(server *Server) {
 	server.mu.Unlock()
 
 	if m.newValue > 0 && len(clients) > m.newValue {
+		rand.Shuffle(len(clients), func(i, j int) {
+			clients[i], clients[j] = clients[j], clients[i]
+		})
+
 		// Close connections til we are within the limit.
 		var (
 			numClose = len(clients) - m.newValue
@@ -2132,6 +2139,14 @@ func (s *Server) reloadAuthorization() {
 		client.closeConnection(ClientClosed)
 	}
 
+	// Randomize order of gathered connections.  This is needed since one of the
+	// checks from isClientAuthorized is checking for max number of connections
+	// exceeded for an account which would then correct the number of connections
+	// to match the new setting, without this we would be relying on Go map iteration
+	// order which is not truly random.
+	rand.Shuffle(len(clients), func(i, j int) {
+		clients[i], clients[j] = clients[j], clients[i]
+	})
 	for _, c := range clients {
 		// Disconnect any unauthorized clients.
 		// Ignore internal clients.
