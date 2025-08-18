@@ -399,7 +399,7 @@ func (a *Account) updateRemoteServer(m *AccountNumConns) []*client {
 	var clients []*client
 	if mtce {
 		clients = a.getClientsLocked()
-		slices.SortFunc(clients, func(i, j *client) int { return -i.start.Compare(j.start) }) // reserve
+		slices.SortFunc(clients, func(i, j *client) int { return i.start.Compare(j.start) }) // close newest
 		over := (len(a.clients) - int(a.sysclients) + int(a.nrclients)) - int(a.mconns)
 		if over < len(clients) {
 			clients = clients[:over]
@@ -3769,9 +3769,9 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 	ajs := a.js
 	a.mu.Unlock()
 
-	// Sort if we are over the limit.
+	// Sort if we are over the limit to close the newest connections.
 	if a.MaxTotalConnectionsReached() {
-		slices.SortFunc(clients, func(i, j *client) int { return -i.start.Compare(j.start) }) // sort in reverse order
+		slices.SortFunc(clients, func(i, j *client) int { return i.start.Compare(j.start) })
 	}
 
 	// If JetStream is enabled for this server we will call into configJetStream for the account
