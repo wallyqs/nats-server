@@ -77,6 +77,7 @@ func createUserCreds(t *testing.T, _ *Server, akp nkeys.KeyPair) nats.Option {
 func runTrustedServer(t *testing.T) (*Server, *Options) {
 	t.Helper()
 	opts := DefaultOptions()
+	opts.Port = 4222
 	kp, _ := nkeys.FromSeed(oSeed)
 	pub, _ := kp.PublicKey()
 	opts.TrustedKeys = []string{pub}
@@ -1594,17 +1595,27 @@ func TestAccountConnsLimitExceededAfterUpdateDisconnectNewOnly(t *testing.T) {
 	// Now create the max connections.
 	// We create half then we will wait and then create the rest.
 	// Will test that we disconnect the newest ones.
+	newConns := make([]*nats.Conn, 0, 5)
 	url := fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port)
 	for i := 0; i < 5; i++ {
-		nc, err := nats.Connect(url, nats.Name("OLD"), nats.NoReconnect(), createUserCreds(t, s, akp))
+		nc, err := nats.Connect(url, nats.Name("OLD"), createUserCreds(t, s, akp))
 		require_NoError(t, err)
 		defer nc.Close()
 	}
 	time.Sleep(500 * time.Millisecond)
 	for i := 0; i < 5; i++ {
-		nc, err := nats.Connect(url, nats.Name("NEW"), nats.NoReconnect(), createUserCreds(t, s, akp))
+		nc, err := nats.Connect(url, nats.Name("NEW"), createUserCreds(t, s, akp),
+			nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+				t.Logf(":::::::::::::::::::::: %v", err)
+			}),
+			nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+				t.Logf(":::::::>:::::::::::::: %v", err)
+			}),
+		)
 		require_NoError(t, err)
 		defer nc.Close()
+		newConns = append(newConns, nc)
+		nc.Flush()
 	}
 
 	// We should have max here.
@@ -1629,6 +1640,20 @@ func TestAccountConnsLimitExceededAfterUpdateDisconnectNewOnly(t *testing.T) {
 	for _, c := range connz.Conns {
 		require_Equal(t, c.Name, "OLD")
 	}
+
+	// Now make sure that only the new ones were closed.
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		var closed int
+		for _, nc := range newConns {
+			if nc.IsClosed() {
+				closed++
+			}
+		}
+		if closed != 5 {
+			return fmt.Errorf("Expected all new clients to be closed, only got %d of 5", closed)
+		}
+		return nil
+	})
 }
 
 func TestSystemAccountWithBadRemoteLatencyUpdate(t *testing.T) {

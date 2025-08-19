@@ -3635,6 +3635,7 @@ func TestAccountUpdateRemoteServerDisconnectsOldestFirst(t *testing.T) {
 		c, err := nats.Connect(s.ClientURL(), nats.UserInfo("dummy", "foo"))
 		require_NoError(t, err)
 		defer c.Close()
+		_ = c // Connection tracked by server, not by test
 
 		// Small delay to ensure distinct start times.
 		time.Sleep(10 * time.Millisecond)

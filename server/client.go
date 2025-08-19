@@ -29,6 +29,7 @@ import (
 	"net/url"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -832,6 +833,7 @@ func (c *client) registerWithAccount(acc *Account) error {
 
 	// Check if we have a max connections violation
 	if kind == CLIENT && acc.MaxTotalConnectionsReached() {
+		debug.PrintStack()
 		return ErrTooManyAccountConnections
 	} else if kind == LEAF {
 		// Check if we are already connected to this cluster.
@@ -839,6 +841,7 @@ func (c *client) registerWithAccount(acc *Account) error {
 			return ErrLeafNodeLoop
 		}
 		if acc.MaxTotalLeafNodesReached() {
+			debug.PrintStack()
 			return ErrTooManyAccountConnections
 		}
 	}
@@ -1859,6 +1862,7 @@ func (c *client) handleWriteTimeout(written, attempted int64, numChunks int) boo
 // Returns true if closed in place, flase otherwise.
 // Lock is held on entry.
 func (c *client) markConnAsClosed(reason ClosedState) {
+	debug.PrintStack()
 	// Possibly set skipFlushOnClose flag even if connection has already been
 	// mark as closed. The rationale is that a connection may be closed with
 	// a reason that justifies a flush (say after sending an -ERR), but then
@@ -1872,6 +1876,7 @@ func (c *client) markConnAsClosed(reason ClosedState) {
 		skipFlush = true
 	}
 	if c.flags.isSet(connMarkedClosed) {
+		c.Warnf("::::::::::::::::::: conn marked closed!!!!!!!!!! %v", skipFlush)
 		return
 	}
 	c.flags.set(connMarkedClosed)
@@ -2207,6 +2212,7 @@ func (c *client) processConnect(arg []byte) error {
 				tooManyAccCons := acc != nil && acc != srv.gacc
 				srv.mu.Unlock()
 				if tooManyAccCons {
+					debug.PrintStack()
 					return ErrTooManyAccountConnections
 				}
 			}
@@ -2278,7 +2284,7 @@ func (c *client) processConnect(arg []byte) error {
 
 func (c *client) sendErrAndErr(err string) {
 	c.sendErr(err)
-	c.RateLimitErrorf(err)
+	c.Errorf(err)
 }
 
 func (c *client) sendErrAndDebug(err string) {
@@ -2328,6 +2334,14 @@ func (c *client) authViolation() {
 
 func (c *client) maxAccountConnExceeded() {
 	c.sendErrAndErr(ErrTooManyAccountConnections.Error())
+	
+	// // Ensure the error message is flushed before closing the connection
+	// c.mu.Lock()
+	// if c.out.pb > 0 && !c.isClosed() {
+	// 	c.flushOutbound()
+	// }
+	// c.mu.Unlock()
+	
 	c.closeConnection(MaxAccountConnectionsExceeded)
 }
 
@@ -2420,11 +2434,14 @@ func (c *client) queueOutbound(data []byte) {
 
 // Assume the lock is held upon entry.
 func (c *client) enqueueProtoAndFlush(proto []byte, doFlush bool) {
+	c.Warnf(">>>>> Already closed? %v - %v - %s - writeLoop: %v", c.isClosed(), doFlush, string(proto), c.flags.isSet(writeLoopStarted))
 	if c.isClosed() {
 		return
 	}
 	c.queueOutbound(proto)
+	c.Warnf(">>>>> flush signal???!!!? %v %v", doFlush, c.flushOutbound())
 	if !(doFlush && c.flushOutbound()) {
+		c.Warnf(">>>>> flush signal!!!?")
 		c.flushSignal()
 	}
 }
@@ -2510,6 +2527,7 @@ func (c *client) generateClientInfoJSON(info Info) []byte {
 }
 
 func (c *client) sendErr(err string) {
+	c.Warnf("::::::::::: TRACE: %v - %v", c.trace, c.isMqtt())
 	c.mu.Lock()
 	if c.trace {
 		c.traceOutOp("-ERR", []byte(err))
