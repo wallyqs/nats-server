@@ -3764,6 +3764,66 @@ func TestServerEventsPingStatsSlowConsumersStats(t *testing.T) {
 	}
 }
 
+func TestServerEventsPingStatsStaleConnectionStats(t *testing.T) {
+	s, _ := runTrustedServer(t)
+	defer s.Shutdown()
+
+	acc, akp := createAccount(s)
+	s.setSystemAccount(acc)
+	ncs, err := nats.Connect(s.ClientURL(), createUserCreds(t, s, akp))
+	require_NoError(t, err)
+	defer ncs.Close()
+
+	const statsz = "STATSZ"
+	for _, test := range []struct {
+		name      string
+		f         func() string
+		expectTwo bool
+	}{
+		{"server stats ping request subject", func() string { return serverStatsPingReqSubj }, true},
+		{"server ping request subject", func() string { return fmt.Sprintf(serverPingReqSubj, statsz) }, true},
+		{"server direct request subject", func() string { return fmt.Sprintf(serverDirectReqSubj, s.ID(), statsz) }, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Clear all stale connection values
+			s.staleStats.clients.Store(0)
+			s.staleStats.routes.Store(0)
+			s.staleStats.gateways.Store(0)
+			s.staleStats.leafs.Store(0)
+
+			msg, err := ncs.Request(test.f(), nil, time.Second)
+			require_NoError(t, err)
+
+			var ssm ServerStatsMsg
+			err = json.Unmarshal(msg.Data, &ssm)
+			require_NoError(t, err)
+
+			// No stale connection stats, so should be nil
+			require_True(t, ssm.Stats.StaleConnectionStats == nil)
+
+			// Now set some values
+			s.staleStats.clients.Store(1)
+			s.staleStats.routes.Store(2)
+			s.staleStats.gateways.Store(3)
+			s.staleStats.leafs.Store(4)
+
+			msg, err = ncs.Request(test.f(), nil, time.Second)
+			require_NoError(t, err)
+
+			ssm = ServerStatsMsg{}
+			err = json.Unmarshal(msg.Data, &ssm)
+			require_NoError(t, err)
+
+			require_NotNil(t, ssm.Stats.StaleConnectionStats)
+			stcs := ssm.Stats.StaleConnectionStats
+			require_Equal(t, stcs.Clients, 1)
+			require_Equal(t, stcs.Routes, 2)
+			require_Equal(t, stcs.Gateways, 3)
+			require_Equal(t, stcs.Leafs, 4)
+		})
+	}
+}
+
 func TestServerEventsStatszMaxProcsMemLimit(t *testing.T) {
 	// We want to prove that our set values are reflected in STATSZ,
 	// so we can't use constants that might match the system that
