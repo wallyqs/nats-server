@@ -10991,6 +10991,34 @@ func init() {
 	}
 }
 
+// acquireDiosToken acquires a disk I/O semaphore token if disk I/O limiting is enabled.
+// If srv is nil or NoDiskIOLimit is true, this function returns immediately without blocking.
+func acquireDiosToken(srv *Server) {
+	if srv != nil {
+		srv.optsMu.RLock()
+		noDiskIOLimit := srv.opts.NoDiskIOLimit
+		srv.optsMu.RUnlock()
+		if noDiskIOLimit {
+			return
+		}
+	}
+	<-dios
+}
+
+// releaseDiosToken releases a disk I/O semaphore token if disk I/O limiting is enabled.
+// If srv is nil or NoDiskIOLimit is true, this function returns immediately without any action.
+func releaseDiosToken(srv *Server) {
+	if srv != nil {
+		srv.optsMu.RLock()
+		noDiskIOLimit := srv.opts.NoDiskIOLimit
+		srv.optsMu.RUnlock()
+		if noDiskIOLimit {
+			return
+		}
+	}
+	dios <- struct{}{}
+}
+
 func (o *consumerFileStore) writeState(buf []byte) error {
 	// Check if we have the index file open.
 	o.mu.Lock()

@@ -361,6 +361,7 @@ type Options struct {
 	StoreDir                   string            `json:"-"`
 	SyncInterval               time.Duration     `json:"-"`
 	SyncAlways                 bool              `json:"-"`
+	NoDiskIOLimit              bool              `json:"-"` // When true, bypasses the dios channel semaphore for disk I/O operations
 	JsAccDefaultDomain         map[string]string `json:"-"` // account to domain name mapping
 	Websocket                  WebsocketOpts     `json:"-"`
 	MQTT                       MQTTOpts          `json:"-"`

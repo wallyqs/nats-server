@@ -1375,9 +1375,9 @@ func (n *raft) loadLastSnapshot() (*snapshot, error) {
 		return nil, errNoSnapAvailable
 	}
 
-	<-dios
+	n.acquireRaftDiosToken()
 	buf, err := os.ReadFile(n.snapfile)
-	dios <- struct{}{}
+	n.releaseRaftDiosToken()
 
 	if err != nil {
 		n.warn("Error reading snapshot: %v", err)
@@ -4137,9 +4137,9 @@ func writeTermVote(sd string, wtv []byte) error {
 // readTermVote will read the largest term and who we voted from to stable storage.
 // Lock should be held.
 func (n *raft) readTermVote() (term uint64, voted string, err error) {
-	<-dios
+	n.acquireRaftDiosToken()
 	buf, err := os.ReadFile(filepath.Join(n.sd, termVoteFile))
-	dios <- struct{}{}
+	n.releaseRaftDiosToken()
 
 	if err != nil {
 		return 0, noVote, err
@@ -4155,6 +4155,34 @@ func (n *raft) readTermVote() (term uint64, voted string, err error) {
 	}
 	voted = string(buf[8:])
 	return term, voted, nil
+}
+
+// acquireRaftDiosToken acquires a disk I/O semaphore token if disk I/O limiting is enabled.
+// If the server has NoDiskIOLimit set to true, this function returns immediately without blocking.
+func (n *raft) acquireRaftDiosToken() {
+	if n.s != nil {
+		n.s.optsMu.RLock()
+		noDiskIOLimit := n.s.opts.NoDiskIOLimit
+		n.s.optsMu.RUnlock()
+		if noDiskIOLimit {
+			return
+		}
+	}
+	<-dios
+}
+
+// releaseRaftDiosToken releases a disk I/O semaphore token if disk I/O limiting is enabled.
+// If the server has NoDiskIOLimit set to true, this function returns immediately without any action.
+func (n *raft) releaseRaftDiosToken() {
+	if n.s != nil {
+		n.s.optsMu.RLock()
+		noDiskIOLimit := n.s.opts.NoDiskIOLimit
+		n.s.optsMu.RUnlock()
+		if noDiskIOLimit {
+			return
+		}
+	}
+	dios <- struct{}{}
 }
 
 // Lock should be held.
