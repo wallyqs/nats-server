@@ -10994,13 +10994,8 @@ func init() {
 // acquireDiosToken acquires a disk I/O semaphore token if disk I/O limiting is enabled.
 // If srv is nil or NoDiskIOLimit is true, this function returns immediately without blocking.
 func acquireDiosToken(srv *Server) {
-	if srv != nil {
-		srv.optsMu.RLock()
-		noDiskIOLimit := srv.opts.NoDiskIOLimit
-		srv.optsMu.RUnlock()
-		if noDiskIOLimit {
-			return
-		}
+	if srv != nil && srv.noDiskIOLimit.Load() {
+		return
 	}
 	<-dios
 }
@@ -11008,13 +11003,8 @@ func acquireDiosToken(srv *Server) {
 // releaseDiosToken releases a disk I/O semaphore token if disk I/O limiting is enabled.
 // If srv is nil or NoDiskIOLimit is true, this function returns immediately without any action.
 func releaseDiosToken(srv *Server) {
-	if srv != nil {
-		srv.optsMu.RLock()
-		noDiskIOLimit := srv.opts.NoDiskIOLimit
-		srv.optsMu.RUnlock()
-		if noDiskIOLimit {
-			return
-		}
+	if srv != nil && srv.noDiskIOLimit.Load() {
+		return
 	}
 	dios <- struct{}{}
 }

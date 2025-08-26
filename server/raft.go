@@ -4160,13 +4160,8 @@ func (n *raft) readTermVote() (term uint64, voted string, err error) {
 // acquireRaftDiosToken acquires a disk I/O semaphore token if disk I/O limiting is enabled.
 // If the server has NoDiskIOLimit set to true, this function returns immediately without blocking.
 func (n *raft) acquireRaftDiosToken() {
-	if n.s != nil {
-		n.s.optsMu.RLock()
-		noDiskIOLimit := n.s.opts.NoDiskIOLimit
-		n.s.optsMu.RUnlock()
-		if noDiskIOLimit {
-			return
-		}
+	if n.s != nil && n.s.noDiskIOLimit.Load() {
+		return
 	}
 	<-dios
 }
@@ -4174,13 +4169,8 @@ func (n *raft) acquireRaftDiosToken() {
 // releaseRaftDiosToken releases a disk I/O semaphore token if disk I/O limiting is enabled.
 // If the server has NoDiskIOLimit set to true, this function returns immediately without any action.
 func (n *raft) releaseRaftDiosToken() {
-	if n.s != nil {
-		n.s.optsMu.RLock()
-		noDiskIOLimit := n.s.opts.NoDiskIOLimit
-		n.s.optsMu.RUnlock()
-		if noDiskIOLimit {
-			return
-		}
+	if n.s != nil && n.s.noDiskIOLimit.Load() {
+		return
 	}
 	dios <- struct{}{}
 }
