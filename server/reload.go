@@ -991,6 +991,16 @@ func (l *noFastProdStallReload) Apply(s *Server) {
 	s.Noticef("Reloaded: fast producers will %sbe stalled", not)
 }
 
+type noDiskIOLimitReload struct {
+	noopOption
+	newValue bool
+}
+
+func (n *noDiskIOLimitReload) Apply(s *Server) {
+	s.noDiskIOLimit.Store(n.newValue)
+	s.Noticef("Reloaded: no_disk_io_limit = %v", n.newValue)
+}
+
 // Compares options and disconnects clients that are no longer listed in pinned certs. Lock must not be held.
 func (s *Server) recheckPinnedCerts(curOpts *Options, newOpts *Options) {
 	s.mu.Lock()
@@ -1754,6 +1764,8 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			continue
 		case "nofastproducerstall":
 			diffOpts = append(diffOpts, &noFastProdStallReload{noStall: newValue.(bool)})
+		case "nodiskiolimit":
+			diffOpts = append(diffOpts, &noDiskIOLimitReload{newValue: newValue.(bool)})
 		case "proxies":
 			new := newValue.(*ProxiesConfig)
 			old := oldValue.(*ProxiesConfig)

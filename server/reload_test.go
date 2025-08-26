@@ -6392,3 +6392,78 @@ func TestConfigReloadNoPanicOnShutdown(t *testing.T) {
 		wg.Wait()
 	}
 }
+
+func TestConfigReloadNoDiskIOLimit(t *testing.T) {
+	// Initial config without no_disk_io_limit (defaults to false)
+	content1 := `
+		port: -1
+	`
+
+	// Config with no_disk_io_limit enabled
+	content2 := `
+		port: -1
+		no_disk_io_limit: true
+	`
+
+	// Config with no_disk_io_limit disabled
+	content3 := `
+		port: -1
+		no_disk_io_limit: false
+	`
+
+	// Start server with initial config
+	s, opts, config := runReloadServerWithContent(t, []byte(content1))
+	defer s.Shutdown()
+
+	// Verify initial state - should be false by default
+	if s.noDiskIOLimit.Load() {
+		t.Fatalf("Expected noDiskIOLimit to be false initially, got true")
+	}
+	if opts.NoDiskIOLimit {
+		t.Fatalf("Expected opts.NoDiskIOLimit to be false initially, got true")
+	}
+
+	// Reload with no_disk_io_limit enabled
+	changeCurrentConfigContentWithNewContent(t, config, []byte(content2))
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Error reloading config: %v", err)
+	}
+
+	// Verify atomic field was updated
+	if !s.noDiskIOLimit.Load() {
+		t.Fatalf("Expected noDiskIOLimit to be true after reload, got false")
+	}
+
+	// Verify opts were updated
+	updatedOpts := s.getOpts()
+	if !updatedOpts.NoDiskIOLimit {
+		t.Fatalf("Expected opts.NoDiskIOLimit to be true after reload, got false")
+	}
+
+	// Reload with no_disk_io_limit disabled
+	changeCurrentConfigContentWithNewContent(t, config, []byte(content3))
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Error reloading config: %v", err)
+	}
+
+	// Verify atomic field was updated back to false
+	if s.noDiskIOLimit.Load() {
+		t.Fatalf("Expected noDiskIOLimit to be false after second reload, got true")
+	}
+
+	// Verify opts were updated
+	updatedOpts2 := s.getOpts()
+	if updatedOpts2.NoDiskIOLimit {
+		t.Fatalf("Expected opts.NoDiskIOLimit to be false after second reload, got true")
+	}
+
+	// Reload with the same config (no_disk_io_limit: false) to test no change
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Error reloading same config: %v", err)
+	}
+
+	// Verify atomic field remains false
+	if s.noDiskIOLimit.Load() {
+		t.Fatalf("Expected noDiskIOLimit to remain false after same config reload, got true")
+	}
+}

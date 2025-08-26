@@ -1745,6 +1745,8 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		}
 	case "no_fast_producer_stall":
 		o.NoFastProducerStall = v.(bool)
+	case "no_disk_io_limit":
+		o.NoDiskIOLimit = v.(bool)
 	case "max_closed_clients":
 		o.MaxClosedClients = int(v.(int64))
 	case "proxies":
