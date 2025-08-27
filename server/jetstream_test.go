@@ -17471,8 +17471,11 @@ func TestJetStreamDirectGetMultiPaging(t *testing.T) {
 
 	processPartial := func(expected int) {
 		t.Helper()
-		sub := sendRequest(&JSApiMsgGetRequest{Seq: uint64(start), Batch: b, MultiLastFor: []string{"foo.*"}})
+		// Set MaxBytes to force partial results - each message is ~512KB, so ~64MB allows ~128 messages
+		maxBytes := 64 * 1024 * 1024
+		sub := sendRequest(&JSApiMsgGetRequest{Seq: uint64(start), Batch: b, MultiLastFor: []string{"foo.*"}, MaxBytes: maxBytes})
 		checkSubsPending(t, sub, expected)
+		
 		// Check partial.
 		// We should receive seqs seq-(seq+bsz-1)
 		for ; seq < start+(expected-1); seq++ {
