@@ -71,6 +71,8 @@ type ConsumerInfo struct {
 	// TimeStamp indicates when the info was gathered
 	TimeStamp      time.Time            `json:"ts"`
 	PriorityGroups []PriorityGroupState `json:"priority_groups,omitempty"`
+	// LagMetrics provides rolling average of message processing lag
+	LagMetrics     *LagMetrics          `json:"lag_metrics,omitempty"`
 }
 
 // consumerInfoClusterResponse is a response used in a cluster to communicate the consumer info
@@ -523,6 +525,9 @@ type consumer struct {
 	// If standalone/single-server, the offline reason needs to be stored directly in the consumer.
 	// Otherwise, if clustered it will be part of the consumer assignment.
 	offlineReason string
+
+	// Lag tracking for rolling average metrics
+	lagTracker *ConsumerLagTracker
 }
 
 // A single subject filter.
@@ -1129,9 +1134,10 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 		mch:       make(chan struct{}, 1),
 		sfreq:     int32(sampleFreq),
 		maxdc:     uint64(max(config.MaxDeliver, 0)), // MaxDeliver is negative (-1) when infinite.
-		maxp:      config.MaxAckPending,
-		retention: cfg.Retention,
-		created:   time.Now().UTC(),
+		maxp:       config.MaxAckPending,
+		retention:  cfg.Retention,
+		created:    time.Now().UTC(),
+		lagTracker: NewConsumerLagTracker(),
 	}
 
 	// Bind internal client to the user account.
@@ -3133,6 +3139,15 @@ func (o *consumer) infoWithSnapAndReply(snap bool, reply string) *ConsumerInfo {
 		PushBound:      o.isPushMode() && o.active,
 		TimeStamp:      time.Now().UTC(),
 		PriorityGroups: priorityGroups,
+	}
+	
+	// Update lag tracking and include metrics if enabled
+	if o.lagTracker != nil {
+		o.lagTracker.UpdateLagMetric(o)
+		if o.lagTracker.IsEnabled() {
+			lagMetrics := o.lagTracker.GetLagMetrics()
+			info.LagMetrics = &lagMetrics
+		}
 	}
 	// Reset redelivered for MaxDeliver 1. Redeliveries are disabled so must not report it (is confusing otherwise).
 	// The state does still keep track of these messages.
