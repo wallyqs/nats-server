@@ -3267,3 +3267,55 @@ func TestClientRejectsNRGSubjects(t *testing.T) {
 		require_True(t, strings.HasPrefix(err.Error(), "nats: permissions violation"))
 	})
 }
+
+func TestMultipleProcessConnectDoesNotGrowConnectionString(t *testing.T) {
+	opts := DefaultOptions()
+	opts.LogConnectionInfo = true
+	s, c, _, _ := rawSetup(*opts)
+	defer c.close()
+	defer s.Shutdown()
+
+	c.kind = CLIENT
+	connectOp := []byte("CONNECT {\"verbose\":false,\"pedantic\":false,\"version\":\"1.0.0\",\"lang\":\"go\",\"name\":\"test-client\"}\r\n")
+
+	err := c.parse(connectOp)
+	if err != nil {
+		t.Fatalf("Received error on first connect: %v", err)
+	}
+
+	// Get the connection string after first process.
+	firstConnStr := c.ncs.Load()
+	if firstConnStr == nil {
+		return
+	}
+	firstStr := firstConnStr.(string)
+	firstLen := len(firstStr)
+	t.Logf("First connection string: %q (len=%d)", firstStr, firstLen)
+
+	// Process connect multiple times.
+	for i := 0; i < 3; i++ {
+		err = c.parse(connectOp)
+		if err != nil {
+			t.Fatalf("Received error on connect attempt %d: %v", i+2, err)
+		}
+	}
+
+	// Get the connection string after multiple calls.
+	finalConnStr := c.ncs.Load()
+	if finalConnStr == nil {
+		t.Fatal("Connection string should not be nil after multiple processConnect calls")
+	}
+	finalStr := finalConnStr.(string)
+	finalLen := len(finalStr)
+
+	// The strings should be identical.
+	if firstStr != finalStr {
+		t.Fatalf("Connection string grew after multiple processConnect calls:\nFirst:  %q (len=%d)\nFinal:  %q (len=%d)",
+			firstStr, firstLen, finalStr, finalLen)
+	}
+
+	// Verify that string length is not growing.
+	if finalLen > firstLen {
+		t.Fatalf("Connection string grew from %d to %d characters", firstLen, finalLen)
+	}
+}

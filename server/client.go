@@ -2131,30 +2131,6 @@ func (c *client) processConnect(arg []byte) error {
 	account := c.opts.Account
 	accountNew := c.opts.AccountNew
 
-	if c.kind == CLIENT {
-		var ncs string
-		if c.opts.Version != _EMPTY_ {
-			ncs = fmt.Sprintf("v%s", c.opts.Version)
-		}
-		if c.opts.Lang != _EMPTY_ {
-			if c.opts.Version == _EMPTY_ {
-				ncs = c.opts.Lang
-			} else {
-				ncs = fmt.Sprintf("%s:%s", ncs, c.opts.Lang)
-			}
-		}
-		if c.opts.Name != _EMPTY_ {
-			if c.opts.Version == _EMPTY_ && c.opts.Lang == _EMPTY_ {
-				ncs = c.opts.Name
-			} else {
-				ncs = fmt.Sprintf("%s:%s", ncs, c.opts.Name)
-			}
-		}
-		if ncs != _EMPTY_ {
-			c.ncs.CompareAndSwap(nil, fmt.Sprintf("%s - %q", c, ncs))
-		}
-	}
-
 	// if websocket client, maybe some options through cookies
 	if ws := c.ws; ws != nil {
 		// if JWT not in the CONNECT, use the cookie JWT (possibly empty).
@@ -2233,13 +2209,57 @@ func (c *client) processConnect(arg []byte) error {
 		c.mu.Lock()
 		acc := c.acc
 		if c.getRawAuthUser() != _EMPTY_ {
-			c.ncsUser.Store(c.getAuthUser())
+			c.ncsUser.Store(c.getAuthUserLabel())
 		}
 		c.mu.Unlock()
+		var accLabel string
 		if acc != nil {
 			acc.mu.RLock()
 			c.ncsAcc.Store(acc.traceLabel())
+			accLabel = acc.traceLabel()
 			acc.mu.RUnlock()
+		}
+
+		o := c.srv.getOpts()
+		cinfoLog := o.LogConnectionInfo
+		ainfoLog := o.LogConnectionAuthInfo
+		cDetails := (cinfoLog || ainfoLog) && c.ncs.Load() == nil
+		if c.kind == CLIENT && cDetails {
+			var ncs string
+			if cinfoLog {
+				if c.opts.Version != _EMPTY_ {
+					ncs = fmt.Sprintf("v%s", c.opts.Version)
+				}
+				if c.opts.Lang != _EMPTY_ {
+					if c.opts.Version == _EMPTY_ {
+						ncs = c.opts.Lang
+					} else {
+						ncs = fmt.Sprintf("%s:%s", ncs, c.opts.Lang)
+					}
+				}
+				if c.opts.Name != _EMPTY_ {
+					if c.opts.Version == _EMPTY_ && c.opts.Lang == _EMPTY_ {
+						ncs = c.opts.Name
+					} else {
+						ncs = fmt.Sprintf("%s:%s", ncs, c.opts.Name)
+					}
+				}
+			}
+			var acs string
+			if ainfoLog {
+				acs = accLabel
+				if authUser := c.ncsUser.Load(); authUser != nil {
+					acs = fmt.Sprintf("%s/%s", accLabel, authUser)
+				}
+			}
+			switch {
+			case ncs != _EMPTY_ && acs != _EMPTY_:
+				c.ncs.Store(fmt.Sprintf("%s - %q - %q", c, ncs, acs))
+			case ncs != _EMPTY_:
+				c.ncs.Store(fmt.Sprintf("%s - %q", c, ncs))
+			case acs != _EMPTY_:
+				c.ncs.Store(fmt.Sprintf("%s - %q", c, acs))
+			}
 		}
 	}
 
@@ -6265,6 +6285,22 @@ func (c *client) getAuthUser() string {
 	}
 }
 
+// getAuthUserLabel returns a label for the auth user for the client.
+func (c *client) getAuthUserLabel() string {
+	switch {
+	case c.opts.Nkey != _EMPTY_:
+		return fmt.Sprintf("nkey:%s", c.opts.Nkey)
+	case c.opts.Username != _EMPTY_:
+		return fmt.Sprintf("user:%s", c.opts.Username)
+	case c.opts.JWT != _EMPTY_:
+		return fmt.Sprintf("jwt:%s", c.pubKey)
+	case c.opts.Token != _EMPTY_:
+		return "token"
+	default:
+		return ""
+	}
+}
+
 // Given an array of strings, this function converts it to a map as long
 // as all the content (converted to upper-case) matches some constants.
 
@@ -6376,27 +6412,32 @@ func (c *client) formatClientSuffix() string {
 
 // Logging functionality scoped to a client or route.
 func (c *client) Error(err error) {
-	c.srv.Errorf(c.format(err.Error()))
+	c.srv.Errors(c, err)
 }
 
 func (c *client) Errorf(format string, v ...any) {
-	c.srv.Errorf(c.format(format), v...)
+	format = fmt.Sprintf("%s - %s", c, format)
+	c.srv.Errorf(format, v...)
 }
 
 func (c *client) Debugf(format string, v ...any) {
-	c.srv.Debugf(c.format(format), v...)
+	format = fmt.Sprintf("%s - %s", c, format)
+	c.srv.Debugf(format, v...)
 }
 
 func (c *client) Noticef(format string, v ...any) {
-	c.srv.Noticef(c.format(format), v...)
+	format = fmt.Sprintf("%s - %s", c, format)
+	c.srv.Noticef(format, v...)
 }
 
 func (c *client) Tracef(format string, v ...any) {
-	c.srv.Tracef(c.format(format), v...)
+	format = fmt.Sprintf("%s - %s", c, format)
+	c.srv.Tracef(format, v...)
 }
 
 func (c *client) Warnf(format string, v ...any) {
-	c.srv.Warnf(c.format(format), v...)
+	format = fmt.Sprintf("%s - %s", c, format)
+	c.srv.Warnf(format, v...)
 }
 
 func (c *client) RateLimitErrorf(format string, v ...any) {
