@@ -1943,19 +1943,41 @@ func (c *client) flushSignal() {
 	}
 }
 
+const (
+	traceInPrefix  string = "<<-"
+	traceOutPrefix string = "->>"
+)
+
 // Traces a message.
 // Will NOT check if tracing is enabled, does NOT need the client lock.
-func (c *client) traceMsg(msg []byte) {
+func (c *client) traceMsgInternal(msg []byte, delivered bool, hdrSize int) {
 	opts := c.srv.getOpts()
 	maxTrace := opts.MaxTracedMsgLen
 	headersOnly := opts.TraceHeaders
+	traceDeliver := opts.TraceDeliver
 	suffix := LEN_CR_LF
+
+	if delivered && !traceDeliver {
+		// Skip if TraceDeliver is disabled.
+		return
+	}
 
 	// If TraceHeaders is enabled, extract only the header portion of the msg.
 	// If a header is present, it ends with an additional trailing CRLF.
-	if headersOnly {
-		msg, _ = c.msgParts(msg)
+	if headersOnly && hdrSize > 0 && len(msg) >= hdrSize {
+		fmt.Printf("A::::::::::: %q\n", string(msg))
+		// if !delivered {
+		// 	msg, _ = c.msgParts(msg)
+		// } else if hdrSize > 0 {
+		// 	msg = msg[:hdrSize]
+		// }
+		msg = msg[:hdrSize]
+		// if !delivered {
 		suffix += LEN_CR_LF
+		fmt.Printf("B::::::::::: %q\n", string(msg))
+		fmt.Println(c.pa.hdr, string(c.pa.szb), "size: ", c.pa.size)
+		fmt.Println(c.pa.hdr, string(c.pa.szb), c.pa.size)
+		// }
 	}
 
 	// Do not emit a log line for zero-length payloads.
@@ -1964,12 +1986,26 @@ func (c *client) traceMsg(msg []byte) {
 		return
 	}
 
+	var prefix string
+	if delivered {
+		prefix = traceOutPrefix
+	} else {
+		prefix = traceInPrefix
+	}
 	if maxTrace > 0 && l > maxTrace {
 		tm := fmt.Sprintf("%q", msg[:maxTrace])
-		c.Tracef("<<- MSG_PAYLOAD: [\"%s...\"]", tm[1:len(tm)-1])
+		c.Tracef("%s MSG_PAYLOAD: [\"%s...\"]", prefix, tm[1:len(tm)-1])
 	} else {
-		c.Tracef("<<- MSG_PAYLOAD: [%q]", msg[:l])
+		c.Tracef("%s MSG_PAYLOAD: [%q]", prefix, msg[:l])
 	}
+}
+
+func (c *client) traceMsg(msg []byte) {
+	c.traceMsgInternal(msg, false, c.pa.hdr)
+}
+
+func (c *client) traceMsgDelivery(msg []byte, hdrSize int) {
+	c.traceMsgInternal(msg, true, hdrSize)
 }
 
 // Traces an incoming operation.
@@ -3644,6 +3680,8 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	// support we need to strip the headers from the payload.
 	// The actual header would have been processed correctly for us, so just
 	// need to update payload.
+	fmt.Println("HEADER SIZE: ", c.pa.hdr)
+	hdrSize := c.pa.hdr
 	if c.pa.hdr > 0 && !sub.client.headers {
 		msg = msg[c.pa.hdr:]
 	}
@@ -3656,7 +3694,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	if !prodIsMQTT {
 		msgSize -= int64(LEN_CR_LF)
 	}
-
+	fmt.Println("HEADER SIZEE: ", client.pa.hdr)
 	// We do not update the outbound stats if we are doing trace only since
 	// this message will not be sent out.
 	// Also do not update on internal callbacks.
@@ -3696,7 +3734,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 
 		return didDeliver
 	}
-
+	fmt.Println("HEADER SIZEEE: ", c.pa.hdr, client.pa.hdr)
 	// If we are a client and we detect that the consumer we are
 	// sending to is in a stalled state, go ahead and wait here
 	// with a limit.
@@ -3715,13 +3753,13 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		client.mu.Unlock()
 		return false
 	}
-
+	fmt.Println("HEADER SIZEEEE: ", c.pa.hdr)
 	// We have passed cases where we could possibly fail to deliver.
 	// Do not call for service-import.
 	if mt != nil && sub.icb == nil {
 		mt.addEgressEvent(client, sub, mtErr)
 	}
-
+	fmt.Println("HEADER SIZEEEEE: ", c.pa.hdr, hdrSize, client.pa.hdr)
 	// Do a fast check here to see if we should be tracking this from a latency
 	// perspective. This will be for a request being received for an exported service.
 	// This needs to be from a non-client (otherwise tracking happens at requestor).
@@ -3750,10 +3788,12 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 			client.trackRemoteReply(string(subject), string(c.pa.reply))
 		}
 	}
+	fmt.Println("HEADER SIZEEEEE!: ", c.pa.hdr)
 
 	// Queue to outbound buffer
 	client.queueOutbound(mh)
 	client.queueOutbound(msg)
+	fmt.Println("HEADER SIZEEEEE!!!!: ", c.pa.hdr)
 	if prodIsMQTT {
 		// Need to add CR_LF since MQTT producers don't send CR_LF
 		client.queueOutbound([]byte(CR_LF))
@@ -3769,7 +3809,7 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 			client.pruneReplyPerms()
 		}
 	}
-
+	fmt.Println("HEADER SIZEEE?>>>>>>>>.EE!!!!: ", c.pa.hdr)
 	// Check outbound threshold and queue IO flush if needed.
 	// This is specifically looking at situations where we are getting behind and may want
 	// to intervene before this producer goes back to top of readloop. We are in the producer's
@@ -3782,9 +3822,13 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	// Add the data size we are responsible for here. This will be processed when we
 	// return to the top of the readLoop.
 	c.addToPCD(client)
-
+	fmt.Println("HEADER SIZEEE?>>>>>!!!!!!!!!!>>>.EE!!!!: ", c.pa.hdr)
 	if client.trace {
+		fmt.Println("TO TRACE: ", string(mh[:len(mh)-LEN_CR_LF]))
+		fmt.Printf("::: %+v\n", client.pa)
+		fmt.Printf("::: HDR %v\n", hdrSize)
 		client.traceOutOp(bytesToString(mh[:len(mh)-LEN_CR_LF]), nil)
+		client.traceMsgDelivery(msg, hdrSize)
 	}
 
 	client.mu.Unlock()

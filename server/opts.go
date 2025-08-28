@@ -304,8 +304,11 @@ type Options struct {
 	Trace           bool   `json:"-"`
 	Debug           bool   `json:"-"`
 	TraceVerbose    bool   `json:"-"`
-	// TraceHeaders if true will only trace message headers, not the payload
-	TraceHeaders               bool          `json:"-"`
+	// TraceHeaders if true will only trace message headers, not the payload.
+	TraceHeaders bool `json:"-"`
+	// TraceDeliver if true will enable tracing of the delivered message payload
+	// or only the headers if trace headers is enabled.
+	TraceDeliver               bool          `json:"-"`
 	NoLog                      bool          `json:"-"`
 	NoSigs                     bool          `json:"-"`
 	NoSublistCache             bool          `json:"-"`
@@ -1047,6 +1050,11 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		o.TraceHeaders = v.(bool)
 		o.Trace = v.(bool)
 		trackExplicitVal(&o.inConfig, "TraceHeaders", o.TraceHeaders)
+		trackExplicitVal(&o.inConfig, "Trace", o.Trace)
+	case "trace_deliver":
+		o.TraceDeliver = v.(bool)
+		o.Trace = v.(bool)
+		trackExplicitVal(&o.inConfig, "TraceDeliver", o.TraceDeliver)
 		trackExplicitVal(&o.inConfig, "Trace", o.Trace)
 	case "logtime":
 		o.Logtime = v.(bool)

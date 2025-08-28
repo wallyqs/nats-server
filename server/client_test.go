@@ -1815,6 +1815,106 @@ func TestTraceMsgHeadersOnly(t *testing.T) {
 	}
 }
 
+func TestTraceMsgDelivery(t *testing.T) {
+	opts := DefaultOptions()
+	opts.Trace = true
+	opts.TraceHeaders = true
+	opts.TraceDeliver = true
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(s.ClientURL())
+	require_NoError(t, err)
+	defer nc.Close()
+
+	ncp, err := nats.Connect(s.ClientURL())
+	require_NoError(t, err)
+	defer ncp.Close()
+
+	_, err = nc.Subscribe("foo", func(msg *nats.Msg) {
+		m := nats.NewMsg(msg.Reply)
+		m.Header["A"] = []string{"1"}
+		m.Header["B"] = []string{"2"}
+		m.Data = []byte("Hi Traced")
+		msg.RespondMsg(m)
+	})
+	require_NoError(t, err)
+	nc.Flush()
+
+	msg := nats.NewMsg("foo")
+	msg.Header = nats.Header{}
+	msg.Header["A"] = []string{"A:1"}
+	msg.Header["B"] = []string{"B:2"}
+	msg.Data = []byte("Hello Traced")
+	_, err = ncp.RequestMsg(msg, 100*time.Millisecond)
+	require_NoError(t, err)
+}
+
+func TestTraceMsgDeliveryWithHeaders(t *testing.T) {
+	c := &client{}
+	c.trace = true
+	hdr := fmt.Sprintf(`NATS/1.0%sFoo: 1%s%s`, CR_LF, CR_LF, CR_LF)
+	cases := []struct {
+		name         string
+		msg          []byte
+		hdr          int
+		traceDeliver bool
+		traceHeaders bool
+		expected     string
+	}{
+		{
+			name:         "delivery with headers enabled",
+			msg:          []byte(hdr),
+			hdr:          len(hdr),
+			traceDeliver: true,
+			traceHeaders: true,
+			expected:     `->> MSG_PAYLOAD: ["NATS/1.0\r\nFoo: 1"]`,
+		},
+		{
+			name:         "delivery disabled",
+			msg:          []byte(hdr),
+			hdr:          len(hdr),
+			traceDeliver: false,
+			traceHeaders: true,
+			expected:     "",
+		},
+		{
+			name:         "delivery with full message",
+			msg:          []byte(fmt.Sprintf("%stest%s", hdr, CR_LF)),
+			hdr:          len(hdr),
+			traceDeliver: true,
+			traceHeaders: false,
+			expected:     `->> MSG_PAYLOAD: ["NATS/1.0\r\nFoo: 1\r\n\r\ntest"]`,
+		},
+		{
+			name:         "delivery with headers only",
+			msg:          []byte(fmt.Sprintf("%stest%s", hdr, CR_LF)),
+			hdr:          len(hdr),
+			traceDeliver: true,
+			traceHeaders: true,
+			expected:     `->> MSG_PAYLOAD: ["NATS/1.0\r\nFoo: 1\r\n"]`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c.srv = &Server{
+				opts: &Options{
+					TraceDeliver: tc.traceDeliver,
+					TraceHeaders: tc.traceHeaders,
+				},
+			}
+			c.srv.SetLogger(&DummyLogger{}, true, true)
+			c.pa.hdr = tc.hdr
+
+			c.traceMsgDelivery(tc.msg, c.pa.hdr)
+
+			got := c.srv.logging.logger.(*DummyLogger).Msg
+			require_Equal(t, tc.expected, got)
+		})
+	}
+}
+
 func TestClientMaxPending(t *testing.T) {
 	opts := DefaultOptions()
 	opts.MaxPending = math.MaxInt32 + 1
