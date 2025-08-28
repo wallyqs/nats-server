@@ -307,8 +307,6 @@ type Options struct {
 
 	// TraceHeaders if true will only trace message headers, not the payload
 	TraceHeaders               bool          `json:"-"`
-	LogConnectionInfo          bool          `json:"-"`
-	LogConnectionAuthInfo      bool          `json:"-"`
 	NoLog                      bool          `json:"-"`
 	NoSigs                     bool          `json:"-"`
 	NoSublistCache             bool          `json:"-"`
@@ -1051,12 +1049,6 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		o.Trace = v.(bool)
 		trackExplicitVal(&o.inConfig, "TraceHeaders", o.TraceHeaders)
 		trackExplicitVal(&o.inConfig, "Trace", o.Trace)
-	case "log_connection_info":
-		o.LogConnectionInfo = v.(bool)
-		trackExplicitVal(&o.inConfig, "LogConnectionInfo", o.LogConnectionInfo)
-	case "log_connection_auth":
-		o.LogConnectionAuthInfo = v.(bool)
-		trackExplicitVal(&o.inConfig, "LogConnectionAuthInfo", o.LogConnectionAuthInfo)
 	case "logtime":
 		o.Logtime = v.(bool)
 		trackExplicitVal(&o.inConfig, "Logtime", o.Logtime)

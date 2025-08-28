@@ -2227,38 +2227,31 @@ func (c *client) processConnect(arg []byte) error {
 			acc.mu.RUnlock()
 		}
 
-		// Optionally log more details about this client.
-		o := c.srv.getOpts()
-		cinfoLog := o.LogConnectionInfo
-		ainfoLog := o.LogConnectionAuthInfo
-		if c.kind == CLIENT && firstConnect && c.srv != nil && (cinfoLog || ainfoLog) {
+		// Enable logging connection details and auth info for this client.
+		if c.kind == CLIENT && firstConnect && c.srv != nil {
 			var ncs string
-			if cinfoLog {
-				if c.opts.Version != _EMPTY_ {
-					ncs = fmt.Sprintf("v%s", c.opts.Version)
+			if c.opts.Version != _EMPTY_ {
+				ncs = fmt.Sprintf("v%s", c.opts.Version)
+			}
+			if c.opts.Lang != _EMPTY_ {
+				if c.opts.Version == _EMPTY_ {
+					ncs = c.opts.Lang
+				} else {
+					ncs = fmt.Sprintf("%s:%s", ncs, c.opts.Lang)
 				}
-				if c.opts.Lang != _EMPTY_ {
-					if c.opts.Version == _EMPTY_ {
-						ncs = c.opts.Lang
-					} else {
-						ncs = fmt.Sprintf("%s:%s", ncs, c.opts.Lang)
-					}
-				}
-				if c.opts.Name != _EMPTY_ {
-					if c.opts.Version == _EMPTY_ && c.opts.Lang == _EMPTY_ {
-						ncs = c.opts.Name
-					} else {
-						ncs = fmt.Sprintf("%s:%s", ncs, c.opts.Name)
-					}
+			}
+			if c.opts.Name != _EMPTY_ {
+				if c.opts.Version == _EMPTY_ && c.opts.Lang == _EMPTY_ {
+					ncs = c.opts.Name
+				} else {
+					ncs = fmt.Sprintf("%s:%s", ncs, c.opts.Name)
 				}
 			}
 			var acs string
-			if ainfoLog {
-				accl := c.ncsAcc.Load()
-				authUser := c.ncsUser.Load()
-				if accl != nil && authUser != nil {
-					acs = fmt.Sprintf("%s/%s", accl, authUser)
-				}
+			accl := c.ncsAcc.Load()
+			authUser := c.ncsUser.Load()
+			if accl != nil && authUser != nil {
+				acs = fmt.Sprintf("%s/%s", accl, authUser)
 			}
 			switch {
 			case ncs != _EMPTY_ && acs != _EMPTY_:
