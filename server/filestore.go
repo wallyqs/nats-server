@@ -417,9 +417,10 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 	}
 
 	tmpfile.Close()
-	<-dios
+	noDiskIOLimit := fcfg.srv != nil && fcfg.srv.noDiskIOLimit.Load()
+	acquireDiosToken(noDiskIOLimit)
 	os.Remove(tmpfile.Name())
-	dios <- struct{}{}
+	releaseDiosToken(noDiskIOLimit)
 
 	fs = &fileStore{
 		fcfg:   fcfg,
@@ -1343,9 +1344,9 @@ func (mb *msgBlock) convertCipher() error {
 			return err
 		}
 		mb.bek.XORKeyStream(buf, buf)
-		<-dios
+		acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 		err = os.WriteFile(mb.mfn, buf, defaultFilePerms)
-		dios <- struct{}{}
+		releaseDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 		if err != nil {
 			return err
 		}
@@ -1375,9 +1376,9 @@ func (mb *msgBlock) convertToEncrypted() error {
 	// Undo cache from above for later.
 	mb.cache = nil
 	mb.bek.XORKeyStream(buf, buf)
-	<-dios
+	acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	err = os.WriteFile(mb.mfn, buf, defaultFilePerms)
-	dios <- struct{}{}
+	releaseDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	if err != nil {
 		return err
 	}
@@ -1461,9 +1462,9 @@ func (mb *msgBlock) rebuildStateLocked() (*LostStreamData, []uint64, error) {
 		if mb.mfd != nil {
 			fd = mb.mfd
 		} else {
-			<-dios
+			acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 			fd, err = os.OpenFile(mb.mfn, os.O_RDWR, defaultFilePerms)
-			dios <- struct{}{}
+			releaseDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 			if err == nil {
 				defer fd.Close()
 			}
@@ -1690,7 +1691,7 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 	defer fs.mu.Unlock()
 
 	// Check for any left over purged messages.
-	<-dios
+	acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 	pdir := filepath.Join(fs.fcfg.StoreDir, purgeDir)
 	if _, err := os.Stat(pdir); err == nil {
 		os.RemoveAll(pdir)
@@ -1698,7 +1699,7 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 	// Grab our stream state file and load it in.
 	fn := filepath.Join(fs.fcfg.StoreDir, msgDir, streamStreamStateFile)
 	buf, err := os.ReadFile(fn)
-	dios <- struct{}{}
+	releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -1928,12 +1929,12 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 	mdir := filepath.Join(fs.fcfg.StoreDir, msgDir)
 	var dirs []os.DirEntry
 
-	<-dios
+	acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	if f, err := os.Open(mdir); err == nil {
 		dirs, _ = f.ReadDir(-1)
 		f.Close()
 	}
-	dios <- struct{}{}
+	releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 
 	var index uint32
 	for _, fi := range dirs {
@@ -1979,10 +1980,10 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 // Lock should be held.
 func (fs *fileStore) recoverTTLState() error {
 	// See if we have a timed hash wheel for TTLs.
-	<-dios
+	acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 	fn := filepath.Join(fs.fcfg.StoreDir, msgDir, ttlStreamStateFile)
 	buf, err := os.ReadFile(fn)
-	dios <- struct{}{}
+	releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -2060,10 +2061,10 @@ func (fs *fileStore) recoverTTLState() error {
 // Lock should be held.
 func (fs *fileStore) recoverMsgSchedulingState() error {
 	// See if we have a timed hash wheel for TTLs.
-	<-dios
+	acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 	fn := filepath.Join(fs.fcfg.StoreDir, msgDir, msgSchedulingStreamStateFile)
 	buf, err := os.ReadFile(fn)
-	dios <- struct{}{}
+	releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -2176,9 +2177,9 @@ func (fs *fileStore) cleanupOldMeta() {
 	mdir := filepath.Join(fs.fcfg.StoreDir, msgDir)
 	fs.mu.RUnlock()
 
-	<-dios
+	acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 	f, err := os.Open(mdir)
-	dios <- struct{}{}
+	releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 	if err != nil {
 		return
 	}
@@ -2203,7 +2204,7 @@ func (fs *fileStore) recoverMsgs() error {
 	defer fs.mu.Unlock()
 
 	// Check for any left over purged messages.
-	<-dios
+	acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 	pdir := filepath.Join(fs.fcfg.StoreDir, purgeDir)
 	if _, err := os.Stat(pdir); err == nil {
 		os.RemoveAll(pdir)
@@ -2211,12 +2212,12 @@ func (fs *fileStore) recoverMsgs() error {
 	mdir := filepath.Join(fs.fcfg.StoreDir, msgDir)
 	f, err := os.Open(mdir)
 	if err != nil {
-		dios <- struct{}{}
+		releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 		return errNotReadable
 	}
 	dirs, err := f.ReadDir(-1)
 	f.Close()
-	dios <- struct{}{}
+	releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 
 	if err != nil {
 		return errNotReadable
@@ -4196,9 +4197,9 @@ func (fs *fileStore) newMsgBlockForWrite() (*msgBlock, error) {
 	}
 	mb.hh = hh
 
-	<-dios
+	acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	mfd, err := os.OpenFile(mb.mfn, os.O_CREATE|os.O_RDWR, defaultFilePerms)
-	dios <- struct{}{}
+	releaseDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 
 	if err != nil {
 		if isPermissionError(err) {
@@ -5211,9 +5212,9 @@ func (mb *msgBlock) compactWithFloor(floor uint64) {
 
 	// We will write to a new file and mv/rename it in case of failure.
 	mfn := filepath.Join(mb.fs.fcfg.StoreDir, msgDir, fmt.Sprintf(newScan, mb.index))
-	<-dios
+	acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	err := os.WriteFile(mfn, nbuf, defaultFilePerms)
-	dios <- struct{}{}
+	releaseDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	if err != nil {
 		os.Remove(mfn)
 		return
@@ -6114,9 +6115,9 @@ func (mb *msgBlock) enableForWriting(fip bool) error {
 	if mb.mfd != nil {
 		return nil
 	}
-	<-dios
+	acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	mfd, err := os.OpenFile(mb.mfn, os.O_CREATE|os.O_RDWR, defaultFilePerms)
-	dios <- struct{}{}
+	releaseDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	if err != nil {
 		return fmt.Errorf("error opening msg block file [%q]: %v", mb.mfn, err)
 	}
@@ -6448,9 +6449,9 @@ func (mb *msgBlock) recompressOnDiskIfNeeded() error {
 	//    header, in which case we do nothing.
 	// 2. The block will be uncompressed, in which case we will compress it
 	//    and then write it back out to disk, re-encrypting if necessary.
-	<-dios
+	acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	origBuf, err := os.ReadFile(mb.mfn)
-	dios <- struct{}{}
+	releaseDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 
 	if err != nil {
 		return fmt.Errorf("failed to read original block from disk: %w", err)
@@ -6504,9 +6505,9 @@ func (mb *msgBlock) atomicOverwriteFile(buf []byte, allowCompress bool) error {
 	// operation if something goes wrong), create a new temporary file. We will
 	// write out the new block here and then swap the files around afterwards
 	// once everything else has succeeded correctly.
-	<-dios
+	acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	tmpFD, err := os.OpenFile(tmpFN, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, defaultFilePerms)
-	dios <- struct{}{}
+	releaseDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %w", err)
@@ -6704,9 +6705,9 @@ func (fs *fileStore) syncBlocks() {
 			if mb.mfd != nil {
 				fd = mb.mfd
 			} else {
-				<-dios
+				acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 				fd, _ = os.OpenFile(mb.mfn, os.O_RDWR, defaultFilePerms)
-				dios <- struct{}{}
+				releaseDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 				didOpen = true
 			}
 			// If we have an fd.
@@ -6738,9 +6739,9 @@ func (fs *fileStore) syncBlocks() {
 	// Sync state file if we are not running with sync always.
 	if !fs.fcfg.SyncAlways {
 		fn := filepath.Join(fs.fcfg.StoreDir, msgDir, streamStreamStateFile)
-		<-dios
+		acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 		fd, _ := os.OpenFile(fn, os.O_RDWR, defaultFilePerms)
-		dios <- struct{}{}
+		releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 		if fd != nil {
 			fd.Sync()
 			fd.Close()
@@ -7009,9 +7010,9 @@ func (mb *msgBlock) writeAt(buf []byte, woff int64) (int, error) {
 		mb.mockWriteErr = false
 		return 0, errors.New("mock write error")
 	}
-	<-dios
+	acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	n, err := mb.mfd.WriteAt(buf, woff)
-	dios <- struct{}{}
+	releaseDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	return n, err
 }
 
@@ -7177,9 +7178,9 @@ func (mb *msgBlock) fssNotLoaded() bool {
 // Lock should be held
 func (mb *msgBlock) openBlock() (*os.File, error) {
 	// Gate with concurrent IO semaphore.
-	<-dios
+	acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	f, err := os.Open(mb.mfn)
-	dios <- struct{}{}
+	releaseDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	return f, err
 }
 
@@ -7232,9 +7233,9 @@ func (mb *msgBlock) loadBlock(buf []byte) ([]byte, error) {
 		buf = buf[:sz]
 	}
 
-	<-dios
+	acquireDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	n, err := io.ReadFull(f, buf)
-	dios <- struct{}{}
+	releaseDiosToken(mb.fs.srv.noDiskIOLimit.Load())
 	// On success capture raw bytes size.
 	if err == nil {
 		mb.rbytes = uint64(n)
@@ -8538,25 +8539,25 @@ func (fs *fileStore) purge(fseq uint64) (uint64, error) {
 	// If purge directory still exists then we need to wait
 	// in place and remove since rename would fail.
 	if _, err := os.Stat(pdir); err == nil {
-		<-dios
+		acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 		os.RemoveAll(pdir)
-		dios <- struct{}{}
+		releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 	}
 
-	<-dios
+	acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 	os.Rename(mdir, pdir)
-	dios <- struct{}{}
+	releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 
 	go func() {
-		<-dios
+		acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 		os.RemoveAll(pdir)
-		dios <- struct{}{}
+		releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 	}()
 
 	// Create new one.
-	<-dios
+	acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 	os.MkdirAll(mdir, defaultDirPerms)
-	dios <- struct{}{}
+	releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 
 	// Make sure we have a lmb to write to.
 	if _, err := fs.newMsgBlockForWrite(); err != nil {
@@ -8748,9 +8749,9 @@ func (fs *fileStore) compact(seq uint64) (uint64, error) {
 			if nbuf, err = smb.cmp.Compress(nbuf); err != nil {
 				goto SKIP
 			}
-			<-dios
+			acquireDiosToken(smb.fs.srv.noDiskIOLimit.Load())
 			err = os.WriteFile(smb.mfn, nbuf, defaultFilePerms)
-			dios <- struct{}{}
+			releaseDiosToken(smb.fs.srv.noDiskIOLimit.Load())
 			if err != nil {
 				goto SKIP
 			}
@@ -9601,18 +9602,18 @@ func (fs *fileStore) Delete(inline bool) error {
 	// Do this in separate Go routine in case lots of blocks.
 	// Purge above protects us as does the removal of meta artifacts above.
 	removeDir := func() {
-		<-dios
+		acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 		err := os.RemoveAll(ndir)
-		dios <- struct{}{}
+		releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 		if err == nil {
 			return
 		}
 		ttl := time.Now().Add(time.Second)
 		for time.Now().Before(ttl) {
 			time.Sleep(10 * time.Millisecond)
-			<-dios
+			acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 			err = os.RemoveAll(ndir)
-			dios <- struct{}{}
+			releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 			if err == nil {
 				return
 			}
@@ -9887,10 +9888,10 @@ func (fs *fileStore) _writeFullState(force bool) error {
 
 	// Write our update index.db
 	// Protect with dios.
-	<-dios
+	acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 	err := os.WriteFile(fn, buf, defaultFilePerms)
 	// if file system is not writable isPermissionError is set to true
-	dios <- struct{}{}
+	releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 	if isPermissionError(err) {
 		return err
 	}
@@ -9924,9 +9925,9 @@ func (fs *fileStore) writeTTLState() error {
 	buf := fs.ttls.Encode(fs.state.LastSeq + 1)
 	fs.mu.RUnlock()
 
-	<-dios
+	acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 	err := os.WriteFile(fn, buf, defaultFilePerms)
-	dios <- struct{}{}
+	releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 
 	return err
 }
@@ -9942,9 +9943,9 @@ func (fs *fileStore) writeMsgSchedulingState() error {
 	buf := fs.scheduling.encode(fs.state.LastSeq + 1)
 	fs.mu.RUnlock()
 
-	<-dios
+	acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 	err := os.WriteFile(fn, buf, defaultFilePerms)
-	dios <- struct{}{}
+	releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 
 	return err
 }
@@ -10991,15 +10992,15 @@ func init() {
 	}
 }
 
-func acquireDiosToken(srv *Server) {
-	if srv != nil && srv.noDiskIOLimit.Load() {
+func acquireDiosToken(noDiskIOLimit bool) {
+	if noDiskIOLimit {
 		return
 	}
 	<-dios
 }
 
-func releaseDiosToken(srv *Server) {
-	if srv != nil && srv.noDiskIOLimit.Load() {
+func releaseDiosToken(noDiskIOLimit bool) {
+	if noDiskIOLimit {
 		return
 	}
 	dios <- struct{}{}
@@ -11183,9 +11184,9 @@ func (o *consumerFileStore) stateWithCopyLocked(doCopy bool) (*ConsumerState, er
 	}
 
 	// Read the state in here from disk..
-	<-dios
+	acquireDiosToken(o.fs.srv.noDiskIOLimit.Load())
 	buf, err := os.ReadFile(o.ifn)
-	dios <- struct{}{}
+	releaseDiosToken(o.fs.srv.noDiskIOLimit.Load())
 
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
@@ -11439,9 +11440,9 @@ func (o *consumerFileStore) delete(streamDeleted bool) error {
 
 	// If our stream was not deleted this will remove the directories.
 	if odir != _EMPTY_ && !streamDeleted {
-		<-dios
+		acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 		err = os.RemoveAll(odir)
-		dios <- struct{}{}
+		releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 	}
 
 	if !streamDeleted {
@@ -11637,9 +11638,9 @@ func (fs *fileStore) writeFileWithOptionalSync(name string, data []byte, perm fs
 	if fs.fcfg.SyncAlways {
 		return writeFileWithSync(name, data, perm)
 	}
-	<-dios
+	acquireDiosToken(fs.srv.noDiskIOLimit.Load())
 	defer func() {
-		dios <- struct{}{}
+		releaseDiosToken(fs.srv.noDiskIOLimit.Load())
 	}()
 	return os.WriteFile(name, data, perm)
 }

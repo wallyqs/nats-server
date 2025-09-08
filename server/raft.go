@@ -4110,10 +4110,16 @@ func writePeerState(sd string, ps *peerState) error {
 	return writeFileWithSync(psf, encodePeerState(ps), defaultFilePerms)
 }
 
-func readPeerState(sd string) (ps *peerState, err error) {
-	<-dios
+func readPeerState(sd string, srv ...*Server) (ps *peerState, err error) {
+	if len(srv) > 0 && srv[0] != nil {
+		noDiskIOLimit := srv[0].noDiskIOLimit.Load()
+		acquireRaftDiosToken(noDiskIOLimit)
+		defer releaseRaftDiosToken(noDiskIOLimit)
+	} else {
+		<-dios
+		defer func() { dios <- struct{}{} }()
+	}
 	buf, err := os.ReadFile(filepath.Join(sd, peerStateFile))
-	dios <- struct{}{}
 
 	if err != nil {
 		return nil, err
@@ -4166,6 +4172,24 @@ func (n *raft) acquireDiosToken() {
 
 func (n *raft) releaseDiosToken() {
 	if n.s != nil && n.s.noDiskIOLimit.Load() {
+		return
+	}
+	dios <- struct{}{}
+}
+
+// acquireRaftDiosToken acquires a disk I/O semaphore token if disk I/O limiting is enabled.
+// Standalone function version for use in utility functions.
+func acquireRaftDiosToken(noDiskIOLimit bool) {
+	if noDiskIOLimit {
+		return
+	}
+	<-dios
+}
+
+// releaseRaftDiosToken releases a disk I/O semaphore token if disk I/O limiting is enabled.
+// Standalone function version for use in utility functions.
+func releaseRaftDiosToken(noDiskIOLimit bool) {
+	if noDiskIOLimit {
 		return
 	}
 	dios <- struct{}{}

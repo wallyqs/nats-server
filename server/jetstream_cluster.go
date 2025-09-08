@@ -895,7 +895,7 @@ func (js *jetStream) setupMetaGroup() error {
 	cfg.Observer = s.canExtendOtherDomain() && s.getOpts().JetStreamExtHint != jsNoExtend
 
 	var bootstrap bool
-	if ps, err := readPeerState(storeDir); err != nil {
+	if ps, err := readPeerState(storeDir, s); err != nil {
 		s.Noticef("JetStream cluster bootstrapping")
 		bootstrap = true
 		peers := s.ActivePeers()
@@ -2374,7 +2374,7 @@ retry:
 
 	cfg := &RaftConfig{Name: rg.Name, Store: storeDir, Log: store, Track: true, Recovering: recovering, ScaleUp: rg.ScaleUp}
 
-	if _, err := readPeerState(storeDir); err != nil {
+	if _, err := readPeerState(storeDir, s); err != nil {
 		s.bootstrapRaftNode(cfg, rg.Peers, true)
 	}
 
