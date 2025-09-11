@@ -7672,6 +7672,11 @@ func (mb *msgBlock) msgFromBufEx(buf []byte, sm *StoreMsg, hh hash.Hash64, doCop
 			sm.buf = data[bi:end]
 		}
 		li, end = li-bi, end-bi
+
+		// Bound check in case of invalid range.
+		if li > len(sm.buf) || end > len(sm.buf) || li > end {
+			return nil, errBadMsg
+		}
 		sm.hdr = sm.buf[0:li:li]
 		sm.msg = sm.buf[li:end]
 	} else {

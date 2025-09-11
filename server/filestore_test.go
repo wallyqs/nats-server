@@ -10424,3 +10424,79 @@ func TestFileStoreMessageScheduleEncodeDecode(t *testing.T) {
 		require_Equal(t, sched.seq, nsched.seq)
 	}
 }
+
+func TestFileStoreMsgBlockFromBufExValidHeaderLengthPanic(t *testing.T) {
+	// Prevent `panic: runtime error: slice bounds out of range [::1678934625] with capacity 8369736`
+
+	// Create a malformed buffer that will trigger the slice bounds panic.
+	// Based on the panic, we need to construct a buffer where:
+	// 1. The message has headers (hbit is set)
+	// 2. The calculated header length (hl) causes li to exceed sm.buf bounds
+	mb := &msgBlock{}
+	var le = binary.LittleEndian
+
+	// Create a buffer that appears valid but has malformed header length
+	buf := make([]byte, 64) // Small buffer
+
+	// Set record length with header bit
+	rl := uint32(56) // Total record length.
+	rl |= hbit
+	le.PutUint32(buf[0:4], rl)           // Set header bit to indicate headers are present.
+	le.PutUint64(buf[4:12], 1)           // Set sequence number.
+	le.PutUint64(buf[12:20], 1234567890) // Set timestamp.
+	slen := uint16(8)
+	le.PutUint16(buf[20:22], slen)
+
+	// Set remaining header fields to zeros.
+	for i := 22; i < msgHdrSize; i++ {
+		buf[i] = 0
+	}
+
+	// Set up the data portion starting at msgHdrSize.
+	pos := msgHdrSize
+
+	// Add subject.
+	copy(buf[pos:pos+int(slen)], "test.sub")
+
+	// This is where we trigger the issue:
+	// Set an invalid header length that will cause slice bounds panic
+	// The header length is stored as uint32 after the subject
+	invalidHeaderLen := uint32(1678934625) // Large value that causes bounds issue
+	le.PutUint32(buf[pos+int(slen):pos+int(slen)+4], invalidHeaderLen)
+
+	// Add some fake message data and hash.
+	remaining := len(buf) - (pos + int(slen) + 4)
+	if remaining >= 8 {
+		// Add minimal message data and 8-byte hash.
+		for i := pos + int(slen) + 4; i < len(buf)-8; i++ {
+			buf[i] = byte('x')
+		}
+		// Add 8-byte hash at the end.
+		for i := len(buf) - 8; i < len(buf); i++ {
+			buf[i] = 0
+		}
+	}
+
+	// // This should panic with "slice bounds out of range"
+	// // We expect this to panic, so we'll recover and check
+	// defer func() {
+	// 	if r := recover(); r != nil {
+	// 		t.Logf("Reproduced panic: %v (type: %T)", r, r)
+	// 		// Check if this is a runtime panic error
+	// 		panicStr := fmt.Sprintf("%v", r)
+	// 		if len(panicStr) > 40 && panicStr[:40] == "runtime error: slice bounds out of range" {
+	// 			t.Log("Successfully reproduced the slice bounds panic from the log")
+	// 			return
+	// 		}
+	// 		// Re-panic if it's a different type of panic
+	// 		t.Fatalf("Unexpected panic type or message: %v", r)
+	// 	}
+	// 	t.Fatal("Expected panic did not occur")
+	// }()
+
+	// This should trigger the panic in msgFromBufEx
+	mb.mu.Lock()
+	_, err := mb.msgFromBufEx(buf, nil, nil, false)
+	mb.mu.Unlock()
+	require_Error(t, err, errBadMsg)
+}
