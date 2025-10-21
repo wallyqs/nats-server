@@ -422,14 +422,15 @@ func TestProxyProtoV2EndToEnd(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Check server's client list to verify the IP was extracted correctly
+	s.mu.Lock()
 	clients := s.clients
+	s.mu.Unlock()
 	if len(clients) == 0 {
 		t.Fatal("Expected at least one client connection")
 	}
 
 	// Find our client
 	var foundClient *client
-	s.mu.Lock()
 	for _, c := range clients {
 		c.mu.Lock()
 		if c.host == clientIP && c.port == clientPort {
@@ -440,7 +441,6 @@ func TestProxyProtoV2EndToEnd(t *testing.T) {
 			break
 		}
 	}
-	s.mu.Unlock()
 
 	if foundClient == nil {
 		t.Errorf("Expected to find client with IP %s:%d", clientIP, clientPort)
