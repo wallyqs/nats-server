@@ -16,6 +16,7 @@ package server
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -30,13 +31,58 @@ const (
 	proxyV2HeaderLen    = 16
 	proxyV1MaxLen       = 108
 	proxyTimeout        = 5 * time.Second
+
+	// PROXY protocol v2 constants
+	proxyProtoV2VerMask = 0xF0
+	proxyProtoV2Ver     = 0x20 // Version 2
+
+	// Commands
+	proxyProtoCmdMask  = 0x0F
+	proxyProtoCmdLocal = 0x00 // LOCAL command (health check)
+	proxyProtoCmdProxy = 0x01 // PROXY command
+
+	// Address family
+	proxyProtoFamilyMask   = 0xF0
+	proxyProtoFamilyUnspec = 0x00
+	proxyProtoFamilyInet   = 0x10 // IPv4
+	proxyProtoFamilyInet6  = 0x20 // IPv6
+
+	// Protocol
+	proxyProtoProtoMask     = 0x0F
+	proxyProtoProtoUnspec   = 0x00
+	proxyProtoProtoStream   = 0x01 // TCP/STREAM
+	proxyProtoProtoDatagram = 0x02 // UDP/DGRAM
+)
+
+var (
+	// Predefined errors for better error handling
+	errProxyProtoInvalidSig     = errors.New("invalid PROXY protocol signature")
+	errProxyProtoInvalidVersion = errors.New("invalid PROXY protocol version")
+	errProxyProtoInvalidFamily  = errors.New("unsupported address family")
+	errProxyProtoInvalidProto   = errors.New("unsupported protocol")
+	errProxyProtoAddrTooLong    = errors.New("address data too long")
+	errProxyProtoReadTimeout    = errors.New("timeout reading PROXY protocol header")
+	errProxyProtoInvalidV1      = errors.New("invalid PROXY v1 header")
 )
 
 type ProxyProtocolInfo struct {
 	SrcIP    net.IP
 	DestIP   net.IP
-	SrcPort  int
-	DestPort int
+	SrcPort  uint16
+	DestPort uint16
+}
+
+// String implements net.Addr interface
+func (p *ProxyProtocolInfo) String() string {
+	return net.JoinHostPort(p.SrcIP.String(), fmt.Sprintf("%d", p.SrcPort))
+}
+
+// Network implements net.Addr interface
+func (p *ProxyProtocolInfo) Network() string {
+	if p.SrcIP.To4() != nil {
+		return "tcp4"
+	}
+	return "tcp6"
 }
 
 type proxyConn struct {
@@ -46,10 +92,7 @@ type proxyConn struct {
 
 func (pc *proxyConn) RemoteAddr() net.Addr {
 	if pc.proxyInfo != nil && pc.proxyInfo.SrcIP != nil {
-		return &net.TCPAddr{
-			IP:   pc.proxyInfo.SrcIP,
-			Port: pc.proxyInfo.SrcPort,
-		}
+		return pc.proxyInfo
 	}
 	return pc.Conn.RemoteAddr()
 }
@@ -58,7 +101,7 @@ func (pc *proxyConn) LocalAddr() net.Addr {
 	if pc.proxyInfo != nil && pc.proxyInfo.DestIP != nil {
 		return &net.TCPAddr{
 			IP:   pc.proxyInfo.DestIP,
-			Port: pc.proxyInfo.DestPort,
+			Port: int(pc.proxyInfo.DestPort),
 		}
 	}
 	return pc.Conn.LocalAddr()
@@ -83,7 +126,7 @@ func parseProxyProtocol(conn net.Conn) (net.Conn, error) {
 		// PROXY v2 (binary)
 		proxyInfo, _, err = parseProxyV2(reader)
 	} else {
-		return nil, fmt.Errorf("invalid PROXY protocol header")
+		return nil, errProxyProtoInvalidSig
 	}
 
 	if err != nil {
@@ -111,14 +154,21 @@ func parseProxyProtocol(conn net.Conn) (net.Conn, error) {
 func parseProxyV1(reader *bufio.Reader) (*ProxyProtocolInfo, int, error) {
 	line, err := reader.ReadString('\n')
 	if err != nil {
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			return nil, 0, errProxyProtoReadTimeout
+		}
 		return nil, 0, fmt.Errorf("failed to read PROXY v1 line: %w", err)
 	}
 
 	line = strings.TrimSpace(line)
+	if len(line) > proxyV1MaxLen {
+		return nil, 0, errProxyProtoAddrTooLong
+	}
+
 	parts := strings.Split(line, " ")
 
 	if len(parts) < 2 || parts[0] != "PROXY" {
-		return nil, 0, fmt.Errorf("invalid PROXY v1 header")
+		return nil, 0, errProxyProtoInvalidV1
 	}
 
 	if len(parts) < 6 {
@@ -126,7 +176,7 @@ func parseProxyV1(reader *bufio.Reader) (*ProxyProtocolInfo, int, error) {
 		if len(parts) >= 2 && parts[1] == "UNKNOWN" {
 			return &ProxyProtocolInfo{}, len(line) + 1, nil
 		}
-		return nil, 0, fmt.Errorf("invalid PROXY v1 header")
+		return nil, 0, errProxyProtoInvalidV1
 	}
 
 	protocol := parts[1]
@@ -145,12 +195,12 @@ func parseProxyV1(reader *bufio.Reader) (*ProxyProtocolInfo, int, error) {
 		return nil, 0, fmt.Errorf("invalid destination IP: %s", parts[3])
 	}
 
-	srcPort, err := strconv.Atoi(parts[4])
+	srcPort, err := strconv.ParseUint(parts[4], 10, 16)
 	if err != nil {
 		return nil, 0, fmt.Errorf("invalid source port: %s", parts[4])
 	}
 
-	destPort, err := strconv.Atoi(parts[5])
+	destPort, err := strconv.ParseUint(parts[5], 10, 16)
 	if err != nil {
 		return nil, 0, fmt.Errorf("invalid destination port: %s", parts[5])
 	}
@@ -158,8 +208,8 @@ func parseProxyV1(reader *bufio.Reader) (*ProxyProtocolInfo, int, error) {
 	return &ProxyProtocolInfo{
 		SrcIP:    srcIP,
 		DestIP:   destIP,
-		SrcPort:  srcPort,
-		DestPort: destPort,
+		SrcPort:  uint16(srcPort),
+		DestPort: uint16(destPort),
 	}, len(line) + 1, nil
 }
 
@@ -167,30 +217,38 @@ func parseProxyV2(reader *bufio.Reader) (*ProxyProtocolInfo, int, error) {
 	header := make([]byte, proxyV2HeaderLen)
 	_, err := io.ReadFull(reader, header)
 	if err != nil {
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			return nil, 0, errProxyProtoReadTimeout
+		}
 		return nil, 0, fmt.Errorf("failed to read PROXY v2 header: %w", err)
 	}
 
 	// Verify signature
 	if string(header[:12]) != proxyV2HeaderPrefix {
-		return nil, 0, fmt.Errorf("invalid PROXY v2 signature")
+		return nil, 0, errProxyProtoInvalidSig
 	}
 
 	// Parse version and command
 	versionCommand := header[12]
-	version := (versionCommand & 0xF0) >> 4
-	command := versionCommand & 0x0F
+	version := versionCommand & proxyProtoV2VerMask
+	command := versionCommand & proxyProtoCmdMask
 
-	if version != 2 {
-		return nil, 0, fmt.Errorf("unsupported PROXY protocol version: %d", version)
+	if version != proxyProtoV2Ver {
+		return nil, 0, errProxyProtoInvalidVersion
 	}
 
 	// Parse family and protocol
 	familyProtocol := header[13]
-	family := (familyProtocol & 0xF0) >> 4
-	_ = familyProtocol & 0x0F // protocol (not currently used)
+	family := familyProtocol & proxyProtoFamilyMask
+	protocol := familyProtocol & proxyProtoProtoMask
 
 	// Parse length
 	length := binary.BigEndian.Uint16(header[14:16])
+
+	// Limit address data size to prevent excessive memory allocation
+	if length > 65535 {
+		return nil, 0, errProxyProtoAddrTooLong
+	}
 
 	// Read the address information
 	addressInfo := make([]byte, length)
@@ -204,42 +262,51 @@ func parseProxyV2(reader *bufio.Reader) (*ProxyProtocolInfo, int, error) {
 	totalBytes := proxyV2HeaderLen + int(length)
 
 	// Handle LOCAL command (health checks)
-	if command == 0x00 {
+	if command == proxyProtoCmdLocal {
 		return &ProxyProtocolInfo{}, totalBytes, nil
 	}
 
 	// Handle PROXY command
-	if command != 0x01 {
-		return nil, 0, fmt.Errorf("unsupported PROXY v2 command: %d", command)
+	if command != proxyProtoCmdProxy {
+		return nil, 0, fmt.Errorf("unsupported PROXY v2 command: 0x%02x", command)
+	}
+
+	// Validate protocol (we only support STREAM/TCP)
+	if protocol != proxyProtoProtoStream && protocol != proxyProtoProtoUnspec {
+		return nil, 0, errProxyProtoInvalidProto
 	}
 
 	// Parse address information based on family
 	switch family {
-	case 0x01: // IPv4
+	case proxyProtoFamilyInet: // IPv4
 		if length < 12 {
-			return nil, 0, fmt.Errorf("insufficient IPv4 address data")
+			return nil, 0, fmt.Errorf("insufficient IPv4 address data: %d bytes", length)
 		}
 		return &ProxyProtocolInfo{
 			SrcIP:    net.IP(addressInfo[0:4]),
 			DestIP:   net.IP(addressInfo[4:8]),
-			SrcPort:  int(binary.BigEndian.Uint16(addressInfo[8:10])),
-			DestPort: int(binary.BigEndian.Uint16(addressInfo[10:12])),
+			SrcPort:  binary.BigEndian.Uint16(addressInfo[8:10]),
+			DestPort: binary.BigEndian.Uint16(addressInfo[10:12]),
 		}, totalBytes, nil
 
-	case 0x02: // IPv6
+	case proxyProtoFamilyInet6: // IPv6
 		if length < 36 {
-			return nil, 0, fmt.Errorf("insufficient IPv6 address data")
+			return nil, 0, fmt.Errorf("insufficient IPv6 address data: %d bytes", length)
 		}
 		return &ProxyProtocolInfo{
 			SrcIP:    net.IP(addressInfo[0:16]),
 			DestIP:   net.IP(addressInfo[16:32]),
-			SrcPort:  int(binary.BigEndian.Uint16(addressInfo[32:34])),
-			DestPort: int(binary.BigEndian.Uint16(addressInfo[34:36])),
+			SrcPort:  binary.BigEndian.Uint16(addressInfo[32:34]),
+			DestPort: binary.BigEndian.Uint16(addressInfo[34:36]),
 		}, totalBytes, nil
 
-	default:
-		// UNSPEC or other family, return empty proxy info
+	case proxyProtoFamilyUnspec:
+		// UNSPEC family with PROXY command is valid but rare
 		return &ProxyProtocolInfo{}, totalBytes, nil
+
+	default:
+		// Unsupported family
+		return nil, 0, errProxyProtoInvalidFamily
 	}
 }
 

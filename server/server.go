@@ -2781,6 +2781,11 @@ func (s *Server) AcceptLoop(clr chan struct{}) {
 	s.Noticef("Listening for client connections on %s",
 		net.JoinHostPort(opts.Host, strconv.Itoa(l.Addr().(*net.TCPAddr).Port)))
 
+	// Alert if PROXY protocol is enabled
+	if opts.ProxyProtocol {
+		s.Noticef("PROXY protocol enabled for client connections")
+	}
+
 	// Alert of TLS enabled.
 	if opts.TLSConfig != nil {
 		s.Noticef("TLS required for client connections")
@@ -2809,7 +2814,7 @@ func (s *Server) AcceptLoop(clr chan struct{}) {
 	s.clientConnectURLs = s.getClientConnectURLs()
 	s.listener = l
 
-	go s.acceptConnections(l, "Client", func(conn net.Conn) { s.createClient(conn) },
+	go s.acceptConnections(l, "Client", func(conn net.Conn) { s.handleClientConnection(conn) },
 		func(_ error) bool {
 			if s.isLameDuckMode() {
 				// Signal that we are not accepting new clients
@@ -3209,6 +3214,31 @@ func (c *tlsMixConn) Read(b []byte) (int, error) {
 	return c.Conn.Read(b)
 }
 
+// handleClientConnection processes a new client connection, handling PROXY protocol if enabled
+func (s *Server) handleClientConnection(conn net.Conn) {
+	opts := s.getOpts()
+
+	// Handle PROXY protocol if enabled
+	if opts.ProxyProtocol {
+		wrappedConn, err := parseProxyProtocol(conn)
+		if err != nil {
+			s.Errorf("Error reading PROXY protocol header from %s: %v", conn.RemoteAddr(), err)
+			conn.Close()
+			return
+		}
+
+		// Check if this is a proxied connection or LOCAL command
+		if pc, ok := wrappedConn.(*proxyConn); ok && pc.proxyInfo != nil && pc.proxyInfo.SrcIP != nil {
+			// Log the proxied connection info
+			s.Debugf("PROXY protocol: connection from %s (via %s)", pc.RemoteAddr(), pc.Conn.RemoteAddr())
+		}
+
+		conn = wrappedConn
+	}
+
+	s.createClient(conn)
+}
+
 func (s *Server) createClient(conn net.Conn) *client {
 	return s.createClientEx(conn, false)
 }
@@ -3220,17 +3250,6 @@ func (s *Server) createClientInProcess(conn net.Conn) *client {
 func (s *Server) createClientEx(conn net.Conn, inProcess bool) *client {
 	// Snapshot server options.
 	opts := s.getOpts()
-
-	// Handle PROXY protocol if enabled
-	if opts.ProxyProtocol && !inProcess {
-		var err error
-		conn, err = parseProxyProtocol(conn)
-		if err != nil {
-			s.Errorf("Failed to parse PROXY protocol: %v", err)
-			conn.Close()
-			return nil
-		}
-	}
 
 	maxPay := int32(opts.MaxPayload)
 	maxSubs := int32(opts.MaxSubs)

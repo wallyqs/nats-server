@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,12 +94,16 @@ func TestProxyProtocolV1(t *testing.T) {
 			}
 
 			if tt.expectedSrc != "" {
-				remoteAddr := proxyConn.RemoteAddr().(*net.TCPAddr)
-				if remoteAddr.IP.String() != tt.expectedSrc {
-					t.Errorf("Expected source IP %s, got %s", tt.expectedSrc, remoteAddr.IP.String())
-				}
-				if remoteAddr.Port != tt.srcPort {
-					t.Errorf("Expected source port %d, got %d", tt.srcPort, remoteAddr.Port)
+				remoteAddr := proxyConn.RemoteAddr()
+				if proxyInfo, ok := remoteAddr.(*ProxyProtocolInfo); ok {
+					if proxyInfo.SrcIP.String() != tt.expectedSrc {
+						t.Errorf("Expected source IP %s, got %s", tt.expectedSrc, proxyInfo.SrcIP.String())
+					}
+					if int(proxyInfo.SrcPort) != tt.srcPort {
+						t.Errorf("Expected source port %d, got %d", tt.srcPort, proxyInfo.SrcPort)
+					}
+				} else {
+					t.Errorf("Expected ProxyProtocolInfo remote address, got %T", remoteAddr)
 				}
 
 				localAddr := proxyConn.LocalAddr().(*net.TCPAddr)
@@ -214,12 +219,16 @@ func TestProxyProtocolV2(t *testing.T) {
 			}
 
 			if tt.expectedSrc != "" {
-				remoteAddr := proxyConn.RemoteAddr().(*net.TCPAddr)
-				if remoteAddr.IP.String() != tt.expectedSrc {
-					t.Errorf("Expected source IP %s, got %s", tt.expectedSrc, remoteAddr.IP.String())
-				}
-				if remoteAddr.Port != tt.srcPort {
-					t.Errorf("Expected source port %d, got %d", tt.srcPort, remoteAddr.Port)
+				remoteAddr := proxyConn.RemoteAddr()
+				if proxyInfo, ok := remoteAddr.(*ProxyProtocolInfo); ok {
+					if proxyInfo.SrcIP.String() != tt.expectedSrc {
+						t.Errorf("Expected source IP %s, got %s", tt.expectedSrc, proxyInfo.SrcIP.String())
+					}
+					if int(proxyInfo.SrcPort) != tt.srcPort {
+						t.Errorf("Expected source port %d, got %d", tt.srcPort, proxyInfo.SrcPort)
+					}
+				} else {
+					t.Errorf("Expected ProxyProtocolInfo remote address, got %T", remoteAddr)
 				}
 
 				localAddr := proxyConn.LocalAddr().(*net.TCPAddr)
@@ -410,5 +419,142 @@ func TestProxyProtocolConfigParsing(t *testing.T) {
 
 	if opts.Port != 4222 {
 		t.Errorf("Expected port 4222, got %d", opts.Port)
+	}
+}
+
+// Additional edge case tests
+
+func TestProxyProtocolV2InvalidSignature(t *testing.T) {
+	// Create invalid signature
+	header := make([]byte, 16)
+	copy(header, "INVALID_SIG\x00") // Wrong signature
+	header[12] = 0x21                // version 2, PROXY command
+	header[13] = 0x11                // IPv4, STREAM
+	binary.BigEndian.PutUint16(header[14:], 12)
+
+	conn := &mockConn{readData: header}
+	_, err := parseProxyProtocol(conn)
+	if err == nil {
+		t.Fatal("Expected error for invalid signature")
+	}
+	if err != errProxyProtoInvalidSig {
+		t.Errorf("Expected errProxyProtoInvalidSig, got: %v", err)
+	}
+}
+
+func TestProxyProtocolV2InvalidVersion(t *testing.T) {
+	header := make([]byte, 16)
+	copy(header, proxyV2HeaderPrefix)
+	header[12] = 0x11 // version 1 (wrong), PROXY command
+	header[13] = 0x11 // IPv4, STREAM
+	binary.BigEndian.PutUint16(header[14:], 12)
+
+	conn := &mockConn{readData: header}
+	_, err := parseProxyProtocol(conn)
+	if err == nil {
+		t.Fatal("Expected error for invalid version")
+	}
+	if err != errProxyProtoInvalidVersion {
+		t.Errorf("Expected errProxyProtoInvalidVersion, got: %v", err)
+	}
+}
+
+func TestProxyProtocolV2UnsupportedProtocol(t *testing.T) {
+	header := make([]byte, 16)
+	copy(header, proxyV2HeaderPrefix)
+	header[12] = 0x21 // version 2, PROXY command
+	header[13] = 0x12 // IPv4, DGRAM (UDP - not supported)
+	binary.BigEndian.PutUint16(header[14:], 12)
+
+	// Add address data
+	addrData := make([]byte, 12)
+	fullData := append(header, addrData...)
+
+	conn := &mockConn{readData: fullData}
+	_, err := parseProxyProtocol(conn)
+	if err == nil {
+		t.Fatal("Expected error for unsupported protocol (UDP)")
+	}
+	if err != errProxyProtoInvalidProto {
+		t.Errorf("Expected errProxyProtoInvalidProto, got: %v", err)
+	}
+}
+
+func TestProxyProtocolV2TruncatedHeader(t *testing.T) {
+	// Only 10 bytes instead of 16
+	header := make([]byte, 10)
+	copy(header, proxyV2HeaderPrefix[:10])
+
+	conn := &mockConn{readData: header}
+	_, err := parseProxyProtocol(conn)
+	if err == nil {
+		t.Fatal("Expected error for truncated header")
+	}
+}
+
+func TestProxyProtocolV2ShortIPv4AddressData(t *testing.T) {
+	header := make([]byte, 16)
+	copy(header, proxyV2HeaderPrefix)
+	header[12] = 0x21 // version 2, PROXY command
+	header[13] = 0x11 // IPv4, STREAM
+	binary.BigEndian.PutUint16(header[14:], 12)
+
+	// Only provide 8 bytes instead of 12
+	addrData := make([]byte, 8)
+	fullData := append(header, addrData...)
+
+	conn := &mockConn{readData: fullData}
+	_, err := parseProxyProtocol(conn)
+	if err == nil {
+		t.Fatal("Expected error for short address data")
+	}
+}
+
+func TestProxyProtocolV2ShortIPv6AddressData(t *testing.T) {
+	header := make([]byte, 16)
+	copy(header, proxyV2HeaderPrefix)
+	header[12] = 0x21 // version 2, PROXY command
+	header[13] = 0x21 // IPv6, STREAM
+	binary.BigEndian.PutUint16(header[14:], 36)
+
+	// Only provide 20 bytes instead of 36
+	addrData := make([]byte, 20)
+	fullData := append(header, addrData...)
+
+	conn := &mockConn{readData: fullData}
+	_, err := parseProxyProtocol(conn)
+	if err == nil {
+		t.Fatal("Expected error for short IPv6 address data")
+	}
+}
+
+func TestProxyProtocolV2UnsupportedFamily(t *testing.T) {
+	header := make([]byte, 16)
+	copy(header, proxyV2HeaderPrefix)
+	header[12] = 0x21 // version 2, PROXY command
+	header[13] = 0x31 // Unix socket (0x30), STREAM - not supported
+	binary.BigEndian.PutUint16(header[14:], 0)
+
+	conn := &mockConn{readData: header}
+	_, err := parseProxyProtocol(conn)
+	if err == nil {
+		t.Fatal("Expected error for unsupported family (Unix socket)")
+	}
+	if err != errProxyProtoInvalidFamily {
+		t.Errorf("Expected errProxyProtoInvalidFamily, got: %v", err)
+	}
+}
+
+func TestProxyProtocolV1TooLong(t *testing.T) {
+	// Create a v1 header that's too long (> 108 bytes)
+	longHeader := "PROXY TCP4 192.168.1.1 192.168.1.2 1234 4222" + strings.Repeat(" extra", 20) + "\r\n"
+
+	conn := &mockConn{readData: []byte(longHeader)}
+	_, err := parseProxyProtocol(conn)
+	if err == nil {
+		t.Fatal("Expected error for v1 header too long")
+	}
+	if err != errProxyProtoAddrTooLong {
+		t.Errorf("Expected errProxyProtoAddrTooLong, got: %v", err)
 	}
 }
