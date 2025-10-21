@@ -6692,6 +6692,95 @@ func (mset *stream) processJetStreamBatchMsg(batchId, subject, reply string, hdr
 	return nil
 }
 
+// Header field type for trie-based matching
+type jsHdrField uint8
+
+const (
+	jsHdrFieldNone jsHdrField = iota
+	jsHdrFieldMsgId
+	jsHdrFieldExpStream
+	jsHdrFieldExpLastSeq
+	jsHdrFieldExpLastSubjSeq
+	jsHdrFieldExpLastSubjSeqSubj
+	jsHdrFieldExpLastMsgId
+	jsHdrFieldRollup
+	jsHdrFieldTTL
+	jsHdrFieldIncr
+	jsHdrFieldBatchId
+	jsHdrFieldBatchSeq
+	jsHdrFieldBatchCommit
+	jsHdrFieldSchedPattern
+	jsHdrFieldSchedTtl
+	jsHdrFieldSchedTarget
+	jsHdrFieldScheduler
+	jsHdrFieldSchedNext
+	jsHdrFieldReqApiLevel
+)
+
+// Trie node for efficient header matching
+type jsHdrTrieNode struct {
+	children [256]*jsHdrTrieNode
+	field    jsHdrField
+}
+
+// Global trie for header matching
+var jsHdrTrie *jsHdrTrieNode
+
+// Initialize the header matching trie
+func initJsHdrTrie() {
+	jsHdrTrie = &jsHdrTrieNode{}
+
+	// Insert all header keys we care about
+	insertHdrKey(JSMsgId, jsHdrFieldMsgId)
+	insertHdrKey(JSExpectedStream, jsHdrFieldExpStream)
+	insertHdrKey(JSExpectedLastSeq, jsHdrFieldExpLastSeq)
+	insertHdrKey(JSExpectedLastSubjSeq, jsHdrFieldExpLastSubjSeq)
+	insertHdrKey(JSExpectedLastSubjSeqSubj, jsHdrFieldExpLastSubjSeqSubj)
+	insertHdrKey(JSExpectedLastMsgId, jsHdrFieldExpLastMsgId)
+	insertHdrKey(JSMsgRollup, jsHdrFieldRollup)
+	insertHdrKey(JSMessageTTL, jsHdrFieldTTL)
+	insertHdrKey(JSMessageIncr, jsHdrFieldIncr)
+	insertHdrKey(JSBatchId, jsHdrFieldBatchId)
+	insertHdrKey(JSBatchSeq, jsHdrFieldBatchSeq)
+	insertHdrKey(JSBatchCommit, jsHdrFieldBatchCommit)
+	insertHdrKey(JSSchedulePattern, jsHdrFieldSchedPattern)
+	insertHdrKey(JSScheduleTTL, jsHdrFieldSchedTtl)
+	insertHdrKey(JSScheduleTarget, jsHdrFieldSchedTarget)
+	insertHdrKey(JSScheduler, jsHdrFieldScheduler)
+	insertHdrKey(JSScheduleNext, jsHdrFieldSchedNext)
+	insertHdrKey(JSRequiredApiLevel, jsHdrFieldReqApiLevel)
+}
+
+// Insert a header key into the trie
+func insertHdrKey(key string, field jsHdrField) {
+	node := jsHdrTrie
+	for i := 0; i < len(key); i++ {
+		ch := key[i]
+		if node.children[ch] == nil {
+			node.children[ch] = &jsHdrTrieNode{}
+		}
+		node = node.children[ch]
+	}
+	node.field = field
+}
+
+// Match a header key using the trie, returns the field type
+func matchHdrKey(key []byte) jsHdrField {
+	node := jsHdrTrie
+	for i := 0; i < len(key); i++ {
+		ch := key[i]
+		node = node.children[ch]
+		if node == nil {
+			return jsHdrFieldNone
+		}
+	}
+	return node.field
+}
+
+func init() {
+	initJsHdrTrie()
+}
+
 type jsHdrIndex struct {
 	msgId              []byte
 	expStream          []byte
@@ -6766,11 +6855,9 @@ func indexJsHdr(hdr []byte) ([]byte, *jsHdrIndex) {
 		}
 		valueEnd := offset + colon + end
 
-		bkey := bytesToString(key)
-
 		// If we have received this message across an account we may have request information attached.
 		// For now remove. TODO(dlc) - Should this be opt-in or opt-out?
-		if bkey == ClientInfoHdr {
+		if bytes.Equal(key, []byte(ClientInfoHdr)) {
 			hdr = append(hdr[:offset], hdr[valueEnd+LEN_CR_LF:]...)
 			hdrLen = len(hdr)
 			continue
@@ -6781,42 +6868,44 @@ func indexJsHdr(hdr []byte) ([]byte, *jsHdrIndex) {
 			idx = getJsHdrIndexFromPool()
 		}
 		value := hdr[valueStart:valueEnd:valueEnd]
-		switch bkey {
-		case JSMsgId:
+		// Use trie-based matching instead of switch
+		field := matchHdrKey(key)
+		switch field {
+		case jsHdrFieldMsgId:
 			idx.msgId = value
-		case JSExpectedStream:
+		case jsHdrFieldExpStream:
 			idx.expStream = value
-		case JSExpectedLastSeq:
+		case jsHdrFieldExpLastSeq:
 			idx.expLastSeq = value
-		case JSExpectedLastSubjSeq:
+		case jsHdrFieldExpLastSubjSeq:
 			idx.expLastSubjSeq = value
-		case JSExpectedLastSubjSeqSubj:
+		case jsHdrFieldExpLastSubjSeqSubj:
 			idx.expLastSubjSeqSubj = value
-		case JSExpectedLastMsgId:
+		case jsHdrFieldExpLastMsgId:
 			idx.expLastMsgId = value
-		case JSMsgRollup:
+		case jsHdrFieldRollup:
 			idx.rollup = value
-		case JSMessageTTL:
+		case jsHdrFieldTTL:
 			idx.ttl = value
-		case JSMessageIncr:
+		case jsHdrFieldIncr:
 			idx.incr = value
-		case JSBatchId:
+		case jsHdrFieldBatchId:
 			idx.batchId = value
-		case JSBatchSeq:
+		case jsHdrFieldBatchSeq:
 			idx.batchSeq = value
-		case JSBatchCommit:
+		case jsHdrFieldBatchCommit:
 			idx.batchCommit = value
-		case JSSchedulePattern:
+		case jsHdrFieldSchedPattern:
 			idx.schedPattern = value
-		case JSScheduleTTL:
+		case jsHdrFieldSchedTtl:
 			idx.schedTtl = value
-		case JSScheduleTarget:
+		case jsHdrFieldSchedTarget:
 			idx.schedTarget = value
-		case JSScheduler:
+		case jsHdrFieldScheduler:
 			idx.scheduler = value
-		case JSScheduleNext:
+		case jsHdrFieldSchedNext:
 			idx.schedNext = value
-		case JSRequiredApiLevel:
+		case jsHdrFieldReqApiLevel:
 			idx.reqApiLevel = true
 		}
 	}
