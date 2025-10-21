@@ -688,3 +688,170 @@ func TestOperatorPreloadFailsWithURLResolver(t *testing.T) {
 		t.Fatalf("Expected error %q, got %q", expectedErr, err.Error())
 	}
 }
+
+// Test that resolver preload takes precedence over runtime JWT updates after restart
+func TestOperatorPreloadPrecedenceAfterRestart(t *testing.T) {
+	// Create operator key pair
+	okp, _ := nkeys.FromSeed(oSeed)
+
+	// Create system account (different from test account)
+	syskp, _ := nkeys.CreateAccount()
+	syspub, _ := syskp.PublicKey()
+	sysnac := jwt.NewAccountClaims(syspub)
+	sysJWT, err := sysnac.Encode(okp)
+	if err != nil {
+		t.Fatalf("Error generating system account JWT: %v", err)
+	}
+
+	// Create test account key pair (this is the one we'll test)
+	akp, _ := nkeys.CreateAccount()
+	apub, _ := akp.PublicKey()
+
+	// Create initial account JWT with connection limit of 10
+	nac := jwt.NewAccountClaims(apub)
+	nac.Limits.Conn = 10
+	initialJWT, err := nac.Encode(okp)
+	if err != nil {
+		t.Fatalf("Error generating initial account JWT: %v", err)
+	}
+	
+	// Create operator JWT
+	opub, _ := okp.PublicKey()
+	opc := jwt.NewOperatorClaims(opub)
+	operatorJWT, err := opc.Encode(okp)
+	if err != nil {
+		t.Fatalf("Error generating operator JWT: %v", err)
+	}
+	
+	// Write operator JWT to temp file
+	operatorFile := "/tmp/test_op_preload.jwt"
+	if err := ioutil.WriteFile(operatorFile, []byte(operatorJWT), 0644); err != nil {
+		t.Fatalf("Error writing operator JWT: %v", err)
+	}
+	defer os.Remove(operatorFile)
+	
+	// Create config with preloaded account JWT (Conn limit = 10)
+	confContent := fmt.Sprintf(`
+		listen: 127.0.0.1:-1
+		operator: %s
+		system_account: %s
+		resolver: MEMORY
+		resolver_preload = {
+			%s: %q
+			%s: %q
+		}
+	`, operatorFile, syspub, syspub, sysJWT, apub, initialJWT)
+	
+	confFile := "/tmp/test_preload_precedence.conf"
+	if err := ioutil.WriteFile(confFile, []byte(confContent), 0644); err != nil {
+		t.Fatalf("Error writing config file: %v", err)
+	}
+	defer os.Remove(confFile)
+	
+	// Start server with preloaded JWT
+	s, opts := RunServerWithConfig(confFile)
+	defer s.Shutdown()
+	
+	// Verify initial state: account should have Conn limit of 10
+	acc, err := s.LookupAccount(apub)
+	if err != nil {
+		t.Fatalf("Error looking up account: %v", err)
+	}
+	if acc.MaxActiveConnections() != 10 {
+		t.Fatalf("Expected initial max connections to be 10, got %d", acc.MaxActiveConnections())
+	}
+	t.Logf("✓ Initial state: account has Conn limit of 10 (from preload)")
+	
+	// Simulate a runtime update by storing a different JWT in the resolver
+	// This is what happens when using nsc push or other dynamic account updates
+	nac2 := jwt.NewAccountClaims(apub)
+	nac2.Limits.Conn = 50
+	updatedJWT, err := nac2.Encode(okp)
+	if err != nil {
+		t.Fatalf("Error generating updated account JWT: %v", err)
+	}
+
+	// Store the updated JWT directly in the resolver (simulates runtime update)
+	// This is what would happen if an operator pushes an updated JWT via nsc or API
+	if err := s.AccountResolver().Store(apub, updatedJWT); err != nil {
+		t.Fatalf("Error storing updated JWT in resolver: %v", err)
+	}
+	t.Logf("✓ Stored updated JWT (Conn=50) in resolver")
+
+	// Note: The account object in cache still has the old limits (Conn=10)
+	// because we only updated the resolver, not the account object
+	// In a real scenario, a system account notification would trigger the update
+	// For this test, we'll just verify the resolver has the new JWT
+	currentLimit := acc.MaxActiveConnections()
+	t.Logf("Account object currently has Conn limit of %d", currentLimit)
+	
+	// Before reload, check what's in the resolver
+	jwtBeforeReload, err := s.AccountResolver().Fetch(apub)
+	if err != nil {
+		t.Fatalf("Error fetching JWT before reload: %v", err)
+	}
+	claimsBeforeReload, err := jwt.DecodeAccountClaims(jwtBeforeReload)
+	if err != nil {
+		t.Fatalf("Error decoding JWT before reload: %v", err)
+	}
+	t.Logf("Before reload: JWT in resolver has Conn limit of %d", claimsBeforeReload.Limits.Conn)
+
+	// Reload the server (this should re-apply the preload)
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Error reloading server: %v", err)
+	}
+
+	// After reload, check what's in the resolver
+	jwtAfterReload, err := s.AccountResolver().Fetch(apub)
+	if err != nil {
+		t.Fatalf("Error fetching JWT after reload: %v", err)
+	}
+	claimsAfterReload, err := jwt.DecodeAccountClaims(jwtAfterReload)
+	if err != nil {
+		t.Fatalf("Error decoding JWT after reload: %v", err)
+	}
+	t.Logf("After reload: JWT in resolver has Conn limit of %d", claimsAfterReload.Limits.Conn)
+
+	// Look up the account again after reload
+	acc, err = s.LookupAccount(apub)
+	if err != nil {
+		t.Fatalf("Error looking up account after reload: %v", err)
+	}
+
+	// Check the final state: does preload override the runtime update?
+	finalLimit := acc.MaxActiveConnections()
+	resolverLimit := claimsAfterReload.Limits.Conn
+
+	t.Logf("After reload: Account object has Conn limit of %d", finalLimit)
+
+	if resolverLimit == 10 {
+		t.Logf("✓ PRELOAD JWT restored in resolver (Conn limit = 10)")
+		t.Logf("CONCLUSION: On reload, preloads ARE re-applied to the resolver")
+		t.Logf("This means runtime Store() updates are OVERWRITTEN by preloads on reload")
+
+		if finalLimit == 10 {
+			t.Logf("✓ Account object was also updated from preload JWT")
+		} else {
+			t.Logf("⚠ Account object kept old limit (%d) despite resolver having preload", finalLimit)
+			t.Logf("This is expected because the account was already in cache")
+		}
+	} else if resolverLimit == 50 {
+		t.Logf("✗ Runtime update persisted in resolver (Conn limit = 50)")
+		t.Logf("UNEXPECTED: Preload should have been restored on reload")
+		t.Fatalf("This is a bug - preloads should override runtime updates")
+	} else {
+		t.Fatalf("Unexpected resolver limit: %d (expected 10 or 50)", resolverLimit)
+	}
+
+	// Also check opts to ensure they still have the original config
+	if opts.SystemAccount != syspub {
+		t.Fatalf("System account mismatch")
+	}
+
+	t.Logf("\n=== FINAL SUMMARY ===")
+	t.Logf("1. Preload JWTs take precedence in the RESOLVER after reload")
+	t.Logf("2. Runtime Store() updates to MemAccResolver are OVERWRITTEN on reload")
+	t.Logf("3. Cached account objects may NOT update unless explicitly refreshed")
+	t.Logf("\nIMPLICATION: Preloads always win in the resolver, but existing")
+	t.Logf("connections/accounts may continue with old claims until refreshed")
+}
