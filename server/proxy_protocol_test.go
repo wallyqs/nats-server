@@ -603,28 +603,42 @@ func TestProxyProtocolInfoNetworkMethod(t *testing.T) {
 			expectedString: "unknown",
 		},
 		{
-			name: "No family set, IPv4 IP",
+			name: "UNSPEC family with IPv4 IP (UNKNOWN v1 connection)",
 			info: &ProxyProtocolInfo{
 				SrcIP:  net.ParseIP("10.0.0.1"),
 				SrcPort: 9999,
+				Family: proxyProtoFamilyUnspec,
 			},
-			expectedNet:    "tcp4",
+			expectedNet:    "tcp",
 			expectedString: "10.0.0.1:9999",
 		},
 		{
-			name: "No family set, IPv6 IP",
+			name: "UNSPEC family with IPv6 IP (UNKNOWN v1 connection)",
 			info: &ProxyProtocolInfo{
 				SrcIP:  net.ParseIP("fe80::1"),
 				SrcPort: 8888,
+				Family: proxyProtoFamilyUnspec,
 			},
-			expectedNet:    "tcp6",
+			expectedNet:    "tcp",
 			expectedString: "[fe80::1]:8888",
 		},
 		{
-			name: "No family, no IP (LOCAL command)",
-			info: &ProxyProtocolInfo{},
+			name: "UNSPEC family no IP (LOCAL v2 command)",
+			info: &ProxyProtocolInfo{
+				Family: proxyProtoFamilyUnspec,
+			},
 			expectedNet:    "tcp",
 			expectedString: "unknown",
+		},
+		{
+			name: "Invalid/unknown family value",
+			info: &ProxyProtocolInfo{
+				SrcIP:  net.ParseIP("192.168.1.1"),
+				SrcPort: 1234,
+				Family: 0xFF, // Invalid family value
+			},
+			expectedNet:    "unknown",
+			expectedString: "192.168.1.1:1234",
 		},
 	}
 

@@ -84,15 +84,9 @@ func (p *ProxyProtocolInfo) String() string {
 
 // Network implements net.Addr interface
 func (p *ProxyProtocolInfo) Network() string {
-	// If Family is UNSPEC (0x00) but we have a source IP, try to detect from IP
-	// This handles v1 protocol and cases where Family wasn't explicitly set
-	if p.Family == proxyProtoFamilyUnspec && p.SrcIP != nil {
-		if p.SrcIP.To4() != nil {
-			return "tcp4"
-		}
-		return "tcp6"
-	}
-
+	// Trust the Family field from the protocol header - do not attempt
+	// to detect or guess from IP addresses. In security-sensitive PROXY
+	// protocol parsing, we should surface issues rather than hide them.
 	switch p.Family {
 	case proxyProtoFamilyInet:
 		return "tcp4"
@@ -101,15 +95,13 @@ func (p *ProxyProtocolInfo) Network() string {
 	case proxyProtoFamilyUnix:
 		return "unix"
 	case proxyProtoFamilyUnspec:
-		return "tcp" // Generic TCP for unspecified (no IP)
-	default:
-		// Unknown family - try to detect from IP as last resort
-		if p.SrcIP != nil && p.SrcIP.To4() != nil {
-			return "tcp4"
-		} else if p.SrcIP != nil {
-			return "tcp6"
-		}
+		// UNSPEC (0x00) is valid for UNKNOWN v1 connections and LOCAL v2 commands
 		return "tcp"
+	default:
+		// Unknown/unsupported family - this indicates a protocol violation
+		// that should have been caught during parsing. Return a value that
+		// makes the problem visible rather than trying to silently recover.
+		return "unknown"
 	}
 }
 
