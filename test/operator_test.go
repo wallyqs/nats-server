@@ -662,3 +662,29 @@ func TestConnsRequestDoesNotLoadAccountCheckingConnLimits(t *testing.T) {
 		t.Fatalf("Expected only 2 loaded accounts, got %d", nla)
 	}
 }
+
+// Test that preloads cannot be used with URL resolver
+func TestOperatorPreloadFailsWithURLResolver(t *testing.T) {
+	confFileName := "/tmp/test_resolver_preload_url.conf"
+
+	opts, err := server.ProcessConfigFile(confFileName)
+	if err != nil {
+		t.Fatalf("Error processing config file: %v", err)
+	}
+
+	// NewServer() internally calls configureResolver which should fail
+	// when trying to use preloads with URL resolver
+	s, err := server.NewServer(opts)
+	if s != nil {
+		defer s.Shutdown()
+	}
+
+	if err == nil {
+		t.Fatal("Expected error when using preloads with URL resolver, got nil")
+	}
+
+	expectedErr := "resolver preloads only available for resolver type MEM"
+	if err.Error() != expectedErr {
+		t.Fatalf("Expected error %q, got %q", expectedErr, err.Error())
+	}
+}
