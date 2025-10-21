@@ -642,3 +642,116 @@ func TestProxyProtocolInfoNetworkMethod(t *testing.T) {
 		})
 	}
 }
+
+// TestProxyProtocolByteCountTracking verifies that parseProxyV1 and parseProxyV2
+// return accurate byte counts even when errors occur, which is critical for
+// callers tracking offsets into memory buffers.
+func TestProxyProtocolByteCountTracking(t *testing.T) {
+	tests := []struct {
+		name          string
+		data          []byte
+		expectedBytes int
+		expectError   bool
+	}{
+		{
+			name:          "V2 truncated header (5 bytes)",
+			data:          []byte{0x0D, 0x0A, 0x0D, 0x0A, 0x00},
+			expectedBytes: 5,
+			expectError:   true,
+		},
+		{
+			name: "V2 invalid signature (full 16 bytes)",
+			data: func() []byte {
+				header := make([]byte, 16)
+				copy(header, "INVALID_SIG\x00")
+				header[12] = 0x21
+				header[13] = 0x11
+				binary.BigEndian.PutUint16(header[14:], 12)
+				return header
+			}(),
+			expectedBytes: 16,
+			expectError:   true,
+		},
+		{
+			name: "V2 invalid version (full 16 bytes)",
+			data: func() []byte {
+				header := make([]byte, 16)
+				copy(header, proxyV2HeaderPrefix)
+				header[12] = 0x11 // version 1 (wrong)
+				header[13] = 0x11
+				binary.BigEndian.PutUint16(header[14:], 12)
+				return header
+			}(),
+			expectedBytes: 16,
+			expectError:   true,
+		},
+		{
+			name: "V2 truncated IPv4 address data (header + 5 bytes instead of 12)",
+			data: func() []byte {
+				header := make([]byte, 16)
+				copy(header, proxyV2HeaderPrefix)
+				header[12] = 0x21 // version 2, PROXY command
+				header[13] = 0x11 // IPv4, STREAM
+				binary.BigEndian.PutUint16(header[14:], 12)
+				// Add only 5 bytes of address data (should be 12)
+				return append(header, []byte{1, 2, 3, 4, 5}...)
+			}(),
+			expectedBytes: 21, // 16 header + 5 bytes read
+			expectError:   true,
+		},
+		{
+			name: "V2 short IPv4 address data (header + full 8 bytes, need 12)",
+			data: func() []byte {
+				header := make([]byte, 16)
+				copy(header, proxyV2HeaderPrefix)
+				header[12] = 0x21 // version 2, PROXY command
+				header[13] = 0x11 // IPv4, STREAM
+				binary.BigEndian.PutUint16(header[14:], 8)
+				// Add 8 bytes of address data (need 12 for IPv4)
+				return append(header, []byte{192, 168, 1, 1, 10, 0, 0, 1}...)
+			}(),
+			expectedBytes: 24, // 16 header + 8 bytes
+			expectError:   true,
+		},
+		{
+			name:          "V1 invalid header format",
+			data:          []byte("INVALID HEADER\r\n"),
+			expectedBytes: 16,
+			expectError:   true,
+		},
+		{
+			name:          "V1 incomplete header",
+			data:          []byte("PROXY TCP4 192.168.1.1\r\n"),
+			expectedBytes: 24,
+			expectError:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := bufio.NewReader(bytes.NewReader(tt.data))
+
+			var info *ProxyProtocolInfo
+			var bytesRead int
+			var err error
+
+			// Determine which parser to use based on first byte
+			firstByte, _ := reader.Peek(1)
+			if len(firstByte) > 0 {
+				if firstByte[0] == 'P' {
+					info, bytesRead, err = parseProxyV1(reader)
+				} else {
+					info, bytesRead, err = parseProxyV2(reader)
+				}
+			}
+
+			if tt.expectError && err == nil {
+				t.Errorf("Expected error but got none, info=%+v", info)
+			}
+
+			if bytesRead != tt.expectedBytes {
+				t.Errorf("Expected %d bytes consumed, got %d", tt.expectedBytes, bytesRead)
+			}
+		})
+	}
+}
