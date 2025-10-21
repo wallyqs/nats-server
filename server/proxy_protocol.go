@@ -46,6 +46,7 @@ const (
 	proxyProtoFamilyUnspec = 0x00
 	proxyProtoFamilyInet   = 0x10 // IPv4
 	proxyProtoFamilyInet6  = 0x20 // IPv6
+	proxyProtoFamilyUnix   = 0x30 // Unix socket
 
 	// Protocol
 	proxyProtoProtoMask     = 0x0F
@@ -70,19 +71,46 @@ type ProxyProtocolInfo struct {
 	DestIP   net.IP
 	SrcPort  uint16
 	DestPort uint16
+	Family   byte // Address family from PROXY protocol header
 }
 
 // String implements net.Addr interface
 func (p *ProxyProtocolInfo) String() string {
+	if p.SrcIP == nil {
+		return "unknown"
+	}
 	return net.JoinHostPort(p.SrcIP.String(), fmt.Sprintf("%d", p.SrcPort))
 }
 
 // Network implements net.Addr interface
 func (p *ProxyProtocolInfo) Network() string {
-	if p.SrcIP.To4() != nil {
-		return "tcp4"
+	// If Family is UNSPEC (0x00) but we have a source IP, try to detect from IP
+	// This handles v1 protocol and cases where Family wasn't explicitly set
+	if p.Family == proxyProtoFamilyUnspec && p.SrcIP != nil {
+		if p.SrcIP.To4() != nil {
+			return "tcp4"
+		}
+		return "tcp6"
 	}
-	return "tcp6"
+
+	switch p.Family {
+	case proxyProtoFamilyInet:
+		return "tcp4"
+	case proxyProtoFamilyInet6:
+		return "tcp6"
+	case proxyProtoFamilyUnix:
+		return "unix"
+	case proxyProtoFamilyUnspec:
+		return "tcp" // Generic TCP for unspecified (no IP)
+	default:
+		// Unknown family - try to detect from IP as last resort
+		if p.SrcIP != nil && p.SrcIP.To4() != nil {
+			return "tcp4"
+		} else if p.SrcIP != nil {
+			return "tcp6"
+		}
+		return "tcp"
+	}
 }
 
 type proxyConn struct {
@@ -174,7 +202,7 @@ func parseProxyV1(reader *bufio.Reader) (*ProxyProtocolInfo, int, error) {
 	if len(parts) < 6 {
 		// Handle UNKNOWN connections or malformed headers
 		if len(parts) >= 2 && parts[1] == "UNKNOWN" {
-			return &ProxyProtocolInfo{}, len(line) + 1, nil
+			return &ProxyProtocolInfo{Family: proxyProtoFamilyUnspec}, len(line) + 1, nil
 		}
 		return nil, 0, errProxyProtoInvalidV1
 	}
@@ -182,7 +210,7 @@ func parseProxyV1(reader *bufio.Reader) (*ProxyProtocolInfo, int, error) {
 	protocol := parts[1]
 	if protocol != "TCP4" && protocol != "TCP6" {
 		// UNKNOWN connection, return empty proxy info
-		return &ProxyProtocolInfo{}, len(line) + 1, nil
+		return &ProxyProtocolInfo{Family: proxyProtoFamilyUnspec}, len(line) + 1, nil
 	}
 
 	srcIP := net.ParseIP(parts[2])
@@ -205,11 +233,18 @@ func parseProxyV1(reader *bufio.Reader) (*ProxyProtocolInfo, int, error) {
 		return nil, 0, fmt.Errorf("invalid destination port: %s", parts[5])
 	}
 
+	// Determine family from protocol
+	var family byte = proxyProtoFamilyInet
+	if protocol == "TCP6" {
+		family = proxyProtoFamilyInet6
+	}
+
 	return &ProxyProtocolInfo{
 		SrcIP:    srcIP,
 		DestIP:   destIP,
 		SrcPort:  uint16(srcPort),
 		DestPort: uint16(destPort),
+		Family:   family,
 	}, len(line) + 1, nil
 }
 
@@ -263,7 +298,7 @@ func parseProxyV2(reader *bufio.Reader) (*ProxyProtocolInfo, int, error) {
 
 	// Handle LOCAL command (health checks)
 	if command == proxyProtoCmdLocal {
-		return &ProxyProtocolInfo{}, totalBytes, nil
+		return &ProxyProtocolInfo{Family: family}, totalBytes, nil
 	}
 
 	// Handle PROXY command
@@ -287,6 +322,7 @@ func parseProxyV2(reader *bufio.Reader) (*ProxyProtocolInfo, int, error) {
 			DestIP:   net.IP(addressInfo[4:8]),
 			SrcPort:  binary.BigEndian.Uint16(addressInfo[8:10]),
 			DestPort: binary.BigEndian.Uint16(addressInfo[10:12]),
+			Family:   family,
 		}, totalBytes, nil
 
 	case proxyProtoFamilyInet6: // IPv6
@@ -298,14 +334,15 @@ func parseProxyV2(reader *bufio.Reader) (*ProxyProtocolInfo, int, error) {
 			DestIP:   net.IP(addressInfo[16:32]),
 			SrcPort:  binary.BigEndian.Uint16(addressInfo[32:34]),
 			DestPort: binary.BigEndian.Uint16(addressInfo[34:36]),
+			Family:   family,
 		}, totalBytes, nil
 
 	case proxyProtoFamilyUnspec:
 		// UNSPEC family with PROXY command is valid but rare
-		return &ProxyProtocolInfo{}, totalBytes, nil
+		return &ProxyProtocolInfo{Family: family}, totalBytes, nil
 
 	default:
-		// Unsupported family
+		// Unsupported family (e.g., Unix socket 0x30)
 		return nil, 0, errProxyProtoInvalidFamily
 	}
 }

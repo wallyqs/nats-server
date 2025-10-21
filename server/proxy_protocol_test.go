@@ -558,3 +558,87 @@ func TestProxyProtocolV1TooLong(t *testing.T) {
 		t.Errorf("Expected errProxyProtoAddrTooLong, got: %v", err)
 	}
 }
+
+func TestProxyProtocolInfoNetworkMethod(t *testing.T) {
+	tests := []struct {
+		name           string
+		info           *ProxyProtocolInfo
+		expectedNet    string
+		expectedString string
+	}{
+		{
+			name: "IPv4 family",
+			info: &ProxyProtocolInfo{
+				SrcIP:  net.ParseIP("192.168.1.1"),
+				SrcPort: 1234,
+				Family: proxyProtoFamilyInet,
+			},
+			expectedNet:    "tcp4",
+			expectedString: "192.168.1.1:1234",
+		},
+		{
+			name: "IPv6 family",
+			info: &ProxyProtocolInfo{
+				SrcIP:  net.ParseIP("2001:db8::1"),
+				SrcPort: 5678,
+				Family: proxyProtoFamilyInet6,
+			},
+			expectedNet:    "tcp6",
+			expectedString: "[2001:db8::1]:5678",
+		},
+		{
+			name: "UNSPEC family",
+			info: &ProxyProtocolInfo{
+				Family: proxyProtoFamilyUnspec,
+			},
+			expectedNet:    "tcp",
+			expectedString: "unknown",
+		},
+		{
+			name: "Unix socket family",
+			info: &ProxyProtocolInfo{
+				Family: proxyProtoFamilyUnix,
+			},
+			expectedNet:    "unix",
+			expectedString: "unknown",
+		},
+		{
+			name: "No family set, IPv4 IP",
+			info: &ProxyProtocolInfo{
+				SrcIP:  net.ParseIP("10.0.0.1"),
+				SrcPort: 9999,
+			},
+			expectedNet:    "tcp4",
+			expectedString: "10.0.0.1:9999",
+		},
+		{
+			name: "No family set, IPv6 IP",
+			info: &ProxyProtocolInfo{
+				SrcIP:  net.ParseIP("fe80::1"),
+				SrcPort: 8888,
+			},
+			expectedNet:    "tcp6",
+			expectedString: "[fe80::1]:8888",
+		},
+		{
+			name: "No family, no IP (LOCAL command)",
+			info: &ProxyProtocolInfo{},
+			expectedNet:    "tcp",
+			expectedString: "unknown",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			network := tt.info.Network()
+			if network != tt.expectedNet {
+				t.Errorf("Network() = %q, want %q", network, tt.expectedNet)
+			}
+
+			str := tt.info.String()
+			if str != tt.expectedString {
+				t.Errorf("String() = %q, want %q", str, tt.expectedString)
+			}
+		})
+	}
+}
