@@ -689,7 +689,7 @@ func TestOperatorPreloadFailsWithURLResolver(t *testing.T) {
 	}
 }
 
-// Test that resolver preload takes precedence over runtime JWT updates after restart
+// Test that resolver preload takes precedence over runtime JWT updates after restart (CLUSTER)
 func TestOperatorPreloadPrecedenceAfterRestart(t *testing.T) {
 	// Create operator key pair
 	okp, _ := nkeys.FromSeed(oSeed)
@@ -714,7 +714,7 @@ func TestOperatorPreloadPrecedenceAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error generating initial account JWT: %v", err)
 	}
-	
+
 	// Create operator JWT
 	opub, _ := okp.PublicKey()
 	opc := jwt.NewOperatorClaims(opub)
@@ -722,45 +722,68 @@ func TestOperatorPreloadPrecedenceAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error generating operator JWT: %v", err)
 	}
-	
+
 	// Write operator JWT to temp file
 	operatorFile := "/tmp/test_op_preload.jwt"
 	if err := ioutil.WriteFile(operatorFile, []byte(operatorJWT), 0644); err != nil {
 		t.Fatalf("Error writing operator JWT: %v", err)
 	}
 	defer os.Remove(operatorFile)
-	
-	// Create config with preloaded account JWT (Conn limit = 10)
-	confContent := fmt.Sprintf(`
+
+	// Create cluster config template with preloaded account JWT (Conn limit = 10)
+	cf := `
+	listen: 127.0.0.1:-1
+	cluster {
 		listen: 127.0.0.1:-1
-		operator: %s
-		system_account: %s
-		resolver: MEMORY
-		resolver_preload = {
-			%s: %q
-			%s: %q
-		}
-	`, operatorFile, syspub, syspub, sysJWT, apub, initialJWT)
-	
-	confFile := "/tmp/test_preload_precedence.conf"
-	if err := ioutil.WriteFile(confFile, []byte(confContent), 0644); err != nil {
-		t.Fatalf("Error writing config file: %v", err)
+		%s
 	}
+	operator: %s
+	system_account: %s
+	resolver: MEMORY
+	resolver_preload = {
+		%s: %q
+		%s: %q
+	}
+	`
+
+	// Start first server in cluster
+	contents := strings.Replace(fmt.Sprintf(cf, "", operatorFile, syspub, syspub, sysJWT, apub, initialJWT), "\n\t", "\n", -1)
+	confFile := createConfFile(t, []byte(contents))
 	defer os.Remove(confFile)
-	
-	// Start server with preloaded JWT
+
 	s, opts := RunServerWithConfig(confFile)
 	defer s.Shutdown()
+
+	// Start second server in cluster with routes to first
+	routeStr := fmt.Sprintf("routes = [nats-route://%s:%d]", opts.Cluster.Host, opts.Cluster.Port)
+	contents2 := strings.Replace(fmt.Sprintf(cf, routeStr, operatorFile, syspub, syspub, sysJWT, apub, initialJWT), "\n\t", "\n", -1)
+	confFile2 := createConfFile(t, []byte(contents2))
+	defer os.Remove(confFile2)
+
+	s2, _ := RunServerWithConfig(confFile2)
+	defer s2.Shutdown()
+
+	checkClusterFormed(t, s, s2)
+	t.Logf("✓ Cluster formed with 2 servers")
 	
-	// Verify initial state: account should have Conn limit of 10
+	// Verify initial state on both servers: account should have Conn limit of 10
 	acc, err := s.LookupAccount(apub)
 	if err != nil {
-		t.Fatalf("Error looking up account: %v", err)
+		t.Fatalf("Error looking up account on s1: %v", err)
 	}
 	if acc.MaxActiveConnections() != 10 {
-		t.Fatalf("Expected initial max connections to be 10, got %d", acc.MaxActiveConnections())
+		t.Fatalf("Expected initial max connections to be 10 on s1, got %d", acc.MaxActiveConnections())
 	}
-	t.Logf("✓ Initial state: account has Conn limit of 10 (from preload)")
+
+	acc2, err := s2.LookupAccount(apub)
+	if err != nil {
+		t.Fatalf("Error looking up account on s2: %v", err)
+	}
+	if acc2.MaxActiveConnections() != 10 {
+		t.Fatalf("Expected initial max connections to be 10 on s2, got %d", acc2.MaxActiveConnections())
+	}
+	t.Logf("✓ [Server 1] Initial state: account has Conn limit of 10 (from preload)")
+	t.Logf("✓ [Server 2] Initial state: account has Conn limit of 10 (from preload)")
 	
 	// Simulate a runtime update by storing a different JWT in the resolver
 	// This is what happens when using nsc push or other dynamic account updates
@@ -771,12 +794,16 @@ func TestOperatorPreloadPrecedenceAfterRestart(t *testing.T) {
 		t.Fatalf("Error generating updated account JWT: %v", err)
 	}
 
-	// Store the updated JWT directly in the resolver (simulates runtime update)
+	// Store the updated JWT directly in the resolver on both servers (simulates runtime update)
 	// This is what would happen if an operator pushes an updated JWT via nsc or API
 	if err := s.AccountResolver().Store(apub, updatedJWT); err != nil {
-		t.Fatalf("Error storing updated JWT in resolver: %v", err)
+		t.Fatalf("Error storing updated JWT in resolver on s1: %v", err)
 	}
-	t.Logf("✓ Stored updated JWT (Conn=50) in resolver")
+	if err := s2.AccountResolver().Store(apub, updatedJWT); err != nil {
+		t.Fatalf("Error storing updated JWT in resolver on s2: %v", err)
+	}
+	t.Logf("✓ [Server 1] Stored updated JWT (Conn=50) in resolver")
+	t.Logf("✓ [Server 2] Stored updated JWT (Conn=50) in resolver")
 
 	// Note: The account object in cache still has the old limits (Conn=10)
 	// because we only updated the resolver, not the account object
@@ -796,51 +823,70 @@ func TestOperatorPreloadPrecedenceAfterRestart(t *testing.T) {
 	}
 	t.Logf("Before reload: JWT in resolver has Conn limit of %d", claimsBeforeReload.Limits.Conn)
 
-	// Reload the server (this should re-apply the preload)
+	// Reload BOTH servers (this should re-apply the preload on each)
 	if err := s.Reload(); err != nil {
-		t.Fatalf("Error reloading server: %v", err)
+		t.Fatalf("Error reloading server 1: %v", err)
 	}
+	if err := s2.Reload(); err != nil {
+		t.Fatalf("Error reloading server 2: %v", err)
+	}
+	t.Logf("✓ Reloaded both cluster servers")
 
-	// After reload, check what's in the resolver
+	// After reload, check what's in the resolver on both servers
 	jwtAfterReload, err := s.AccountResolver().Fetch(apub)
 	if err != nil {
-		t.Fatalf("Error fetching JWT after reload: %v", err)
+		t.Fatalf("Error fetching JWT after reload on s1: %v", err)
 	}
 	claimsAfterReload, err := jwt.DecodeAccountClaims(jwtAfterReload)
 	if err != nil {
-		t.Fatalf("Error decoding JWT after reload: %v", err)
+		t.Fatalf("Error decoding JWT after reload on s1: %v", err)
 	}
-	t.Logf("After reload: JWT in resolver has Conn limit of %d", claimsAfterReload.Limits.Conn)
+	t.Logf("[Server 1] After reload: JWT in resolver has Conn limit of %d", claimsAfterReload.Limits.Conn)
 
-	// Look up the account again after reload
+	jwtAfterReload2, err := s2.AccountResolver().Fetch(apub)
+	if err != nil {
+		t.Fatalf("Error fetching JWT after reload on s2: %v", err)
+	}
+	claimsAfterReload2, err := jwt.DecodeAccountClaims(jwtAfterReload2)
+	if err != nil {
+		t.Fatalf("Error decoding JWT after reload on s2: %v", err)
+	}
+	t.Logf("[Server 2] After reload: JWT in resolver has Conn limit of %d", claimsAfterReload2.Limits.Conn)
+
+	// Look up the account again after reload on both servers
 	acc, err = s.LookupAccount(apub)
 	if err != nil {
-		t.Fatalf("Error looking up account after reload: %v", err)
+		t.Fatalf("Error looking up account after reload on s1: %v", err)
+	}
+	acc2, err = s2.LookupAccount(apub)
+	if err != nil {
+		t.Fatalf("Error looking up account after reload on s2: %v", err)
 	}
 
 	// Check the final state: does preload override the runtime update?
 	finalLimit := acc.MaxActiveConnections()
+	finalLimit2 := acc2.MaxActiveConnections()
 	resolverLimit := claimsAfterReload.Limits.Conn
+	resolverLimit2 := claimsAfterReload2.Limits.Conn
 
-	t.Logf("After reload: Account object has Conn limit of %d", finalLimit)
+	t.Logf("[Server 1] After reload: Account object has Conn limit of %d", finalLimit)
+	t.Logf("[Server 2] After reload: Account object has Conn limit of %d", finalLimit2)
 
-	if resolverLimit == 10 {
-		t.Logf("✓ PRELOAD JWT restored in resolver (Conn limit = 10)")
-		t.Logf("CONCLUSION: On reload, preloads ARE re-applied to the resolver")
+	if resolverLimit == 10 && resolverLimit2 == 10 {
+		t.Logf("✓ PRELOAD JWT restored in BOTH cluster servers' resolvers (Conn limit = 10)")
+		t.Logf("CONCLUSION: On reload, preloads ARE re-applied to the resolver on each node")
 		t.Logf("This means runtime Store() updates are OVERWRITTEN by preloads on reload")
 
-		if finalLimit == 10 {
-			t.Logf("✓ Account object was also updated from preload JWT")
+		if finalLimit == 10 && finalLimit2 == 10 {
+			t.Logf("✓ Account objects on BOTH servers updated from preload JWT")
 		} else {
-			t.Logf("⚠ Account object kept old limit (%d) despite resolver having preload", finalLimit)
+			t.Logf("⚠ One or more account objects kept old limit (s1=%d, s2=%d)", finalLimit, finalLimit2)
 			t.Logf("This is expected because the account was already in cache")
 		}
-	} else if resolverLimit == 50 {
-		t.Logf("✗ Runtime update persisted in resolver (Conn limit = 50)")
-		t.Logf("UNEXPECTED: Preload should have been restored on reload")
-		t.Fatalf("This is a bug - preloads should override runtime updates")
 	} else {
-		t.Fatalf("Unexpected resolver limit: %d (expected 10 or 50)", resolverLimit)
+		t.Logf("✗ Runtime update persisted (s1 resolver=%d, s2 resolver=%d)", resolverLimit, resolverLimit2)
+		t.Logf("UNEXPECTED: Preload should have been restored on reload for both servers")
+		t.Fatalf("This is a bug - preloads should override runtime updates")
 	}
 
 	// Also check opts to ensure they still have the original config
@@ -848,16 +894,16 @@ func TestOperatorPreloadPrecedenceAfterRestart(t *testing.T) {
 		t.Fatalf("System account mismatch")
 	}
 
-	t.Logf("\n=== FINAL SUMMARY ===")
-	t.Logf("1. Preload JWTs take precedence in the RESOLVER after reload")
-	t.Logf("2. Runtime Store() updates to MemAccResolver are OVERWRITTEN on reload")
-	t.Logf("3. Cached account objects may NOT update unless explicitly refreshed")
-	t.Logf("\nIMPLICATION: Preloads always win in the resolver, but existing")
-	t.Logf("connections/accounts may continue with old claims until refreshed")
+	t.Logf("\n=== FINAL SUMMARY (CLUSTER) ===")
+	t.Logf("1. Preload JWTs take precedence in the RESOLVER after reload on ALL cluster nodes")
+	t.Logf("2. Runtime Store() updates to MemAccResolver are OVERWRITTEN on reload on EACH node")
+	t.Logf("3. Each cluster node independently manages its own MemAccResolver")
+	t.Logf("4. Preloads are applied from config on each node during reload")
+	t.Logf("\nIMPLICATION: In a cluster, preloads always win on ALL nodes after reload")
 }
 
-// Test that resolver preload takes precedence over runtime JWT updates after FULL NODE RESTART
-// This is different from reload - the server completely shuts down and starts fresh
+// Test that resolver preload takes precedence over runtime JWT updates after FULL NODE RESTART (CLUSTER)
+// This is different from reload - the servers completely shut down and start fresh
 func TestOperatorPreloadPrecedenceAfterNodeRestart(t *testing.T) {
 	// Create operator key pair
 	okp, _ := nkeys.FromSeed(oSeed)
@@ -898,36 +944,58 @@ func TestOperatorPreloadPrecedenceAfterNodeRestart(t *testing.T) {
 	}
 	defer os.Remove(operatorFile)
 
-	// Create config with preloaded account JWT (Conn limit = 10)
-	confContent := fmt.Sprintf(`
+	// Create cluster config template with preloaded account JWT (Conn limit = 10)
+	cf := `
+	listen: 127.0.0.1:-1
+	cluster {
 		listen: 127.0.0.1:-1
-		operator: %s
-		system_account: %s
-		resolver: MEMORY
-		resolver_preload = {
-			%s: %q
-			%s: %q
-		}
-	`, operatorFile, syspub, syspub, sysJWT, apub, initialJWT)
-
-	confFile := "/tmp/test_preload_restart.conf"
-	if err := ioutil.WriteFile(confFile, []byte(confContent), 0644); err != nil {
-		t.Fatalf("Error writing config file: %v", err)
+		%s
 	}
+	operator: %s
+	system_account: %s
+	resolver: MEMORY
+	resolver_preload = {
+		%s: %q
+		%s: %q
+	}
+	`
+
+	// Start first cluster server with preloaded JWT
+	contents := strings.Replace(fmt.Sprintf(cf, "", operatorFile, syspub, syspub, sysJWT, apub, initialJWT), "\n\t", "\n", -1)
+	confFile := createConfFile(t, []byte(contents))
 	defer os.Remove(confFile)
 
-	// Start server with preloaded JWT
-	s1, _ := RunServerWithConfig(confFile)
+	s1, opts1 := RunServerWithConfig(confFile)
 
-	// Verify initial state: account should have Conn limit of 10
+	// Start second cluster server
+	routeStr := fmt.Sprintf("routes = [nats-route://%s:%d]", opts1.Cluster.Host, opts1.Cluster.Port)
+	contents2 := strings.Replace(fmt.Sprintf(cf, routeStr, operatorFile, syspub, syspub, sysJWT, apub, initialJWT), "\n\t", "\n", -1)
+	confFile2 := createConfFile(t, []byte(contents2))
+	defer os.Remove(confFile2)
+
+	s2, _ := RunServerWithConfig(confFile2)
+
+	checkClusterFormed(t, s1, s2)
+	t.Logf("✓ CLUSTER 1 formed with 2 servers")
+
+	// Verify initial state on both servers: account should have Conn limit of 10
 	acc, err := s1.LookupAccount(apub)
 	if err != nil {
-		t.Fatalf("Error looking up account: %v", err)
+		t.Fatalf("Error looking up account on s1: %v", err)
 	}
 	if acc.MaxActiveConnections() != 10 {
-		t.Fatalf("Expected initial max connections to be 10, got %d", acc.MaxActiveConnections())
+		t.Fatalf("Expected initial max connections to be 10 on s1, got %d", acc.MaxActiveConnections())
 	}
-	t.Logf("✓ [Server 1] Initial state: account has Conn limit of 10 (from preload)")
+
+	acc2, err := s2.LookupAccount(apub)
+	if err != nil {
+		t.Fatalf("Error looking up account on s2: %v", err)
+	}
+	if acc2.MaxActiveConnections() != 10 {
+		t.Fatalf("Expected initial max connections to be 10 on s2, got %d", acc2.MaxActiveConnections())
+	}
+	t.Logf("✓ [Cluster 1 - Server 1] Initial state: account has Conn limit of 10 (from preload)")
+	t.Logf("✓ [Cluster 1 - Server 2] Initial state: account has Conn limit of 10 (from preload)")
 
 	// Simulate a runtime update by storing a different JWT in the resolver
 	nac2 := jwt.NewAccountClaims(apub)
@@ -937,77 +1005,118 @@ func TestOperatorPreloadPrecedenceAfterNodeRestart(t *testing.T) {
 		t.Fatalf("Error generating updated account JWT: %v", err)
 	}
 
-	// Store the updated JWT directly in the resolver (simulates runtime update)
+	// Store the updated JWT directly in the resolver on BOTH servers (simulates runtime update)
 	if err := s1.AccountResolver().Store(apub, updatedJWT); err != nil {
-		t.Fatalf("Error storing updated JWT in resolver: %v", err)
+		t.Fatalf("Error storing updated JWT in resolver on s1: %v", err)
 	}
-	t.Logf("✓ [Server 1] Stored updated JWT (Conn=50) in resolver")
+	if err := s2.AccountResolver().Store(apub, updatedJWT); err != nil {
+		t.Fatalf("Error storing updated JWT in resolver on s2: %v", err)
+	}
+	t.Logf("✓ [Cluster 1 - Server 1] Stored updated JWT (Conn=50) in resolver")
+	t.Logf("✓ [Cluster 1 - Server 2] Stored updated JWT (Conn=50) in resolver")
 
-	// Verify the resolver has the updated JWT
-	jwtBeforeShutdown, err := s1.AccountResolver().Fetch(apub)
+	// Verify the resolver has the updated JWT on both servers
+	jwtBeforeShutdown1, err := s1.AccountResolver().Fetch(apub)
 	if err != nil {
-		t.Fatalf("Error fetching JWT before shutdown: %v", err)
+		t.Fatalf("Error fetching JWT before shutdown on s1: %v", err)
 	}
-	claimsBeforeShutdown, err := jwt.DecodeAccountClaims(jwtBeforeShutdown)
+	claimsBeforeShutdown1, err := jwt.DecodeAccountClaims(jwtBeforeShutdown1)
 	if err != nil {
-		t.Fatalf("Error decoding JWT before shutdown: %v", err)
+		t.Fatalf("Error decoding JWT before shutdown on s1: %v", err)
 	}
-	if claimsBeforeShutdown.Limits.Conn != 50 {
-		t.Fatalf("Expected resolver to have Conn=50 before shutdown, got %d", claimsBeforeShutdown.Limits.Conn)
+	if claimsBeforeShutdown1.Limits.Conn != 50 {
+		t.Fatalf("Expected resolver to have Conn=50 before shutdown on s1, got %d", claimsBeforeShutdown1.Limits.Conn)
 	}
-	t.Logf("✓ [Server 1] Before shutdown: JWT in resolver has Conn limit of 50")
 
-	// SHUTDOWN THE SERVER COMPLETELY
+	jwtBeforeShutdown2, err := s2.AccountResolver().Fetch(apub)
+	if err != nil {
+		t.Fatalf("Error fetching JWT before shutdown on s2: %v", err)
+	}
+	claimsBeforeShutdown2, err := jwt.DecodeAccountClaims(jwtBeforeShutdown2)
+	if err != nil {
+		t.Fatalf("Error decoding JWT before shutdown on s2: %v", err)
+	}
+	if claimsBeforeShutdown2.Limits.Conn != 50 {
+		t.Fatalf("Expected resolver to have Conn=50 before shutdown on s2, got %d", claimsBeforeShutdown2.Limits.Conn)
+	}
+	t.Logf("✓ [Cluster 1] Before shutdown: JWT in both resolvers has Conn limit of 50")
+
+	// SHUTDOWN THE ENTIRE CLUSTER COMPLETELY
 	s1.Shutdown()
-	t.Logf("✓ [Server 1] Shut down completely")
+	s2.Shutdown()
+	t.Logf("✓ [Cluster 1] Shut down both servers completely")
 
-	// Wait a moment to ensure clean shutdown
+	// Wait for clean shutdown
 	s1.WaitForShutdown()
+	s2.WaitForShutdown()
 
-	// START A FRESH SERVER INSTANCE with the same config
-	s2, _ := RunServerWithConfig(confFile)
-	defer s2.Shutdown()
-	t.Logf("✓ [Server 2] Started fresh server with same config")
+	// START FRESH SERVERS with the same configs (not clustered this time, just independent servers)
+	// This tests that each server independently loads preloads from its config
+	s3, _ := RunServerWithConfig(confFile)
+	defer s3.Shutdown()
 
-	// After restart, check what's in the resolver
-	jwtAfterRestart, err := s2.AccountResolver().Fetch(apub)
+	s4, _ := RunServerWithConfig(confFile2)
+	defer s4.Shutdown()
+
+	t.Logf("✓ CLUSTER 2 started fresh with same configs (2 independent servers)")
+
+	// After restart, check what's in the resolver on both new servers
+	jwtAfterRestart3, err := s3.AccountResolver().Fetch(apub)
 	if err != nil {
-		t.Fatalf("Error fetching JWT after restart: %v", err)
+		t.Fatalf("Error fetching JWT after restart on s3: %v", err)
 	}
-	claimsAfterRestart, err := jwt.DecodeAccountClaims(jwtAfterRestart)
+	claimsAfterRestart3, err := jwt.DecodeAccountClaims(jwtAfterRestart3)
 	if err != nil {
-		t.Fatalf("Error decoding JWT after restart: %v", err)
+		t.Fatalf("Error decoding JWT after restart on s3: %v", err)
 	}
-	t.Logf("[Server 2] After restart: JWT in resolver has Conn limit of %d", claimsAfterRestart.Limits.Conn)
 
-	// Look up the account after restart
-	acc2, err := s2.LookupAccount(apub)
+	jwtAfterRestart4, err := s4.AccountResolver().Fetch(apub)
 	if err != nil {
-		t.Fatalf("Error looking up account after restart: %v", err)
+		t.Fatalf("Error fetching JWT after restart on s4: %v", err)
+	}
+	claimsAfterRestart4, err := jwt.DecodeAccountClaims(jwtAfterRestart4)
+	if err != nil {
+		t.Fatalf("Error decoding JWT after restart on s4: %v", err)
+	}
+
+	t.Logf("[Cluster 2 - Server 1] After restart: JWT in resolver has Conn limit of %d", claimsAfterRestart3.Limits.Conn)
+	t.Logf("[Cluster 2 - Server 2] After restart: JWT in resolver has Conn limit of %d", claimsAfterRestart4.Limits.Conn)
+
+	// Look up the account after restart on both servers
+	acc3, err := s3.LookupAccount(apub)
+	if err != nil {
+		t.Fatalf("Error looking up account after restart on s3: %v", err)
+	}
+	acc4, err := s4.LookupAccount(apub)
+	if err != nil {
+		t.Fatalf("Error looking up account after restart on s4: %v", err)
 	}
 
 	// Check the final state
-	finalLimit := acc2.MaxActiveConnections()
-	resolverLimit := claimsAfterRestart.Limits.Conn
+	finalLimit3 := acc3.MaxActiveConnections()
+	finalLimit4 := acc4.MaxActiveConnections()
+	resolverLimit3 := claimsAfterRestart3.Limits.Conn
+	resolverLimit4 := claimsAfterRestart4.Limits.Conn
 
-	t.Logf("[Server 2] After restart: Account object has Conn limit of %d", finalLimit)
+	t.Logf("[Cluster 2 - Server 1] After restart: Account object has Conn limit of %d", finalLimit3)
+	t.Logf("[Cluster 2 - Server 2] After restart: Account object has Conn limit of %d", finalLimit4)
 
-	if resolverLimit == 10 && finalLimit == 10 {
-		t.Logf("✓ PRELOAD JWT restored in resolver (Conn limit = 10)")
-		t.Logf("✓ Account object has preload limits (Conn limit = 10)")
-		t.Logf("CONCLUSION: On full node restart, preloads ARE re-applied")
+	if resolverLimit3 == 10 && resolverLimit4 == 10 && finalLimit3 == 10 && finalLimit4 == 10 {
+		t.Logf("✓ PRELOAD JWT restored in BOTH servers' resolvers (Conn limit = 10)")
+		t.Logf("✓ Account objects on BOTH servers have preload limits (Conn limit = 10)")
+		t.Logf("CONCLUSION: On full cluster restart, preloads ARE re-applied on all nodes")
 		t.Logf("Runtime Store() updates are NOT persisted across restarts")
-	} else if resolverLimit == 50 || finalLimit == 50 {
-		t.Logf("✗ Runtime update persisted (resolver=%d, account=%d)", resolverLimit, finalLimit)
-		t.Fatalf("UNEXPECTED: Preload should be restored on fresh server start")
 	} else {
-		t.Fatalf("Unexpected state: resolver=%d, account=%d (expected both to be 10)", resolverLimit, finalLimit)
+		t.Logf("✗ Runtime update persisted (s3: resolver=%d account=%d, s4: resolver=%d account=%d)",
+			resolverLimit3, finalLimit3, resolverLimit4, finalLimit4)
+		t.Fatalf("UNEXPECTED: Preload should be restored on fresh server start")
 	}
 
-	t.Logf("\n=== RESTART TEST SUMMARY ===")
-	t.Logf("1. MemAccResolver does NOT persist state across restarts")
-	t.Logf("2. On fresh start, preloads from config are always loaded")
-	t.Logf("3. Runtime Store() updates are lost when server restarts")
-	t.Logf("\nIMPLICATION: Preloads ALWAYS win after a full node restart")
-	t.Logf("This is expected - MemAccResolver is in-memory only")
+	t.Logf("\n=== RESTART TEST SUMMARY (CLUSTER) ===")
+	t.Logf("1. MemAccResolver does NOT persist state across restarts on ANY node")
+	t.Logf("2. On fresh start, preloads from config are loaded on EACH node")
+	t.Logf("3. Runtime Store() updates are lost when cluster restarts")
+	t.Logf("4. Each node independently loads its own preloads from its config")
+	t.Logf("\nIMPLICATION: Preloads ALWAYS win after a full cluster restart")
+	t.Logf("This is expected - MemAccResolver is in-memory only, not shared across cluster")
 }
