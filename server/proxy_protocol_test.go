@@ -397,17 +397,17 @@ func TestProxyProtocolConfigParsing(t *testing.T) {
 		proxy_protocol: true
 		port: 4222
 	`
-	
+
 	opts := &Options{}
 	err := opts.ProcessConfigString(conf)
 	if err != nil {
 		t.Fatalf("Failed to process config: %v", err)
 	}
-	
+
 	if !opts.ProxyProtocol {
 		t.Error("Expected ProxyProtocol to be true")
 	}
-	
+
 	if opts.Port != 4222 {
 		t.Errorf("Expected port 4222, got %d", opts.Port)
 	}
