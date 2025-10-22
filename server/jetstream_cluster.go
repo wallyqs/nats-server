@@ -2339,6 +2339,14 @@ func (mset *stream) raftGroup() *raftGroup {
 	return mset.sa.Group
 }
 
+// raftGroupLocked returns the raft group. Lock should be held.
+func (mset *stream) raftGroupLocked() *raftGroup {
+	if mset == nil || mset.sa == nil {
+		return nil
+	}
+	return mset.sa.Group
+}
+
 func (mset *stream) raftNode() RaftNode {
 	if mset == nil {
 		return nil
@@ -3854,13 +3862,22 @@ func (js *jetStream) processStreamLeaderChange(mset *stream, isLeader bool) {
 		s.sendAPIErrResponse(client, acc, subject, reply, _EMPTY_, s.jsonResponse(&resp))
 	} else {
 		msetCfg := mset.config()
+
+		// Acquire lock once to read all stream metadata atomically
+		mset.mu.RLock()
+		created := mset.createdTimeLocked()
+		rg := mset.raftGroupLocked()
+		sources := mset.sourcesInfoLocked()
+		mirror := mset.mirrorInfoLocked()
+		mset.mu.RUnlock()
+
 		resp.StreamInfo = &StreamInfo{
-			Created:   mset.createdTime(),
+			Created:   created,
 			State:     mset.state(),
 			Config:    *setDynamicStreamMetadata(&msetCfg),
-			Cluster:   js.clusterInfo(mset.raftGroup()),
-			Sources:   mset.sourcesInfo(),
-			Mirror:    mset.mirrorInfo(),
+			Cluster:   js.clusterInfo(rg),
+			Sources:   sources,
+			Mirror:    mirror,
 			TimeStamp: time.Now().UTC(),
 		}
 		resp.DidCreate = true
@@ -9707,13 +9724,21 @@ func (mset *stream) processClusterStreamInfoRequest(reply string) {
 		time.Sleep(500 * time.Millisecond)
 	}
 
+	// Acquire lock once to read all stream metadata atomically
+	mset.mu.RLock()
+	created := mset.createdTimeLocked()
+	rg := mset.raftGroupLocked()
+	sources := mset.sourcesInfoLocked()
+	mirror := mset.mirrorInfoLocked()
+	mset.mu.RUnlock()
+
 	si := &StreamInfo{
-		Created:   mset.createdTime(),
+		Created:   created,
 		State:     mset.state(),
 		Config:    config,
-		Cluster:   js.clusterInfo(mset.raftGroup()),
-		Sources:   mset.sourcesInfo(),
-		Mirror:    mset.mirrorInfo(),
+		Cluster:   js.clusterInfo(rg),
+		Sources:   sources,
+		Mirror:    mirror,
 		TimeStamp: time.Now().UTC(),
 	}
 

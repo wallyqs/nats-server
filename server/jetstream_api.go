@@ -1704,13 +1704,21 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 		return
 	}
 	msetCfg := mset.config()
+
+	// Acquire lock once to read all stream metadata atomically
+	mset.mu.RLock()
+	created := mset.createdTimeLocked()
+	mirror := mset.mirrorInfoLocked()
+	sources := mset.sourcesInfoLocked()
+	mset.mu.RUnlock()
+
 	resp.StreamInfo = &StreamInfo{
-		Created:   mset.createdTime(),
+		Created:   created,
 		State:     mset.state(),
 		Config:    *setDynamicStreamMetadata(&msetCfg),
 		TimeStamp: time.Now().UTC(),
-		Mirror:    mset.mirrorInfo(),
-		Sources:   mset.sourcesInfo(),
+		Mirror:    mirror,
+		Sources:   sources,
 	}
 	resp.DidCreate = true
 	s.sendAPIResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(resp))
@@ -1808,13 +1816,21 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 	}
 
 	msetCfg := mset.config()
+
+	// Acquire lock once to read all stream metadata atomically
+	mset.mu.RLock()
+	created := mset.createdTimeLocked()
+	mirror := mset.mirrorInfoLocked()
+	sources := mset.sourcesInfoLocked()
+	mset.mu.RUnlock()
+
 	resp.StreamInfo = &StreamInfo{
-		Created:   mset.createdTime(),
+		Created:   created,
 		State:     mset.state(),
 		Config:    *setDynamicStreamMetadata(&msetCfg),
 		Domain:    s.getOpts().JetStreamDomain,
-		Mirror:    mset.mirrorInfo(),
-		Sources:   mset.sourcesInfo(),
+		Mirror:    mirror,
+		Sources:   sources,
 		TimeStamp: time.Now().UTC(),
 	}
 	s.sendAPIResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(resp))
@@ -2050,13 +2066,21 @@ func (s *Server) jsStreamListRequest(sub *subscription, c *client, _ *Account, s
 		}
 
 		config := mset.config()
+
+		// Acquire lock once to read all stream metadata atomically
+		mset.mu.RLock()
+		created := mset.createdTimeLocked()
+		mirror := mset.mirrorInfoLocked()
+		sources := mset.sourcesInfoLocked()
+		mset.mu.RUnlock()
+
 		resp.Streams = append(resp.Streams, &StreamInfo{
-			Created:   mset.createdTime(),
+			Created:   created,
 			State:     mset.state(),
 			Config:    config,
 			Domain:    s.getOpts().JetStreamDomain,
-			Mirror:    mset.mirrorInfo(),
-			Sources:   mset.sourcesInfo(),
+			Mirror:    mirror,
+			Sources:   sources,
 			TimeStamp: time.Now().UTC(),
 		})
 		if len(resp.Streams) >= JSApiListLimit {
@@ -2230,14 +2254,25 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 	}
 
 	config := mset.config()
+
+	// Acquire lock once to read all stream metadata atomically.
+	// This prevents deadlock when a writer is waiting for the lock
+	// between multiple separate RLock acquisitions.
+	mset.mu.RLock()
+	created := mset.createdTimeLocked()
+	rg := mset.raftGroupLocked()
+	mirror := mset.mirrorInfoLocked()
+	sources := mset.sourcesInfoLocked()
+	mset.mu.RUnlock()
+
 	resp.StreamInfo = &StreamInfo{
-		Created:    mset.createdTime(),
+		Created:    created,
 		State:      mset.stateWithDetail(details),
 		Config:     *setDynamicStreamMetadata(&config),
 		Domain:     s.getOpts().JetStreamDomain,
-		Cluster:    js.clusterInfo(mset.raftGroup()),
-		Mirror:     mset.mirrorInfo(),
-		Sources:    mset.sourcesInfo(),
+		Cluster:    js.clusterInfo(rg),
+		Mirror:     mirror,
+		Sources:    sources,
 		Alternates: js.streamAlternates(ci, config.Name),
 		TimeStamp:  time.Now().UTC(),
 	}

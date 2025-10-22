@@ -1464,6 +1464,11 @@ func (mset *stream) createdTime() time.Time {
 	return created
 }
 
+// createdTimeLocked returns created time. Lock should be held.
+func (mset *stream) createdTimeLocked() time.Time {
+	return mset.created
+}
+
 // Internal to allow creation time to be restored.
 func (mset *stream) setCreatedTime(created time.Time) {
 	mset.mu.Lock()
@@ -2692,6 +2697,15 @@ func (mset *stream) sourcesInfo() (sis []*StreamSourceInfo) {
 	return sis
 }
 
+// sourcesInfoLocked returns information on sources. Lock should be held.
+func (mset *stream) sourcesInfoLocked() (sis []*StreamSourceInfo) {
+	sis = make([]*StreamSourceInfo, 0, len(mset.sources))
+	for _, si := range mset.sources {
+		sis = append(sis, mset.sourceInfo(si))
+	}
+	return sis
+}
+
 // Lock should be held
 func (mset *stream) sourceInfo(si *sourceInfo) *StreamSourceInfo {
 	if si == nil {
@@ -2737,6 +2751,11 @@ func (mset *stream) sourceInfo(si *sourceInfo) *StreamSourceInfo {
 func (mset *stream) mirrorInfo() *StreamSourceInfo {
 	mset.mu.RLock()
 	defer mset.mu.RUnlock()
+	return mset.sourceInfo(mset.mirror)
+}
+
+// mirrorInfoLocked returns source info for our mirror. Lock should be held.
+func (mset *stream) mirrorInfoLocked() *StreamSourceInfo {
 	return mset.sourceInfo(mset.mirror)
 }
 
