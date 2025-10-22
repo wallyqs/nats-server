@@ -4463,21 +4463,49 @@ func sliceHeader(key string, hdr []byte) []byte {
 	if len(hdr) == 0 {
 		return nil
 	}
-	index := bytes.Index(hdr, stringToBytes(key+":"))
+	// Search for just the key to avoid string concatenation allocation.
+	// We need to verify that it's followed by ':' to avoid false matches with key prefixes.
+	keyBytes := stringToBytes(key)
 	hdrLen := len(hdr)
-	// Check that we have enough characters, this will handle the -1 case of the key not
-	// being found and will also handle not having enough characters for trailing CRLF.
-	if index < 2 {
-		return nil
-	}
-	// There should be a terminating CRLF.
-	if index >= hdrLen-1 || hdr[index-1] != '\n' || hdr[index-2] != '\r' {
-		return nil
-	}
-	// The key should be immediately followed by a : separator.
-	index += len(key) + 1
-	if index >= hdrLen || hdr[index-1] != ':' {
-		return nil
+	searchStart := 0
+	var index int
+	for {
+		index = bytes.Index(hdr[searchStart:], keyBytes)
+		if index < 0 {
+			return nil
+		}
+		index += searchStart
+		// Check that we have enough characters for preceding CRLF.
+		if index < 2 {
+			// Try searching for the next occurrence
+			searchStart = index + 1
+			if searchStart >= hdrLen {
+				return nil
+			}
+			continue
+		}
+		// There should be a preceding CRLF.
+		if hdr[index-1] != '\n' || hdr[index-2] != '\r' {
+			// Try searching for the next occurrence
+			searchStart = index + 1
+			if searchStart >= hdrLen {
+				return nil
+			}
+			continue
+		}
+		// The key should be immediately followed by a : separator.
+		colonIndex := index + len(key)
+		if colonIndex >= hdrLen || hdr[colonIndex] != ':' {
+			// Try searching for the next occurrence (handles prefix matches)
+			searchStart = index + 1
+			if searchStart >= hdrLen {
+				return nil
+			}
+			continue
+		}
+		// Found the right match, now position index after the colon
+		index = colonIndex + 1
+		break
 	}
 	// Skip over whitespace before the value.
 	for index < hdrLen && hdr[index] == ' ' {
