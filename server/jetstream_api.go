@@ -1792,8 +1792,8 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
-	if mset.offlineReason != _EMPTY_ {
-		resp.Error = NewJSStreamOfflineReasonError(errors.New(mset.offlineReason))
+	if offlineReason := mset.offlineReasonString(); offlineReason != _EMPTY_ {
+		resp.Error = NewJSStreamOfflineReasonError(errors.New(offlineReason))
 		s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil, errRespDelay)
 		return
 	}
@@ -2040,11 +2040,11 @@ func (s *Server) jsStreamListRequest(sub *subscription, c *client, _ *Account, s
 
 	var missingNames []string
 	for _, mset := range msets[offset:] {
-		if mset.offlineReason != _EMPTY_ {
+		if offlineReason := mset.offlineReasonString(); offlineReason != _EMPTY_ {
 			if resp.Offline == nil {
 				resp.Offline = make(map[string]string, 1)
 			}
-			resp.Offline[mset.getCfgName()] = mset.offlineReason
+			resp.Offline[mset.getCfgName()] = offlineReason
 			missingNames = append(missingNames, mset.getCfgName())
 			continue
 		}
@@ -2223,8 +2223,8 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 		}
 	}
 
-	if mset.offlineReason != _EMPTY_ {
-		resp.Error = NewJSStreamOfflineReasonError(errors.New(mset.offlineReason))
+	if offlineReason := mset.offlineReasonString(); offlineReason != _EMPTY_ {
+		resp.Error = NewJSStreamOfflineReasonError(errors.New(offlineReason))
 		s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil, errRespDelay)
 		return
 	}
@@ -3619,7 +3619,7 @@ func (s *Server) jsMsgGetRequest(sub *subscription, c *client, _ *Account, subje
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
-	if mset.offlineReason != _EMPTY_ {
+	if mset.offlineReasonString() != _EMPTY_ {
 		// Just let the request time out.
 		return
 	}
@@ -3769,7 +3769,7 @@ func (s *Server) jsConsumerUnpinRequest(sub *subscription, c *client, _ *Account
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
-	if mset.offlineReason != _EMPTY_ {
+	if mset.offlineReasonString() != _EMPTY_ {
 		// Just let the request time out.
 		return
 	}
@@ -5341,7 +5341,7 @@ func (s *Server) jsConsumerPauseRequest(sub *subscription, c *client, _ *Account
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
-	if mset.offlineReason != _EMPTY_ {
+	if mset.offlineReasonString() != _EMPTY_ {
 		// Just let the request time out.
 		return
 	}

@@ -1471,6 +1471,14 @@ func (mset *stream) setCreatedTime(created time.Time) {
 	mset.mu.Unlock()
 }
 
+// Returns offline reason if set.
+func (mset *stream) offlineReasonString() string {
+	mset.mu.RLock()
+	reason := mset.offlineReason
+	mset.mu.RUnlock()
+	return reason
+}
+
 // subjectsOverlap to see if these subjects overlap with existing subjects.
 // Use only for non-clustered JetStream
 // RLock minimum should be held.
