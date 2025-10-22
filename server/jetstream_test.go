@@ -22254,3 +22254,192 @@ func TestJetStreamScheduledMessageNotDeactivated(t *testing.T) {
 		})
 	}
 }
+
+// Test for reproducing the deadlock issue with multiple RLock acquisitions.
+// This reproduces the issue fixed in commit 21206220.
+func TestJetStreamStreamInfoDeadlock(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create a stream
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Storage:  nats.FileStorage,
+	})
+	require_NoError(t, err)
+
+	acc, err := s.LookupAccount("$G")
+	require_NoError(t, err)
+
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	// This test reproduces the deadlock scenario:
+	// 1. One goroutine holds the write lock for an extended period (simulating slow disk I/O)
+	// 2. Multiple goroutines try to get stream info, which would acquire RLock multiple times
+	//
+	// Before the fix, this would deadlock because:
+	// - The write lock holder blocks in the middle of processJetStreamMsg
+	// - When multiple readers try to acquire RLock separately for different fields,
+	//   Go's RWMutex prioritizes writers, causing readers to block
+	// - With multiple separate RLock acquisitions, a writer can interleave between them
+
+	// Channel to coordinate goroutines
+	writeLockHeld := make(chan struct{})
+
+	// Goroutine 1: Simulate holding write lock during slow disk I/O
+	// This mimics what happens in processJetStreamMsg when doing disk operations
+	go func() {
+		mset.mu.Lock()
+		close(writeLockHeld) // Signal that we have the write lock
+		time.Sleep(100 * time.Millisecond) // Simulate slow disk I/O
+		mset.mu.Unlock()
+	}()
+
+	// Wait for the write lock to be acquired
+	<-writeLockHeld
+
+	// Give it a moment to ensure the write lock is firmly held
+	time.Sleep(10 * time.Millisecond)
+
+	// Goroutines 2-N: Try to get stream info concurrently
+	// Before the fix, these would deadlock trying to acquire multiple RLocks
+	const numReaders = 10
+	var wg sync.WaitGroup
+	wg.Add(numReaders)
+
+	for i := 0; i < numReaders; i++ {
+		go func(id int) {
+			defer wg.Done()
+
+			// Simulate what jsStreamInfoRequest does - multiple lock acquisitions
+			// With the fix, this acquires the lock once and reads all fields atomically
+			// Without the fix, each method would acquire RLock separately, allowing
+			// the write lock to interleave and cause deadlock
+
+			_ = mset.createdTime()
+			_ = mset.mirrorInfo()
+			_ = mset.sourcesInfo()
+			_ = mset.raftGroup()
+		}(i)
+	}
+
+	// Wait with a timeout - if we deadlock, this will fail
+	timeout := time.After(5 * time.Second)
+	finished := make(chan struct{})
+
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+
+	select {
+	case <-finished:
+		// Success! All goroutines completed without deadlock
+	case <-timeout:
+		t.Fatal("Deadlock detected: goroutines did not complete within timeout")
+	}
+}
+
+// Test for reproducing the deadlock with concurrent stream info API requests
+// during message publishing. This is a more realistic integration test.
+func TestJetStreamStreamInfoDeadlockViaAPI(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create a stream with file storage (slower I/O)
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo.*"},
+		Storage:  nats.FileStorage,
+	})
+	require_NoError(t, err)
+
+	// This test reproduces the real-world deadlock scenario:
+	// - One goroutine publishes messages (acquires write lock in processJetStreamMsg)
+	// - Multiple goroutines make concurrent stream info API requests
+	//
+	// Before the fix, the stream info requests would deadlock when:
+	// 1. jsStreamInfoRequest() calls createdTime(), mirrorInfo(), sourcesInfo(), raftGroup()
+	// 2. Each call acquires and releases RLock separately
+	// 3. A pending write lock (from message processing) causes new RLock attempts to block
+	// 4. Multiple goroutines pile up waiting for RLock in createdTime()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 100)
+
+	// Publisher goroutine: continuously publish messages
+	// This holds the write lock periodically
+	wg.Add(1)
+	stopPublish := make(chan struct{})
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stopPublish:
+				return
+			default:
+				_, err := js.Publish(fmt.Sprintf("foo.%d", i), []byte("data"))
+				if err != nil {
+					errCh <- fmt.Errorf("publish error: %w", err)
+					return
+				}
+				// Small delay to let other goroutines run
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+
+	// Multiple stream info request goroutines
+	// Before the fix, these would deadlock
+	const numInfoRequests = 20
+	wg.Add(numInfoRequests)
+
+	for i := 0; i < numInfoRequests; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				info, err := js.StreamInfo("TEST")
+				if err != nil {
+					errCh <- fmt.Errorf("stream info error (goroutine %d, iteration %d): %w", id, j, err)
+					return
+				}
+				if info == nil {
+					errCh <- fmt.Errorf("stream info is nil (goroutine %d, iteration %d)", id, j)
+					return
+				}
+				// Small delay between requests
+				time.Sleep(time.Millisecond)
+			}
+		}(i)
+	}
+
+	// Wait with a timeout
+	timeout := time.After(30 * time.Second)
+	finished := make(chan struct{})
+
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+
+	select {
+	case <-finished:
+		close(stopPublish)
+		// Check for any errors
+		close(errCh)
+		for err := range errCh {
+			t.Errorf("Error during test: %v", err)
+		}
+	case <-timeout:
+		close(stopPublish)
+		t.Fatal("Test timed out - possible deadlock detected")
+	}
+}
