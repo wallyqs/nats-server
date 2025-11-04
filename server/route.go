@@ -2358,7 +2358,7 @@ func (s *Server) addRoute(c *client, didSolicit, sendDelayedInfo bool, gossipMod
 						stats:           nil,
 						offline:         false,
 						js:              info.JetStream,
-						binarySnapshots: true,
+						binarySnapshots: false,
 						accountNRG:      false,
 					})
 			}

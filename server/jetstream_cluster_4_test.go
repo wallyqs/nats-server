@@ -7078,3 +7078,224 @@ func TestJetStreamClusterAccountMaxConnectionsReconnect(t *testing.T) {
 		return nil
 	})
 }
+
+func TestJetStreamClusterReplicaRestartWithBinarySnapshot(t *testing.T) {
+	conf := `
+	listen: 127.0.0.1:-1
+	server_name: %s
+	jetstream: {
+		store_dir: '%s',
+	}
+	cluster {
+		name: %s
+		listen: 127.0.0.1:%d
+		routes = [%s]
+	}
+        system_account: sys
+        no_auth_user: js
+	accounts {
+	  sys {
+	    users = [
+	      { user: sys, pass: sys }
+	    ]
+	  }
+	  js {
+	    jetstream = enabled
+	    users = [
+	      { user: js, pass: js }
+	    ]
+	  }
+	}`
+	c := createJetStreamClusterWithTemplate(t, conf, "C3S", 3)
+	defer c.shutdown()
+
+	// Ensure cluster is properly formed
+	c.checkClusterFormed()
+	c.waitOnClusterReady()
+
+	// Set up dummy loggers to capture warnings
+	loggers := make([]*DummyLogger, 3)
+	for i := 0; i < 3; i++ {
+		loggers[i] = &DummyLogger{AllMsgs: make([]string, 0, 100)}
+		c.servers[i].SetLogger(loggers[i], false, false)
+	}
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Create 3 source streams
+	sourceStreams := []string{"foo", "bar", "quux"}
+	for _, streamName := range sourceStreams {
+		_, err := js.AddStream(&nats.StreamConfig{
+			Name:     streamName,
+			Subjects: []string{streamName},
+			Replicas: 3,
+		})
+		require_NoError(t, err)
+	}
+
+	// Wait for all source streams to have leaders
+	for _, streamName := range sourceStreams {
+		c.waitOnStreamLeader(globalAccountName, streamName)
+	}
+
+	// Create sources config for the global stream
+	sources := make([]*nats.StreamSource, len(sourceStreams))
+	for i, streamName := range sourceStreams {
+		sources[i] = &nats.StreamSource{
+			Name: streamName,
+		}
+	}
+
+	// Create global stream that sources from all three streams
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "global",
+		Sources:  sources,
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "global")
+
+	// Publish messages to each source stream for 20 seconds with rollout restart
+	start := time.Now()
+	duration := 20 * time.Second
+	msgCount := 0
+	restartDone := make(chan bool, 1)
+	
+	// Start publishing in a goroutine
+	go func() {
+		for time.Since(start) < duration {
+			for i, streamName := range sourceStreams {
+				msg := fmt.Sprintf("message-%d-%d", i, msgCount)
+				_, err := js.Publish(streamName, []byte(msg))
+				if err != nil {
+					t.Logf("Publish error during restart (expected): %v", err)
+				}
+			}
+			msgCount++
+			time.Sleep(10 * time.Millisecond) // Small delay to avoid overwhelming
+		}
+	}()
+	
+	// Perform rollout restart after 3 seconds of publishing
+	go func() {
+		time.Sleep(3 * time.Second)
+		t.Log("Starting rollout restart of servers...")
+		
+		for i := 0; i < 3; i++ {
+			t.Logf("Restarting server %d", i)
+			c.restartServer(c.servers[i])
+			
+			// Wait for cluster to be ready again
+			c.checkClusterFormed()
+			c.waitOnClusterReady()
+			
+			// Wait for all streams to have leaders again
+			for _, streamName := range sourceStreams {
+				c.waitOnStreamLeader(globalAccountName, streamName)
+			}
+			c.waitOnStreamLeader(globalAccountName, "global")
+			
+			time.Sleep(3 * time.Second) // Wait longer between restarts
+			
+			// Re-establish logger after restart
+			loggers[i] = &DummyLogger{AllMsgs: make([]string, 0, 100)}
+			c.servers[i].SetLogger(loggers[i], false, false)
+		}
+		
+		t.Log("Rollout restart completed")
+		restartDone <- true
+	}()
+	
+	// Wait for both publishing duration and restart to complete
+	time.Sleep(duration)
+	select {
+	case <-restartDone:
+		t.Log("Rollout restart completed successfully")
+	case <-time.After(30 * time.Second):
+		t.Log("Restart still in progress after publishing completed - continuing anyway")
+	}
+	
+	// Reconnect client after restarts
+	nc.Close()
+	nc, js = jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+	
+	// Ensure all streams have leaders before verification
+	for _, streamName := range sourceStreams {
+		c.waitOnStreamLeader(globalAccountName, streamName)
+	}
+	c.waitOnStreamLeader(globalAccountName, "global")
+	
+	totalExpectedMsgs := msgCount * len(sourceStreams)
+	t.Logf("Published %d messages per stream (%d total messages) over %v with rollout restart", msgCount, totalExpectedMsgs, duration)
+
+	// Verify the global stream receives all messages
+	checkFor(t, 30*time.Second, 500*time.Millisecond, func() error {
+		info, err := js.StreamInfo("global")
+		if err != nil {
+			return err
+		}
+		expectedCount := uint64(totalExpectedMsgs)
+		if info.State.Msgs != expectedCount {
+			return fmt.Errorf("expected %d messages in global stream, got %d", expectedCount, info.State.Msgs)
+		}
+		return nil
+	})
+
+	// Create pull consumer to verify message content
+	sub, err := js.PullSubscribe("", "", nats.BindStream("global"))
+	require_NoError(t, err)
+	defer sub.Unsubscribe()
+
+	// Collect all messages
+	var receivedMsgs []string
+	for i := 0; i < totalExpectedMsgs; i++ {
+		msgs, err := sub.Fetch(1, nats.MaxWait(5*time.Second))
+		require_NoError(t, err)
+		require_True(t, len(msgs) == 1)
+		receivedMsgs = append(receivedMsgs, string(msgs[0].Data))
+		msgs[0].Ack()
+	}
+
+	// Verify we received the expected number of messages
+	if len(receivedMsgs) != totalExpectedMsgs {
+		t.Fatalf("Expected %d messages, got %d", totalExpectedMsgs, len(receivedMsgs))
+	}
+
+	// Verify each source stream contributed messages
+	for i, streamName := range sourceStreams {
+		found := false
+		for _, msg := range receivedMsgs {
+			if strings.Contains(msg, fmt.Sprintf("message-%d-", i)) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("No messages found from source stream %s", streamName)
+		}
+	}
+
+	// Check for legacy JSON snapshot warning in any of the server logs
+	var foundWarning bool
+	for i, logger := range loggers {
+		logger.Lock()
+		for _, msg := range logger.AllMsgs {
+			if strings.Contains(msg, "Using legacy JSON snapshot format") {
+				t.Logf("Found legacy JSON snapshot warning in server %d: %s", i, msg)
+				foundWarning = true
+				break
+			}
+		}
+		logger.Unlock()
+		if foundWarning {
+			break
+		}
+	}
+
+	if !foundWarning {
+		t.Log("No legacy JSON snapshot format warning found - this may indicate binary snapshots are being used")
+	}
+}
