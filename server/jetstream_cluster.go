@@ -10014,14 +10014,39 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 			dr.First, dr.Num = 0, 0
 		}
 
-		// See if we should use LoadNextMsg instead of walking sequence by sequence if we have an order magnitude more interior deletes.
-		// Only makes sense with delete range capabilities.
-		// Lowered threshold from 10x to 3x for better performance with moderately sparse streams
-		useLoadNext := drOk && (uint64(state.NumDeleted) > 3*state.Msgs)
+		// Combined Smart Heuristic for LoadNextMsg decision
+		// Combines multiple signals for better optimization decisions
+		sequenceRange := state.LastSeq - state.FirstSeq + 1
+		messageDensity := float64(state.Msgs) / float64(sequenceRange)
+		deletedRatio := float64(state.NumDeleted) / float64(state.Msgs)
+		catchupSize := sreq.LastSeq - sreq.FirstSeq + 1
 		
-		// Log LoadNextMsg decision
-		s.Noticef("CATCHUP_LOAD_METHOD: Stream '%s > %s' useLoadNext=%v (drOk=%v, NumDeleted=%d, Msgs=%d, NumDeleted=%d > 3*Msgs=%d)", 
-			accountName, streamName, useLoadNext, drOk, state.NumDeleted, state.Msgs, uint64(state.NumDeleted), 3*state.Msgs)
+		// Multiple conditions for enabling LoadNextMsg optimization
+		useLoadNext := drOk && (
+			// Very sparse streams (< 10% density)
+			messageDensity < 0.10 ||
+			
+			// Moderately sparse with many deletes
+			(messageDensity < 0.25 && state.NumDeleted > 100_000) ||
+			
+			// High delete ratio (original 3x threshold)
+			deletedRatio > 3.0 ||
+			
+			// Large catch-up with significant deletes
+			(catchupSize > 1_000_000 && deletedRatio > 1.0) ||
+			
+			// Absolute threshold for very large delete sets
+			state.NumDeleted > 10_000_000)
+		
+		// Log the decision with all factors
+		s.Noticef("CATCHUP_LOAD_METHOD: Stream '%s > %s' useLoadNext=%v (drOk=%v, density=%.2f%%, deletedRatio=%.1fx, catchupSize=%d, triggers: sparse=%v, modSparse=%v, highRatio=%v, largeCatchup=%v, absolute=%v)",
+			accountName, streamName, useLoadNext, drOk, 
+			messageDensity*100, deletedRatio, catchupSize,
+			drOk && messageDensity < 0.10,
+			drOk && (messageDensity < 0.25 && state.NumDeleted > 100_000),
+			drOk && deletedRatio > 3.0,
+			drOk && (catchupSize > 1_000_000 && deletedRatio > 1.0),
+			drOk && state.NumDeleted > 10_000_000)
 
 		var smv StoreMsg
 		
