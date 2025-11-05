@@ -9832,6 +9832,19 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	s := mset.srv
 	defer s.grWG.Done()
 
+	// Instrumentation: Track overall catchup timing
+	catchupStart := time.Now()
+	streamName := mset.name()
+	accountName := mset.account()
+	
+	defer func() {
+		totalDuration := time.Since(catchupStart)
+		s.Noticef("CATCHUP_TIMING: Stream '%s > %s' total duration: %v", accountName, streamName, totalDuration)
+	}()
+
+	s.Noticef("CATCHUP_START: Stream '%s > %s' peer=%s first_seq=%d last_seq=%d range=%d", 
+		accountName, streamName, sreq.Peer, sreq.FirstSeq, sreq.LastSeq, sreq.LastSeq-sreq.FirstSeq+1)
+
 	const maxOutBytes = int64(64 * 1024 * 1024) // 64MB for now, these are all internal, from server to server
 	const maxOutMsgs = int32(256 * 1024)        // 256k in case we have lots of small messages or skip msgs.
 	outb := int64(0)
@@ -9884,7 +9897,10 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	// Grab our state.
 	var state StreamState
 	// mset.store never changes after being set, don't need lock.
+	stateStart := time.Now()
 	mset.store.FastState(&state)
+	stateDuration := time.Since(stateStart)
+	s.Noticef("CATCHUP_TIMING: Stream '%s > %s' FastState duration: %v", accountName, streamName, stateDuration)
 
 	// Setup sequences to walk through.
 	seq, last := sreq.FirstSeq, sreq.LastSeq
@@ -9930,6 +9946,10 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 		// If we already sent a batch, we will try to make sure we can at least send a minimum
 		// batch before sending the next batch.
 		if spb > 0 {
+			// Instrumentation: Track flow control wait time
+			flowControlStart := time.Now()
+			outMsgsBefore := atomic.LoadInt32(&outm)
+			
 			// Wait til we can send at least 4k
 			const minBatchWait = int32(4 * 1024)
 			mw := time.NewTimer(minWait)
@@ -9954,6 +9974,12 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 					return false
 				}
 			}
+			
+			flowControlDuration := time.Since(flowControlStart)
+			outMsgsAfter := atomic.LoadInt32(&outm)
+			s.Noticef("CATCHUP_FLOW_CONTROL: Stream '%s > %s' waited %v for flow control, outMsgs: %d->%d", 
+				accountName, streamName, flowControlDuration, outMsgsBefore, outMsgsAfter)
+			
 			spb = 0
 		}
 
@@ -9990,12 +10016,39 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 
 		// See if we should use LoadNextMsg instead of walking sequence by sequence if we have an order magnitude more interior deletes.
 		// Only makes sense with delete range capabilities.
-		useLoadNext := drOk && (uint64(state.NumDeleted) > 10*state.Msgs)
+		// Lowered threshold from 10x to 3x for better performance with moderately sparse streams
+		useLoadNext := drOk && (uint64(state.NumDeleted) > 3*state.Msgs)
+		
+		// Log LoadNextMsg decision
+		s.Noticef("CATCHUP_LOAD_METHOD: Stream '%s > %s' useLoadNext=%v (drOk=%v, NumDeleted=%d, Msgs=%d, NumDeleted=%d > 3*Msgs=%d)", 
+			accountName, streamName, useLoadNext, drOk, state.NumDeleted, state.Msgs, uint64(state.NumDeleted), 3*state.Msgs)
 
 		var smv StoreMsg
+		
+		// Instrumentation: Track message loading performance
+		msgLoadStart := time.Now()
+		var totalMsgLoadTime, totalGcbCheckTime time.Duration
+		var msgCount, gcbCheckCount int64
+		
 		for ; seq <= last && atomic.LoadInt64(&outb) <= maxOutBytes && atomic.LoadInt32(&outm) <= maxOutMsgs && s.gcbBelowMax(); seq++ {
 			var sm *StoreMsg
 			var err error
+			
+			// Track gcbBelowMax check time
+			gcbStart := time.Now()
+			gcbOk := s.gcbBelowMax()
+			gcbDuration := time.Since(gcbStart)
+			totalGcbCheckTime += gcbDuration
+			gcbCheckCount++
+			
+			if !gcbOk {
+				s.Noticef("CATCHUP_TIMING: Stream '%s > %s' seq=%d gcbBelowMax() returned false, stopping batch", accountName, streamName, seq)
+				break
+			}
+			
+			// Track message loading time
+			loadStart := time.Now()
+			
 			// If we should use load next do so here.
 			if useLoadNext {
 				var nseq uint64
@@ -10019,6 +10072,19 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 				}
 			} else {
 				sm, err = mset.store.LoadMsg(seq, &smv)
+			}
+			
+			loadDuration := time.Since(loadStart)
+			totalMsgLoadTime += loadDuration
+			msgCount++
+			
+			// Log slow message loads
+			if loadDuration > 100*time.Millisecond {
+				loadMethod := "LoadMsg"
+				if useLoadNext {
+					loadMethod = "LoadNextMsg"
+				}
+				s.Warnf("CATCHUP_SLOW_LOAD: Stream '%s > %s' seq=%d %s took %v", accountName, streamName, seq, loadMethod, loadDuration)
 			}
 
 			// if this is not a deleted msg, bail out.
@@ -10091,6 +10157,21 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 		if drOk && dr.First > 0 {
 			sendDR()
 		}
+		
+		// Instrumentation: Log batch completion statistics
+		batchDuration := time.Since(msgLoadStart)
+		avgMsgLoadTime := time.Duration(0)
+		avgGcbCheckTime := time.Duration(0)
+		if msgCount > 0 {
+			avgMsgLoadTime = totalMsgLoadTime / time.Duration(msgCount)
+		}
+		if gcbCheckCount > 0 {
+			avgGcbCheckTime = totalGcbCheckTime / time.Duration(gcbCheckCount)
+		}
+		
+		s.Noticef("CATCHUP_BATCH_COMPLETE: Stream '%s > %s' processed %d msgs in %v (avg_load=%v, avg_gcb=%v, total_load=%v, total_gcb=%v)", 
+			accountName, streamName, msgCount, batchDuration, avgMsgLoadTime, avgGcbCheckTime, totalMsgLoadTime, totalGcbCheckTime)
+		
 		return true
 	}
 
@@ -10104,34 +10185,59 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 
 	// Run as long as we are still active and need catchup.
 	// FIXME(dlc) - Purge event? Stream delete?
+	
+	// Instrumentation: Track main loop iterations and timing
+	var loopIterations int64
+	mainLoopStart := time.Now()
+	
 	for {
+		loopIterations++
+		iterationStart := time.Now()
+		
 		// Get this each time, will be non-nil if globally blocked and we will close to wake everyone up.
 		cbKick := s.cbKickChan()
 
 		select {
 		case <-s.quitCh:
+			s.Noticef("CATCHUP_EXIT: Stream '%s > %s' exiting due to server quit after %d iterations (%v)", 
+				accountName, streamName, loopIterations, time.Since(mainLoopStart))
 			return
 		case <-qch:
+			s.Noticef("CATCHUP_EXIT: Stream '%s > %s' exiting due to stream quit after %d iterations (%v)", 
+				accountName, streamName, loopIterations, time.Since(mainLoopStart))
 			return
 		case <-remoteQuitCh:
+			s.Noticef("CATCHUP_EXIT: Stream '%s > %s' exiting due to remote quit after %d iterations (%v)", 
+				accountName, streamName, loopIterations, time.Since(mainLoopStart))
 			mset.clearCatchupPeer(sreq.Peer)
 			return
 		case <-notActive.C:
-			s.Warnf("Catchup for stream '%s > %s' stalled", mset.account(), mset.name())
+			s.Warnf("CATCHUP_STALLED: Stream '%s > %s' stalled after %d iterations (%v)", 
+				accountName, streamName, loopIterations, time.Since(mainLoopStart))
 			mset.clearCatchupPeer(sreq.Peer)
 			return
 		case <-nextBatchC:
 			if !sendNextBatchAndContinue(qch) {
+				s.Noticef("CATCHUP_COMPLETE: Stream '%s > %s' completed after %d iterations (%v)", 
+					accountName, streamName, loopIterations, time.Since(mainLoopStart))
 				mset.clearCatchupPeer(sreq.Peer)
 				return
 			}
 		case <-cbKick:
+			s.Noticef("CATCHUP_KICK: Stream '%s > %s' kicked by global flow control", accountName, streamName)
 			if !sendNextBatchAndContinue(qch) {
+				s.Noticef("CATCHUP_COMPLETE: Stream '%s > %s' completed after %d iterations (%v)", 
+					accountName, streamName, loopIterations, time.Since(mainLoopStart))
 				mset.clearCatchupPeer(sreq.Peer)
 				return
 			}
 		case <-time.After(500 * time.Millisecond):
+			iterationDuration := time.Since(iterationStart)
+			s.Noticef("CATCHUP_TIMEOUT: Stream '%s > %s' iteration %d timeout after %v", 
+				accountName, streamName, loopIterations, iterationDuration)
 			if !sendNextBatchAndContinue(qch) {
+				s.Noticef("CATCHUP_COMPLETE: Stream '%s > %s' completed after %d iterations (%v)", 
+					accountName, streamName, loopIterations, time.Since(mainLoopStart))
 				mset.clearCatchupPeer(sreq.Peer)
 				return
 			}
