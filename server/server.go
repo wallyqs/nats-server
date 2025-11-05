@@ -2662,6 +2662,10 @@ func (s *Server) Shutdown() {
 		doneExpected++
 		s.listener.Close()
 		s.listener = nil
+		// Clean up Unix socket file if it was used
+		if opts.UnixSocket != "" {
+			os.Remove(opts.UnixSocket)
+		}
 	}
 
 	// Kick websocket server
@@ -2795,16 +2799,27 @@ func (s *Server) AcceptLoop(clr chan struct{}) {
 
 	// Setup state that can enable shutdown
 	s.mu.Lock()
-	hp := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
-	l, e := s.getServerListener(hp)
+	var hp string
+	var isUnix bool
+	if opts.UnixSocket != "" {
+		hp = opts.UnixSocket
+		isUnix = true
+	} else {
+		hp = net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
+	}
+	l, e := s.getServerListener(hp, isUnix)
 	s.listenerErr = e
 	if e != nil {
 		s.mu.Unlock()
-		s.Fatalf("Error listening on port: %s, %q", hp, e)
+		s.Fatalf("Error listening on %s: %q", hp, e)
 		return
 	}
-	s.Noticef("Listening for client connections on %s",
-		net.JoinHostPort(opts.Host, strconv.Itoa(l.Addr().(*net.TCPAddr).Port)))
+	if isUnix {
+		s.Noticef("Listening for client connections on unix://%s", l.Addr().String())
+	} else {
+		s.Noticef("Listening for client connections on %s",
+			net.JoinHostPort(opts.Host, strconv.Itoa(l.Addr().(*net.TCPAddr).Port)))
+	}
 
 	// Alert if PROXY protocol is enabled
 	if opts.ProxyProtocol {
@@ -2821,7 +2836,7 @@ func (s *Server) AcceptLoop(clr chan struct{}) {
 
 	// If server was started with RANDOM_PORT (-1), opts.Port would be equal
 	// to 0 at the beginning this function. So we need to get the actual port
-	if opts.Port == 0 {
+	if !isUnix && opts.Port == 0 {
 		// Write resolved port back to options.
 		opts.Port = l.Addr().(*net.TCPAddr).Port
 	}
@@ -2857,16 +2872,21 @@ func (s *Server) AcceptLoop(clr chan struct{}) {
 	clr = nil
 }
 
-// getServerListener returns a network listener for the given host-port address.
+// getServerListener returns a network listener for the given address.
 // If the Server already has an active listener (s.listener), it returns that listener
 // along with any previous error (s.listenerErr). Otherwise, it creates and returns
-// a new TCP listener on the specified address using natsListen.
-func (s *Server) getServerListener(hp string) (net.Listener, error) {
+// a new TCP or Unix socket listener on the specified address using natsListen.
+func (s *Server) getServerListener(addr string, isUnix bool) (net.Listener, error) {
 	if s.listener != nil {
 		return s.listener, s.listenerErr
 	}
 
-	return natsListen("tcp", hp)
+	if isUnix {
+		// Remove the Unix socket file if it already exists
+		os.Remove(addr)
+		return natsListen("unix", addr)
+	}
+	return natsListen("tcp", addr)
 }
 
 // InProcessConn returns an in-process connection to the server,

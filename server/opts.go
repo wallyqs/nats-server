@@ -329,6 +329,7 @@ type Options struct {
 	Host            string `json:"addr"`
 	Port            int    `json:"port"`
 	DontListen      bool   `json:"dont_listen"`
+	UnixSocket      string `json:"-"`
 	ClientAdvertise string `json:"-"`
 	Trace           bool   `json:"-"`
 	Debug           bool   `json:"-"`
@@ -1055,8 +1056,12 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 			*errors = append(*errors, &configErr{tk, err.Error()})
 			return
 		}
-		o.Host = hp.host
-		o.Port = hp.port
+		if hp.isUnix {
+			o.UnixSocket = hp.unixSocket
+		} else {
+			o.Host = hp.host
+			o.Port = hp.port
+		}
 	case "client_advertise":
 		o.ClientAdvertise = v.(string)
 	case "port":
@@ -1870,8 +1875,10 @@ func trackExplicitVal(pm *map[string]bool, name string, val bool) {
 
 // hostPort is simple struct to hold parsed listen/addr strings.
 type hostPort struct {
-	host string
-	port int
+	host       string
+	port       int
+	isUnix     bool
+	unixSocket string
 }
 
 // parseListen will parse listen option which is replacing host/net and port
@@ -1882,6 +1889,15 @@ func parseListen(v any) (*hostPort, error) {
 	case int64:
 		hp.port = int(vv)
 	case string:
+		// Check if this is a Unix socket (unix:// scheme)
+		if strings.HasPrefix(vv, "unix://") {
+			hp.isUnix = true
+			hp.unixSocket = strings.TrimPrefix(vv, "unix://")
+			if hp.unixSocket == "" {
+				return nil, fmt.Errorf("unix socket path cannot be empty")
+			}
+			return hp, nil
+		}
 		host, port, err := net.SplitHostPort(vv)
 		if err != nil {
 			return nil, fmt.Errorf("could not parse address string %q", vv)
@@ -6274,6 +6290,15 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	// have a routes override, we need to report misconfiguration.
 	if opts.RoutesStr != _EMPTY_ && opts.Cluster.ListenStr == _EMPTY_ && opts.Cluster.Host == _EMPTY_ && opts.Cluster.Port == 0 {
 		return nil, errors.New("solicited routes require cluster capabilities, e.g. --cluster")
+	}
+
+	// Check if the Host field contains a Unix socket URL and handle accordingly
+	if opts.Host != _EMPTY_ && strings.HasPrefix(opts.Host, "unix://") {
+		opts.UnixSocket = strings.TrimPrefix(opts.Host, "unix://")
+		if opts.UnixSocket == _EMPTY_ {
+			return nil, fmt.Errorf("unix socket path cannot be empty")
+		}
+		opts.Host = _EMPTY_
 	}
 
 	return opts, nil

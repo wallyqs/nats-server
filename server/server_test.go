@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nuid"
 
 	"github.com/nats-io/nats-server/v2/internal/antithesis"
 	srvlog "github.com/nats-io/nats-server/v2/logger"
@@ -197,6 +198,84 @@ func TestStartupAndShutdown(t *testing.T) {
 	numSubscriptions := s.NumSubscriptions()
 	if numSubscriptions != 0 {
 		t.Fatalf("Expected numSubscriptions to be 0 vs %d\n", numSubscriptions)
+	}
+}
+
+func TestUnixSocketListen(t *testing.T) {
+	socketPath := "/tmp/nats-test-" + nuid.Next() + ".sock"
+	defer os.Remove(socketPath)
+
+	opts := DefaultOptions()
+	opts.NoSystemAccount = true
+	opts.UnixSocket = socketPath
+
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	if !s.isRunning() {
+		t.Fatal("Could not run server with Unix socket")
+	}
+
+	// Verify the socket file was created
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Fatalf("Unix socket file was not created at %s", socketPath)
+	}
+
+	// Test connection to Unix socket
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Failed to connect to Unix socket: %v", err)
+	}
+	defer conn.Close()
+
+	// Set read timeout
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	// Read INFO message
+	br := bufio.NewReader(conn)
+	info, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("Failed to read INFO: %v", err)
+	}
+	if !strings.HasPrefix(info, "INFO") {
+		t.Fatalf("Expected INFO, got: %s", info)
+	}
+
+	// Send CONNECT and PING to verify it's a working NATS server
+	if _, err := conn.Write([]byte("CONNECT {\"verbose\":false,\"pedantic\":false}\r\nPING\r\n")); err != nil {
+		t.Fatalf("Failed to send CONNECT/PING: %v", err)
+	}
+
+	// Read PONG response
+	pong, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("Failed to read PONG: %v", err)
+	}
+	if !strings.HasPrefix(pong, "PONG") {
+		t.Fatalf("Expected PONG, got: %s", pong)
+	}
+}
+
+func TestUnixSocketCleanupOnShutdown(t *testing.T) {
+	socketPath := "/tmp/nats-test-cleanup-" + nuid.Next() + ".sock"
+
+	opts := DefaultOptions()
+	opts.NoSystemAccount = true
+	opts.UnixSocket = socketPath
+
+	s := RunServer(opts)
+
+	// Verify the socket file was created
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Fatalf("Unix socket file was not created at %s", socketPath)
+	}
+
+	// Shutdown the server
+	s.Shutdown()
+
+	// Verify the socket file was removed
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("Unix socket file was not cleaned up after shutdown")
 	}
 }
 
