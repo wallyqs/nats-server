@@ -543,6 +543,50 @@ func TestListenPortWithColonConfig(t *testing.T) {
 	}
 }
 
+func TestListenUnixSocket(t *testing.T) {
+	opts, err := ProcessConfigFile("./configs/unix_socket.conf")
+	if err != nil {
+		t.Fatalf("Received an error reading config file: %v", err)
+	}
+
+	expectedSocket := "/tmp/nats-test.sock"
+	if opts.UnixSocket != expectedSocket {
+		t.Fatalf("Received incorrect unix socket %q, expected %q", opts.UnixSocket, expectedSocket)
+	}
+	// When using Unix socket from config, Port and Host should remain at zero
+	// before setBaselineOptions is called
+	if opts.Port != 0 {
+		t.Fatalf("Port should be 0 when using Unix socket from config, got %v", opts.Port)
+	}
+	if opts.Host != "" {
+		t.Fatalf("Host should be empty when using Unix socket from config, got %q", opts.Host)
+	}
+}
+
+func TestListenUnixSocketInline(t *testing.T) {
+	conf := createConfFile(t, []byte(`listen: "unix:///tmp/test.sock"`))
+	opts, err := ProcessConfigFile(conf)
+	if err != nil {
+		t.Fatalf("Received an error reading config file: %v", err)
+	}
+	setBaselineOptions(opts)
+
+	if opts.UnixSocket != "/tmp/test.sock" {
+		t.Fatalf("Received incorrect unix socket %q, expected %q", opts.UnixSocket, "/tmp/test.sock")
+	}
+}
+
+func TestListenUnixSocketEmpty(t *testing.T) {
+	conf := createConfFile(t, []byte(`listen: "unix://"`))
+	_, err := ProcessConfigFile(conf)
+	if err == nil {
+		t.Fatalf("Expected an error for empty unix socket path")
+	}
+	if !strings.Contains(err.Error(), "unix socket path cannot be empty") {
+		t.Fatalf("Expected error about empty socket path, got: %v", err)
+	}
+}
+
 func TestListenMonitoringDefault(t *testing.T) {
 	opts := &Options{
 		Host: "10.0.1.22",
