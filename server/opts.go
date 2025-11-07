@@ -595,6 +595,11 @@ type WebsocketOpts struct {
 	// time needed for the TLS Handshake.
 	HandshakeTimeout time.Duration
 
+	// How often to send pings to WebSocket clients. When set to a non-zero
+	// duration, this overrides the default PingInterval for WebSocket connections.
+	// If not set or zero, the server's default PingInterval will be used.
+	PingInterval time.Duration
+
 	// Headers to be added to the upgrade response.
 	// Useful for adding custom headers like Strict-Transport-Security.
 	Headers map[string]string
@@ -5414,6 +5419,8 @@ func parseWebsocket(v any, o *Options, errors *[]error) error {
 					o.Websocket.Headers[key] = headerValue
 				}
 			}
+		case "ping_interval":
+			o.Websocket.PingInterval = parseDuration("ping_interval", tk, mv, errors, nil)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
