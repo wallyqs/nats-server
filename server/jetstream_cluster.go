@@ -8008,8 +8008,7 @@ func encodeDeleteStreamAssignment(sa *streamAssignment) []byte {
 
 func decodeStreamAssignment(s *Server, buf []byte) (*streamAssignment, error) {
 	var sa streamAssignment
-	decoder := json.NewDecoder(bytes.NewReader(buf))
-	if err := decoder.Decode(&sa); err != nil {
+	if err := json.Unmarshal(buf, &sa); err != nil {
 		return nil, err
 	}
 	if err := decodeStreamAssignmentConfig(s, &sa); err != nil {
@@ -8474,8 +8473,7 @@ func encodeDeleteConsumerAssignment(ca *consumerAssignment) []byte {
 
 func decodeConsumerAssignment(buf []byte) (*consumerAssignment, error) {
 	var ca consumerAssignment
-	decoder := json.NewDecoder(bytes.NewReader(buf))
-	if err := decoder.Decode(&ca); err != nil {
+	if err := json.Unmarshal(buf, &ca); err != nil {
 		return nil, err
 	}
 	if err := decodeConsumerAssignmentConfig(&ca); err != nil {
