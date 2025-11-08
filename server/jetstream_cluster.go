@@ -1563,6 +1563,8 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 	streams := make([]writeableStreamAssignment, 0, nsa)
 	for _, asa := range cc.streams {
 		for _, sa := range asa {
+			// Ensure ConfigJSON is populated for the snapshot
+			sa.ensureConfigJSON()
 			wsa := writeableStreamAssignment{
 				Client:     sa.Client.forAssignmentSnap(),
 				Created:    sa.Created,
@@ -1577,6 +1579,8 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 				if ca.pending {
 					continue
 				}
+				// Ensure ConfigJSON is populated for the snapshot
+				ca.ensureConfigJSON()
 				wca := writeableConsumerAssignment{
 					Client:     ca.Client.forAssignmentSnap(),
 					Created:    ca.Created,
@@ -8017,6 +8021,14 @@ func decodeStreamAssignment(s *Server, buf []byte) (*streamAssignment, error) {
 	return &sa, nil
 }
 
+// ensureStreamConfigJSON ensures ConfigJSON is populated from Config if it's nil.
+// This is needed when creating snapshots or encoding assignments.
+func (sa *streamAssignment) ensureConfigJSON() {
+	if sa.ConfigJSON == nil && sa.Config != nil {
+		sa.ConfigJSON, _ = json.Marshal(sa.Config)
+	}
+}
+
 func decodeStreamAssignmentConfig(s *Server, sa *streamAssignment) error {
 	var unsupported bool
 	var cfg StreamConfig
@@ -8031,6 +8043,8 @@ func decodeStreamAssignmentConfig(s *Server, sa *streamAssignment) error {
 		}
 	}
 	sa.Config = &cfg
+	// Clear ConfigJSON to reduce memory usage. It will be regenerated if needed for encoding/snapshots.
+	sa.ConfigJSON = nil
 	fixCfgMirrorWithDedupWindow(sa.Config)
 
 	if unsupported || err != nil || (sa.Config != nil && !supportsRequiredApiLevel(sa.Config.Metadata)) {
@@ -8482,6 +8496,14 @@ func decodeConsumerAssignment(buf []byte) (*consumerAssignment, error) {
 	return &ca, nil
 }
 
+// ensureConsumerConfigJSON ensures ConfigJSON is populated from Config if it's nil.
+// This is needed when creating snapshots or encoding assignments.
+func (ca *consumerAssignment) ensureConfigJSON() {
+	if ca.ConfigJSON == nil && ca.Config != nil {
+		ca.ConfigJSON, _ = json.Marshal(ca.Config)
+	}
+}
+
 func decodeConsumerAssignmentConfig(ca *consumerAssignment) error {
 	var unsupported bool
 	var cfg ConsumerConfig
@@ -8496,6 +8518,8 @@ func decodeConsumerAssignmentConfig(ca *consumerAssignment) error {
 		}
 	}
 	ca.Config = &cfg
+	// Clear ConfigJSON to reduce memory usage. It will be regenerated if needed for encoding/snapshots.
+	ca.ConfigJSON = nil
 	if unsupported || err != nil || (ca.Config != nil && !supportsRequiredApiLevel(ca.Config.Metadata)) {
 		ca.unsupported = newUnsupportedConsumerAssignment(ca, err)
 	}
