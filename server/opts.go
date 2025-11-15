@@ -389,6 +389,7 @@ type Options struct {
 	JetStreamRequestQueueLimit int64
 	JetStreamMetaCompact       uint64
 	JetStreamMetaCompactSize   uint64
+	UseCBORInternally          bool
 	StreamMaxBufferedMsgs      int               `json:"-"`
 	StreamMaxBufferedSize      int64             `json:"-"`
 	StoreDir                   string            `json:"-"`
@@ -2609,6 +2610,8 @@ func parseJetStream(v any, opts *Options, errors *[]error, warnings *[]error) er
 				}
 			case "unique_tag":
 				opts.JetStreamUniqueTag = strings.ToLower(strings.TrimSpace(mv.(string)))
+			case "use_cbor_internally":
+				opts.UseCBORInternally = mv.(bool)
 			case "max_outstanding_catchup":
 				s, err := getStorageSize(mv)
 				if err != nil {

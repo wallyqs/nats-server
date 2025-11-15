@@ -2711,13 +2711,14 @@ func (a *Account) checkForJetStream() (*Server, *jsAccount, error) {
 	return s, jsa, nil
 }
 
-type Number interface {
+// byteNumber is used as a generic constraint for friendlyBytes.
+type byteNumber interface {
 	int | int8 | int16 | int32 | int64 | uint | uint8 | uint16 | uint32 | uint64 | float32 | float64
 }
 
 // friendlyBytes returns a string with the given bytes int64
 // represented as a size, such as 1KB, 10MB, etc...
-func friendlyBytes[T Number](bytes T) string {
+func friendlyBytes[T byteNumber](bytes T) string {
 	fbytes := float64(bytes)
 	base := 1024
 	pre := []string{"K", "M", "G", "T", "P", "E"}

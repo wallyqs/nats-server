@@ -1669,14 +1669,14 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 		return nil, nil
 	}
 
-	// Track how long it took to marshal the JSON
+	// Track how long it took to marshal the JSON snapshot.
 	mstart := time.Now()
-	b, err := json.Marshal(streams)
+	raw, err := json.Marshal(streams)
 	mend := time.Since(mstart)
 
 	js.mu.RUnlock()
 
-	// Must not be possible for a JSON marshaling error to result
+	// Must not be possible for a marshaling error to result
 	// in an empty snapshot.
 	if err != nil {
 		return nil, err
@@ -1684,13 +1684,13 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 
 	// Track how long it took to compress the JSON.
 	cstart := time.Now()
-	snap := s2.Encode(nil, b)
+	snap := s2.Encode(nil, raw)
 	cend := time.Since(cstart)
 	took := time.Since(start)
 
 	if took > time.Second {
 		s.rateLimitFormatWarnf("Metalayer snapshot took %.3fs (streams: %d, consumers: %d, marshal: %.3fs, s2: %.3fs, uncompressed: %d, compressed: %d)",
-			took.Seconds(), nsa, nca, mend.Seconds(), cend.Seconds(), len(b), len(snap))
+			took.Seconds(), nsa, nca, mend.Seconds(), cend.Seconds(), len(raw), len(snap))
 	}
 
 	// Track in jsz monitoring as well.
