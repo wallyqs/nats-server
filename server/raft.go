@@ -255,13 +255,13 @@ type lps struct {
 }
 
 const (
-	minElectionTimeoutDefault      = 4 * time.Second
-	maxElectionTimeoutDefault      = 9 * time.Second
+	minElectionTimeoutDefault      = 5 * time.Second
+	maxElectionTimeoutDefault      = 10 * time.Second
 	minCampaignTimeoutDefault      = 100 * time.Millisecond
 	maxCampaignTimeoutDefault      = 8 * minCampaignTimeoutDefault
 	hbIntervalDefault              = 1 * time.Second
-	lostQuorumIntervalDefault      = hbIntervalDefault * 10 // 10 seconds
-	lostQuorumCheckIntervalDefault = hbIntervalDefault * 10 // 10 seconds
+	lostQuorumIntervalDefault      = 4 * time.Second
+	lostQuorumCheckIntervalDefault = 1 * time.Second
 	observerModeIntervalDefault    = 48 * time.Hour
 	peerRemoveTimeoutDefault       = 5 * time.Minute
 )

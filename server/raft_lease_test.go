@@ -21,11 +21,9 @@ import (
 )
 
 // TestRaftStaleReadDueToLeaseDuration demonstrates that a partitioned leader
-// can serve stale reads because lostQuorumInterval (10s) > minElectionTimeout (4s).
-// This creates a window where:
-// 1. The majority partition elects a new leader (after ~4s)
-// 2. The old leader still thinks it's leader (won't step down for ~10s)
-// 3. The old leader can serve stale reads during this 6+ second window
+// can serve stale reads when timing is misconfigured.
+// With proper configuration (lostQuorumInterval < minElectionTimeout), the old
+// leader's lease expires before a new leader can be elected, preventing stale reads.
 func TestRaftStaleReadDueToLeaseDuration(t *testing.T) {
 	// Create a 3-node cluster
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
@@ -169,25 +167,28 @@ func TestRaftLeaderLeaseTiming(t *testing.T) {
 	t.Logf("  lostQuorumInterval: %v (leader checks for quorum loss)", lostQuorumIntervalDefault)
 	t.Logf("  lostQuorumCheck:    %v (how often leader checks)", lostQuorumCheckIntervalDefault)
 
-	// The vulnerability window
-	vulnerabilityWindow := lostQuorumIntervalDefault - minElectionTimeoutDefault
-	t.Logf("\nVulnerability window: %v", vulnerabilityWindow)
-	t.Logf("During this window, two leaders can exist simultaneously!")
-	t.Logf("The old leader can serve stale reads while the new leader serves fresh writes.")
-
 	// For linearizable reads, we need: lostQuorumInterval < minElectionTimeout
 	if lostQuorumIntervalDefault >= minElectionTimeoutDefault {
-		t.Errorf("UNSAFE CONFIGURATION: lostQuorumInterval (%v) >= minElectionTimeout (%v)",
-			lostQuorumIntervalDefault, minElectionTimeoutDefault)
-		t.Errorf("For linearizable reads, lostQuorumInterval must be < minElectionTimeout")
-		t.Errorf("Recommended: lostQuorumInterval should be ~2-3 seconds")
+		vulnerabilityWindow := lostQuorumIntervalDefault - minElectionTimeoutDefault
+		t.Errorf("\n⚠️  UNSAFE CONFIGURATION DETECTED:")
+		t.Errorf("  lostQuorumInterval (%v) >= minElectionTimeout (%v)", lostQuorumIntervalDefault, minElectionTimeoutDefault)
+		t.Errorf("  Vulnerability window: %v", vulnerabilityWindow)
+		t.Errorf("  During this window, two leaders can exist simultaneously!")
+		t.Errorf("  The old leader can serve stale reads while the new leader serves fresh writes.")
+		t.Errorf("\nFor linearizable reads, lostQuorumInterval must be < minElectionTimeout")
 	} else {
-		t.Logf("Configuration is safe for linearizable reads")
+		safetyBuffer := minElectionTimeoutDefault - lostQuorumIntervalDefault
+		t.Logf("\n✅ SAFE CONFIGURATION:")
+		t.Logf("  lostQuorumInterval (%v) < minElectionTimeout (%v)", lostQuorumIntervalDefault, minElectionTimeoutDefault)
+		t.Logf("  Safety buffer: %v", safetyBuffer)
+		t.Logf("  Old leader's lease expires BEFORE new elections can complete")
+		t.Logf("  No vulnerability window - stale reads are prevented!")
 	}
 }
 
-// TestRaftCurrentDoesNotCheckQuorum demonstrates that the Current() method
-// returns true for a leader even if it has lost quorum.
+// TestRaftCurrentDoesNotCheckQuorum verifies that a partitioned leader
+// properly detects quorum loss within the configured lostQuorumInterval.
+// With the fix, the leader should detect quorum loss before a new election completes.
 func TestRaftCurrentDoesNotCheckQuorum(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -229,50 +230,37 @@ func TestRaftCurrentDoesNotCheckQuorum(t *testing.T) {
 		}
 	}
 
-	// The leader has now lost quorum, but Current() will still return true
-	// until lostQuorumInterval (10s) passes
+	// The leader has now lost quorum
+	// With the fix (lostQuorumInterval=4s < minElectionTimeout=5s), the leader should
+	// detect quorum loss before a new election could complete
 
 	// Check immediately (should still think it's current due to timing)
 	time.Sleep(500 * time.Millisecond)
 
-	t.Logf("After partition - Leader still reports: Current: %v", node.Current())
+	t.Logf("After partition (500ms) - Leader reports: Current: %v", node.Current())
 
-	// The issue: Current() returns true if State() == Leader (see raft.go:1550-1552)
-	// It does NOT check if the leader has quorum!
+	// Wait for lostQuorumInterval to pass
+	t.Logf("Waiting for lostQuorumInterval (%v) to elapse...", lostQuorumIntervalDefault)
+	time.Sleep(4500 * time.Millisecond) // Total ~5s, past the 4s lostQuorumInterval
 
-	// Wait for 5 seconds (more than minElectionTimeout but less than lostQuorumInterval)
-	t.Log("Waiting 5 seconds...")
-	time.Sleep(5 * time.Second)
+	// At this point, the leader should have detected quorum loss
+	// This is BEFORE minElectionTimeout (5s), so no new leader could be elected yet
+	current := node.Current()
+	t.Logf("After %v: Leader reports Current: %v", lostQuorumIntervalDefault, current)
 
-	// At this point:
-	// - If there was a majority partition, they would have elected a new leader (after 4s)
-	// - But this old leader STILL thinks it's current (won't detect loss until 10s)
-
-	if node.Current() {
-		t.Logf("After 5s: Leader STILL reports Current: true (UNSAFE!)")
-		t.Logf("This leader has lost quorum but will still serve reads!")
-		t.Logf("A new leader could have been elected in the majority partition by now.")
+	if current {
+		t.Errorf("After %v: Leader STILL reports Current: true!", lostQuorumIntervalDefault)
+		t.Errorf("Leader should detect quorum loss within lostQuorumInterval")
 	} else {
-		t.Logf("After 5s: Leader correctly reports Current: false")
-	}
-
-	// Wait for lostQuorumInterval
-	t.Logf("Waiting for lostQuorumInterval (%v)...", lostQuorumIntervalDefault)
-	time.Sleep(6 * time.Second) // Total ~11s
-
-	// Now it should detect quorum loss
-	if node.Current() {
-		t.Errorf("After %v: Leader STILL reports Current: true - this should not happen!",
-			lostQuorumIntervalDefault)
-	} else {
-		t.Logf("After %v: Leader finally detected quorum loss", lostQuorumIntervalDefault)
+		t.Logf("✅ Leader correctly detected quorum loss within %v", lostQuorumIntervalDefault)
+		t.Logf("This is BEFORE minElectionTimeout (%v), preventing stale reads!", minElectionTimeoutDefault)
 	}
 }
 
-// TestRaftCurrentDoesNotCheckQuorumR5 is similar to TestRaftCurrentDoesNotCheckQuorum
-// but uses a 5-node cluster to more clearly demonstrate the vulnerability.
+// TestRaftCurrentDoesNotCheckQuorumR5 verifies quorum loss detection with a 5-node cluster.
 // With R5, quorum = 3 nodes. We partition the leader with 1 follower (minority = 2),
-// leaving a majority of 3 nodes that can elect a new leader.
+// leaving a majority of 3 nodes. With the fix, the leader should detect quorum loss
+// within lostQuorumInterval (4s), before a new election completes (5s).
 func TestRaftCurrentDoesNotCheckQuorumR5(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R5S", 5)
 	defer c.shutdown()
@@ -341,59 +329,41 @@ func TestRaftCurrentDoesNotCheckQuorumR5(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	t.Logf("\nAfter partition (500ms):")
-	t.Logf("  Leader Current: %v (should be false but is likely true due to bug)", node.Current())
-	t.Logf("  Leader still has only 2/5 nodes - NO QUORUM!")
+	t.Logf("  Leader Current: %v (expected: true, quorum loss not detected yet)", node.Current())
+	t.Logf("  Leader has only 2/5 nodes - NO QUORUM!")
 
-	// Wait for 5 seconds (more than minElectionTimeout but less than lostQuorumInterval)
-	t.Logf("\nWaiting 5 seconds (more than minElectionTimeout of 4s)...")
-	time.Sleep(5 * time.Second)
+	// Wait for lostQuorumInterval to pass (4s)
+	t.Logf("\nWaiting for lostQuorumInterval (%v) to elapse...", lostQuorumIntervalDefault)
+	time.Sleep(4500 * time.Millisecond) // Total ~5s, past the 4s lostQuorumInterval
 
 	// At this point:
-	// - The majority partition (3 followers) could have elected a new leader (after 4s)
-	// - But this old leader STILL thinks it's current (won't detect loss until 10s)
-	// - This creates the SPLIT-BRAIN scenario
+	// - Leader should have detected quorum loss (after 4s)
+	// - minElectionTimeout is 5s, so no new leader could be elected yet
+	// - This prevents the split-brain scenario!
 
 	current := node.Current()
 	quorum := node.Quorum()
 	isLeader := node.Leader()
 
-	t.Logf("\nAfter 5 seconds:")
+	t.Logf("\nAfter %v (before minElectionTimeout of %v):", lostQuorumIntervalDefault, minElectionTimeoutDefault)
 	t.Logf("  Leader Current: %v", current)
 	t.Logf("  Leader Quorum: %v", quorum)
 	t.Logf("  Leader state: %v", isLeader)
 
 	if current {
-		t.Logf("\n⚠️  VULNERABILITY DETECTED:")
-		t.Logf("  Old leader (2/5 nodes) reports Current: true")
-		t.Logf("  New leader (3/5 majority) may have been elected by now")
-		t.Logf("  TWO LEADERS CAN SERVE READS WITH DIFFERENT DATA!")
-		t.Logf("  Old leader has stale data, new leader has fresh writes")
-		t.Errorf("UNSAFE: Leader reports Current=true despite having only 2/5 nodes (no quorum)")
+		t.Errorf("⚠️  Leader STILL reports Current: true after %v", lostQuorumIntervalDefault)
+		t.Errorf("Leader should detect quorum loss within lostQuorumInterval!")
 	} else {
-		t.Logf("✓ Leader correctly reports Current: false")
-	}
-
-	// Wait for lostQuorumInterval
-	t.Logf("\nWaiting additional %v for quorum loss detection...", lostQuorumIntervalDefault-5*time.Second)
-	time.Sleep(6 * time.Second) // Total ~11s
-
-	// Now it should definitely detect quorum loss
-	current = node.Current()
-	t.Logf("\nAfter %v total:", lostQuorumIntervalDefault)
-	t.Logf("  Leader Current: %v", current)
-
-	if current {
-		t.Errorf("CRITICAL: After %v, leader STILL reports Current: true with only 2/5 nodes!",
-			lostQuorumIntervalDefault)
-		t.Errorf("This means it could serve stale reads for the entire vulnerability window!")
-	} else {
-		t.Logf("✓ Leader finally detected quorum loss")
+		t.Logf("\n✅ SUCCESS: Leader correctly detected quorum loss!")
+		t.Logf("  Detection happened at %v, BEFORE minElectionTimeout (%v)", lostQuorumIntervalDefault, minElectionTimeoutDefault)
+		t.Logf("  No split-brain scenario - stale reads are prevented!")
 	}
 }
 
-// TestRaftCurrentDoesNotCheckQuorumR5NetworkPartition is similar to TestRaftCurrentDoesNotCheckQuorumR5
-// but instead of shutting down nodes, it blocks the routes from the leader to create a
-// network partition. This is more realistic as the nodes are still running but can't communicate.
+// TestRaftCurrentDoesNotCheckQuorumR5NetworkPartition verifies quorum loss detection in
+// a network partition scenario. Instead of shutting down nodes, it blocks routes to
+// simulate a real network partition where nodes are alive but can't communicate.
+// With the fix, the leader should detect quorum loss before a new election completes.
 func TestRaftCurrentDoesNotCheckQuorumR5NetworkPartition(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R5S", 5)
 	defer c.shutdown()
@@ -491,54 +461,35 @@ func TestRaftCurrentDoesNotCheckQuorumR5NetworkPartition(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	t.Logf("\nAfter network partition (500ms):")
-	t.Logf("  Leader Current: %v (should be false but is likely true due to bug)", node.Current())
-	t.Logf("  Leader still has only 2/5 nodes - NO QUORUM!")
+	t.Logf("  Leader Current: %v (expected: true, quorum loss not detected yet)", node.Current())
+	t.Logf("  Leader has only 2/5 nodes - NO QUORUM!")
 
-	// Wait for 5 seconds (more than minElectionTimeout but less than lostQuorumInterval)
-	t.Logf("\nWaiting 5 seconds (more than minElectionTimeout of 4s)...")
-	time.Sleep(5 * time.Second)
+	// Wait for lostQuorumInterval to pass (4s)
+	t.Logf("\nWaiting for lostQuorumInterval (%v) to elapse...", lostQuorumIntervalDefault)
+	time.Sleep(4500 * time.Millisecond) // Total ~5s, past the 4s lostQuorumInterval
 
 	// At this point:
-	// - The majority partition (3 followers) could have elected a new leader (after 4s)
-	// - But this old leader STILL thinks it's current (won't detect loss until 10s)
-	// - This creates the SPLIT-BRAIN scenario
+	// - Leader should have detected quorum loss (after 4s)
+	// - minElectionTimeout is 5s, so no new leader could be elected yet
+	// - This prevents the split-brain scenario even in network partitions!
 
 	current := node.Current()
 	quorum := node.Quorum()
 	isLeader := node.Leader()
 
-	t.Logf("\nAfter 5 seconds:")
+	t.Logf("\nAfter %v (before minElectionTimeout of %v):", lostQuorumIntervalDefault, minElectionTimeoutDefault)
 	t.Logf("  Leader Current: %v", current)
 	t.Logf("  Leader Quorum: %v", quorum)
 	t.Logf("  Leader state: %v", isLeader)
 
 	if current {
-		t.Logf("\n⚠️  VULNERABILITY DETECTED:")
-		t.Logf("  Old leader (2/5 nodes) reports Current: true")
-		t.Logf("  New leader (3/5 majority) may have been elected by now")
-		t.Logf("  TWO LEADERS CAN SERVE READS WITH DIFFERENT DATA!")
-		t.Logf("  Old leader has stale data, new leader has fresh writes")
-		t.Logf("  This is a NETWORK PARTITION scenario - nodes are running but can't communicate")
-		t.Errorf("UNSAFE: Leader reports Current=true despite having only 2/5 nodes (no quorum)")
+		t.Errorf("⚠️  Leader STILL reports Current: true after %v", lostQuorumIntervalDefault)
+		t.Errorf("Leader should detect quorum loss within lostQuorumInterval!")
+		t.Errorf("This is a NETWORK PARTITION scenario - nodes are alive but partitioned")
 	} else {
-		t.Logf("✓ Leader correctly reports Current: false")
-	}
-
-	// Wait for lostQuorumInterval
-	t.Logf("\nWaiting additional %v for quorum loss detection...", lostQuorumIntervalDefault-5*time.Second)
-	time.Sleep(6 * time.Second) // Total ~11s
-
-	// Now it should definitely detect quorum loss
-	current = node.Current()
-	t.Logf("\nAfter %v total:", lostQuorumIntervalDefault)
-	t.Logf("  Leader Current: %v", current)
-
-	if current {
-		t.Errorf("CRITICAL: After %v, leader STILL reports Current: true with only 2/5 nodes!",
-			lostQuorumIntervalDefault)
-		t.Errorf("This means it could serve stale reads for the entire vulnerability window!")
-		t.Errorf("Even in a network partition scenario where nodes are alive but partitioned!")
-	} else {
-		t.Logf("✓ Leader finally detected quorum loss")
+		t.Logf("\n✅ SUCCESS: Leader correctly detected quorum loss!")
+		t.Logf("  Detection happened at %v, BEFORE minElectionTimeout (%v)", lostQuorumIntervalDefault, minElectionTimeoutDefault)
+		t.Logf("  No split-brain scenario - even in network partitions!")
+		t.Logf("  Stale reads are prevented in real-world partition scenarios!")
 	}
 }
