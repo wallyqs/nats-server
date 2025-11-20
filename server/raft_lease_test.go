@@ -31,13 +31,31 @@ func TestRaftStaleReadDueToLeaseDuration(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
 
-	// Create a KV bucket (which uses Raft underneath) with R3 replication
+	// Create a KV-style stream with R3 replication
 	nc, js := jsClientConnect(t, c.randomServer())
 	defer nc.Close()
 
-	_, err := js.CreateKeyValue(&nats.KeyValueConfig{
-		Bucket:   "TEST",
-		Replicas: 3,
+	twominutes := 2 * time.Minute
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:              "KV_TEST",
+		Subjects:          []string{"$KV.TEST.>"},
+		Retention:         nats.LimitsPolicy,
+		MaxConsumers:      -1,
+		MaxMsgsPerSubject: 1,
+		MaxMsgs:           -1,
+		MaxBytes:          -1,
+		MaxAge:            0,
+		MaxMsgSize:        -1,
+		Storage:           nats.FileStorage,
+		Discard:           nats.DiscardNew,
+		Replicas:          3,
+		Duplicates:        twominutes,
+		Sealed:            false,
+		DenyDelete:        true,
+		DenyPurge:         false,
+		AllowRollup:       true,
+		AllowDirect:       false,
+		MirrorDirect:      false,
 	})
 	require_NoError(t, err)
 
