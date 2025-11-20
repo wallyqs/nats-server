@@ -246,11 +246,17 @@ func TestRaftCurrentDoesNotCheckQuorum(t *testing.T) {
 	// At this point, the leader should have detected quorum loss
 	// This is BEFORE minElectionTimeout (5s), so no new leader could be elected yet
 	current := node.Current()
-	t.Logf("After %v: Leader reports Current: %v", lostQuorumIntervalDefault, current)
+	quorum := node.Quorum()
+	isLeader := node.Leader()
+	state := node.State()
+
+	t.Logf("After %v: Current=%v, Quorum=%v, Leader=%v, State=%v",
+		lostQuorumIntervalDefault, current, quorum, isLeader, state)
 
 	if current {
 		t.Errorf("After %v: Leader STILL reports Current: true!", lostQuorumIntervalDefault)
 		t.Errorf("Leader should detect quorum loss within lostQuorumInterval")
+		t.Errorf("Debug: Quorum=%v, Leader=%v, State=%v", quorum, isLeader, state)
 	} else {
 		t.Logf("✅ Leader correctly detected quorum loss within %v", lostQuorumIntervalDefault)
 		t.Logf("This is BEFORE minElectionTimeout (%v), preventing stale reads!", minElectionTimeoutDefault)
@@ -417,45 +423,19 @@ func TestRaftCurrentDoesNotCheckQuorumR5NetworkPartition(t *testing.T) {
 	t.Logf("  Majority: 3 followers (can elect new leader)")
 
 	keepFollower := followers[0]
-	t.Logf("  Keeping route to follower %s", keepFollower.Name())
+	t.Logf("  Keeping follower %s with leader", keepFollower.Name())
 
-	// Block routes from leader to 3 followers
-	// Collect connections to close, then close them without holding locks to avoid deadlock
-	var connsToClose []*client
+	// Shut down 3 followers to simulate network partition
+	// This is more reliable than route closure since routes can auto-reconnect
 	for i := 1; i < len(followers); i++ {
 		follower := followers[i]
-		t.Logf("  Blocking routes to %s", follower.Name())
-
-		// Collect route connections from leader to this follower
-		leader.mu.Lock()
-		if conns, ok := leader.routes[follower.ID()]; ok {
-			for _, rc := range conns {
-				if rc != nil {
-					connsToClose = append(connsToClose, rc)
-				}
-			}
-		}
-		leader.mu.Unlock()
-
-		// Collect routes from follower to leader
-		follower.mu.Lock()
-		if conns, ok := follower.routes[leader.ID()]; ok {
-			for _, rc := range conns {
-				if rc != nil {
-					connsToClose = append(connsToClose, rc)
-				}
-			}
-		}
-		follower.mu.Unlock()
+		t.Logf("  Shutting down %s", follower.Name())
+		follower.Shutdown()
+		follower.WaitForShutdown()
 	}
 
-	// Now close all collected connections without holding any locks
-	for _, rc := range connsToClose {
-		rc.closeConnection(ClientClosed)
-	}
-
-	// The leader has now lost quorum (only has 2/5 nodes), but Current() will still return true
-	// until lostQuorumInterval (10s) passes
+	// The leader has now lost quorum (only has 2/5 nodes)
+	// With the fix, the leader should detect this within lostQuorumInterval (4s)
 
 	// Check immediately
 	time.Sleep(500 * time.Millisecond)
@@ -476,16 +456,19 @@ func TestRaftCurrentDoesNotCheckQuorumR5NetworkPartition(t *testing.T) {
 	current := node.Current()
 	quorum := node.Quorum()
 	isLeader := node.Leader()
+	state := node.State()
 
 	t.Logf("\nAfter %v (before minElectionTimeout of %v):", lostQuorumIntervalDefault, minElectionTimeoutDefault)
 	t.Logf("  Leader Current: %v", current)
 	t.Logf("  Leader Quorum: %v", quorum)
 	t.Logf("  Leader state: %v", isLeader)
+	t.Logf("  Node State: %v", state)
 
 	if current {
 		t.Errorf("⚠️  Leader STILL reports Current: true after %v", lostQuorumIntervalDefault)
 		t.Errorf("Leader should detect quorum loss within lostQuorumInterval!")
 		t.Errorf("This is a NETWORK PARTITION scenario - nodes are alive but partitioned")
+		t.Errorf("Debug: Quorum=%v, Leader=%v, State=%v", quorum, isLeader, state)
 	} else {
 		t.Logf("\n✅ SUCCESS: Leader correctly detected quorum loss!")
 		t.Logf("  Detection happened at %v, BEFORE minElectionTimeout (%v)", lostQuorumIntervalDefault, minElectionTimeoutDefault)

@@ -1546,10 +1546,29 @@ func (n *raft) isCurrent(includeForwardProgress bool) bool {
 		}
 	}
 
+	// Candidates cannot serve reads - they're in an election state.
+	if n.State() == Candidate {
+		n.debug("Not current, node is in candidate state")
+		return false
+	}
+
 	// Make sure we are the leader or we know we have heard from the leader recently.
 	if n.State() == Leader {
+		// Check if we still have quorum before claiming to be current.
+		// This prevents serving stale reads during network partitions.
+		if n.lostQuorumLocked() {
+			n.debug("Not current, leader has lost quorum")
+			return false
+		}
 		clearBehindState()
 		return true
+	}
+
+	// Followers must have a current leader to be considered current.
+	// Without a leader, there's no source of truth for linearizable reads.
+	if n.State() == Follower && n.leader == noLeader {
+		n.debug("Not current, follower has no leader")
+		return false
 	}
 
 	// Check to see that we have heard from the current leader lately.
