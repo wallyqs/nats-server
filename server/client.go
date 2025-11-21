@@ -4128,6 +4128,32 @@ func isReservedReply(reply []byte) bool {
 	return false
 }
 
+// Check if reply already has the deliver subject decoration to avoid duplicate appends.
+// Returns true if reply already ends with @<deliver>.
+func replyHasDecoration(reply, deliver []byte) bool {
+	if len(reply) == 0 || len(deliver) == 0 {
+		return false
+	}
+	// Check if reply ends with @<deliver>
+	if len(reply) < len(deliver)+1 {
+		return false
+	}
+	// Find the last @ in reply
+	atIndex := -1
+	for i := len(reply) - 1; i >= 0; i-- {
+		if reply[i] == '@' {
+			atIndex = i
+			break
+		}
+	}
+	if atIndex == -1 {
+		return false
+	}
+	// Check if what comes after @ matches deliver
+	suffix := reply[atIndex+1:]
+	return len(suffix) == len(deliver) && bytesToString(suffix) == bytesToString(deliver)
+}
+
 // This will decide to call the client code or router code.
 func (c *client) processInboundMsg(msg []byte) {
 	switch c.kind {
@@ -4312,7 +4338,7 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 	// Now deal with gateways
 	if c.srv.gateway.enabled {
 		reply := c.pa.reply
-		if len(c.pa.deliver) > 0 && c.kind == JETSTREAM && len(c.pa.reply) > 0 {
+		if len(c.pa.deliver) > 0 && c.kind == JETSTREAM && len(c.pa.reply) > 0 && !replyHasDecoration(c.pa.reply, c.pa.deliver) {
 			reply = append(reply, '@')
 			reply = append(reply, c.pa.deliver...)
 		}
@@ -4360,7 +4386,7 @@ func (c *client) handleGWReplyMap(msg []byte) bool {
 	}
 	if c.srv.gateway.enabled {
 		reply := c.pa.reply
-		if len(c.pa.deliver) > 0 && c.kind == JETSTREAM && len(c.pa.reply) > 0 {
+		if len(c.pa.deliver) > 0 && c.kind == JETSTREAM && len(c.pa.reply) > 0 && !replyHasDecoration(c.pa.reply, c.pa.deliver) {
 			reply = append(reply, '@')
 			reply = append(reply, c.pa.deliver...)
 		}
@@ -5342,7 +5368,8 @@ sendToRoutesOrLeafs:
 	// Again this is when JetStream (but possibly others) wants the system
 	// to rewrite the delivered subject. The way we will do that is place it
 	// at the end of the reply subject if it exists.
-	if len(deliver) > 0 && len(reply) > 0 {
+	// Check if the decoration already exists to avoid duplicate appends.
+	if len(deliver) > 0 && len(reply) > 0 && !replyHasDecoration(reply, deliver) {
 		reply = append(reply, '@')
 		reply = append(reply, deliver...)
 	}
