@@ -223,6 +223,72 @@ func BenchmarkWhitespaceAtStart_IndexByte(b *testing.B) {
 
 // Benchmarks for larger strings (>128 bytes)
 
+func BenchmarkLarge32NoWhitespace_ManualLoop(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyz012345" // 32 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceManualLoop(s)
+	}
+}
+
+func BenchmarkLarge32NoWhitespace_IndexByte(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyz012345" // 32 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
+func BenchmarkLarge32NoWhitespace_ContainsAny(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyz012345" // 32 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceContainsAny(s)
+	}
+}
+
+func BenchmarkLarge64NoWhitespace_ManualLoop(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" // 64 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceManualLoop(s)
+	}
+}
+
+func BenchmarkLarge64NoWhitespace_IndexByte(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" // 64 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
+func BenchmarkLarge64NoWhitespace_ContainsAny(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" // 64 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceContainsAny(s)
+	}
+}
+
+func BenchmarkLarge128NoWhitespace_ManualLoop(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" +
+		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" // 128 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceManualLoop(s)
+	}
+}
+
+func BenchmarkLarge128NoWhitespace_IndexByte(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" +
+		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" // 128 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
+func BenchmarkLarge128NoWhitespace_ContainsAny(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" +
+		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" // 128 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceContainsAny(s)
+	}
+}
+
 func BenchmarkLarge256NoWhitespace_ManualLoop(b *testing.B) {
 	s := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" +
 		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" +
@@ -290,6 +356,72 @@ func BenchmarkLarge512NoWhitespace_ContainsAny(b *testing.B) {
 		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" +
 		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" +
 		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceContainsAny(s)
+	}
+}
+
+func BenchmarkLarge32WithSpaceAt16_ManualLoop(b *testing.B) {
+	s := "abcdefghijklmnop qrstuvwxyz012345" // 32 bytes, space at position 16
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceManualLoop(s)
+	}
+}
+
+func BenchmarkLarge32WithSpaceAt16_IndexByte(b *testing.B) {
+	s := "abcdefghijklmnop qrstuvwxyz012345" // 32 bytes, space at position 16
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
+func BenchmarkLarge32WithSpaceAt16_ContainsAny(b *testing.B) {
+	s := "abcdefghijklmnop qrstuvwxyz012345" // 32 bytes, space at position 16
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceContainsAny(s)
+	}
+}
+
+func BenchmarkLarge64WithSpaceAt32_ManualLoop(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyzABCDEF HIJKLMNOPQRSTUVWXYZ0123456789-_" // 64 bytes, space at position 32
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceManualLoop(s)
+	}
+}
+
+func BenchmarkLarge64WithSpaceAt32_IndexByte(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyzABCDEF HIJKLMNOPQRSTUVWXYZ0123456789-_" // 64 bytes, space at position 32
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
+func BenchmarkLarge64WithSpaceAt32_ContainsAny(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyzABCDEF HIJKLMNOPQRSTUVWXYZ0123456789-_" // 64 bytes, space at position 32
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceContainsAny(s)
+	}
+}
+
+func BenchmarkLarge128WithSpaceAt64_ManualLoop(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" +
+		" bcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" // 128 bytes, space at position 64
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceManualLoop(s)
+	}
+}
+
+func BenchmarkLarge128WithSpaceAt64_IndexByte(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" +
+		" bcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" // 128 bytes, space at position 64
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
+func BenchmarkLarge128WithSpaceAt64_ContainsAny(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" +
+		" bcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" // 128 bytes, space at position 64
 	for i := 0; i < b.N; i++ {
 		hasWhitespaceContainsAny(s)
 	}
