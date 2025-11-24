@@ -15,6 +15,7 @@ package server
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 )
 
@@ -868,6 +869,47 @@ func TestMaxControlLine(t *testing.T) {
 			case false:
 				if err != nil {
 					t.Fatalf("Should not have failed, got %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestParsePubWithControlCharactersInSubject(t *testing.T) {
+	// Test what happens when publishing messages with control characters (ASCII 0-32) in the subject.
+	// Control characters include: NULL (0), SOH (1), STX (2), ETX (3), EOT (4), ENQ (5), ACK (6),
+	// BEL (7), BS (8), HT (9), LF (10), VT (11), FF (12), CR (13), SO (14), SI (15), DLE (16),
+	// DC1 (17), DC2 (18), DC3 (19), DC4 (20), NAK (21), SYN (22), ETB (23), CAN (24), EM (25),
+	// SUB (26), ESC (27), FS (28), GS (29), RS (30), US (31), and SPACE (32).
+
+	c := dummyClient()
+
+	for i := 0; i <= 32; i++ {
+		t.Run(fmt.Sprintf("ASCII_%d", i), func(t *testing.T) {
+			// Reset client state
+			c.argBuf, c.msgBuf, c.state = nil, nil, OP_START
+
+			// Create a subject with the control character in it
+			subject := fmt.Sprintf("test%csubject", byte(i))
+
+			// Create PUB command with control character in subject
+			pub := []byte(fmt.Sprintf("PUB %s 5\r\nhello\r\n", subject))
+
+			err := c.parse(pub)
+
+			// Document the behavior for each control character
+			// Note: This test documents the CURRENT behavior, which may not be the DESIRED behavior.
+			// As of the time of writing, most control characters are accepted by the parser.
+			switch i {
+			case 10: // LF (Line Feed)
+				// LF terminates the PUB command line early, so parsing succeeds but with unexpected results
+				t.Logf("Control character ASCII %d (LF) terminates command line", i)
+			default:
+				// All other control characters (including NULL, TAB, CR, FF, SPACE) are currently accepted
+				if err != nil {
+					t.Logf("Control character ASCII %d rejected: %v", i, err)
+				} else {
+					t.Logf("Control character ASCII %d accepted (current behavior)", i)
 				}
 			}
 		})
