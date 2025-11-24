@@ -71,6 +71,14 @@ func hasWhitespaceContainsAny(s string) bool {
 	return strings.ContainsAny(s, " \t\n\r")
 }
 
+// hasWhitespaceIndexByte uses strings.IndexByte for each whitespace character
+func hasWhitespaceIndexByte(s string) bool {
+	return strings.IndexByte(s, ' ') != -1 ||
+		strings.IndexByte(s, '\t') != -1 ||
+		strings.IndexByte(s, '\n') != -1 ||
+		strings.IndexByte(s, '\r') != -1
+}
+
 func BenchmarkWhitespaceIndexFunc(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for _, s := range testStrings {
@@ -119,6 +127,14 @@ func BenchmarkWhitespaceContainsAny(b *testing.B) {
 	}
 }
 
+func BenchmarkWhitespaceIndexByte(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		for _, s := range testStrings {
+			hasWhitespaceIndexByte(s)
+		}
+	}
+}
+
 // Individual benchmarks for different string types
 
 func BenchmarkNoWhitespace_IndexFunc(b *testing.B) {
@@ -139,6 +155,13 @@ func BenchmarkNoWhitespace_ContainsAny(b *testing.B) {
 	s := "no-whitespace-here-in-this-long-string"
 	for i := 0; i < b.N; i++ {
 		hasWhitespaceContainsAny(s)
+	}
+}
+
+func BenchmarkNoWhitespace_IndexByte(b *testing.B) {
+	s := "no-whitespace-here-in-this-long-string"
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
 	}
 }
 
@@ -163,6 +186,13 @@ func BenchmarkHasWhitespace_ContainsAny(b *testing.B) {
 	}
 }
 
+func BenchmarkHasWhitespace_IndexByte(b *testing.B) {
+	s := "has whitespace in the middle"
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
 func BenchmarkWhitespaceAtStart_IndexFunc(b *testing.B) {
 	s := " whitespace-at-start"
 	for i := 0; i < b.N; i++ {
@@ -181,5 +211,12 @@ func BenchmarkWhitespaceAtStart_ContainsAny(b *testing.B) {
 	s := " whitespace-at-start"
 	for i := 0; i < b.N; i++ {
 		hasWhitespaceContainsAny(s)
+	}
+}
+
+func BenchmarkWhitespaceAtStart_IndexByte(b *testing.B) {
+	s := " whitespace-at-start"
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
 	}
 }
