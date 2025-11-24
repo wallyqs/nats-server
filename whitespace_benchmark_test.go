@@ -221,7 +221,70 @@ func BenchmarkWhitespaceAtStart_IndexByte(b *testing.B) {
 	}
 }
 
-// Benchmarks for larger strings (>128 bytes)
+// Benchmarks for various string sizes
+
+func BenchmarkLarge8NoWhitespace_ManualLoop(b *testing.B) {
+	s := "abcdefgh" // 8 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceManualLoop(s)
+	}
+}
+
+func BenchmarkLarge8NoWhitespace_IndexByte(b *testing.B) {
+	s := "abcdefgh" // 8 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
+func BenchmarkLarge8NoWhitespace_ContainsAny(b *testing.B) {
+	s := "abcdefgh" // 8 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceContainsAny(s)
+	}
+}
+
+func BenchmarkLarge16NoWhitespace_ManualLoop(b *testing.B) {
+	s := "abcdefghijklmnop" // 16 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceManualLoop(s)
+	}
+}
+
+func BenchmarkLarge16NoWhitespace_IndexByte(b *testing.B) {
+	s := "abcdefghijklmnop" // 16 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
+func BenchmarkLarge16NoWhitespace_ContainsAny(b *testing.B) {
+	s := "abcdefghijklmnop" // 16 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceContainsAny(s)
+	}
+}
+
+func BenchmarkLarge24NoWhitespace_ManualLoop(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwx" // 24 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceManualLoop(s)
+	}
+}
+
+func BenchmarkLarge24NoWhitespace_IndexByte(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwx" // 24 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
+func BenchmarkLarge24NoWhitespace_ContainsAny(b *testing.B) {
+	s := "abcdefghijklmnopqrstuvwx" // 24 bytes
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceContainsAny(s)
+	}
+}
 
 func BenchmarkLarge32NoWhitespace_ManualLoop(b *testing.B) {
 	s := "abcdefghijklmnopqrstuvwxyz012345" // 32 bytes
@@ -356,6 +419,69 @@ func BenchmarkLarge512NoWhitespace_ContainsAny(b *testing.B) {
 		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" +
 		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" +
 		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceContainsAny(s)
+	}
+}
+
+func BenchmarkLarge8WithSpaceAt4_ManualLoop(b *testing.B) {
+	s := "abcd efgh" // 8 bytes, space at position 4
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceManualLoop(s)
+	}
+}
+
+func BenchmarkLarge8WithSpaceAt4_IndexByte(b *testing.B) {
+	s := "abcd efgh" // 8 bytes, space at position 4
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
+func BenchmarkLarge8WithSpaceAt4_ContainsAny(b *testing.B) {
+	s := "abcd efgh" // 8 bytes, space at position 4
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceContainsAny(s)
+	}
+}
+
+func BenchmarkLarge16WithSpaceAt8_ManualLoop(b *testing.B) {
+	s := "abcdefgh ijklmnop" // 16 bytes, space at position 8
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceManualLoop(s)
+	}
+}
+
+func BenchmarkLarge16WithSpaceAt8_IndexByte(b *testing.B) {
+	s := "abcdefgh ijklmnop" // 16 bytes, space at position 8
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
+func BenchmarkLarge16WithSpaceAt8_ContainsAny(b *testing.B) {
+	s := "abcdefgh ijklmnop" // 16 bytes, space at position 8
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceContainsAny(s)
+	}
+}
+
+func BenchmarkLarge24WithSpaceAt12_ManualLoop(b *testing.B) {
+	s := "abcdefghijkl mnopqrstuvwx" // 24 bytes, space at position 12
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceManualLoop(s)
+	}
+}
+
+func BenchmarkLarge24WithSpaceAt12_IndexByte(b *testing.B) {
+	s := "abcdefghijkl mnopqrstuvwx" // 24 bytes, space at position 12
+	for i := 0; i < b.N; i++ {
+		hasWhitespaceIndexByte(s)
+	}
+}
+
+func BenchmarkLarge24WithSpaceAt12_ContainsAny(b *testing.B) {
+	s := "abcdefghijkl mnopqrstuvwx" // 24 bytes, space at position 12
 	for i := 0; i < b.N; i++ {
 		hasWhitespaceContainsAny(s)
 	}
