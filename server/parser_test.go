@@ -915,3 +915,138 @@ func TestParsePubWithControlCharactersInSubject(t *testing.T) {
 		})
 	}
 }
+
+func TestParsePubWithNullBytesInSubject(t *testing.T) {
+	// Test NULL byte (ASCII 0) handling in subjects more thoroughly.
+	// NULL bytes are particularly problematic because they:
+	// 1. Terminate strings in C/C++, causing string truncation
+	// 2. Can bypass security checks and ACLs
+	// 3. Break logging and monitoring
+	// 4. Cause interoperability issues across languages
+
+	tests := []struct {
+		name    string
+		subject string
+		desc    string
+	}{
+		{"null_at_start", "\x00foo", "NULL byte at the start of subject"},
+		{"null_in_middle", "foo\x00bar", "NULL byte in the middle of subject"},
+		{"null_at_end", "foo\x00", "NULL byte at the end of subject"},
+		{"multiple_nulls", "foo\x00bar\x00baz", "Multiple NULL bytes in subject"},
+		{"null_after_dot", "foo.\x00bar", "NULL byte after dot separator"},
+		{"null_before_dot", "foo\x00.bar", "NULL byte before dot separator"},
+		{"only_null", "\x00", "Subject is only a NULL byte"},
+		{"double_null", "\x00\x00", "Subject is two NULL bytes"},
+		{"null_with_wildcard", "foo.\x00.*", "NULL byte with wildcard"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c := dummyClient()
+			c.argBuf, c.msgBuf, c.state = nil, nil, OP_START
+
+			// Create PUB command with NULL byte in subject
+			pub := []byte(fmt.Sprintf("PUB %s 5\r\nhello\r\n", test.subject))
+
+			err := c.parse(pub)
+
+			// Log what happened
+			if err != nil {
+				t.Logf("%s - Parser rejected: %v", test.desc, err)
+			} else {
+				t.Logf("%s - Parser accepted (potential security issue)", test.desc)
+				// If parser accepted, check what subject was actually stored
+				if len(c.pa.subject) > 0 {
+					t.Logf("  Parsed subject length: %d bytes", len(c.pa.subject))
+					t.Logf("  Parsed subject (hex): %x", c.pa.subject)
+				}
+			}
+		})
+	}
+}
+
+func TestParsePubWithNullBytesInReplySubject(t *testing.T) {
+	// Test NULL byte handling in reply subjects.
+	// Reply subjects are used for request/reply patterns and are equally sensitive
+	// to NULL byte injection attacks.
+
+	tests := []struct {
+		name      string
+		subject   string
+		replySubj string
+		desc      string
+	}{
+		{"null_in_reply_start", "foo.bar", "\x00reply", "NULL byte at start of reply subject"},
+		{"null_in_reply_middle", "foo.bar", "reply\x00inbox", "NULL byte in middle of reply subject"},
+		{"null_in_reply_end", "foo.bar", "reply\x00", "NULL byte at end of reply subject"},
+		{"null_in_both", "foo\x00bar", "reply\x00inbox", "NULL bytes in both subject and reply"},
+		{"null_only_reply", "foo.bar", "\x00", "Reply subject is only NULL byte"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c := dummyClient()
+			c.argBuf, c.msgBuf, c.state = nil, nil, OP_START
+
+			// Create PUB command with reply subject containing NULL byte
+			pub := []byte(fmt.Sprintf("PUB %s %s 5\r\nhello\r\n", test.subject, test.replySubj))
+
+			err := c.parse(pub)
+
+			if err != nil {
+				t.Logf("%s - Parser rejected: %v", test.desc, err)
+			} else {
+				t.Logf("%s - Parser accepted (potential security issue)", test.desc)
+				if len(c.pa.subject) > 0 {
+					t.Logf("  Parsed subject: %q (len=%d, hex=%x)", c.pa.subject, len(c.pa.subject), c.pa.subject)
+				}
+				if len(c.pa.reply) > 0 {
+					t.Logf("  Parsed reply: %q (len=%d, hex=%x)", c.pa.reply, len(c.pa.reply), c.pa.reply)
+				}
+			}
+		})
+	}
+}
+
+func TestIsValidSubjectWithNullBytes(t *testing.T) {
+	// Test the IsValidSubject validation function with NULL bytes.
+	// This tests the validation layer separately from the parser.
+
+	tests := []struct {
+		name       string
+		subject    string
+		checkRunes bool
+		desc       string
+	}{
+		{"null_no_check", "foo\x00bar", false, "NULL in middle, checkRunes=false"},
+		{"null_with_check", "foo\x00bar", true, "NULL in middle, checkRunes=true"},
+		{"null_start_no_check", "\x00foo", false, "NULL at start, checkRunes=false"},
+		{"null_start_with_check", "\x00foo", true, "NULL at start, checkRunes=true"},
+		{"null_end_no_check", "foo\x00", false, "NULL at end, checkRunes=false"},
+		{"null_end_with_check", "foo\x00", true, "NULL at end, checkRunes=true"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var valid bool
+			if test.checkRunes {
+				// Use the internal function with checkRunes=true
+				valid = isValidSubject(test.subject, true)
+			} else {
+				// Use the public function (checkRunes=false)
+				valid = IsValidSubject(test.subject)
+			}
+
+			if valid {
+				t.Logf("%s - Validation PASSED (accepted NULL byte)", test.desc)
+			} else {
+				t.Logf("%s - Validation FAILED (rejected NULL byte)", test.desc)
+			}
+
+			// Document the expected behavior difference
+			if test.checkRunes && valid {
+				t.Errorf("Expected checkRunes=true to reject NULL bytes, but it accepted them")
+			}
+		})
+	}
+}
