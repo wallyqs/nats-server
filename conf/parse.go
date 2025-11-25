@@ -280,6 +280,39 @@ func (p *parser) processItem(it item, fp string) error {
 		if p.pedantic {
 			p.pushItemKey(it)
 		}
+	case itemKeyVariable:
+		// Handle ${VAR} syntax for map keys - resolve the variable and use as key
+		value, found, err := p.lookupVariable(it.val)
+		if err != nil {
+			return fmt.Errorf("key variable reference for '%s' on line %d could not be parsed: %s",
+				it.val, it.line, err)
+		}
+		if !found {
+			return fmt.Errorf("key variable reference for '%s' on line %d can not be found",
+				it.val, it.line)
+		}
+
+		// Convert the resolved value to a string for use as key
+		var keyStr string
+		switch v := value.(type) {
+		case string:
+			keyStr = v
+		case *token:
+			// If it's a token, get the underlying value
+			switch tv := v.Value().(type) {
+			case string:
+				keyStr = tv
+			default:
+				keyStr = fmt.Sprintf("%v", tv)
+			}
+		default:
+			keyStr = fmt.Sprintf("%v", v)
+		}
+
+		p.pushKey(keyStr)
+		if p.pedantic {
+			p.pushItemKey(it)
+		}
 	case itemMapStart:
 		newCtx := make(map[string]any)
 		p.pushContext(newCtx)

@@ -876,7 +876,8 @@ func TestBlocks(t *testing.T) {
 }
 
 // TestEnvVariableSubstitutionInMapKeys verifies that environment variable
-// substitution using os.Setenv works in map values but NOT in map keys.
+// substitution using os.Setenv works in map values but NOT in map keys
+// with the $VAR syntax. However, the ${VAR} syntax DOES work for keys.
 // This documents the behavior reported in GitHub issue #6946.
 func TestEnvVariableSubstitutionInMapKeys(t *testing.T) {
 	const envVarName = "__TEST_ENV_VAR__"
@@ -903,7 +904,7 @@ func TestEnvVariableSubstitutionInMapKeys(t *testing.T) {
 		}
 	})
 
-	t.Run("env var substitution does NOT work in map key", func(t *testing.T) {
+	t.Run("env var substitution does NOT work in map key with $VAR syntax", func(t *testing.T) {
 		config := fmt.Sprintf(`
 			preload {
 				$%s: "static_value"
@@ -926,6 +927,105 @@ func TestEnvVariableSubstitutionInMapKeys(t *testing.T) {
 		expectedKey := "$" + envVarName
 		if _, found := preload[expectedKey]; !found {
 			t.Fatalf("Expected literal key %q in map, got keys: %v", expectedKey, preload)
+		}
+	})
+
+	t.Run("env var substitution WORKS in map key with ${VAR} syntax", func(t *testing.T) {
+		config := fmt.Sprintf(`
+			preload {
+				${%s}: "static_value"
+			}
+		`, envVarName)
+
+		m, err := Parse(config)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		preload := m["preload"].(map[string]any)
+
+		// Key SHOULD be resolved to "my_dynamic_key"
+		if _, found := preload[envVarValue]; !found {
+			t.Fatalf("Expected resolved key %q in map, got keys: %v", envVarValue, preload)
+		}
+
+		// Verify the value is correct
+		if val := preload[envVarValue]; val != "static_value" {
+			t.Fatalf("Expected value %q, got %q", "static_value", val)
+		}
+	})
+
+	t.Run("config var substitution WORKS in map key with ${VAR} syntax", func(t *testing.T) {
+		config := `
+			MY_KEY = "resolved_from_config"
+			preload {
+				${MY_KEY}: "config_value"
+			}
+		`
+
+		m, err := Parse(config)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		preload := m["preload"].(map[string]any)
+
+		// Key SHOULD be resolved to "resolved_from_config"
+		if _, found := preload["resolved_from_config"]; !found {
+			t.Fatalf("Expected resolved key %q in map, got keys: %v", "resolved_from_config", preload)
+		}
+
+		// Verify the value is correct
+		if val := preload["resolved_from_config"]; val != "config_value" {
+			t.Fatalf("Expected value %q, got %q", "config_value", val)
+		}
+	})
+
+	t.Run("both key and value substitution with ${VAR} syntax", func(t *testing.T) {
+		const keyEnvVar = "__TEST_KEY__"
+		const keyEnvValue = "dynamic_key"
+		const valEnvVar = "__TEST_VAL__"
+		const valEnvValue = "dynamic_value"
+
+		os.Setenv(keyEnvVar, keyEnvValue)
+		defer os.Unsetenv(keyEnvVar)
+		os.Setenv(valEnvVar, valEnvValue)
+		defer os.Unsetenv(valEnvVar)
+
+		config := fmt.Sprintf(`
+			preload {
+				${%s}: $%s
+			}
+		`, keyEnvVar, valEnvVar)
+
+		m, err := Parse(config)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		preload := m["preload"].(map[string]any)
+
+		// Both key and value should be resolved
+		if val, found := preload[keyEnvValue]; !found {
+			t.Fatalf("Expected resolved key %q in map, got keys: %v", keyEnvValue, preload)
+		} else if val != valEnvValue {
+			t.Fatalf("Expected value %q, got %q", valEnvValue, val)
+		}
+	})
+
+	t.Run("missing env var in key returns error", func(t *testing.T) {
+		config := `
+			preload {
+				${NONEXISTENT_VAR_12345}: "value"
+			}
+		`
+
+		_, err := Parse(config)
+		if err == nil {
+			t.Fatal("Expected error for missing variable, got none")
+		}
+		if !strings.Contains(err.Error(), "can not be found") {
+			t.Fatalf("Expected 'can not be found' error, got: %v", err)
 		}
 	})
 }

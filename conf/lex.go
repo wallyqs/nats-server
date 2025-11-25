@@ -54,6 +54,7 @@ const (
 	itemCommentStart
 	itemVariable
 	itemInclude
+	itemKeyVariable // key that needs variable substitution via ${VAR} syntax
 )
 
 const (
@@ -760,6 +761,16 @@ func lexMapKeyStart(lx *lexer) stateFn {
 	case r == dqStringStart:
 		lx.next()
 		return lexSkip(lx, lexMapDubQuotedKey)
+	case r == '$':
+		// Check for ${VAR} interpolation syntax
+		lx.next()
+		if lx.peek() == '{' {
+			lx.next()
+			lx.ignore() // ignore the "${"
+			return lexMapKeyVariable
+		}
+		// Not ${, treat as regular key starting with $
+		return lexMapKey
 	case r == eof:
 		return lx.errorf("Unexpected EOF processing map.")
 	}
@@ -792,6 +803,26 @@ func lexMapDubQuotedKey(lx *lexer) stateFn {
 	}
 	lx.next()
 	return lexMapDubQuotedKey
+}
+
+// lexMapKeyVariable consumes a variable name inside ${...} used as a map key.
+// It assumes that "${" has already been consumed and ignored.
+func lexMapKeyVariable(lx *lexer) stateFn {
+	r := lx.peek()
+	switch {
+	case r == eof:
+		return lx.errorf("Unexpected EOF processing interpolated map key.")
+	case r == '}':
+		// End of variable name
+		lx.emit(itemKeyVariable)
+		lx.next()
+		lx.ignore() // ignore the closing '}'
+		return lexMapKeyEnd
+	case unicode.IsSpace(r):
+		return lx.errorf("Unexpected whitespace in interpolated map key variable name.")
+	}
+	lx.next()
+	return lexMapKeyVariable
 }
 
 // lexMapKey consumes the text of a key. Assumes that the first character (which
@@ -1302,6 +1333,8 @@ func (itype itemType) String() string {
 		return "Variable"
 	case itemInclude:
 		return "Include"
+	case itemKeyVariable:
+		return "KeyVariable"
 	}
 	panic(fmt.Sprintf("BUG: Unknown type '%s'.", itype.String()))
 }
