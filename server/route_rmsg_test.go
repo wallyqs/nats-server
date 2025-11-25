@@ -342,3 +342,84 @@ func TestDoubleAtAppendInProcessMsgResults(t *testing.T) {
 	t.Log("")
 	t.Log("Protection: When receiving from routes, deliver is set to nil (route.go:498)")
 }
+
+// TestDoubleAtWithMirrorPushConsumerAndImports documents the specific scenario
+// that can cause double @ with mirror + push consumer + service imports.
+//
+// The flow is:
+// 1. Original stream on account A has a push consumer with deliver subject
+// 2. Consumer sends message with reply=$JS.ACK...@DELIVER.subject
+// 3. Message goes through a service import to account B
+// 4. In processServiceImport (client.go:4792), it calls:
+//    c.processMsgResults(siAcc, rr, msg, c.pa.deliver, []byte(to), nrr, flags)
+//    This passes c.pa.deliver, which will append ANOTHER @deliver!
+//
+// The problem is that processServiceImport doesn't check if the reply
+// already contains an @deliver suffix before passing c.pa.deliver.
+//
+// There IS extraction code at client.go:4913-4930 that extracts @deliver
+// from replies for ROUTER/GATEWAY/LEAF connections, but this extraction
+// happens in processMsgResults, and if processServiceImport has already
+// appended another @, the reply would have double @.
+func TestDoubleAtWithMirrorPushConsumerAndImports(t *testing.T) {
+	// Analyzing the actual log message:
+	// $JS.ACK.saptooling_eu.dimsproxy_saptooling_eu.1.13266774.12547470.1708328638063395796.1@saptooling.eu.de.2961.tool.orderconf.93810634.110.342263425@DELIVER.dims-proxy.saptooling.eu
+	//
+	// Breaking it down:
+	// Base ACK (8 dots): $JS.ACK.saptooling_eu.dimsproxy_saptooling_eu.1.13266774.12547470.1708328638063395796.1
+	// First @: saptooling.eu.de.2961.tool.orderconf.93810634.110.342263425 (not a deliver subject!)
+	// Second @: DELIVER.dims-proxy.saptooling.eu (the actual deliver subject)
+	//
+	// The first @ content looks like it could be:
+	// - A mapped subject from service import/export
+	// - Some routing metadata
+	// - Part of an account/domain mapping
+
+	baseAck := "$JS.ACK.saptooling_eu.dimsproxy_saptooling_eu.1.13266774.12547470.1708328638063395796.1"
+	firstAt := "saptooling.eu.de.2961.tool.orderconf.93810634.110.342263425"
+	secondAt := "DELIVER.dims-proxy.saptooling.eu"
+
+	// Count dots in baseAck - should be 8
+	dotCount := bytes.Count([]byte(baseAck), []byte("."))
+	t.Logf("Base ACK has %d dots (expected 8)", dotCount)
+
+	// The extraction code at client.go:4919-4926 looks for @ AFTER 8 dots
+	// So if the reply is: baseAck@firstAt@secondAt
+	// It would find the first @ and extract everything after it as the subject
+	// This means subj = "firstAt@secondAt" which contains @!
+
+	fullReply := fmt.Sprintf("%s@%s@%s", baseAck, firstAt, secondAt)
+	t.Logf("Full malformed reply: %s", fullReply)
+
+	// Find first @ after 8 dots
+	counter := 0
+	li := bytes.IndexFunc([]byte(fullReply), func(rn rune) bool {
+		if rn == '.' {
+			counter++
+		} else if rn == '@' {
+			return counter >= 8
+		}
+		return false
+	})
+
+	if li != -1 {
+		extractedSubj := string([]byte(fullReply)[li+1:])
+		truncatedReply := string([]byte(fullReply)[:li])
+		t.Logf("Extracted subject (contains @!): %s", extractedSubj)
+		t.Logf("Truncated reply: %s", truncatedReply)
+
+		// Check if extracted subject contains @
+		if bytes.Contains([]byte(extractedSubj), []byte("@")) {
+			t.Log("PROBLEM: Extracted subject contains @ which indicates double @ in original reply")
+		}
+	}
+
+	// Key finding: processServiceImport at line 4792 passes c.pa.deliver
+	// without checking if the reply already has @deliver appended.
+	// This is the likely source of the double @ issue.
+	t.Log("")
+	t.Log("LIKELY CAUSE: processServiceImport (client.go:4792) calls")
+	t.Log("  c.processMsgResults(..., c.pa.deliver, ...)")
+	t.Log("without checking if reply already contains @deliver suffix.")
+	t.Log("When combined with mirror + push consumer + imports, this causes double @.")
+}
