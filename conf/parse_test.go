@@ -875,6 +875,61 @@ func TestBlocks(t *testing.T) {
 	}
 }
 
+// TestEnvVariableSubstitutionInMapKeys verifies that environment variable
+// substitution using os.Setenv works in map values but NOT in map keys.
+// This documents the behavior reported in GitHub issue #6946.
+func TestEnvVariableSubstitutionInMapKeys(t *testing.T) {
+	const envVarName = "__TEST_ENV_VAR__"
+	const envVarValue = "my_dynamic_key"
+
+	os.Setenv(envVarName, envVarValue)
+	defer os.Unsetenv(envVarName)
+
+	t.Run("env var substitution works in map value", func(t *testing.T) {
+		config := fmt.Sprintf(`
+			preload {
+				static_key: $%s
+			}
+		`, envVarName)
+
+		m, err := Parse(config)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		preload := m["preload"].(map[string]any)
+		if val := preload["static_key"]; val != envVarValue {
+			t.Fatalf("Expected value %q, got %q", envVarValue, val)
+		}
+	})
+
+	t.Run("env var substitution does NOT work in map key", func(t *testing.T) {
+		config := fmt.Sprintf(`
+			preload {
+				$%s: "static_value"
+			}
+		`, envVarName)
+
+		m, err := Parse(config)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		preload := m["preload"].(map[string]any)
+
+		// Key should NOT be resolved to "my_dynamic_key"
+		if _, found := preload[envVarValue]; found {
+			t.Fatalf("Map key should NOT be substituted, but found resolved key %q", envVarValue)
+		}
+
+		// Key should be the literal "$__TEST_ENV_VAR__" ($ is preserved)
+		expectedKey := "$" + envVarName
+		if _, found := preload[expectedKey]; !found {
+			t.Fatalf("Expected literal key %q in map, got keys: %v", expectedKey, preload)
+		}
+	})
+}
+
 func TestParseDigest(t *testing.T) {
 	for _, test := range []struct {
 		input    string
