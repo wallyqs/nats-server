@@ -259,6 +259,63 @@ func (p *parser) popItemKey() item {
 	return last
 }
 
+// interpolateKey processes key interpolation syntax ${VAR_NAME}
+// and replaces it with the actual variable value.
+func (p *parser) interpolateKey(key string, line int) (string, error) {
+	result := strings.Builder{}
+	i := 0
+	for i < len(key) {
+		// Look for ${
+		if i < len(key)-2 && key[i] == '$' && key[i+1] == '{' {
+			// Find the closing }
+			start := i + 2
+			end := start
+			for end < len(key) && key[end] != '}' {
+				end++
+			}
+			if end >= len(key) {
+				return "", fmt.Errorf("unclosed variable interpolation in key on line %d", line)
+			}
+
+			// Extract the variable name
+			varName := key[start:end]
+			if varName == "" {
+				return "", fmt.Errorf("empty variable name in key interpolation on line %d", line)
+			}
+
+			// Look up the variable
+			value, found, err := p.lookupVariable(varName)
+			if err != nil {
+				return "", fmt.Errorf("variable interpolation for '%s' in key on line %d could not be parsed: %s",
+					varName, line, err)
+			}
+			if !found {
+				return "", fmt.Errorf("variable interpolation for '%s' in key on line %d can not be found",
+					varName, line)
+			}
+
+			// Convert the value to string
+			var strValue string
+			if p.pedantic {
+				if tk, ok := value.(*token); ok {
+					strValue = fmt.Sprintf("%v", tk.Value())
+				} else {
+					strValue = fmt.Sprintf("%v", value)
+				}
+			} else {
+				strValue = fmt.Sprintf("%v", value)
+			}
+
+			result.WriteString(strValue)
+			i = end + 1
+		} else {
+			result.WriteByte(key[i])
+			i++
+		}
+	}
+	return result.String(), nil
+}
+
 func (p *parser) processItem(it item, fp string) error {
 	setValue := func(it item, v any) {
 		if p.pedantic {
@@ -275,7 +332,13 @@ func (p *parser) processItem(it item, fp string) error {
 		// Keep track of the keys as items and strings,
 		// we do this in order to be able to still support
 		// includes without many breaking changes.
-		p.pushKey(it.val)
+
+		// Process key interpolation for ${VAR_NAME} syntax
+		keyVal, err := p.interpolateKey(it.val, it.line)
+		if err != nil {
+			return err
+		}
+		p.pushKey(keyVal)
 
 		if p.pedantic {
 			p.pushItemKey(it)

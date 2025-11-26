@@ -1014,3 +1014,122 @@ func TestParseDigest(t *testing.T) {
 		})
 	}
 }
+
+// Test key interpolation using ${VAR_NAME} syntax
+func TestKeyInterpolation(t *testing.T) {
+	ex := map[string]any{
+		"MY_KEY": "foo",
+		"foo":    "bar",
+	}
+	test(t, `MY_KEY = "foo"
+${MY_KEY} = "bar"`, ex)
+}
+
+func TestKeyInterpolationWithNumber(t *testing.T) {
+	ex := map[string]any{
+		"NUM":   int64(42),
+		"key42": "value",
+	}
+	test(t, `NUM = 42
+key${NUM} = "value"`, ex)
+}
+
+func TestKeyInterpolationMultiple(t *testing.T) {
+	ex := map[string]any{
+		"PREFIX": "my",
+		"SUFFIX": "key",
+		"mykey":  "value",
+	}
+	test(t, `PREFIX = "my"
+SUFFIX = "key"
+${PREFIX}${SUFFIX} = "value"`, ex)
+}
+
+func TestKeyInterpolationInMap(t *testing.T) {
+	ex := map[string]any{
+		"MY_KEY": "foo",
+		"config": map[string]any{
+			"foo": "bar",
+		},
+	}
+	test(t, `MY_KEY = "foo"
+config {
+  ${MY_KEY} = "bar"
+}`, ex)
+}
+
+func TestKeyInterpolationMixed(t *testing.T) {
+	ex := map[string]any{
+		"VAR":                "test",
+		"prefix_test_suffix": "value",
+	}
+	test(t, `VAR = "test"
+prefix_${VAR}_suffix = "value"`, ex)
+}
+
+func TestKeyInterpolationScoped(t *testing.T) {
+	ex := map[string]any{
+		"VAR": "outer",
+		"config": map[string]any{
+			"VAR":   "inner",
+			"inner": "scoped_value",
+		},
+		"outer": "top_value",
+	}
+	test(t, `VAR = "outer"
+config {
+  VAR = "inner"
+  ${VAR} = "scoped_value"
+}
+${VAR} = "top_value"`, ex)
+}
+
+func TestKeyInterpolationWithEnvVar(t *testing.T) {
+	evar := "__UNIQ_KEY_TEST__"
+	os.Setenv(evar, "mykey")
+	defer os.Unsetenv(evar)
+
+	ex := map[string]any{
+		"mykey": "value",
+	}
+	test(t, fmt.Sprintf("${%s} = \"value\"", evar), ex)
+}
+
+func TestKeyInterpolationMissingVar(t *testing.T) {
+	_, err := Parse("${MISSING_VAR} = \"value\"")
+	if err == nil {
+		t.Fatal("Expected an error for missing variable in key interpolation")
+	}
+	if !strings.Contains(err.Error(), "variable interpolation") {
+		t.Fatalf("Expected variable interpolation error, got: %v", err)
+	}
+}
+
+func TestKeyInterpolationUnclosed(t *testing.T) {
+	_, err := Parse("${UNCLOSED = \"value\"")
+	if err == nil {
+		t.Fatal("Expected an error for unclosed variable interpolation")
+	}
+	if !strings.Contains(err.Error(), "unclosed variable interpolation") {
+		t.Fatalf("Expected unclosed variable interpolation error, got: %v", err)
+	}
+}
+
+func TestKeyInterpolationEmpty(t *testing.T) {
+	_, err := Parse("${} = \"value\"")
+	if err == nil {
+		t.Fatal("Expected an error for empty variable name in key interpolation")
+	}
+	if !strings.Contains(err.Error(), "empty variable name") {
+		t.Fatalf("Expected empty variable name error, got: %v", err)
+	}
+}
+
+func TestKeyInterpolationQuoted(t *testing.T) {
+	ex := map[string]any{
+		"KEY":   "mykey",
+		"mykey": "value1",
+	}
+	test(t, `KEY = "mykey"
+"${KEY}" = "value1"`, ex)
+}
