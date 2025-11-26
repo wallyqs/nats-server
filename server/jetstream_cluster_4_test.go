@@ -4208,14 +4208,15 @@ func TestJetStreamClusterMetaSnapshotReCreateConsistency(t *testing.T) {
 
 	oldStreamGroup := sa.Group.Name
 	oldConsumerGroup := ca.Group.Name
-	streamDelete := encodeDeleteStreamAssignment(sa)
+	useCBOR := mjs.srv.getOpts().UseCBORInternally
+	streamDelete := encodeDeleteStreamAssignment(sa, useCBOR)
 
 	csa := sa.copyGroup()
 	cca := ca.copyGroup()
 	csa.Group.Name, csa.Config.Replicas = "new-group", 1
 	cca.Group.Name, cca.Config.Replicas = "new-group", 1
-	streamAdd := encodeAddStreamAssignment(csa)
-	consumerAdd := encodeAddConsumerAssignment(cca)
+	streamAdd := encodeAddStreamAssignment(csa, useCBOR)
+	consumerAdd := encodeAddConsumerAssignment(cca, useCBOR)
 	mjs.mu.Unlock()
 
 	// Get the snapshot before removing the stream below so we can recover fresh.
@@ -4287,9 +4288,10 @@ func TestJetStreamClusterMetaSnapshotConsumerDeleteConsistency(t *testing.T) {
 	sl := c.streamLeader(globalAccountName, "TEST")
 	mjs := sl.getJetStream()
 	mjs.mu.Lock()
+	useCBOR := mjs.srv.getOpts().UseCBORInternally
 	ca := mjs.consumerAssignment(globalAccountName, "TEST", "consumer")
 	ca.Created = time.Time{} // Simulate this consumer existed for a while already.
-	deleteConsumer := encodeDeleteConsumerAssignment(ca)
+	deleteConsumer := encodeDeleteConsumerAssignment(ca, useCBOR)
 	mjs.mu.Unlock()
 
 	// Get the snapshot before removing the stream below so we can recover fresh.

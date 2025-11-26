@@ -2068,7 +2068,8 @@ func (o *consumer) deleteNotActive() {
 			meta = cc.meta
 			cca = *ca
 			cca.Reply = _EMPTY_
-			removeEntry = encodeDeleteConsumerAssignment(&cca)
+			useCBOR := s.getOpts().UseCBORInternally
+			removeEntry = encodeDeleteConsumerAssignment(&cca, useCBOR)
 			meta.ForwardProposal(removeEntry)
 		}
 		js.mu.RUnlock()

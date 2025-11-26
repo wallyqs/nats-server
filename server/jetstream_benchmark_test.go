@@ -1012,6 +1012,7 @@ func BenchmarkJetStreamMetaSnapshot(b *testing.B) {
 		numStreams := 200
 		numConsumers := 500
 		ci := &ClientInfo{Cluster: "R3S", Account: globalAccountName}
+		useCBOR := ml.getOpts().UseCBORInternally
 		js.mu.Lock()
 		metadata := map[string]string{JSRequiredLevelMetadataKey: reqLevel}
 		for i := 0; i < numStreams; i++ {
@@ -1024,7 +1025,7 @@ func BenchmarkJetStreamMetaSnapshot(b *testing.B) {
 			cfg, _ := ml.checkStreamCfg(scfg, acc, false)
 			rg, _ := js.createGroupForStream(ci, &cfg)
 			sa := &streamAssignment{Group: rg, Sync: syncSubjForStream(), Config: &cfg, Client: ci, Created: time.Now().UTC()}
-			n.Propose(encodeAddStreamAssignment(sa))
+			n.Propose(encodeAddStreamAssignment(sa, useCBOR))
 
 			for j := 0; j < numConsumers; j++ {
 				ccfg := &ConsumerConfig{
@@ -1037,7 +1038,7 @@ func BenchmarkJetStreamMetaSnapshot(b *testing.B) {
 				setConsumerConfigDefaults(ccfg, &cfg, srvLim, selectedLimits, false)
 				rg = js.cluster.createGroupForConsumer(ccfg, sa)
 				ca := &consumerAssignment{Group: rg, Stream: cfg.Name, Name: ccfg.Durable, Config: ccfg, Client: ci, Created: time.Now().UTC()}
-				n.Propose(encodeAddConsumerAssignment(ca))
+				n.Propose(encodeAddConsumerAssignment(ca, useCBOR))
 			}
 		}
 		js.mu.Unlock()
@@ -1066,9 +1067,9 @@ func BenchmarkJetStreamMetaSnapshot(b *testing.B) {
 	}
 
 	for _, t := range []struct {
-		title          string
-		reqLevel       string
-		useCBOR        bool
+		title    string
+		reqLevel string
+		useCBOR  bool
 	}{
 		{title: "JSON_Default", reqLevel: "0", useCBOR: false},
 		{title: "JSON_AllUnsupported", reqLevel: strconv.Itoa(math.MaxInt), useCBOR: false},

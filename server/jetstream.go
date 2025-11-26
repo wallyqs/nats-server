@@ -128,6 +128,12 @@ type jetStream struct {
 	oos            bool
 	shuttingDown   bool
 
+	// Reusable buffers for meta snapshot construction to reduce allocations.
+	metaSnapStreams      []writeableStreamAssignment
+	metaSnapConsumers    []writeableConsumerAssignment
+	metaSnapConsumerPtrs []*writeableConsumerAssignment
+	metaSnapCBORBuf      []byte
+
 	// Atomic versions
 	disabled atomic.Bool
 }

@@ -2818,15 +2818,16 @@ func (s *Server) jsLeaderAccountPurgeRequest(sub *subscription, c *client, _ *Ac
 	js.mu.RLock()
 	ns, nc := 0, 0
 	streams, hasAccount := cc.streams[accName]
+	useCBOR := s.getOpts().UseCBORInternally
 	for _, osa := range streams {
 		for _, oca := range osa.consumers {
 			oca.deleted = true
 			ca := &consumerAssignment{Group: oca.Group, Stream: oca.Stream, Name: oca.Name, Config: oca.Config, Subject: subject, Client: oca.Client}
-			meta.Propose(encodeDeleteConsumerAssignment(ca))
+			meta.Propose(encodeDeleteConsumerAssignment(ca, useCBOR))
 			nc++
 		}
 		sa := &streamAssignment{Group: osa.Group, Config: osa.Config, Subject: subject, Client: osa.Client}
-		meta.Propose(encodeDeleteStreamAssignment(sa))
+		meta.Propose(encodeDeleteStreamAssignment(sa, useCBOR))
 		ns++
 	}
 	js.mu.RUnlock()
@@ -5031,7 +5032,8 @@ func (s *Server) jsConsumerPauseRequest(sub *subscription, c *client, _ *Account
 		// Only PauseUntil is updated above, so reuse config for both.
 		setStaticConsumerMetadata(nca.Config)
 
-		eca := encodeAddConsumerAssignment(&nca)
+		useCBOR := s.getOpts().UseCBORInternally
+		eca := encodeAddConsumerAssignment(&nca, useCBOR)
 		meta.Propose(eca)
 
 		resp.PauseUntil = pauseUTC
