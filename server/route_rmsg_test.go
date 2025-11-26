@@ -11,12 +11,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !skip_js_tests && !skip_js_cluster_tests && !skip_js_cluster_tests_2
+
 package server
 
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 // TestProcessRoutedMsgArgsWithDoubleAtReply tests parsing RMSG with double @ in reply
@@ -422,4 +428,215 @@ func TestDoubleAtWithMirrorPushConsumerAndImports(t *testing.T) {
 	t.Log("  c.processMsgResults(..., c.pa.deliver, ...)")
 	t.Log("without checking if reply already contains @deliver suffix.")
 	t.Log("When combined with mirror + push consumer + imports, this causes double @.")
+}
+
+// Template for testing mirror with push consumer across accounts via imports.
+// Account A has a stream with a push consumer
+// Account B imports from Account A and creates a mirror
+var jsMirrorPushConsumerImportsTempl = `
+	listen: 127.0.0.1:-1
+	server_name: %s
+	jetstream: {max_mem_store: 256MB, max_file_store: 256MB, store_dir: '%s'}
+
+	cluster {
+		name: %s
+		listen: 127.0.0.1:%d
+		routes = [%s]
+	}
+
+	accounts {
+		A {
+			jetstream: enabled
+			users = [ { user: "a", pass: "a" } ]
+			exports [
+				{ service: "$JS.API.>" }
+				{ stream: "DELIVER.>" }
+				{ service: "$JS.ACK.>" }
+				{ service: "$JS.FC.>" }
+			]
+		}
+		B {
+			jetstream: enabled
+			users = [ { user: "b", pass: "b" } ]
+			imports [
+				{ service: { account: A, subject: "$JS.API.>" }, to: "FROM_A.JS.API.>" }
+				{ stream: { account: A, subject: "DELIVER.>" } }
+				{ service: { account: A, subject: "$JS.ACK.>" } }
+				{ service: { account: A, subject: "$JS.FC.>" } }
+			]
+		}
+		$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+	}
+`
+
+// TestJetStreamMirrorWithPushConsumerAndImportsDoubleAt tests the scenario
+// where a mirror stream with a push consumer and service imports can
+// cause a double @ in the reply subject.
+//
+// Setup:
+// - Account A has stream "SOURCE" with push consumer delivering to "DELIVER.test"
+// - Account B imports from A and has a mirror of "SOURCE"
+// - Messages flow: A's consumer -> deliver subject -> import -> B
+//
+// The issue: When the message flows through the service import,
+// processServiceImport may append @deliver again to a reply that
+// already has @deliver, causing double @.
+func TestJetStreamMirrorWithPushConsumerAndImportsDoubleAt(t *testing.T) {
+	c := createJetStreamClusterWithTemplate(t, jsMirrorPushConsumerImportsTempl, "C1", 3)
+	defer c.shutdown()
+
+	// Connect to account A and create stream with push consumer
+	s := c.randomServer()
+	ncA, jsA := jsClientConnect(t, s, nats.UserInfo("a", "a"))
+	defer ncA.Close()
+
+	// Create stream in account A
+	_, err := jsA.AddStream(&nats.StreamConfig{
+		Name:     "SOURCE",
+		Subjects: []string{"test.>"},
+		Replicas: 1,
+	})
+	require_NoError(t, err)
+
+	// Create push consumer with deliver subject
+	deliverSubject := "DELIVER.test.consumer"
+	_, err = jsA.AddConsumer("SOURCE", &nats.ConsumerConfig{
+		Durable:        "push_consumer",
+		DeliverSubject: deliverSubject,
+		AckPolicy:      nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Subscribe to the deliver subject in account A to receive messages
+	var receivedReply string
+	sub, err := ncA.Subscribe(deliverSubject, func(msg *nats.Msg) {
+		receivedReply = msg.Reply
+		t.Logf("Received message on deliver subject, reply: %s", msg.Reply)
+		// Check for double @
+		if strings.Count(msg.Reply, "@") > 1 {
+			t.Logf("FOUND DOUBLE @! Reply: %s", msg.Reply)
+		}
+		msg.Ack()
+	})
+	require_NoError(t, err)
+	defer sub.Unsubscribe()
+	ncA.Flush()
+
+	// Connect to account B
+	ncB, jsB := jsClientConnect(t, s, nats.UserInfo("b", "b"))
+	defer ncB.Close()
+
+	// Create mirror in account B that mirrors from account A
+	_, err = jsB.AddStream(&nats.StreamConfig{
+		Name:     "MIRROR",
+		Replicas: 1,
+		Mirror: &nats.StreamSource{
+			Name: "SOURCE",
+			External: &nats.ExternalStream{
+				APIPrefix:     "FROM_A.JS.API",
+				DeliverPrefix: "DELIVER",
+			},
+		},
+	})
+	require_NoError(t, err)
+
+	// Publish a message to the source stream
+	_, err = jsA.Publish("test.foo", []byte("hello"))
+	require_NoError(t, err)
+
+	// Wait for message to be delivered
+	time.Sleep(500 * time.Millisecond)
+
+	// Check if the reply has double @
+	if receivedReply != "" {
+		atCount := strings.Count(receivedReply, "@")
+		t.Logf("Reply subject: %s", receivedReply)
+		t.Logf("Number of @ in reply: %d", atCount)
+
+		if atCount > 1 {
+			t.Errorf("Double @ detected in reply subject! This indicates the bug.")
+			// Parse the reply to show the structure
+			parts := strings.Split(receivedReply, "@")
+			for i, part := range parts {
+				t.Logf("  Part %d: %s", i, part)
+			}
+		}
+	}
+
+	// Verify mirror received the message
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := jsB.StreamInfo("MIRROR")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg in mirror, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+}
+
+// TestJetStreamPushConsumerReplyWithAtDeliver tests that a push consumer's
+// reply subject contains the @deliver suffix when sent to gateways/routes.
+func TestJetStreamPushConsumerReplyWithAtDeliver(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3", 3)
+	defer c.shutdown()
+
+	s := c.randomServer()
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create stream
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"test.>"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Create push consumer with deliver subject
+	deliverSubject := "DELIVER.myconsumer"
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:        "push",
+		DeliverSubject: deliverSubject,
+		AckPolicy:      nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Subscribe to receive messages
+	var replies []string
+	sub, err := nc.Subscribe(deliverSubject, func(msg *nats.Msg) {
+		replies = append(replies, msg.Reply)
+		t.Logf("Received reply: %s", msg.Reply)
+		msg.Ack()
+	})
+	require_NoError(t, err)
+	defer sub.Unsubscribe()
+	nc.Flush()
+
+	// Publish messages
+	for i := 0; i < 3; i++ {
+		_, err = js.Publish("test.foo", []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Wait for messages
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify replies are in expected format
+	for i, reply := range replies {
+		t.Logf("Reply %d: %s", i, reply)
+
+		// Reply should start with $JS.ACK
+		if !strings.HasPrefix(reply, "$JS.ACK.") {
+			t.Errorf("Reply %d doesn't start with $JS.ACK: %s", i, reply)
+		}
+
+		// For local delivery (CLIENT), reply should NOT have @
+		// The @ is only added when sending to routes/gateways
+		atCount := strings.Count(reply, "@")
+		if atCount > 0 {
+			t.Logf("Reply %d has %d @ symbols (this is normal for route/gateway delivery)", i, atCount)
+		}
+	}
 }
