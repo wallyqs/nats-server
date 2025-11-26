@@ -44,20 +44,20 @@ import (
 	"sort"
 )
 
-type ByteBuffer struct {
+type cborByteBuffer struct {
 	b []byte
 }
 
-var bbPool = sync.Pool{New: func() any { return &ByteBuffer{b: make([]byte, 0, 1024)} }}
+var cborbbPool = sync.Pool{New: func() any { return &cborByteBuffer{b: make([]byte, 0, 1024)} }}
 
-func GetByteBuffer() *ByteBuffer {
-	bb := bbPool.Get().(*ByteBuffer)
+func cborGetByteBuffer() *cborByteBuffer {
+	bb := cborbbPool.Get().(*cborByteBuffer)
 	bb.Reset()
 	return bb
 }
 
-func GetMinSize(size int) *ByteBuffer {
-	bb := bbPool.Get().(*ByteBuffer)
+func cborGetMinSize(size int) *cborByteBuffer {
+	bb := cborbbPool.Get().(*cborByteBuffer)
 	bb.Reset()
 	if size > 0 {
 		bb.Ensure(size)
@@ -69,23 +69,23 @@ func GetMinSize(size int) *ByteBuffer {
 // (no implicit Reset). Call Reset() yourself if you want to clear before reuse
 // without returning to the pool.
 // PutByteBuffer returns the buffer to the pool after Resetting length to zero.
-func PutByteBuffer(bb *ByteBuffer) { bb.Reset(); bbPool.Put(bb) }
+func cborPutByteBuffer(bb *cborByteBuffer) { bb.Reset(); cborbbPool.Put(bb) }
 
 // Bytes returns the underlying bytes.
-func (bb *ByteBuffer) Bytes() []byte { return bb.b }
+func (bb *cborByteBuffer) Bytes() []byte { return bb.b }
 
 // Len returns length.
-func (bb *ByteBuffer) Len() int { return len(bb.b) }
+func (bb *cborByteBuffer) Len() int { return len(bb.b) }
 
 // Cap returns capacity.
-func (bb *ByteBuffer) Cap() int { return cap(bb.b) }
+func (bb *cborByteBuffer) Cap() int { return cap(bb.b) }
 
 // Reset resets the length to zero; capacity is unchanged.
-func (bb *ByteBuffer) Reset() { bb.b = bb.b[:0] }
+func (bb *cborByteBuffer) Reset() { bb.b = bb.b[:0] }
 
 // Ensure ensures there is room for at least n more bytes without reallocation.
 // If needed, it grows the underlying slice.
-func (bb *ByteBuffer) Ensure(n int) {
+func (bb *cborByteBuffer) Ensure(n int) {
 	need := len(bb.b) + n
 	if cap(bb.b) >= need {
 		return
@@ -105,7 +105,7 @@ func (bb *ByteBuffer) Ensure(n int) {
 
 // Extend grows the buffer by n bytes and returns a slice to the newly
 // appended region for direct writes. The buffer length is advanced by n.
-func (bb *ByteBuffer) Extend(n int) []byte {
+func (bb *cborByteBuffer) Extend(n int) []byte {
 	old := len(bb.b)
 	bb.Ensure(n)
 	bb.b = bb.b[:old+n]
@@ -113,28 +113,28 @@ func (bb *ByteBuffer) Extend(n int) []byte {
 }
 
 // Write implements io.Writer.
-func (bb *ByteBuffer) Write(p []byte) (int, error) {
+func (bb *cborByteBuffer) Write(p []byte) (int, error) {
 	bb.Ensure(len(p))
 	bb.b = append(bb.b, p...)
 	return len(p), nil
 }
 
 // WriteString appends a string.
-func (bb *ByteBuffer) WriteString(s string) (int, error) {
+func (bb *cborByteBuffer) WriteString(s string) (int, error) {
 	bb.Ensure(len(s))
 	bb.b = append(bb.b, s...)
 	return len(s), nil
 }
 
 // WriteByte appends a single byte.
-func (bb *ByteBuffer) WriteByte(c byte) error {
+func (bb *cborByteBuffer) WriteByte(c byte) error {
 	bb.Ensure(1)
 	bb.b = append(bb.b, c)
 	return nil
 }
 
 // ReadFrom implements io.ReaderFrom for efficient streaming into the buffer.
-func (bb *ByteBuffer) ReadFrom(r io.Reader) (int64, error) {
+func (bb *cborByteBuffer) ReadFrom(r io.Reader) (int64, error) {
 	var total int64
 	for {
 		// Grow a chunk (~32KB) if no free space
@@ -238,21 +238,21 @@ func (bb *ByteBuffer) ReadFrom(r io.Reader) (int64, error) {
 
 // getMajorType extracts the major type from a CBOR initial byte
 
-func (bb *ByteBuffer) AppendMapHeader(sz uint32) *
+func (bb *cborByteBuffer) AppendMapHeader(sz uint32) *
 
 // getAddInfo extracts the additional info from a CBOR initial byte
 
-ByteBuffer {
-	bb.b = AppendMapHeader(bb.b, sz)
+cborByteBuffer {
+	bb.b = cborAppendMapHeader(bb.b, sz)
 	return bb
 }
 
-func (bb *ByteBuffer) AppendArrayHeader(sz uint32) *
+func (bb *cborByteBuffer) AppendArrayHeader(sz uint32) *
 
 // Type represents CBOR data types
 
-ByteBuffer {
-	bb.b = AppendArrayHeader(bb.
+cborByteBuffer {
+	bb.b = cborAppendArrayHeader(bb.
 
 		// CBOR Types
 
@@ -260,15 +260,15 @@ ByteBuffer {
 	return bb
 }
 
-func (bb *ByteBuffer) AppendArrayHeaderIndefinite(
+func (bb *cborByteBuffer) AppendArrayHeaderIndefinite(
 
 // text string
 
-) *ByteBuffer {
+) *cborByteBuffer {
 
 	// byte string
 
-	bb.b = AppendArrayHeaderIndefinite(
+	bb.b = cborAppendArrayHeaderIndefinite(
 
 		// map
 
@@ -279,15 +279,15 @@ func (bb *ByteBuffer) AppendArrayHeaderIndefinite(
 
 }
 
-func (bb *ByteBuffer) AppendBreak(
+func (bb *cborByteBuffer) AppendBreak(
 
 // float64
 
-) *ByteBuffer {
+) *cborByteBuffer {
 
 	// float32
 
-	bb.b = AppendBreak(
+	bb.b = cborAppendBreak(
 
 		// bool
 
@@ -298,15 +298,15 @@ func (bb *ByteBuffer) AppendBreak(
 
 }
 
-func (bb *ByteBuffer) AppendString(
+func (bb *cborByteBuffer) AppendString(
 
 	// unsigned integer
 
-	s string) *ByteBuffer {
+	s string) *cborByteBuffer {
 
 	// nil
 
-	bb.b = AppendString(bb.
+	bb.b = cborAppendString(bb.
 
 		// duration (encoded as int64)
 
@@ -314,43 +314,43 @@ func (bb *ByteBuffer) AppendString(
 	return bb
 }
 
-func (bb *ByteBuffer) AppendBytes(
+func (bb *cborByteBuffer) AppendBytes(
 
 	// tagged value
 
-	bs []byte) *ByteBuffer {
+	bs []byte) *cborByteBuffer {
 
 	// time (tagged epoch timestamp)
 
-	bb.b = AppendBytes(bb.b, bs)
+	bb.b = cborAppendBytes(bb.b, bs)
 
 	// String implements fmt.Stringer
 
 	return bb
 }
 
-func (bb *ByteBuffer) AppendInt64(i int64) *ByteBuffer {
-	bb.b = AppendInt64(bb.b, i)
+func (bb *cborByteBuffer) AppendInt64(i int64) *cborByteBuffer {
+	bb.b = cborAppendInt64(bb.b, i)
 	return bb
 }
 
-func (bb *ByteBuffer) AppendUint64(u uint64) *ByteBuffer {
-	bb.b = AppendUint64(bb.b, u)
+func (bb *cborByteBuffer) AppendUint64(u uint64) *cborByteBuffer {
+	bb.b = cborAppendUint64(bb.b, u)
 	return bb
 }
 
-func (bb *ByteBuffer) AppendBool(v bool) *ByteBuffer {
-	bb.b = AppendBool(bb.b, v)
+func (bb *cborByteBuffer) AppendBool(v bool) *cborByteBuffer {
+	bb.b = cborAppendBool(bb.b, v)
 	return bb
 }
 
-func (bb *ByteBuffer) AppendFloat64(f float64) *ByteBuffer {
-	bb.b = AppendFloat64(bb.b, f)
+func (bb *cborByteBuffer) AppendFloat64(f float64) *cborByteBuffer {
+	bb.b = cborAppendFloat64(bb.b, f)
 	return bb
 }
 
-func (bb *ByteBuffer) AppendFloat32(f float32) *ByteBuffer {
-	bb.b = AppendFloat32(bb.b, f)
+func (bb *cborByteBuffer) AppendFloat32(f float32) *cborByteBuffer {
+	bb.b = cborAppendFloat32(bb.b, f)
 
 	// Marshaler is the interface implemented by types that know how to marshal
 	// themselves as CBOR. MarshalCBOR appends the marshalled form to the provided
@@ -359,162 +359,162 @@ func (bb *ByteBuffer) AppendFloat32(f float32) *ByteBuffer {
 	return bb
 }
 
-func (bb *ByteBuffer) AppendTag(tag uint64) *ByteBuffer {
-	bb.b = AppendTag(bb.b, tag)
+func (bb *cborByteBuffer) AppendTag(tag uint64) *cborByteBuffer {
+	bb.b = cborAppendTag(bb.b, tag)
 	return bb
 }
 
-type RawPair struct {
+type cborRawPair struct {
 	Key   []byte
 	Value []byte
 }
 
 const (
-	recursionLimit = 100000
+	cborrecursionLimit = 100000
 )
 
-var ErrNonCanonicalFloat = errors.New("cbor: non-canonical float encoding")
+var cborErrNonCanonicalFloat = errors.New("cbor: non-canonical float encoding")
 
-var ErrContainerTooLarge = errors.New("cbor: container too large")
-
-const (
-	majorTypeUint   = 0
-	majorTypeNegInt = 1
-	majorTypeBytes  = 2
-	majorTypeText   = 3
-	majorTypeArray  = 4
-	majorTypeMap    = 5
-	majorTypeTag    = 6
-	majorTypeSimple = 7
-)
+var cborErrContainerTooLarge = errors.New("cbor: container too large")
 
 const (
-	addInfoDirect     = 23
-	addInfoUint8      = 24
-	addInfoUint16     = 25
-	addInfoUint32     = 26
-	addInfoUint64     = 27
-	addInfoIndefinite = 31
+	cbormajorTypeUint   = 0
+	cbormajorTypeNegInt = 1
+	cbormajorTypeBytes  = 2
+	cbormajorTypeText   = 3
+	cbormajorTypeArray  = 4
+	cbormajorTypeMap    = 5
+	cbormajorTypeTag    = 6
+	cbormajorTypeSimple = 7
 )
 
 const (
-	simpleFalse     = 20
-	simpleTrue      = 21
-	simpleNull      = 22
-	simpleUndefined = 23
-	simpleFloat16   = 25
-	simpleFloat32   = 26
-	simpleFloat64   = 27
-	simpleBreak     = 31
+	cboraddInfoDirect     = 23
+	cboraddInfoUint8      = 24
+	cboraddInfoUint16     = 25
+	cboraddInfoUint32     = 26
+	cboraddInfoUint64     = 27
+	cboraddInfoIndefinite = 31
 )
 
 const (
-	tagDateTimeString   = 0
-	tagEpochDateTime    = 1
-	tagPosBignum        = 2
-	tagNegBignum        = 3
-	tagDecimalFrac      = 4
-	tagBigfloat         = 5
-	tagBase64URL        = 21
-	tagBase64           = 22
-	tagBase16           = 23
-	tagCBOR             = 24
-	tagURI              = 32
-	tagBase64URLString  = 33
-	tagBase64String     = 34
-	tagRegexp           = 35
-	tagMIME             = 36
-	tagSelfDescribeCBOR = 55799
+	cborsimpleFalse     = 20
+	cborsimpleTrue      = 21
+	cborsimpleNull      = 22
+	cborsimpleUndefined = 23
+	cborsimpleFloat16   = 25
+	cborsimpleFloat32   = 26
+	cborsimpleFloat64   = 27
+	cborsimpleBreak     = 31
 )
 
-func makeByte(majorType, addInfo uint8) byte {
+const (
+	cbortagDateTimeString   = 0
+	cbortagEpochDateTime    = 1
+	cbortagPosBignum        = 2
+	cbortagNegBignum        = 3
+	cbortagDecimalFrac      = 4
+	cbortagBigfloat         = 5
+	cbortagBase64URL        = 21
+	cbortagBase64           = 22
+	cbortagBase16           = 23
+	cbortagCBOR             = 24
+	cbortagURI              = 32
+	cbortagBase64URLString  = 33
+	cbortagBase64String     = 34
+	cbortagRegexp           = 35
+	cbortagMIME             = 36
+	cbortagSelfDescribeCBOR = 55799
+)
+
+func cbormakeByte(majorType, addInfo uint8) byte {
 	return byte((majorType << 5) | addInfo)
 }
 
-func getMajorType(b byte) uint8 {
+func cborgetMajorType(b byte) uint8 {
 	return (b >> 5) & 0x07
 }
 
-func getAddInfo(b byte) uint8 {
+func cborgetAddInfo(b byte) uint8 {
 	return b & 0x1f
 }
 
-type Type byte
+type cborType byte
 
 const (
-	InvalidType Type = iota
+	cborInvalidType cborType = iota
 
-	StrType
-	BinType
-	MapType
-	ArrayType
-	Float64Type
-	Float32Type
-	BoolType
-	IntType
-	UintType
-	NilType
-	DurationType
-	ExtensionType
-	TimeType
+	cborStrType
+	cborBinType
+	cborMapType
+	cborArrayType
+	cborFloat64Type
+	cborFloat32Type
+	cborBoolType
+	cborIntType
+	cborUintType
+	cborNilType
+	cborDurationType
+	cborExtensionType
+	cborTimeType
 )
 
-func (t Type) String() string {
+func (t cborType) String() string {
 	switch t {
-	case StrType:
+	case cborStrType:
 		return "str"
-	case BinType:
+	case cborBinType:
 		return "bin"
-	case MapType:
+	case cborMapType:
 		return "map"
-	case ArrayType:
+	case cborArrayType:
 		return "array"
-	case Float64Type:
+	case cborFloat64Type:
 		return "float64"
-	case Float32Type:
+	case cborFloat32Type:
 		return "float32"
-	case BoolType:
+	case cborBoolType:
 		return "bool"
-	case UintType:
+	case cborUintType:
 		return "uint"
-	case IntType:
+	case cborIntType:
 		return "int"
-	case ExtensionType:
+	case cborExtensionType:
 		return "ext"
-	case NilType:
+	case cborNilType:
 		return "nil"
-	case TimeType:
+	case cborTimeType:
 		return "time"
-	case DurationType:
+	case cborDurationType:
 		return "duration"
 	default:
 		return "<invalid>"
 	}
 }
 
-type Marshaler interface {
+type cborMarshaler interface {
 	MarshalCBOR([]byte) ([]byte, error)
 }
 
 // Unmarshaler is the interface fulfilled by objects that know how to unmarshal
 // themselves from CBOR. UnmarshalCBOR unmarshals the object from binary,
 // returning any leftover bytes and any errors encountered.
-type Unmarshaler interface {
+type cborUnmarshaler interface {
 	UnmarshalCBOR([]byte) ([]byte, error)
 }
 
 // ValidateUTF8OnDecode controls whether ReadStringBytes validates UTF-8.
 // Enabled by default for spec compliance; can be disabled in hot paths.
-var ValidateUTF8OnDecode = true
+var cborValidateUTF8OnDecode = true
 
 // UnsafeStringDecode controls whether ReadStringBytes converts zero-copy using
 // UnsafeString (unsafe) instead of allocating a new string. Disabled by default.
-var UnsafeStringDecode = false
+var cborUnsafeStringDecode = false
 
-func DiagBytes(b []byte) (string, []byte, error) {
-	bb := GetByteBuffer()
-	defer PutByteBuffer(bb)
-	rest, err := diagOneBuf(bb, b, 0)
+func cborDiagBytes(b []byte) (string, []byte, error) {
+	bb := cborGetByteBuffer()
+	defer cborPutByteBuffer(bb)
+	rest, err := cbordiagOneBuf(bb, b, 0)
 	if err != nil {
 		return "", b, err
 	}
@@ -523,51 +523,51 @@ func DiagBytes(b []byte) (string, []byte, error) {
 	return string(out), rest, nil
 }
 
-func diagOneBuf(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
-	if depth > recursionLimit {
-		return b, ErrMaxDepthExceeded
+func cbordiagOneBuf(buf *cborByteBuffer, b []byte, depth int) ([]byte, error) {
+	if depth > cborrecursionLimit {
+		return b, cborErrMaxDepthExceeded
 	}
 	if len(b) < 1 {
-		return b, ErrShortBytes
+		return b, cborErrShortBytes
 	}
-	maj := getMajorType(b[0])
-	add := getAddInfo(b[0])
+	maj := cborgetMajorType(b[0])
+	add := cborgetAddInfo(b[0])
 
 	switch maj {
-	case majorTypeUint:
-		u, o, err := readUintCore(b, majorTypeUint)
+	case cbormajorTypeUint:
+		u, o, err := cborreadUintCore(b, cbormajorTypeUint)
 		if err != nil {
 			return b, err
 		}
 		buf.WriteString(strconv.FormatUint(u, 10))
 		return o, nil
-	case majorTypeNegInt:
-		u, o, err := readUintCore(b, majorTypeNegInt)
+	case cbormajorTypeNegInt:
+		u, o, err := cborreadUintCore(b, cbormajorTypeNegInt)
 		if err != nil {
 			return b, err
 		}
 		n := int64(-1) - int64(u)
 		buf.WriteString(strconv.FormatInt(n, 10))
 		return o, nil
-	case majorTypeBytes:
-		if add == addInfoIndefinite {
+	case cbormajorTypeBytes:
+		if add == cboraddInfoIndefinite {
 			p := b[1:]
 			buf.WriteString("(_")
 			first := true
 			for {
 				if len(p) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					buf.WriteString(")")
 					return p[1:], nil
 				}
-				sz, o, err := readUintCore(p, majorTypeBytes)
+				sz, o, err := cborreadUintCore(p, cbormajorTypeBytes)
 				if err != nil {
 					return b, err
 				}
 				if uint64(len(o)) < sz {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
 				if !first {
 					buf.WriteString(", ")
@@ -582,7 +582,7 @@ func diagOneBuf(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 				p = o[sz:]
 			}
 		}
-		bs, o, err := ReadBytesBytes(b, nil)
+		bs, o, err := cborReadBytesBytes(b, nil)
 		if err != nil {
 			return b, err
 		}
@@ -591,20 +591,20 @@ func diagOneBuf(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 		hex.Encode(d, bs)
 		buf.WriteString("'")
 		return o, nil
-	case majorTypeText:
-		if add == addInfoIndefinite {
+	case cbormajorTypeText:
+		if add == cboraddInfoIndefinite {
 			p := b[1:]
 			buf.WriteString("(_")
 			first := true
 			for {
 				if len(p) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					buf.WriteString(")")
 					return p[1:], nil
 				}
-				chunk, o, err := ReadStringZC(p)
+				chunk, o, err := cborReadStringZC(p)
 				if err != nil {
 					return b, err
 				}
@@ -619,22 +619,22 @@ func diagOneBuf(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 				p = o
 			}
 		}
-		s, o, err := ReadStringBytes(b)
+		s, o, err := cborReadStringBytes(b)
 		if err != nil {
 			return b, err
 		}
 		buf.WriteString(strconv.Quote(s))
 		return o, nil
-	case majorTypeArray:
-		if add == addInfoIndefinite {
+	case cbormajorTypeArray:
+		if add == cboraddInfoIndefinite {
 			p := b[1:]
 			buf.WriteString("[_")
 			first := true
 			for {
 				if len(p) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					buf.WriteString("]")
 					return p[1:], nil
 				}
@@ -645,13 +645,13 @@ func diagOneBuf(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 					first = false
 				}
 				var err error
-				p, err = diagOneBuf(buf, p, depth+1)
+				p, err = cbordiagOneBuf(buf, p, depth+1)
 				if err != nil {
 					return b, err
 				}
 			}
 		}
-		sz, p, err := readUintCore(b, majorTypeArray)
+		sz, p, err := cborreadUintCore(b, cbormajorTypeArray)
 		if err != nil {
 			return b, err
 		}
@@ -661,23 +661,23 @@ func diagOneBuf(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 				buf.WriteString(", ")
 			}
 			var err error
-			p, err = diagOneBuf(buf, p, depth+1)
+			p, err = cbordiagOneBuf(buf, p, depth+1)
 			if err != nil {
 				return b, err
 			}
 		}
 		buf.WriteString("]")
 		return p, nil
-	case majorTypeMap:
-		if add == addInfoIndefinite {
+	case cbormajorTypeMap:
+		if add == cboraddInfoIndefinite {
 			p := b[1:]
 			buf.WriteString("{_")
 			first := true
 			for {
 				if len(p) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					buf.WriteString("}")
 					return p[1:], nil
 				}
@@ -689,19 +689,19 @@ func diagOneBuf(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 				}
 
 				var err error
-				p, err = diagOneBuf(buf, p, depth+1)
+				p, err = cbordiagOneBuf(buf, p, depth+1)
 				if err != nil {
 					return b, err
 				}
 				buf.WriteString(": ")
 
-				p, err = diagOneBuf(buf, p, depth+1)
+				p, err = cbordiagOneBuf(buf, p, depth+1)
 				if err != nil {
 					return b, err
 				}
 			}
 		}
-		sz, p, err := readUintCore(b, majorTypeMap)
+		sz, p, err := cborreadUintCore(b, cbormajorTypeMap)
 		if err != nil {
 			return b, err
 		}
@@ -711,34 +711,34 @@ func diagOneBuf(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 				buf.WriteString(", ")
 			}
 			var err error
-			p, err = diagOneBuf(buf, p, depth+1)
+			p, err = cbordiagOneBuf(buf, p, depth+1)
 			if err != nil {
 				return b, err
 			}
 			buf.WriteString(": ")
-			p, err = diagOneBuf(buf, p, depth+1)
+			p, err = cbordiagOneBuf(buf, p, depth+1)
 			if err != nil {
 				return b, err
 			}
 		}
 		buf.WriteString("}")
 		return p, nil
-	case majorTypeTag:
-		tag, o, err := ReadTagBytes(b)
+	case cbormajorTypeTag:
+		tag, o, err := cborReadTagBytes(b)
 		if err != nil {
 			return b, err
 		}
 		buf.WriteString(strconv.FormatUint(tag, 10))
 		buf.WriteString("(")
-		o2, err := diagOneBuf(buf, o, depth+1)
+		o2, err := cbordiagOneBuf(buf, o, depth+1)
 		if err != nil {
 			return b, err
 		}
 		buf.WriteString(")")
 		return o2, nil
-	case majorTypeSimple:
+	case cbormajorTypeSimple:
 		switch add {
-		case simpleFalse:
+		case cborsimpleFalse:
 
 			// (duplicate removed)
 
@@ -754,56 +754,56 @@ func diagOneBuf(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 
 			buf.WriteString("false")
 			return b[1:], nil
-		case simpleTrue:
+		case cborsimpleTrue:
 			buf.WriteString("true")
 			return b[1:], nil
-		case simpleNull:
+		case cborsimpleNull:
 			buf.WriteString("null")
 			return b[1:], nil
-		case simpleUndefined:
+		case cborsimpleUndefined:
 			buf.WriteString("undefined")
 			return b[1:], nil
-		case simpleFloat16:
-			f, o, err := ReadFloat16Bytes(b)
+		case cborsimpleFloat16:
+			f, o, err := cborReadFloat16Bytes(b)
 			if err != nil {
 				return b, err
 			}
-			buf.WriteString(formatFloat32Diag(f))
+			buf.WriteString(cborformatFloat32Diag(f))
 			return o, nil
-		case simpleFloat32:
-			f, o, err := ReadFloat32Bytes(b)
+		case cborsimpleFloat32:
+			f, o, err := cborReadFloat32Bytes(b)
 			if err != nil {
 				return b, err
 			}
-			buf.WriteString(formatFloat32Diag(f))
+			buf.WriteString(cborformatFloat32Diag(f))
 			return o, nil
-		case simpleFloat64:
-			f, o, err := ReadFloat64Bytes(b)
+		case cborsimpleFloat64:
+			f, o, err := cborReadFloat64Bytes(b)
 			if err != nil {
 				return b, err
 			}
-			buf.WriteString(formatFloat64Diag(f))
+			buf.WriteString(cborformatFloat64Diag(f))
 			return o, nil
 		default:
 			if add < 20 {
 				buf.WriteString(fmt.Sprintf("simple(%d)", add))
 				return b[1:], nil
 			}
-			if add == addInfoUint8 {
+			if add == cboraddInfoUint8 {
 				if len(b) < 2 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
 				buf.WriteString(fmt.Sprintf("simple(%d)", b[1]))
 				return b[2:], nil
 			}
-			return b, &ErrUnsupportedType{}
+			return b, &cborErrUnsupportedType{}
 		}
 	}
-	return b, &ErrUnsupportedType{}
+	return b, &cborErrUnsupportedType{}
 }
 
 // formatFloat64Diag returns a diagnostic string for float64 matching RFC examples
-func formatFloat64Diag(f float64) string {
+func cborformatFloat64Diag(f float64) string {
 	if math.IsInf(f, +1) {
 		return "Infinity"
 	}
@@ -817,13 +817,13 @@ func formatFloat64Diag(f float64) string {
 	// Prefer fixed-point for reasonable magnitudes
 	if af == 0 || af < 1e15 {
 		s := strconv.FormatFloat(f, 'f', -1, 64)
-		return trimTrailingZerosDot(s)
+		return cbortrimTrailingZerosDot(s)
 	}
 	return strconv.FormatFloat(f, 'g', -1, 64)
 }
 
 // formatFloat32Diag returns a diagnostic string for float32 matching RFC examples
-func formatFloat32Diag(f float32) string {
+func cborformatFloat32Diag(f float32) string {
 	if math.IsInf(float64(f), +1) {
 		return "Infinity"
 	}
@@ -836,12 +836,12 @@ func formatFloat32Diag(f float32) string {
 	af := math.Abs(float64(f))
 	if af == 0 || af < 1e15 {
 		s := strconv.FormatFloat(float64(f), 'f', -1, 32)
-		return trimTrailingZerosDot(s)
+		return cbortrimTrailingZerosDot(s)
 	}
 	return strconv.FormatFloat(float64(f), 'g', -1, 32)
 }
 
-func trimTrailingZerosDot(s string) string {
+func cbortrimTrailingZerosDot(s string) string {
 	// Trim trailing zeros and optional dot
 
 	// ErrShortBytes is returned when the
@@ -973,69 +973,69 @@ func trimTrailingZerosDot(s string) string {
 	return s[:i]
 }
 
-const resumableDefault = false
+const cborresumableDefault = false
 
 var (
-	ErrShortBytes error = errShort{}
+	cborErrShortBytes error = cborerrShort{}
 
-	ErrRecursion error = errRecursion{}
+	cborErrRecursion error = cborerrRecursion{}
 
-	ErrLimitExceeded error = errLimitExceeded{}
+	cborErrLimitExceeded error = cborerrLimitExceeded{}
 
-	ErrMaxDepthExceeded error = errors.New("cbor: max depth exceeded")
+	cborErrMaxDepthExceeded error = errors.New("cbor: max depth exceeded")
 
-	ErrNotNil error = errors.New("cbor: not nil")
+	cborErrNotNil error = errors.New("cbor: not nil")
 
-	ErrInvalidUTF8 error = errors.New("cbor: invalid UTF-8 in text string")
+	cborErrInvalidUTF8 error = errors.New("cbor: invalid UTF-8 in text string")
 
-	ErrDuplicateMapKey error = errors.New("cbor: duplicate map key")
+	cborErrDuplicateMapKey error = errors.New("cbor: duplicate map key")
 
-	ErrIndefiniteForbidden error = errors.New("cbor: indefinite-length item not allowed in strict/deterministic mode")
+	cborErrIndefiniteForbidden error = errors.New("cbor: indefinite-length item not allowed in strict/deterministic mode")
 
-	ErrNonCanonicalInteger error = errors.New("cbor: non-canonical integer encoding")
+	cborErrNonCanonicalInteger error = errors.New("cbor: non-canonical integer encoding")
 
-	ErrNonCanonicalLength error = errors.New("cbor: non-canonical length encoding")
+	cborErrNonCanonicalLength error = errors.New("cbor: non-canonical length encoding")
 )
 
-type Error interface {
+type cborError interface {
 	error
 
 	Resumable() bool
 }
 
-type contextError interface {
-	Error
+type cborcontextError interface {
+	cborError
 
 	withContext(ctx string) error
 }
 
-func Cause(e error) error {
+func cborCause(e error) error {
 	out := e
-	if e, ok := e.(errWrapped); ok && e.cause != nil {
+	if e, ok := e.(cborerrWrapped); ok && e.cause != nil {
 		out = e.cause
 	}
 	return out
 }
 
-func Resumable(e error) bool {
-	if e, ok := e.(Error); ok {
+func cborResumable(e error) bool {
+	if e, ok := e.(cborError); ok {
 		return e.Resumable()
 	}
-	return resumableDefault
+	return cborresumableDefault
 }
 
-func WrapError(err error, ctx ...any) error {
+func cborWrapError(err error, ctx ...any) error {
 	switch e := err.(type) {
-	case errShort:
+	case cborerrShort:
 		return e
-	case contextError:
-		return e.withContext(ctxString(ctx))
+	case cborcontextError:
+		return e.withContext(cborctxString(ctx))
 	default:
-		return errWrapped{cause: err, ctx: ctxString(ctx)}
+		return cborerrWrapped{cause: err, ctx: cborctxString(ctx)}
 	}
 }
 
-func addCtx(ctx, add string) string {
+func cboraddCtx(ctx, add string) string {
 	if ctx != "" {
 		return add + "/" + ctx
 	} else {
@@ -1043,12 +1043,12 @@ func addCtx(ctx, add string) string {
 	}
 }
 
-type errWrapped struct {
+type cborerrWrapped struct {
 	cause error
 	ctx   string
 }
 
-func (e errWrapped) Error() string {
+func (e cborerrWrapped) Error() string {
 	if e.ctx != "" {
 		return e.cause.Error() + " at " + e.ctx
 	} else {
@@ -1056,37 +1056,37 @@ func (e errWrapped) Error() string {
 	}
 }
 
-func (e errWrapped) Resumable() bool {
-	if e, ok := e.cause.(Error); ok {
+func (e cborerrWrapped) Resumable() bool {
+	if e, ok := e.cause.(cborError); ok {
 		return e.Resumable()
 	}
-	return resumableDefault
+	return cborresumableDefault
 }
 
-func (e errWrapped) Unwrap() error { return e.cause }
+func (e cborerrWrapped) Unwrap() error { return e.cause }
 
-type errShort struct{}
+type cborerrShort struct{}
 
-func (e errShort) Error() string   { return "cbor: too few bytes left to read object" }
-func (e errShort) Resumable() bool { return false }
+func (e cborerrShort) Error() string   { return "cbor: too few bytes left to read object" }
+func (e cborerrShort) Resumable() bool { return false }
 
-type errRecursion struct{}
+type cborerrRecursion struct{}
 
-func (e errRecursion) Error() string   { return "cbor: recursion limit reached" }
-func (e errRecursion) Resumable() bool { return false }
+func (e cborerrRecursion) Error() string   { return "cbor: recursion limit reached" }
+func (e cborerrRecursion) Resumable() bool { return false }
 
-type errLimitExceeded struct{}
+type cborerrLimitExceeded struct{}
 
-func (e errLimitExceeded) Error() string   { return "cbor: configured reader limit exceeded" }
-func (e errLimitExceeded) Resumable() bool { return false }
+func (e cborerrLimitExceeded) Error() string   { return "cbor: configured reader limit exceeded" }
+func (e cborerrLimitExceeded) Resumable() bool { return false }
 
-type ArrayError struct {
+type cborArrayError struct {
 	Wanted uint32
 	Got    uint32
 	ctx    string
 }
 
-func (a ArrayError) Error() string {
+func (a cborArrayError) Error() string {
 	out := "cbor: wanted array of size " + strconv.Itoa(int(a.Wanted)) + "; got " + strconv.Itoa(int(a.Got))
 	if a.ctx != "" {
 		out += " at " + a.ctx
@@ -1094,17 +1094,17 @@ func (a ArrayError) Error() string {
 	return out
 }
 
-func (a ArrayError) Resumable() bool { return true }
+func (a cborArrayError) Resumable() bool { return true }
 
-func (a ArrayError) withContext(ctx string) error { a.ctx = addCtx(a.ctx, ctx); return a }
+func (a cborArrayError) withContext(ctx string) error { a.ctx = cboraddCtx(a.ctx, ctx); return a }
 
-type IntOverflow struct {
+type cborIntOverflow struct {
 	Value         int64
 	FailedBitsize int
 	ctx           string
 }
 
-func (i IntOverflow) Error() string {
+func (i cborIntOverflow) Error() string {
 	str := "cbor: " + strconv.FormatInt(i.Value, 10) + " overflows int" + strconv.Itoa(i.FailedBitsize)
 	if i.ctx != "" {
 		str += " at " + i.ctx
@@ -1112,17 +1112,17 @@ func (i IntOverflow) Error() string {
 	return str
 }
 
-func (i IntOverflow) Resumable() bool { return true }
+func (i cborIntOverflow) Resumable() bool { return true }
 
-func (i IntOverflow) withContext(ctx string) error { i.ctx = addCtx(i.ctx, ctx); return i }
+func (i cborIntOverflow) withContext(ctx string) error { i.ctx = cboraddCtx(i.ctx, ctx); return i }
 
-type UintOverflow struct {
+type cborUintOverflow struct {
 	Value         uint64
 	FailedBitsize int
 	ctx           string
 }
 
-func (u UintOverflow) Error() string {
+func (u cborUintOverflow) Error() string {
 	str := "cbor: " + strconv.FormatUint(u.Value, 10) + " overflows uint" + strconv.Itoa(u.FailedBitsize)
 	if u.ctx != "" {
 		str += " at " + u.ctx
@@ -1130,17 +1130,17 @@ func (u UintOverflow) Error() string {
 	return str
 }
 
-func (u UintOverflow) Resumable() bool { return true }
+func (u cborUintOverflow) Resumable() bool { return true }
 
-func (u UintOverflow) withContext(ctx string) error { u.ctx = addCtx(u.ctx, ctx); return u }
+func (u cborUintOverflow) withContext(ctx string) error { u.ctx = cboraddCtx(u.ctx, ctx); return u }
 
-type InvalidTimestamp struct {
+type cborInvalidTimestamp struct {
 	Nanos       int64
 	FieldLength int
 	ctx         string
 }
 
-func (u InvalidTimestamp) Error() (str string) {
+func (u cborInvalidTimestamp) Error() (str string) {
 	if u.Nanos > 0 {
 		str = "msgp: timestamp nanosecond field value " + strconv.FormatInt(u.Nanos, 10) + " exceeds maximum allows of 999999999"
 	} else if u.FieldLength >= 0 {
@@ -1152,16 +1152,16 @@ func (u InvalidTimestamp) Error() (str string) {
 	return str
 }
 
-func (u InvalidTimestamp) Resumable() bool { return true }
+func (u cborInvalidTimestamp) Resumable() bool { return true }
 
-func (u InvalidTimestamp) withContext(ctx string) error { u.ctx = addCtx(u.ctx, ctx); return u }
+func (u cborInvalidTimestamp) withContext(ctx string) error { u.ctx = cboraddCtx(u.ctx, ctx); return u }
 
-type UintBelowZero struct {
+type cborUintBelowZero struct {
 	Value int64
 	ctx   string
 }
 
-func (u UintBelowZero) Error() string {
+func (u cborUintBelowZero) Error() string {
 	str := "cbor: attempted to cast int " + strconv.FormatInt(u.Value, 10) + " to unsigned"
 	if u.ctx != "" {
 		str += " at " + u.ctx
@@ -1169,22 +1169,22 @@ func (u UintBelowZero) Error() string {
 	return str
 }
 
-func (u UintBelowZero) Resumable() bool { return true }
+func (u cborUintBelowZero) Resumable() bool { return true }
 
-func (u UintBelowZero) withContext(ctx string) error {
+func (u cborUintBelowZero) withContext(ctx string) error {
 	u.ctx = ctx
 	return u
 }
 
-type TypeError struct {
-	Method  Type
-	Encoded Type
+type cborTypeError struct {
+	Method  cborType
+	Encoded cborType
 
 	ctx string
 }
 
-func (t TypeError) Error() string {
-	out := "cbor: attempted to decode type " + quoteStr(t.Encoded.String()) + " with method for " + quoteStr(t.Method.String())
+func (t cborTypeError) Error() string {
+	out := "cbor: attempted to decode type " + cborquoteStr(t.Encoded.String()) + " with method for " + cborquoteStr(t.Method.String())
 	if t.ctx != "" {
 		out += " at " + t.ctx
 	}
@@ -1192,44 +1192,44 @@ func (t TypeError) Error() string {
 }
 
 // Resumable returns 'true' for TypeErrors
-func (t TypeError) Resumable() bool { return true }
+func (t cborTypeError) Resumable() bool { return true }
 
-func (t TypeError) withContext(ctx string) error { t.ctx = addCtx(t.ctx, ctx); return t }
+func (t cborTypeError) withContext(ctx string) error { t.ctx = cboraddCtx(t.ctx, ctx); return t }
 
 // returns either InvalidPrefixError or
 // TypeError depending on whether or not
 // the prefix is recognized
-func badPrefix(wantMajor uint8, gotMajor uint8) error {
-	return InvalidPrefixError{Want: wantMajor, Got: gotMajor}
+func cborbadPrefix(wantMajor uint8, gotMajor uint8) error {
+	return cborInvalidPrefixError{Want: wantMajor, Got: gotMajor}
 }
 
 // InvalidPrefixError is returned when a bad encoding
 // uses a major type that is not expected.
 // This kind of error is unrecoverable.
-type InvalidPrefixError struct {
+type cborInvalidPrefixError struct {
 	Want uint8
 	Got  uint8
 }
 
 // Error implements the error interface
-func (i InvalidPrefixError) Error() string {
+func (i cborInvalidPrefixError) Error() string {
 	return "cbor: expected major type " + strconv.Itoa(int(i.Want)) + " but got " + strconv.Itoa(int(i.Got))
 }
 
 // Resumable returns 'false' for InvalidPrefixErrors
-func (i InvalidPrefixError) Resumable() bool { return false }
+func (i cborInvalidPrefixError) Resumable() bool { return false }
 
 // ErrUnsupportedType is returned when a bad argument is supplied to
 // a function that accepts arbitrary values.
-type ErrUnsupportedType struct {
+type cborErrUnsupportedType struct {
 	T reflect.Type
 
 	ctx string
 }
 
 // Error implements error
-func (e *ErrUnsupportedType) Error() string {
-	out := "cbor: type " + quoteStr(e.T.String()) + " not supported"
+func (e *cborErrUnsupportedType) Error() string {
+	out := "cbor: type " + cborquoteStr(e.T.String()) + " not supported"
 	if e.ctx != "" {
 		out += " at " + e.ctx
 	}
@@ -1381,18 +1381,18 @@ func (e *ErrUnsupportedType) Error() string {
 // application-defined simple value; map to null in JSON by default
 
 // unassigned simple values -> null
-func (e *ErrUnsupportedType) Resumable() bool { return true }
+func (e *cborErrUnsupportedType) Resumable() bool { return true }
 
-func (e *ErrUnsupportedType) withContext(ctx string) error {
+func (e *cborErrUnsupportedType) withContext(ctx string) error {
 	o :=
 
 		// encodeBase64Std writes standard base64 of src into buf.
 		*e
-	o.ctx = addCtx(o.ctx, ctx)
+	o.ctx = cboraddCtx(o.ctx, ctx)
 	return &o
 }
 
-func ctxString(ctx []any) string {
+func cborctxString(ctx []any) string {
 	out := ""
 	for idx, cv := range ctx {
 		if idx > 0 {
@@ -1403,49 +1403,49 @@ func ctxString(ctx []any) string {
 	return out
 }
 
-func quoteStr(s string) string {
+func cborquoteStr(s string) string {
 	return strconv.Quote(s)
 }
 
-func getType(b byte) Type {
-	major := getMajorType(b)
+func cborgetType(b byte) cborType {
+	major := cborgetMajorType(b)
 	switch major {
-	case majorTypeUint:
-		return UintType
-	case majorTypeNegInt:
-		return IntType
-	case majorTypeBytes:
-		return BinType
-	case majorTypeText:
-		return StrType
-	case majorTypeArray:
-		return ArrayType
-	case majorTypeMap:
-		return MapType
-	case majorTypeTag:
-		return ExtensionType
-	case majorTypeSimple:
-		addInfo := getAddInfo(b)
+	case cbormajorTypeUint:
+		return cborUintType
+	case cbormajorTypeNegInt:
+		return cborIntType
+	case cbormajorTypeBytes:
+		return cborBinType
+	case cbormajorTypeText:
+		return cborStrType
+	case cbormajorTypeArray:
+		return cborArrayType
+	case cbormajorTypeMap:
+		return cborMapType
+	case cbormajorTypeTag:
+		return cborExtensionType
+	case cbormajorTypeSimple:
+		addInfo := cborgetAddInfo(b)
 		switch addInfo {
-		case simpleTrue, simpleFalse:
-			return BoolType
-		case simpleNull:
-			return NilType
-		case simpleFloat32, simpleFloat64:
-			return Float64Type
+		case cborsimpleTrue, cborsimpleFalse:
+			return cborBoolType
+		case cborsimpleNull:
+			return cborNilType
+		case cborsimpleFloat32, cborsimpleFloat64:
+			return cborFloat64Type
 		}
 	}
-	return InvalidType
+	return cborInvalidType
 }
 
-func NextType(b []byte) Type {
+func cborNextType(b []byte) cborType {
 	if len(b) == 0 {
-		return InvalidType
+		return cborInvalidType
 	}
-	return getType(b[0])
+	return cborgetType(b[0])
 }
 
-func Require(b []byte, n int) []byte {
+func cborRequire(b []byte, n int) []byte {
 	if cap(b)-len(b) >= n {
 		return b
 	}
@@ -1454,7 +1454,7 @@ func Require(b []byte, n int) []byte {
 	return nb
 }
 
-func IsLikelyJSON(b []byte) bool {
+func cborIsLikelyJSON(b []byte) bool {
 
 	if !utf8.Valid(b) {
 		return false
@@ -1486,22 +1486,22 @@ func IsLikelyJSON(b []byte) bool {
 	return false
 }
 
-func FromJSONBytes(js []byte) ([]byte, error) {
+func cborFromJSONBytes(js []byte) ([]byte, error) {
 	dec := json.NewDecoder(strings.NewReader(string(js)))
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
 		return nil, err
 	}
-	return jsonToCBOR(nil, v)
+	return cborjsonToCBOR(nil, v)
 }
 
-func jsonToCBOR(b []byte, v any) ([]byte, error) {
+func cborjsonToCBOR(b []byte, v any) ([]byte, error) {
 	switch x := v.(type) {
 	case nil:
-		return AppendNil(b), nil
+		return cborAppendNil(b), nil
 	case bool:
-		return AppendBool(b, x), nil
+		return cborAppendBool(b, x), nil
 	case json.Number:
 
 		if strings.ContainsAny(string(x), ".eE") {
@@ -1509,25 +1509,25 @@ func jsonToCBOR(b []byte, v any) ([]byte, error) {
 			if err != nil {
 				return b, err
 			}
-			return AppendFloat64(b, f), nil
+			return cborAppendFloat64(b, f), nil
 		}
 		if i, err := x.Int64(); err == nil {
-			return AppendInt64(b, i), nil
+			return cborAppendInt64(b, i), nil
 		}
 		f, err := x.Float64()
 		if err != nil {
 			return b, err
 		}
-		return AppendFloat64(b, f), nil
+		return cborAppendFloat64(b, f), nil
 	case float64:
-		return AppendFloat64(b, x), nil
+		return cborAppendFloat64(b, x), nil
 	case string:
-		return AppendString(b, x), nil
+		return cborAppendString(b, x), nil
 	case []any:
-		b = AppendArrayHeader(b, uint32(len(x)))
+		b = cborAppendArrayHeader(b, uint32(len(x)))
 		var err error
 		for _, e := range x {
-			b, err = jsonToCBOR(b, e)
+			b, err = cborjsonToCBOR(b, e)
 			if err != nil {
 				return b, err
 			}
@@ -1535,41 +1535,41 @@ func jsonToCBOR(b []byte, v any) ([]byte, error) {
 		return b, nil
 	case map[string]any:
 
-		if out, ok, err := tryWrapper(b, x); ok || err != nil {
+		if out, ok, err := cbortryWrapper(b, x); ok || err != nil {
 			return out, err
 		}
 
-		b = AppendMapHeader(b, uint32(len(x)))
+		b = cborAppendMapHeader(b, uint32(len(x)))
 		var err error
 		for k, vv := range x {
-			b = AppendString(b, k)
-			b, err = jsonToCBOR(b, vv)
+			b = cborAppendString(b, k)
+			b, err = cborjsonToCBOR(b, vv)
 			if err != nil {
 				return b, err
 			}
 		}
 		return b, nil
 	default:
-		return b, &ErrUnsupportedType{}
+		return b, &cborErrUnsupportedType{}
 	}
 }
 
-func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
+func cbortryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 
 	if tagv, ok := m["$tag"]; ok {
 		iv, ok2 := m["$"]
 		if !ok2 {
 			return b, true, errors.New("cbor: $tag wrapper missing $ field")
 		}
-		tag, err := numToUint64(tagv)
+		tag, err := cbornumToUint64(tagv)
 		if err != nil {
 			return b, true, err
 		}
-		inner, err := jsonToCBOR(nil, iv)
+		inner, err := cborjsonToCBOR(nil, iv)
 		if err != nil {
 			return b, true, err
 		}
-		return AppendTagged(b, tag, inner), true, nil
+		return cborAppendTagged(b, tag, inner), true, nil
 	}
 
 	if v, ok := m["$rfc3339"]; ok {
@@ -1581,7 +1581,7 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if err != nil {
 			return b, true, err
 		}
-		return AppendRFC3339Time(b, t), true, nil
+		return cborAppendRFC3339Time(b, t), true, nil
 	}
 
 	if v, ok := m["$epoch"]; ok {
@@ -1601,15 +1601,15 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		default:
 			return b, true, errors.New("cbor: $epoch expects number")
 		}
-		sec := mathFloor(f)
-		ns := int64(mathRound((f - float64(sec)) * 1e9))
+		sec := cbormathFloor(f)
+		ns := int64(cbormathRound((f - float64(sec)) * 1e9))
 		secs := int64(sec)
 		if ns >= 1e9 {
 			secs++
 			ns -= 1e9
 		}
 		t := time.Unix(secs, ns).UTC()
-		return AppendTime(b, t), true, nil
+		return cborAppendTime(b, t), true, nil
 	}
 
 	if v, ok := m["$decimal"]; ok {
@@ -1617,7 +1617,7 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if !ok || len(arr) != 2 {
 			return b, true, errors.New("cbor: $decimal expects [exp, mant]")
 		}
-		exp, err := anyToInt64(arr[0])
+		exp, err := cboranyToInt64(arr[0])
 		if err != nil {
 			return b, true, err
 		}
@@ -1629,7 +1629,7 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if !ok {
 			return b, true, errors.New("cbor: invalid $decimal mantissa")
 		}
-		return AppendDecimalFraction(b, exp, z), true, nil
+		return cborAppendDecimalFraction(b, exp, z), true, nil
 	}
 
 	if v, ok := m["$bigfloat"]; ok {
@@ -1637,7 +1637,7 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if !ok || len(arr) != 2 {
 			return b, true, errors.New("cbor: $bigfloat expects [exp, mant]")
 		}
-		exp, err := anyToInt64(arr[0])
+		exp, err := cboranyToInt64(arr[0])
 		if err != nil {
 			return b, true, err
 		}
@@ -1649,7 +1649,7 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if !ok {
 			return b, true, errors.New("cbor: invalid $bigfloat mantissa")
 		}
-		return AppendBigfloat(b, exp, z), true, nil
+		return cborAppendBigfloat(b, exp, z), true, nil
 	}
 
 	if v, ok := m["$base64url"]; ok {
@@ -1658,7 +1658,7 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if err != nil {
 			return b, true, err
 		}
-		return AppendBase64URL(b, bs), true, nil
+		return cborAppendBase64URL(b, bs), true, nil
 	}
 
 	if v, ok := m["$base64"]; ok {
@@ -1667,7 +1667,7 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if err != nil {
 			return b, true, err
 		}
-		return AppendBase64(b, bs), true, nil
+		return cborAppendBase64(b, bs), true, nil
 	}
 
 	if v, ok := m["$base16"]; ok {
@@ -1676,7 +1676,7 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if err != nil {
 			return b, true, err
 		}
-		return AppendBase16(b, bs), true, nil
+		return cborAppendBase16(b, bs), true, nil
 	}
 
 	if v, ok := m["$cbor"]; ok {
@@ -1685,7 +1685,7 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if err != nil {
 			return b, true, err
 		}
-		return AppendEmbeddedCBOR(b, bs), true, nil
+		return cborAppendEmbeddedCBOR(b, bs), true, nil
 	}
 
 	if v, ok := m["$uri"]; ok {
@@ -1693,17 +1693,17 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if s == "" {
 			return b, true, errors.New("cbor: $uri expects string")
 		}
-		return AppendURI(b, s), true, nil
+		return cborAppendURI(b, s), true, nil
 	}
 
 	if v, ok := m["$base64urlstr"]; ok {
 		s, _ := v.(string)
-		return AppendBase64URLString(b, s), true, nil
+		return cborAppendBase64URLString(b, s), true, nil
 	}
 
 	if v, ok := m["$base64str"]; ok {
 		s, _ := v.(string)
-		return AppendBase64String(b, s), true, nil
+		return cborAppendBase64String(b, s), true, nil
 	}
 
 	if v, ok := m["$regex"]; ok {
@@ -1714,7 +1714,7 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if _, err := regexp.Compile(s); err != nil {
 			return b, true, err
 		}
-		return AppendRegexpString(b, s), true, nil
+		return cborAppendRegexpString(b, s), true, nil
 	}
 
 	if v, ok := m["$mime"]; ok {
@@ -1722,7 +1722,7 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if s == "" {
 			return b, true, errors.New("cbor: $mime expects string")
 		}
-		return AppendMIMEString(b, s), true, nil
+		return cborAppendMIMEString(b, s), true, nil
 	}
 
 	if v, ok := m["$uuid"]; ok {
@@ -1737,7 +1737,7 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		}
 		var u [16]byte
 		copy(u[:], bs)
-		return AppendUUID(b, u), true, nil
+		return cborAppendUUID(b, u), true, nil
 	}
 
 	if v, ok := m["$selfdescribe"]; ok {
@@ -1745,12 +1745,12 @@ func tryWrapper(b []byte, m map[string]any) ([]byte, bool, error) {
 		if !bval {
 			return b, true, errors.New("cbor: $selfdescribe expects true")
 		}
-		return AppendSelfDescribeCBOR(b), true, nil
+		return cborAppendSelfDescribeCBOR(b), true, nil
 	}
 	return b, false, nil
 }
 
-func numToUint64(v any) (uint64, error) {
+func cbornumToUint64(v any) (uint64, error) {
 	switch t := v.(type) {
 	case json.Number:
 		if strings.ContainsAny(string(t), ".eE") {
@@ -1791,7 +1791,7 @@ func numToUint64(v any) (uint64, error) {
 	}
 }
 
-func anyToInt64(v any) (int64, error) {
+func cboranyToInt64(v any) (int64, error) {
 	switch t := v.(type) {
 	case json.Number:
 		i, err := t.Int64()
@@ -1810,7 +1810,7 @@ func anyToInt64(v any) (int64, error) {
 	}
 }
 
-func mathFloor(f float64) float64 {
+func cbormathFloor(f float64) float64 {
 	if f >= 0 {
 		return float64(int64(f))
 	}
@@ -1820,17 +1820,17 @@ func mathFloor(f float64) float64 {
 	return float64(int64(f) - 1)
 }
 
-func mathRound(f float64) float64 {
+func cbormathRound(f float64) float64 {
 	if f >= 0 {
 		return float64(int64(f + 0.5))
 	}
 	return float64(int64(f - 0.5))
 }
 
-func ToJSONBytes(b []byte) ([]byte, []byte, error) {
-	bb := GetByteBuffer()
-	defer PutByteBuffer(bb)
-	rest, err := toJSON(bb, b, 0)
+func cborToJSONBytes(b []byte) ([]byte, []byte, error) {
+	bb := cborGetByteBuffer()
+	defer cborPutByteBuffer(bb)
+	rest, err := cbortoJSON(bb, b, 0)
 	if err != nil {
 		return nil, b, err
 	}
@@ -1839,60 +1839,60 @@ func ToJSONBytes(b []byte) ([]byte, []byte, error) {
 	return out, rest, nil
 }
 
-func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
-	if depth > recursionLimit {
-		return b, ErrMaxDepthExceeded
+func cbortoJSON(buf *cborByteBuffer, b []byte, depth int) ([]byte, error) {
+	if depth > cborrecursionLimit {
+		return b, cborErrMaxDepthExceeded
 	}
 	if len(b) < 1 {
-		return b, ErrShortBytes
+		return b, cborErrShortBytes
 	}
-	maj := getMajorType(b[0])
-	add := getAddInfo(b[0])
+	maj := cborgetMajorType(b[0])
+	add := cborgetAddInfo(b[0])
 
 	switch maj {
-	case majorTypeUint:
-		u, o, err := readUintCore(b, majorTypeUint)
+	case cbormajorTypeUint:
+		u, o, err := cborreadUintCore(b, cbormajorTypeUint)
 		if err != nil {
 			return b, err
 		}
 		buf.WriteString(strconv.FormatUint(u, 10))
 		return o, nil
-	case majorTypeNegInt:
-		u, o, err := readUintCore(b, majorTypeNegInt)
+	case cbormajorTypeNegInt:
+		u, o, err := cborreadUintCore(b, cbormajorTypeNegInt)
 		if err != nil {
 			return b, err
 		}
 		n := int64(-1) - int64(u)
 		buf.WriteString(strconv.FormatInt(n, 10))
 		return o, nil
-	case majorTypeBytes:
-		bs, o, err := ReadBytesBytes(b, nil)
+	case cbormajorTypeBytes:
+		bs, o, err := cborReadBytesBytes(b, nil)
 		if err != nil {
 			return b, err
 		}
 
 		buf.WriteString("\"")
-		encodeBase64Std(buf, bs)
+		cborencodeBase64Std(buf, bs)
 		buf.WriteString("\"")
 		return o, nil
-	case majorTypeText:
-		s, o, err := ReadStringBytes(b)
+	case cbormajorTypeText:
+		s, o, err := cborReadStringBytes(b)
 		if err != nil {
 			return b, err
 		}
 		js, _ := json.Marshal(s)
 		buf.Write(js)
 		return o, nil
-	case majorTypeArray:
-		if add == addInfoIndefinite {
+	case cbormajorTypeArray:
+		if add == cboraddInfoIndefinite {
 			buf.WriteString("[")
 			p := b[1:]
 			first := true
 			for {
 				if len(p) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					buf.WriteString("]")
 					return p[1:], nil
 				}
@@ -1902,13 +1902,13 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 					first = false
 				}
 				var err error
-				p, err = toJSON(buf, p, depth+1)
+				p, err = cbortoJSON(buf, p, depth+1)
 				if err != nil {
 					return b, err
 				}
 			}
 		}
-		sz, p, err := readUintCore(b, majorTypeArray)
+		sz, p, err := cborreadUintCore(b, cbormajorTypeArray)
 		if err != nil {
 			return b, err
 		}
@@ -1918,29 +1918,29 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 				buf.WriteString(",")
 			}
 			var err error
-			p, err = toJSON(buf, p, depth+1)
+			p, err = cbortoJSON(buf, p, depth+1)
 			if err != nil {
 				return b, err
 			}
 		}
 		buf.WriteString("]")
 		return p, nil
-	case majorTypeMap:
-		if add == addInfoIndefinite {
+	case cbormajorTypeMap:
+		if add == cboraddInfoIndefinite {
 			buf.WriteString("{")
 			p := b[1:]
 			first := true
 			for {
 				if len(p) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					buf.WriteString("}")
 					return p[1:], nil
 				}
 
-				if getMajorType(p[0]) == majorTypeText {
-					k, o, err := ReadStringBytes(p)
+				if cborgetMajorType(p[0]) == cbormajorTypeText {
+					k, o, err := cborReadStringBytes(p)
 					if err != nil {
 						return b, err
 					}
@@ -1953,13 +1953,13 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 					buf.Write(kj)
 					buf.WriteString(":")
 					var err2 error
-					p, err2 = toJSON(buf, o, depth+1)
+					p, err2 = cbortoJSON(buf, o, depth+1)
 					if err2 != nil {
 						return b, err2
 					}
 				} else {
 
-					ks, o, err := DiagBytes(p)
+					ks, o, err := cborDiagBytes(p)
 					if err != nil {
 						return b, err
 					}
@@ -1972,14 +1972,14 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 					buf.Write(kj)
 					buf.WriteString(":")
 					var err2 error
-					p, err2 = toJSON(buf, o, depth+1)
+					p, err2 = cbortoJSON(buf, o, depth+1)
 					if err2 != nil {
 						return b, err2
 					}
 				}
 			}
 		}
-		sz, p, err := readUintCore(b, majorTypeMap)
+		sz, p, err := cborreadUintCore(b, cbormajorTypeMap)
 		if err != nil {
 			return b, err
 		}
@@ -1988,8 +1988,8 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 			if i > 0 {
 				buf.WriteString(",")
 			}
-			if getMajorType(p[0]) == majorTypeText {
-				k, o, err := ReadStringBytes(p)
+			if cborgetMajorType(p[0]) == cbormajorTypeText {
+				k, o, err := cborReadStringBytes(p)
 				if err != nil {
 					return b, err
 				}
@@ -1997,12 +1997,12 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 				buf.Write(kj)
 				buf.WriteString(":")
 				var err2 error
-				p, err2 = toJSON(buf, o, depth+1)
+				p, err2 = cbortoJSON(buf, o, depth+1)
 				if err2 != nil {
 					return b, err2
 				}
 			} else {
-				ks, o, err := DiagBytes(p)
+				ks, o, err := cborDiagBytes(p)
 				if err != nil {
 					return b, err
 				}
@@ -2010,7 +2010,7 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 				buf.Write(kj)
 				buf.WriteString(":")
 				var err2 error
-				p, err2 = toJSON(buf, o, depth+1)
+				p, err2 = cbortoJSON(buf, o, depth+1)
 				if err2 != nil {
 					return b, err2
 				}
@@ -2018,38 +2018,38 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 		}
 		buf.WriteString("}")
 		return p, nil
-	case majorTypeTag:
-		tag, o, err := ReadTagBytes(b)
+	case cbormajorTypeTag:
+		tag, o, err := cborReadTagBytes(b)
 		if err != nil {
 			return b, err
 		}
 		switch tag {
-		case tagDateTimeString:
-			tm, rest, err := ReadRFC3339TimeBytes(b)
+		case cbortagDateTimeString:
+			tm, rest, err := cborReadRFC3339TimeBytes(b)
 			if err != nil {
 				return b, err
 			}
 			js, _ := json.Marshal(tm.Format(time.RFC3339Nano))
 			buf.Write(js)
 			return rest, nil
-		case tagEpochDateTime:
-			tm, rest, err := ReadTimeBytes(b)
+		case cbortagEpochDateTime:
+			tm, rest, err := cborReadTimeBytes(b)
 			if err != nil {
 				return b, err
 			}
 			js, _ := json.Marshal(tm.Format(time.RFC3339Nano))
 			buf.Write(js)
 			return rest, nil
-		case tagPosBignum, tagNegBignum:
-			z, rest, err := ReadBigIntBytes(b)
+		case cbortagPosBignum, cbortagNegBignum:
+			z, rest, err := cborReadBigIntBytes(b)
 			if err != nil {
 				return b, err
 			}
 			js, _ := json.Marshal(z.String())
 			buf.Write(js)
 			return rest, nil
-		case tagDecimalFrac:
-			exp, mant, rest, err := ReadDecimalFractionBytes(b)
+		case cbortagDecimalFrac:
+			exp, mant, rest, err := cborReadDecimalFractionBytes(b)
 			if err != nil {
 				return b, err
 			}
@@ -2060,8 +2060,8 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 			buf.Write(ms)
 			buf.WriteString("]}")
 			return rest, nil
-		case tagBigfloat:
-			exp, mant, rest, err := ReadBigfloatBytes(b)
+		case cbortagBigfloat:
+			exp, mant, rest, err := cborReadBigfloatBytes(b)
 			if err != nil {
 				return b, err
 			}
@@ -2072,26 +2072,26 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 			buf.Write(ms)
 			buf.WriteString("]}")
 			return rest, nil
-		case tagBase64URL:
-			bs, rest, err := ReadBase64URLBytes(b)
+		case cbortagBase64URL:
+			bs, rest, err := cborReadBase64URLBytes(b)
 			if err != nil {
 				return b, err
 			}
 			buf.WriteString(`{"$base64url":"`)
-			encodeBase64RawURL(buf, bs)
+			cborencodeBase64RawURL(buf, bs)
 			buf.WriteString(`"}`)
 			return rest, nil
-		case tagBase64:
-			bs, rest, err := ReadBase64Bytes(b)
+		case cbortagBase64:
+			bs, rest, err := cborReadBase64Bytes(b)
 			if err != nil {
 				return b, err
 			}
 			buf.WriteString(`{"$base64":"`)
-			encodeBase64Std(buf, bs)
+			cborencodeBase64Std(buf, bs)
 			buf.WriteString(`"}`)
 			return rest, nil
-		case tagBase16:
-			bs, rest, err := ReadBase16Bytes(b)
+		case cbortagBase16:
+			bs, rest, err := cborReadBase16Bytes(b)
 			if err != nil {
 				return b, err
 			}
@@ -2100,25 +2100,25 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 			hex.Encode(d, bs)
 			buf.WriteString(`"}`)
 			return rest, nil
-		case tagCBOR:
-			payload, rest, err := ReadEmbeddedCBORBytes(b)
+		case cbortagCBOR:
+			payload, rest, err := cborReadEmbeddedCBORBytes(b)
 			if err != nil {
 				return b, err
 			}
 			buf.WriteString(`{"$cbor":"`)
-			encodeBase64Std(buf, payload)
+			cborencodeBase64Std(buf, payload)
 			buf.WriteString(`"}`)
 			return rest, nil
-		case tagURI:
-			s, rest, err := ReadURIStringBytes(b)
+		case cbortagURI:
+			s, rest, err := cborReadURIStringBytes(b)
 			if err != nil {
 				return b, err
 			}
 			js, _ := json.Marshal(s)
 			buf.Write(js)
 			return rest, nil
-		case tagBase64URLString:
-			s, rest, err := ReadBase64URLStringBytes(b)
+		case cbortagBase64URLString:
+			s, rest, err := cborReadBase64URLStringBytes(b)
 			if err != nil {
 				return b, err
 			}
@@ -2127,8 +2127,8 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 			buf.Write(js)
 			buf.WriteString("}")
 			return rest, nil
-		case tagBase64String:
-			s, rest, err := ReadBase64StringBytes(b)
+		case cbortagBase64String:
+			s, rest, err := cborReadBase64StringBytes(b)
 			if err != nil {
 				return b, err
 			}
@@ -2137,8 +2137,8 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 			buf.Write(js)
 			buf.WriteString("}")
 			return rest, nil
-		case tagRegexp:
-			s, rest, err := ReadRegexpStringBytes(b)
+		case cbortagRegexp:
+			s, rest, err := cborReadRegexpStringBytes(b)
 			if err != nil {
 				return b, err
 			}
@@ -2147,8 +2147,8 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 			buf.Write(js)
 			buf.WriteString("}")
 			return rest, nil
-		case tagMIME:
-			s, rest, err := ReadMIMEStringBytes(b)
+		case cbortagMIME:
+			s, rest, err := cborReadMIMEStringBytes(b)
 			if err != nil {
 				return b, err
 			}
@@ -2158,7 +2158,7 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 			buf.WriteString("}")
 			return rest, nil
 		case 37:
-			u, rest, err := ReadUUIDBytes(b)
+			u, rest, err := cborReadUUIDBytes(b)
 			if err != nil {
 				return b, err
 			}
@@ -2168,20 +2168,20 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 			buf.WriteString(uuidStr)
 			buf.WriteString(`"}`)
 			return rest, nil
-		case tagSelfDescribeCBOR:
-			_, found, _ := StripSelfDescribeCBOR(b)
+		case cbortagSelfDescribeCBOR:
+			_, found, _ := cborStripSelfDescribeCBOR(b)
 			if found {
 				buf.WriteString(`{"$selfdescribe":true}`)
-				_, o2, _ := ReadTagBytes(b)
+				_, o2, _ := cborReadTagBytes(b)
 				return o2, nil
 			}
-			return b, &ErrUnsupportedType{}
+			return b, &cborErrUnsupportedType{}
 		default:
 
-			vbuf := GetByteBuffer()
-			rest, err := toJSON(vbuf, o, depth+1)
+			vbuf := cborGetByteBuffer()
+			rest, err := cbortoJSON(vbuf, o, depth+1)
 			if err != nil {
-				PutByteBuffer(vbuf)
+				cborPutByteBuffer(vbuf)
 				return b, err
 			}
 			buf.WriteString(`{"$tag":`)
@@ -2189,45 +2189,45 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 			buf.WriteString(`,"$":`)
 			buf.Write(vbuf.Bytes())
 			buf.WriteString("}")
-			PutByteBuffer(vbuf)
+			cborPutByteBuffer(vbuf)
 			return rest, nil
 		}
-	case majorTypeSimple:
+	case cbormajorTypeSimple:
 		switch add {
-		case simpleFalse:
+		case cborsimpleFalse:
 			buf.WriteString("false")
 			return b[1:], nil
-		case simpleTrue:
+		case cborsimpleTrue:
 			buf.WriteString("true")
 			return b[1:], nil
-		case simpleNull, simpleUndefined:
+		case cborsimpleNull, cborsimpleUndefined:
 			buf.WriteString("null")
 			return b[1:], nil
-		case simpleFloat16:
-			f, o, err := ReadFloat16Bytes(b)
+		case cborsimpleFloat16:
+			f, o, err := cborReadFloat16Bytes(b)
 			if err != nil {
 				return b, err
 			}
 			buf.WriteString(strconv.FormatFloat(float64(f), 'g', -1, 32))
 			return o, nil
-		case simpleFloat32:
-			f, o, err := ReadFloat32Bytes(b)
+		case cborsimpleFloat32:
+			f, o, err := cborReadFloat32Bytes(b)
 			if err != nil {
 				return b, err
 			}
 			buf.WriteString(strconv.FormatFloat(float64(f), 'g', -1, 32))
 			return o, nil
-		case simpleFloat64:
-			f, o, err := ReadFloat64Bytes(b)
+		case cborsimpleFloat64:
+			f, o, err := cborReadFloat64Bytes(b)
 			if err != nil {
 				return b, err
 			}
 			buf.WriteString(strconv.FormatFloat(f, 'g', -1, 64))
 			return o, nil
-		case addInfoUint8:
+		case cboraddInfoUint8:
 
 			if len(b) < 2 {
-				return b, ErrShortBytes
+				return b, cborErrShortBytes
 			}
 			buf.WriteString("null")
 			return b[2:], nil
@@ -2237,13 +2237,13 @@ func toJSON(buf *ByteBuffer, b []byte, depth int) ([]byte, error) {
 				buf.WriteString("null")
 				return b[1:], nil
 			}
-			return b, &ErrUnsupportedType{}
+			return b, &cborErrUnsupportedType{}
 		}
 	}
-	return b, &ErrUnsupportedType{}
+	return b, &cborErrUnsupportedType{}
 }
 
-func encodeBase64Std(buf *ByteBuffer, src []byte) {
+func cborencodeBase64Std(buf *cborByteBuffer, src []byte) {
 	out := buf.Extend(base64.StdEncoding.EncodedLen(len(src)))
 	base64.StdEncoding.Encode(out, src)
 }
@@ -2396,7 +2396,7 @@ func encodeBase64Std(buf *ByteBuffer, src []byte) {
 
 // ReadBytesBytes reads a byte string
 
-func encodeBase64RawURL(buf *ByteBuffer, src []byte) {
+func cborencodeBase64RawURL(buf *cborByteBuffer, src []byte) {
 	out := buf.Extend(base64.RawURLEncoding.EncodedLen(len(src)))
 	base64.
 
@@ -2405,153 +2405,153 @@ func encodeBase64RawURL(buf *ByteBuffer, src []byte) {
 		RawURLEncoding.Encode(out, src)
 }
 
-func ReadJSONNumberBytes(b []byte) (json.Number, []byte, error) {
-	typ := NextType(b)
+func cborReadJSONNumberBytes(b []byte) (json.Number, []byte, error) {
+	typ := cborNextType(b)
 	switch typ {
-	case IntType:
-		v, o, err := ReadInt64Bytes(b)
+	case cborIntType:
+		v, o, err := cborReadInt64Bytes(b)
 		if err != nil {
 			return "", b, err
 		}
 		return json.Number(strconv.FormatInt(v, 10)), o, nil
-	case UintType:
-		v, o, err := ReadUint64Bytes(b)
+	case cborUintType:
+		v, o, err := cborReadUint64Bytes(b)
 		if err != nil {
 			return "", b, err
 		}
 		return json.Number(strconv.FormatUint(v, 10)), o, nil
-	case Float32Type:
-		v, o, err := ReadFloat32Bytes(b)
+	case cborFloat32Type:
+		v, o, err := cborReadFloat32Bytes(b)
 		if err != nil {
 			return "", b, err
 		}
 		return json.Number(strconv.FormatFloat(float64(v), 'f', -1, 64)), o, nil
-	case Float64Type:
-		v, o, err := ReadFloat64Bytes(b)
+	case cborFloat64Type:
+		v, o, err := cborReadFloat64Bytes(b)
 		if err != nil {
 			return "", b, err
 		}
 		return json.Number(strconv.FormatFloat(v, 'f', -1, 64)), o, nil
 	default:
-		return "", b, &ErrUnsupportedType{}
+		return "", b, &cborErrUnsupportedType{}
 	}
 }
 
-type Number struct {
+type cborNumber struct {
 	bits uint64
-	typ  Type
+	typ  cborType
 }
 
-func (n *Number) AsInt(i int64) {
+func (n *cborNumber) AsInt(i int64) {
 	if i == 0 {
-		n.typ = InvalidType
+		n.typ = cborInvalidType
 		n.bits = 0
 		return
 	}
 
-	n.typ = IntType
+	n.typ = cborIntType
 	n.bits = uint64(i)
 }
 
-func (n *Number) AsUint(u uint64) {
-	n.typ = UintType
+func (n *cborNumber) AsUint(u uint64) {
+	n.typ = cborUintType
 	n.bits = u
 }
 
-func (n *Number) AsFloat32(f float32) {
-	n.typ = Float32Type
+func (n *cborNumber) AsFloat32(f float32) {
+	n.typ = cborFloat32Type
 	n.bits = uint64(math.Float32bits(f))
 }
 
-func (n *Number) AsFloat64(f float64) {
-	n.typ = Float64Type
+func (n *cborNumber) AsFloat64(f float64) {
+	n.typ = cborFloat64Type
 	n.bits = math.Float64bits(f)
 }
 
-func (n *Number) Int() (int64, bool) {
-	return int64(n.bits), n.typ == IntType || n.typ == InvalidType
+func (n *cborNumber) Int() (int64, bool) {
+	return int64(n.bits), n.typ == cborIntType || n.typ == cborInvalidType
 }
 
-func (n *Number) Uint() (uint64, bool) {
-	return n.bits, n.typ == UintType
+func (n *cborNumber) Uint() (uint64, bool) {
+	return n.bits, n.typ == cborUintType
 }
 
-func (n *Number) Float() (float64, bool) {
+func (n *cborNumber) Float() (float64, bool) {
 	switch n.typ {
-	case Float32Type:
+	case cborFloat32Type:
 		return float64(math.Float32frombits(uint32(n.bits))), true
-	case Float64Type:
+	case cborFloat64Type:
 		return math.Float64frombits(n.bits), true
 	default:
 		return 0, false
 	}
 }
 
-func (n *Number) Type() Type {
-	if n.typ == InvalidType {
-		return IntType
+func (n *cborNumber) Type() cborType {
+	if n.typ == cborInvalidType {
+		return cborIntType
 	}
 	return n.typ
 }
 
-func (n *Number) UnmarshalCBOR(b []byte) ([]byte, error) {
-	typ := NextType(b)
+func (n *cborNumber) UnmarshalCBOR(b []byte) ([]byte, error) {
+	typ := cborNextType(b)
 	switch typ {
-	case IntType:
-		i, o, err := ReadInt64Bytes(b)
+	case cborIntType:
+		i, o, err := cborReadInt64Bytes(b)
 		if err != nil {
 			return b, err
 		}
 		n.AsInt(i)
 		return o, nil
-	case UintType:
-		u, o, err := ReadUint64Bytes(b)
+	case cborUintType:
+		u, o, err := cborReadUint64Bytes(b)
 		if err != nil {
 			return b, err
 		}
 		n.AsUint(u)
 		return o, nil
-	case Float64Type:
-		f, o, err := ReadFloat64Bytes(b)
+	case cborFloat64Type:
+		f, o, err := cborReadFloat64Bytes(b)
 		if err != nil {
 			return b, err
 		}
 		n.AsFloat64(f)
 		return o, nil
-	case Float32Type:
-		f, o, err := ReadFloat32Bytes(b)
+	case cborFloat32Type:
+		f, o, err := cborReadFloat32Bytes(b)
 		if err != nil {
 			return b, err
 		}
 		n.AsFloat32(f)
 		return o, nil
 	default:
-		return b, &ErrUnsupportedType{}
+		return b, &cborErrUnsupportedType{}
 	}
 }
 
-func (n *Number) MarshalCBOR(b []byte) ([]byte, error) {
+func (n *cborNumber) MarshalCBOR(b []byte) ([]byte, error) {
 	switch n.typ {
-	case IntType:
-		return AppendInt64(b, int64(n.bits)), nil
-	case UintType:
-		return AppendUint64(b, n.bits), nil
-	case Float64Type:
-		return AppendFloat64(b, math.Float64frombits(n.bits)), nil
-	case Float32Type:
-		return AppendFloat32(b, math.Float32frombits(uint32(n.bits))), nil
+	case cborIntType:
+		return cborAppendInt64(b, int64(n.bits)), nil
+	case cborUintType:
+		return cborAppendUint64(b, n.bits), nil
+	case cborFloat64Type:
+		return cborAppendFloat64(b, math.Float64frombits(n.bits)), nil
+	case cborFloat32Type:
+		return cborAppendFloat32(b, math.Float32frombits(uint32(n.bits))), nil
 	default:
-		return AppendInt64(b, 0), nil
+		return cborAppendInt64(b, 0), nil
 	}
 }
 
-func (n *Number) CoerceInt() (int64, bool) {
+func (n *cborNumber) CoerceInt() (int64, bool) {
 	switch n.typ {
-	case InvalidType, IntType:
+	case cborInvalidType, cborIntType:
 		return int64(n.bits), true
-	case UintType:
+	case cborUintType:
 		return int64(n.bits), n.bits <= math.MaxInt64
-	case Float32Type:
+	case cborFloat32Type:
 		f := math.Float32frombits(uint32(n.bits))
 		if n.isExactInt() && f <= math.MaxInt64 && f >= math.MinInt64 {
 			return int64(f), true
@@ -2559,7 +2559,7 @@ func (n *Number) CoerceInt() (int64, bool) {
 		if n.bits == 0 || n.bits == 1<<31 {
 			return 0, true
 		}
-	case Float64Type:
+	case cborFloat64Type:
 		f := math.Float64frombits(n.bits)
 		if n.isExactInt() && f <= math.MaxInt64 && f >= math.MinInt64 {
 			return int64(f), true
@@ -2569,15 +2569,15 @@ func (n *Number) CoerceInt() (int64, bool) {
 	return 0, false
 }
 
-func (n *Number) CoerceUInt() (uint64, bool) {
+func (n *cborNumber) CoerceUInt() (uint64, bool) {
 	switch n.typ {
-	case InvalidType, IntType:
+	case cborInvalidType, cborIntType:
 		if int64(n.bits) >= 0 {
 			return n.bits, true
 		}
-	case UintType:
+	case cborUintType:
 		return n.bits, true
-	case Float32Type:
+	case cborFloat32Type:
 		f := math.Float32frombits(uint32(n.bits))
 		if f >= 0 && f <= math.MaxUint64 && n.isExactInt() {
 			return uint64(f), true
@@ -2585,7 +2585,7 @@ func (n *Number) CoerceUInt() (uint64, bool) {
 		if n.bits == 0 || n.bits == 1<<31 {
 			return 0, true
 		}
-	case Float64Type:
+	case cborFloat64Type:
 		f := math.Float64frombits(n.bits)
 		if f >= 0 && f <= math.MaxUint64 && n.isExactInt() {
 			return uint64(f), true
@@ -2595,16 +2595,16 @@ func (n *Number) CoerceUInt() (uint64, bool) {
 	return 0, false
 }
 
-func (n *Number) isExactInt() bool {
+func (n *cborNumber) isExactInt() bool {
 	var eBits, mBits int
 
 	switch n.typ {
-	case InvalidType, IntType, UintType:
+	case cborInvalidType, cborIntType, cborUintType:
 		return true
-	case Float32Type:
+	case cborFloat32Type:
 		eBits = 8
 		mBits = 23
-	case Float64Type:
+	case cborFloat64Type:
 		eBits = 11
 		mBits = 52
 	default:
@@ -2627,47 +2627,47 @@ func (n *Number) isExactInt() bool {
 	return bits.TrailingZeros64(mant) >= mBits-exp
 }
 
-func (n *Number) CoerceFloat() float64 {
+func (n *cborNumber) CoerceFloat() float64 {
 	switch n.typ {
-	case IntType:
+	case cborIntType:
 		return float64(int64(n.bits))
-	case UintType:
+	case cborUintType:
 		return float64(n.bits)
-	case Float32Type:
+	case cborFloat32Type:
 		return float64(math.Float32frombits(uint32(n.bits)))
-	case Float64Type:
+	case cborFloat64Type:
 		return math.Float64frombits(n.bits)
 	default:
 		return 0
 	}
 }
 
-func (n *Number) Msgsize() int {
+func (n *cborNumber) Msgsize() int {
 	switch n.typ {
-	case Float32Type:
-		return Float32Size
-	case Float64Type:
-		return Float64Size
-	case IntType:
-		return Int64Size
-	case UintType:
-		return Uint64Size
+	case cborFloat32Type:
+		return cborFloat32Size
+	case cborFloat64Type:
+		return cborFloat64Size
+	case cborIntType:
+		return cborInt64Size
+	case cborUintType:
+		return cborUint64Size
 	default:
 		return 1
 	}
 }
 
-func (n *Number) String() string {
+func (n *cborNumber) String() string {
 	switch n.typ {
-	case InvalidType:
+	case cborInvalidType:
 		return "0"
-	case Float32Type, Float64Type:
+	case cborFloat32Type, cborFloat64Type:
 		f, _ := n.Float()
 		return strconv.FormatFloat(f, 'f', -1, 64)
-	case IntType:
+	case cborIntType:
 		i, _ := n.Int()
 		return strconv.FormatInt(i, 10)
-	case UintType:
+	case cborUintType:
 		u, _ := n.Uint()
 		return strconv.FormatUint(u, 10)
 	default:
@@ -2675,51 +2675,51 @@ func (n *Number) String() string {
 	}
 }
 
-var be = binary.BigEndian
+var cborbe = binary.BigEndian
 
-func readUintCore(b []byte, expectedMajor uint8) (uint64, []byte, error) {
+func cborreadUintCore(b []byte, expectedMajor uint8) (uint64, []byte, error) {
 	if len(b) < 1 {
-		return 0, b, ErrShortBytes
+		return 0, b, cborErrShortBytes
 	}
 
-	major := getMajorType(b[0])
+	major := cborgetMajorType(b[0])
 	if major != expectedMajor {
-		return 0, b, badPrefix(major, expectedMajor)
+		return 0, b, cborbadPrefix(major, expectedMajor)
 	}
 
-	addInfo := getAddInfo(b[0])
+	addInfo := cborgetAddInfo(b[0])
 
 	switch {
-	case addInfo <= addInfoDirect:
+	case addInfo <= cboraddInfoDirect:
 		return uint64(addInfo), b[1:], nil
-	case addInfo == addInfoUint8:
+	case addInfo == cboraddInfoUint8:
 		if len(b) < 2 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
 		return uint64(b[1]), b[2:], nil
-	case addInfo == addInfoUint16:
+	case addInfo == cboraddInfoUint16:
 		if len(b) < 3 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		return uint64(be.Uint16(b[1:])), b[3:], nil
-	case addInfo == addInfoUint32:
+		return uint64(cborbe.Uint16(b[1:])), b[3:], nil
+	case addInfo == cboraddInfoUint32:
 		if len(b) < 5 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		return uint64(be.Uint32(b[1:])), b[5:], nil
-	case addInfo == addInfoUint64:
+		return uint64(cborbe.Uint32(b[1:])), b[5:], nil
+	case addInfo == cboraddInfoUint64:
 		if len(b) < 9 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		return be.Uint64(b[1:]), b[9:], nil
+		return cborbe.Uint64(b[1:]), b[9:], nil
 	default:
-		return 0, b, &ErrUnsupportedType{}
+		return 0, b, &cborErrUnsupportedType{}
 	}
 }
 
-func ReadMapHeaderBytes(b []byte) (sz uint32, o []byte, err error) {
+func cborReadMapHeaderBytes(b []byte) (sz uint32, o []byte, err error) {
 	if len(b) < 1 {
-		return 0, b, ErrShortBytes
+		return 0, b, cborErrShortBytes
 	}
 
 	lead := b[0]
@@ -2729,40 +2729,40 @@ func ReadMapHeaderBytes(b []byte) (sz uint32, o []byte, err error) {
 	}
 	if lead == 0xb8 {
 		if len(b) < 2 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
 		return uint32(b[1]), b[2:], nil
 	}
 	if lead == 0xb9 {
 		if len(b) < 3 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		return uint32(be.Uint16(b[1:])), b[3:], nil
+		return uint32(cborbe.Uint16(b[1:])), b[3:], nil
 	}
 	if lead == 0xba {
 		if len(b) < 5 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		return be.Uint32(b[1:]), b[5:], nil
+		return cborbe.Uint32(b[1:]), b[5:], nil
 	}
 	if lead == 0xbb {
 		if len(b) < 9 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		u := be.Uint64(b[1:])
+		u := cborbe.Uint64(b[1:])
 		if u > math.MaxUint32 {
-			return 0, b, UintOverflow{Value: u, FailedBitsize: 32}
+			return 0, b, cborUintOverflow{Value: u, FailedBitsize: 32}
 		}
 		return uint32(u), b[9:], nil
 	}
 
-	major := getMajorType(lead)
-	return 0, b, badPrefix(major, majorTypeMap)
+	major := cborgetMajorType(lead)
+	return 0, b, cborbadPrefix(major, cbormajorTypeMap)
 }
 
-func ReadArrayHeaderBytes(b []byte) (sz uint32, o []byte, err error) {
+func cborReadArrayHeaderBytes(b []byte) (sz uint32, o []byte, err error) {
 	if len(b) < 1 {
-		return 0, b, ErrShortBytes
+		return 0, b, cborErrShortBytes
 	}
 
 	lead := b[0]
@@ -2772,118 +2772,118 @@ func ReadArrayHeaderBytes(b []byte) (sz uint32, o []byte, err error) {
 	}
 	if lead == 0x98 {
 		if len(b) < 2 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
 		return uint32(b[1]), b[2:], nil
 	}
 	if lead == 0x99 {
 		if len(b) < 3 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		return uint32(be.Uint16(b[1:])), b[3:], nil
+		return uint32(cborbe.Uint16(b[1:])), b[3:], nil
 	}
 	if lead == 0x9a {
 		if len(b) < 5 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		return be.Uint32(b[1:]), b[5:], nil
+		return cborbe.Uint32(b[1:]), b[5:], nil
 	}
 	if lead == 0x9b {
 		if len(b) < 9 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		u := be.Uint64(b[1:])
+		u := cborbe.Uint64(b[1:])
 		if u > math.MaxUint32 {
-			return 0, b, UintOverflow{Value: u, FailedBitsize: 32}
+			return 0, b, cborUintOverflow{Value: u, FailedBitsize: 32}
 		}
 		return uint32(u), b[9:], nil
 	}
 
-	major := getMajorType(lead)
-	return 0, b, badPrefix(major, majorTypeArray)
+	major := cborgetMajorType(lead)
+	return 0, b, cborbadPrefix(major, cbormajorTypeArray)
 }
 
-func ReadMapStartBytes(b []byte) (sz uint32, indefinite bool, rest []byte, err error) {
+func cborReadMapStartBytes(b []byte) (sz uint32, indefinite bool, rest []byte, err error) {
 	if len(b) < 1 {
-		return 0, false, b, ErrShortBytes
+		return 0, false, b, cborErrShortBytes
 	}
-	if b[0] == makeByte(majorTypeMap, addInfoIndefinite) {
+	if b[0] == cbormakeByte(cbormajorTypeMap, cboraddInfoIndefinite) {
 		return 0, true, b[1:], nil
 	}
-	s, o, e := ReadMapHeaderBytes(b)
+	s, o, e := cborReadMapHeaderBytes(b)
 	return s, false, o, e
 }
 
-func ReadArrayStartBytes(b []byte) (sz uint32, indefinite bool, rest []byte, err error) {
+func cborReadArrayStartBytes(b []byte) (sz uint32, indefinite bool, rest []byte, err error) {
 	if len(b) < 1 {
-		return 0, false, b, ErrShortBytes
+		return 0, false, b, cborErrShortBytes
 	}
-	if b[0] == makeByte(majorTypeArray, addInfoIndefinite) {
+	if b[0] == cbormakeByte(cbormajorTypeArray, cboraddInfoIndefinite) {
 		return 0, true, b[1:], nil
 	}
-	s, o, e := ReadArrayHeaderBytes(b)
+	s, o, e := cborReadArrayHeaderBytes(b)
 	return s, false, o, e
 }
 
-func ReadBreakBytes(b []byte) (rest []byte, ok bool, err error) {
+func cborReadBreakBytes(b []byte) (rest []byte, ok bool, err error) {
 	if len(b) < 1 {
-		return b, false, ErrShortBytes
+		return b, false, cborErrShortBytes
 	}
-	if b[0] == makeByte(majorTypeSimple, simpleBreak) {
+	if b[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 		return b[1:], true, nil
 	}
 	return b, false, nil
 }
 
-func ReadNilBytes(b []byte) ([]byte, error) {
+func cborReadNilBytes(b []byte) ([]byte, error) {
 	if len(b) < 1 {
-		return b, ErrShortBytes
+		return b, cborErrShortBytes
 	}
-	if b[0] != makeByte(majorTypeSimple, simpleNull) {
-		return b, ErrNotNil
+	if b[0] != cbormakeByte(cbormajorTypeSimple, cborsimpleNull) {
+		return b, cborErrNotNil
 	}
 	return b[1:], nil
 }
 
-func ReadFloat64Bytes(b []byte) (f float64, o []byte, err error) {
+func cborReadFloat64Bytes(b []byte) (f float64, o []byte, err error) {
 	if len(b) < 9 {
-		return 0, b, ErrShortBytes
+		return 0, b, cborErrShortBytes
 	}
 
 	if b[0] != 0xfb {
-		return 0, b, badPrefix(getMajorType(b[0]), majorTypeSimple)
+		return 0, b, cborbadPrefix(cborgetMajorType(b[0]), cbormajorTypeSimple)
 	}
-	f = math.Float64frombits(be.Uint64(b[1:]))
+	f = math.Float64frombits(cborbe.Uint64(b[1:]))
 	return f, b[9:], nil
 }
 
-func ReadFloat32Bytes(b []byte) (f float32, o []byte, err error) {
+func cborReadFloat32Bytes(b []byte) (f float32, o []byte, err error) {
 	if len(b) < 5 {
-		return 0, b, ErrShortBytes
+		return 0, b, cborErrShortBytes
 	}
 
 	if b[0] != 0xfa {
-		return 0, b, badPrefix(getMajorType(b[0]), majorTypeSimple)
+		return 0, b, cborbadPrefix(cborgetMajorType(b[0]), cbormajorTypeSimple)
 	}
-	f = math.Float32frombits(be.Uint32(b[1:]))
+	f = math.Float32frombits(cborbe.Uint32(b[1:]))
 	return f, b[5:], nil
 }
 
-func ReadFloat16Bytes(b []byte) (f float32, o []byte, err error) {
+func cborReadFloat16Bytes(b []byte) (f float32, o []byte, err error) {
 	if len(b) < 3 {
-		return 0, b, ErrShortBytes
+		return 0, b, cborErrShortBytes
 	}
 	if b[0] != 0xF9 {
-		return 0, b, badPrefix(getMajorType(b[0]), majorTypeSimple)
+		return 0, b, cborbadPrefix(cborgetMajorType(b[0]), cbormajorTypeSimple)
 	}
 	h := binary.BigEndian.Uint16(b[1:])
-	f = float16BitsToFloat32(h)
+	f = cborfloat16BitsToFloat32(h)
 	return f, b[3:], nil
 }
 
-func ReadBoolBytes(b []byte) (bool, []byte, error) {
+func cborReadBoolBytes(b []byte) (bool, []byte, error) {
 	if len(b) < 1 {
-		return false, b, ErrShortBytes
+		return false, b, cborErrShortBytes
 	}
 
 	if b[0] == 0xf5 {
@@ -2892,12 +2892,12 @@ func ReadBoolBytes(b []byte) (bool, []byte, error) {
 	if b[0] == 0xf4 {
 		return false, b[1:], nil
 	}
-	return false, b, TypeError{Method: BoolType, Encoded: getType(b[0])}
+	return false, b, cborTypeError{Method: cborBoolType, Encoded: cborgetType(b[0])}
 }
 
-func ReadInt64Bytes(b []byte) (i int64, o []byte, err error) {
+func cborReadInt64Bytes(b []byte) (i int64, o []byte, err error) {
 	if len(b) < 1 {
-		return 0, b, ErrShortBytes
+		return 0, b, cborErrShortBytes
 	}
 
 	lead := b[0]
@@ -2907,30 +2907,30 @@ func ReadInt64Bytes(b []byte) (i int64, o []byte, err error) {
 	}
 	if lead == 0x18 {
 		if len(b) < 2 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
 		return int64(b[1]), b[2:], nil
 	}
 	if lead == 0x19 {
 		if len(b) < 3 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		return int64(be.Uint16(b[1:])), b[3:], nil
+		return int64(cborbe.Uint16(b[1:])), b[3:], nil
 	}
 	if lead == 0x1a {
 		if len(b) < 5 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		u := uint64(be.Uint32(b[1:]))
+		u := uint64(cborbe.Uint32(b[1:]))
 		return int64(u), b[5:], nil
 	}
 	if lead == 0x1b {
 		if len(b) < 9 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		u := be.Uint64(b[1:])
+		u := cborbe.Uint64(b[1:])
 		if u > math.MaxInt64 {
-			return 0, b, IntOverflow{Value: int64(u), FailedBitsize: 64}
+			return 0, b, cborIntOverflow{Value: int64(u), FailedBitsize: 64}
 		}
 		return int64(u), b[9:], nil
 	}
@@ -2940,157 +2940,157 @@ func ReadInt64Bytes(b []byte) (i int64, o []byte, err error) {
 	}
 	if lead == 0x38 {
 		if len(b) < 2 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
 		return -1 - int64(b[1]), b[2:], nil
 	}
 	if lead == 0x39 {
 		if len(b) < 3 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		return -1 - int64(be.Uint16(b[1:])), b[3:], nil
+		return -1 - int64(cborbe.Uint16(b[1:])), b[3:], nil
 	}
 	if lead == 0x3a {
 		if len(b) < 5 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		return -1 - int64(be.Uint32(b[1:])), b[5:], nil
+		return -1 - int64(cborbe.Uint32(b[1:])), b[5:], nil
 	}
 	if lead == 0x3b {
 		if len(b) < 9 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
-		u := be.Uint64(b[1:])
+		u := cborbe.Uint64(b[1:])
 		if u > math.MaxInt64 {
-			return 0, b, IntOverflow{Value: -1, FailedBitsize: 64}
+			return 0, b, cborIntOverflow{Value: -1, FailedBitsize: 64}
 		}
 		return -1 - int64(u), b[9:], nil
 	}
 
 	major := (lead >> 5) & 0x07
-	return 0, b, badPrefix(major, majorTypeUint)
+	return 0, b, cborbadPrefix(major, cbormajorTypeUint)
 }
 
-func ReadInt32Bytes(b []byte) (i int32, o []byte, err error) {
-	i64, o, err := ReadInt64Bytes(b)
+func cborReadInt32Bytes(b []byte) (i int32, o []byte, err error) {
+	i64, o, err := cborReadInt64Bytes(b)
 	if err != nil {
 		return 0, b, err
 	}
 	if i64 > math.MaxInt32 || i64 < math.MinInt32 {
-		return 0, b, IntOverflow{Value: i64, FailedBitsize: 32}
+		return 0, b, cborIntOverflow{Value: i64, FailedBitsize: 32}
 	}
 	return int32(i64), o, nil
 }
 
-func ReadInt16Bytes(b []byte) (i int16, o []byte, err error) {
-	i64, o, err := ReadInt64Bytes(b)
+func cborReadInt16Bytes(b []byte) (i int16, o []byte, err error) {
+	i64, o, err := cborReadInt64Bytes(b)
 	if err != nil {
 		return 0, b, err
 	}
 	if i64 > math.MaxInt16 || i64 < math.MinInt16 {
-		return 0, b, IntOverflow{Value: i64, FailedBitsize: 16}
+		return 0, b, cborIntOverflow{Value: i64, FailedBitsize: 16}
 	}
 	return int16(i64), o, nil
 }
 
-func ReadInt8Bytes(b []byte) (i int8, o []byte, err error) {
-	i64, o, err := ReadInt64Bytes(b)
+func cborReadInt8Bytes(b []byte) (i int8, o []byte, err error) {
+	i64, o, err := cborReadInt64Bytes(b)
 	if err != nil {
 		return 0, b, err
 	}
 	if i64 > math.MaxInt8 || i64 < math.MinInt8 {
-		return 0, b, IntOverflow{Value: i64, FailedBitsize: 8}
+		return 0, b, cborIntOverflow{Value: i64, FailedBitsize: 8}
 	}
 	return int8(i64), o, nil
 }
 
-func ReadIntBytes(b []byte) (i int, o []byte, err error) {
-	i64, o, err := ReadInt64Bytes(b)
+func cborReadIntBytes(b []byte) (i int, o []byte, err error) {
+	i64, o, err := cborReadInt64Bytes(b)
 	if err != nil {
 		return 0, b, err
 	}
 	return int(i64), o, nil
 }
 
-func ReadUint64Bytes(b []byte) (u uint64, o []byte, err error) {
-	return readUintCore(b, majorTypeUint)
+func cborReadUint64Bytes(b []byte) (u uint64, o []byte, err error) {
+	return cborreadUintCore(b, cbormajorTypeUint)
 }
 
-func ReadUint32Bytes(b []byte) (u uint32, o []byte, err error) {
-	u64, o, err := readUintCore(b, majorTypeUint)
+func cborReadUint32Bytes(b []byte) (u uint32, o []byte, err error) {
+	u64, o, err := cborreadUintCore(b, cbormajorTypeUint)
 	if err != nil {
 		return 0, b, err
 	}
 	if u64 > math.MaxUint32 {
-		return 0, b, UintOverflow{Value: u64, FailedBitsize: 32}
+		return 0, b, cborUintOverflow{Value: u64, FailedBitsize: 32}
 	}
 	return uint32(u64), o, nil
 }
 
-func ReadUint16Bytes(b []byte) (u uint16, o []byte, err error) {
-	u64, o, err := readUintCore(b, majorTypeUint)
+func cborReadUint16Bytes(b []byte) (u uint16, o []byte, err error) {
+	u64, o, err := cborreadUintCore(b, cbormajorTypeUint)
 	if err != nil {
 		return 0, b, err
 	}
 	if u64 > math.MaxUint16 {
-		return 0, b, UintOverflow{Value: u64, FailedBitsize: 16}
+		return 0, b, cborUintOverflow{Value: u64, FailedBitsize: 16}
 	}
 	return uint16(u64), o, nil
 }
 
-func ReadUint8Bytes(b []byte) (u uint8, o []byte, err error) {
-	u64, o, err := readUintCore(b, majorTypeUint)
+func cborReadUint8Bytes(b []byte) (u uint8, o []byte, err error) {
+	u64, o, err := cborreadUintCore(b, cbormajorTypeUint)
 	if err != nil {
 		return 0, b, err
 	}
 	if u64 > math.MaxUint8 {
-		return 0, b, UintOverflow{Value: u64, FailedBitsize: 8}
+		return 0, b, cborUintOverflow{Value: u64, FailedBitsize: 8}
 	}
 	return uint8(u64), o, nil
 }
 
-func ReadUintBytes(b []byte) (u uint, o []byte, err error) {
-	u64, o, err := readUintCore(b, majorTypeUint)
+func cborReadUintBytes(b []byte) (u uint, o []byte, err error) {
+	u64, o, err := cborreadUintCore(b, cbormajorTypeUint)
 	if err != nil {
 		return 0, b, err
 	}
 	return uint(u64), o, nil
 }
 
-func ReadBytesBytes(b []byte, scratch []byte) (v []byte, o []byte, err error) {
+func cborReadBytesBytes(b []byte, scratch []byte) (v []byte, o []byte, err error) {
 	if len(b) < 1 {
-		return nil, b, ErrShortBytes
+		return nil, b, cborErrShortBytes
 	}
 
-	if b[0] == makeByte(majorTypeBytes, addInfoIndefinite) {
+	if b[0] == cbormakeByte(cbormajorTypeBytes, cboraddInfoIndefinite) {
 		out := scratch[:0]
 		p := b[1:]
 		for {
 			if len(p) < 1 {
-				return nil, b, ErrShortBytes
+				return nil, b, cborErrShortBytes
 			}
 			// Break?
-			if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+			if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 				return out, p[1:], nil
 			}
 			// Next must be a definite-length byte string
-			sz, q, e := readUintCore(p, majorTypeBytes)
+			sz, q, e := cborreadUintCore(p, cbormajorTypeBytes)
 			if e != nil {
 				return nil, b, e
 			}
 			if uint64(len(q)) < sz {
-				return nil, b, ErrShortBytes
+				return nil, b, cborErrShortBytes
 			}
 			out = append(out, q[:sz]...)
 			p = q[sz:]
 		}
 	}
-	sz, o, err := readUintCore(b, majorTypeBytes)
+	sz, o, err := cborreadUintCore(b, cbormajorTypeBytes)
 	if err != nil {
 		return nil, b, err
 	}
 	if uint64(len(o)) < sz {
-		return nil, b, ErrShortBytes
+		return nil, b, cborErrShortBytes
 	}
 	if sz == 0 {
 		return scratch[:0], o, nil
@@ -3099,9 +3099,9 @@ func ReadBytesBytes(b []byte, scratch []byte) (v []byte, o []byte, err error) {
 }
 
 // ReadStringZC reads a text string zero-copy (returns slice into original buffer)
-func ReadStringZC(b []byte) (v []byte, o []byte, err error) {
+func cborReadStringZC(b []byte) (v []byte, o []byte, err error) {
 	if len(b) < 1 {
-		return nil, b, ErrShortBytes
+		return nil, b, cborErrShortBytes
 	}
 
 	lead := b[0]
@@ -3110,7 +3110,7 @@ func ReadStringZC(b []byte) (v []byte, o []byte, err error) {
 	if lead >= 0x60 && lead <= 0x77 {
 		sz := int(lead & 0x1f)
 		if len(b) < 1+sz {
-			return nil, b, ErrShortBytes
+			return nil, b, cborErrShortBytes
 		}
 		return b[1 : 1+sz], b[1+sz:], nil
 	}
@@ -3122,70 +3122,70 @@ func ReadStringZC(b []byte) (v []byte, o []byte, err error) {
 	switch lead {
 	case 0x78: // uint8
 		if len(b) < 2 {
-			return nil, b, ErrShortBytes
+			return nil, b, cborErrShortBytes
 		}
 		sz = int(b[1])
 		start = 2
 	case 0x79: // uint16
 		if len(b) < 3 {
-			return nil, b, ErrShortBytes
+			return nil, b, cborErrShortBytes
 		}
-		sz = int(be.Uint16(b[1:]))
+		sz = int(cborbe.Uint16(b[1:]))
 		start = 3
 	case 0x7a: // uint32
 		if len(b) < 5 {
-			return nil, b, ErrShortBytes
+			return nil, b, cborErrShortBytes
 		}
-		sz = int(be.Uint32(b[1:]))
+		sz = int(cborbe.Uint32(b[1:]))
 		start = 5
 	case 0x7b: // uint64
 		if len(b) < 9 {
-			return nil, b, ErrShortBytes
+			return nil, b, cborErrShortBytes
 		}
-		u64 := be.Uint64(b[1:])
+		u64 := cborbe.Uint64(b[1:])
 		if u64 > math.MaxInt {
-			return nil, b, UintOverflow{Value: u64, FailedBitsize: 64}
+			return nil, b, cborUintOverflow{Value: u64, FailedBitsize: 64}
 		}
 		sz = int(u64)
 		start = 9
 	default:
 		// Invalid major type
-		major := getMajorType(lead)
-		return nil, b, badPrefix(major, majorTypeText)
+		major := cborgetMajorType(lead)
+		return nil, b, cborbadPrefix(major, cbormajorTypeText)
 	}
 
 	// Guard against integer overflow and out-of-bounds slicing.
 	// Use subtraction form to avoid start+sz overflow when sz is near MaxInt.
 	if start < 0 || start > len(b) {
-		return nil, b, ErrShortBytes
+		return nil, b, cborErrShortBytes
 	}
 	if sz < 0 || sz > len(b)-start {
-		return nil, b, ErrShortBytes
+		return nil, b, cborErrShortBytes
 	}
 	end := start + sz
 	return b[start:end], b[end:], nil
 }
 
 // ReadStringBytes reads a text string
-func ReadStringBytes(b []byte) (s string, o []byte, err error) {
+func cborReadStringBytes(b []byte) (s string, o []byte, err error) {
 	if len(b) < 1 {
-		return "", b, ErrShortBytes
+		return "", b, cborErrShortBytes
 	}
 	// Indefinite-length text string (0x7f)
-	if b[0] == makeByte(majorTypeText, addInfoIndefinite) {
+	if b[0] == cbormakeByte(cbormajorTypeText, cboraddInfoIndefinite) {
 		p := b[1:]
 		var out []byte
 		for {
 			if len(p) < 1 {
-				return "", b, ErrShortBytes
+				return "", b, cborErrShortBytes
 			}
-			if p[0] == makeByte(majorTypeSimple, simpleBreak) {
-				if ValidateUTF8OnDecode && !isUTF8Valid(out) {
-					return "", b, ErrInvalidUTF8
+			if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
+				if cborValidateUTF8OnDecode && !cborisUTF8Valid(out) {
+					return "", b, cborErrInvalidUTF8
 				}
 				return string(out), p[1:], nil
 			}
-			chunk, q, e := ReadStringZC(p)
+			chunk, q, e := cborReadStringZC(p)
 			if e != nil {
 				return "", b, e
 			}
@@ -3193,91 +3193,91 @@ func ReadStringBytes(b []byte) (s string, o []byte, err error) {
 			p = q
 		}
 	}
-	v, o, err := ReadStringZC(b)
+	v, o, err := cborReadStringZC(b)
 	if err != nil {
 		return "", b, err
 	}
-	if ValidateUTF8OnDecode && !isUTF8Valid(v) {
-		return "", b, ErrInvalidUTF8
+	if cborValidateUTF8OnDecode && !cborisUTF8Valid(v) {
+		return "", b, cborErrInvalidUTF8
 	}
-	if UnsafeStringDecode {
-		return UnsafeString(v), o, nil
+	if cborUnsafeStringDecode {
+		return cborUnsafeString(v), o, nil
 	}
 	return string(v), o, nil
 }
 
 // ReadMapKeyZC reads a map key expecting a text string and returns its bytes zero-copy.
 // It is a thin wrapper around ReadStringZC for generated code compatibility.
-func ReadMapKeyZC(b []byte) (v []byte, o []byte, err error) {
+func cborReadMapKeyZC(b []byte) (v []byte, o []byte, err error) {
 	// For CBOR, map keys are typically text. Support text zero-copy here.
 	if len(b) < 1 {
-		return nil, b, ErrShortBytes
+		return nil, b, cborErrShortBytes
 	}
-	if getMajorType(b[0]) != majorTypeText {
+	if cborgetMajorType(b[0]) != cbormajorTypeText {
 		// Fallback: treat as text anyway to surface a type error consistently
-		return nil, b, TypeError{Method: StrType, Encoded: getType(b[0])}
+		return nil, b, cborTypeError{Method: cborStrType, Encoded: cborgetType(b[0])}
 	}
-	return ReadStringZC(b)
+	return cborReadStringZC(b)
 }
 
 // ReadSimpleValue reads a simple value and returns its numeric value.
 // Returns values 0..23 (including false/true/null/undefined) directly,
 // or 32..255 following a 0xf8 prefix. Float encodings are not handled here.
-func ReadSimpleValue(b []byte) (val uint8, o []byte, err error) {
+func cborReadSimpleValue(b []byte) (val uint8, o []byte, err error) {
 	if len(b) < 1 {
-		return 0, b, ErrShortBytes
+		return 0, b, cborErrShortBytes
 	}
-	major := getMajorType(b[0])
-	if major != majorTypeSimple {
-		return 0, b, badPrefix(major, majorTypeSimple)
+	major := cborgetMajorType(b[0])
+	if major != cbormajorTypeSimple {
+		return 0, b, cborbadPrefix(major, cbormajorTypeSimple)
 	}
-	addInfo := getAddInfo(b[0])
+	addInfo := cborgetAddInfo(b[0])
 	switch addInfo {
-	case simpleFloat16, simpleFloat32, simpleFloat64:
-		return 0, b, &ErrUnsupportedType{}
-	case addInfoUint8: // 0xf8 XX
+	case cborsimpleFloat16, cborsimpleFloat32, cborsimpleFloat64:
+		return 0, b, &cborErrUnsupportedType{}
+	case cboraddInfoUint8: // 0xf8 XX
 		if len(b) < 2 {
-			return 0, b, ErrShortBytes
+			return 0, b, cborErrShortBytes
 		}
 		return b[1], b[2:], nil
 	default:
-		if addInfo <= addInfoDirect {
+		if addInfo <= cboraddInfoDirect {
 			return addInfo, b[1:], nil
 		}
-		return 0, b, &ErrUnsupportedType{}
+		return 0, b, &cborErrUnsupportedType{}
 	}
 }
 
 // ReadTimeBytes reads a time.Time (CBOR tag 1 with Unix timestamp)
-func ReadTimeBytes(b []byte) (t time.Time, o []byte, err error) {
+func cborReadTimeBytes(b []byte) (t time.Time, o []byte, err error) {
 	if len(b) < 2 {
-		return time.Time{}, b, ErrShortBytes
+		return time.Time{}, b, cborErrShortBytes
 	}
-	if getMajorType(b[0]) != majorTypeTag {
-		return time.Time{}, b, badPrefix(getMajorType(b[0]), majorTypeTag)
+	if cborgetMajorType(b[0]) != cbormajorTypeTag {
+		return time.Time{}, b, cborbadPrefix(cborgetMajorType(b[0]), cbormajorTypeTag)
 	}
-	tag, o, err := readUintCore(b, majorTypeTag)
+	tag, o, err := cborreadUintCore(b, cbormajorTypeTag)
 	if err != nil {
 		return time.Time{}, b, err
 	}
-	if tag != tagEpochDateTime {
+	if tag != cbortagEpochDateTime {
 		return time.Time{}, b, errors.New("cbor: expected epoch datetime tag")
 	}
 	if len(o) < 1 {
-		return time.Time{}, b, ErrShortBytes
+		return time.Time{}, b, cborErrShortBytes
 	}
-	switch getMajorType(o[0]) {
-	case majorTypeUint, majorTypeNegInt:
-		sec, o2, e := ReadInt64Bytes(o)
+	switch cborgetMajorType(o[0]) {
+	case cbormajorTypeUint, cbormajorTypeNegInt:
+		sec, o2, e := cborReadInt64Bytes(o)
 		if e != nil {
 			return time.Time{}, b, e
 		}
 		return time.Unix(sec, 0), o2, nil
-	case majorTypeSimple:
-		add := getAddInfo(o[0])
+	case cbormajorTypeSimple:
+		add := cborgetAddInfo(o[0])
 		switch add {
-		case simpleFloat64:
-			f, o2, e := ReadFloat64Bytes(o)
+		case cborsimpleFloat64:
+			f, o2, e := cborReadFloat64Bytes(o)
 			if e != nil {
 				return time.Time{}, b, e
 			}
@@ -3289,8 +3289,8 @@ func ReadTimeBytes(b []byte) (t time.Time, o []byte, err error) {
 				ns -= 1e9
 			}
 			return time.Unix(secs, ns), o2, nil
-		case simpleFloat32:
-			f, o2, e := ReadFloat32Bytes(o)
+		case cborsimpleFloat32:
+			f, o2, e := cborReadFloat32Bytes(o)
 			if e != nil {
 				return time.Time{}, b, e
 			}
@@ -3302,8 +3302,8 @@ func ReadTimeBytes(b []byte) (t time.Time, o []byte, err error) {
 				ns -= 1e9
 			}
 			return time.Unix(secs, ns), o2, nil
-		case simpleFloat16:
-			f, o2, e := ReadFloat16Bytes(o)
+		case cborsimpleFloat16:
+			f, o2, e := cborReadFloat16Bytes(o)
 			if e != nil {
 				return time.Time{}, b, e
 			}
@@ -3316,16 +3316,16 @@ func ReadTimeBytes(b []byte) (t time.Time, o []byte, err error) {
 			}
 			return time.Unix(secs, ns), o2, nil
 		default:
-			return time.Time{}, b, &ErrUnsupportedType{}
+			return time.Time{}, b, &cborErrUnsupportedType{}
 		}
 	default:
-		return time.Time{}, b, &ErrUnsupportedType{}
+		return time.Time{}, b, &cborErrUnsupportedType{}
 	}
 }
 
 // ReadTagBytes reads a semantic tag value (major type 6)
-func ReadTagBytes(b []byte) (tag uint64, o []byte, err error) {
-	tag, o, err = readUintCore(b, majorTypeTag)
+func cborReadTagBytes(b []byte) (tag uint64, o []byte, err error) {
+	tag, o, err = cborreadUintCore(b, cbormajorTypeTag)
 	if err != nil {
 		return 0, b, err
 	}
@@ -3333,15 +3333,15 @@ func ReadTagBytes(b []byte) (tag uint64, o []byte, err error) {
 }
 
 // ReadRFC3339TimeBytes reads a tag(0) RFC3339 time string into time.Time
-func ReadRFC3339TimeBytes(b []byte) (t time.Time, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadRFC3339TimeBytes(b []byte) (t time.Time, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return time.Time{}, b, err
 	}
-	if tag != tagDateTimeString {
-		return time.Time{}, b, badPrefix(majorTypeTag, majorTypeTag)
+	if tag != cbortagDateTimeString {
+		return time.Time{}, b, cborbadPrefix(cbormajorTypeTag, cbormajorTypeTag)
 	}
-	s, o2, err := ReadStringBytes(o)
+	s, o2, err := cborReadStringBytes(o)
 	if err != nil {
 		return time.Time{}, b, err
 	}
@@ -3353,99 +3353,99 @@ func ReadRFC3339TimeBytes(b []byte) (t time.Time, o []byte, err error) {
 }
 
 // ReadBase64URLStringBytes reads tag(33) base64url text string
-func ReadBase64URLStringBytes(b []byte) (s string, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadBase64URLStringBytes(b []byte) (s string, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return "", b, err
 	}
-	if tag != tagBase64URLString {
-		return "", b, badPrefix(majorTypeTag, majorTypeTag)
+	if tag != cbortagBase64URLString {
+		return "", b, cborbadPrefix(cbormajorTypeTag, cbormajorTypeTag)
 	}
-	return ReadStringBytes(o)
+	return cborReadStringBytes(o)
 }
 
 // ReadBase64StringBytes reads tag(34) base64 text string
-func ReadBase64StringBytes(b []byte) (s string, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadBase64StringBytes(b []byte) (s string, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return "", b, err
 	}
-	if tag != tagBase64String {
-		return "", b, badPrefix(majorTypeTag, majorTypeTag)
+	if tag != cbortagBase64String {
+		return "", b, cborbadPrefix(cbormajorTypeTag, cbormajorTypeTag)
 	}
-	return ReadStringBytes(o)
+	return cborReadStringBytes(o)
 }
 
 // ReadURIStringBytes reads a tag(32) URI text string
-func ReadURIStringBytes(b []byte) (uri string, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadURIStringBytes(b []byte) (uri string, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return "", b, err
 	}
-	if tag != tagURI {
-		return "", b, badPrefix(majorTypeTag, majorTypeTag)
+	if tag != cbortagURI {
+		return "", b, cborbadPrefix(cbormajorTypeTag, cbormajorTypeTag)
 	}
-	return ReadStringBytes(o)
+	return cborReadStringBytes(o)
 }
 
 // ReadEmbeddedCBORBytes reads tag(24) with embedded CBOR payload
-func ReadEmbeddedCBORBytes(b []byte) (payload []byte, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadEmbeddedCBORBytes(b []byte) (payload []byte, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return nil, b, err
 	}
-	if tag != tagCBOR {
-		return nil, b, badPrefix(majorTypeTag, majorTypeTag)
+	if tag != cbortagCBOR {
+		return nil, b, cborbadPrefix(cbormajorTypeTag, cbormajorTypeTag)
 	}
-	return ReadBytesBytes(o, nil)
+	return cborReadBytesBytes(o, nil)
 }
 
 // ReadBase64URLBytes reads tag(21) byte string
-func ReadBase64URLBytes(b []byte) (bs []byte, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadBase64URLBytes(b []byte) (bs []byte, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return nil, b, err
 	}
-	if tag != tagBase64URL {
-		return nil, b, badPrefix(majorTypeTag, majorTypeTag)
+	if tag != cbortagBase64URL {
+		return nil, b, cborbadPrefix(cbormajorTypeTag, cbormajorTypeTag)
 	}
-	return ReadBytesBytes(o, nil)
+	return cborReadBytesBytes(o, nil)
 }
 
 // ReadBase64Bytes reads tag(22) byte string
-func ReadBase64Bytes(b []byte) (bs []byte, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadBase64Bytes(b []byte) (bs []byte, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return nil, b, err
 	}
-	if tag != tagBase64 {
-		return nil, b, badPrefix(majorTypeTag, majorTypeTag)
+	if tag != cbortagBase64 {
+		return nil, b, cborbadPrefix(cbormajorTypeTag, cbormajorTypeTag)
 	}
-	return ReadBytesBytes(o, nil)
+	return cborReadBytesBytes(o, nil)
 }
 
 // ReadBase16Bytes reads tag(23) byte string
-func ReadBase16Bytes(b []byte) (bs []byte, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadBase16Bytes(b []byte) (bs []byte, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return nil, b, err
 	}
-	if tag != tagBase16 {
-		return nil, b, badPrefix(majorTypeTag, majorTypeTag)
+	if tag != cbortagBase16 {
+		return nil, b, cborbadPrefix(cbormajorTypeTag, cbormajorTypeTag)
 	}
-	return ReadBytesBytes(o, nil)
+	return cborReadBytesBytes(o, nil)
 }
 
 // ReadUUIDBytes reads tag(37) UUID as 16-byte array
-func ReadUUIDBytes(b []byte) (uuid [16]byte, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadUUIDBytes(b []byte) (uuid [16]byte, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return uuid, b, err
 	}
 	if tag != 37 {
-		return uuid, b, badPrefix(majorTypeTag, majorTypeTag)
+		return uuid, b, cborbadPrefix(cbormajorTypeTag, cbormajorTypeTag)
 	}
-	bs, o2, err := ReadBytesBytes(o, nil)
+	bs, o2, err := cborReadBytesBytes(o, nil)
 	if err != nil {
 		return uuid, b, err
 	}
@@ -3457,50 +3457,50 @@ func ReadUUIDBytes(b []byte) (uuid [16]byte, o []byte, err error) {
 }
 
 // ReadRegexpStringBytes reads tag(35) regular expression pattern as text string
-func ReadRegexpStringBytes(b []byte) (pattern string, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadRegexpStringBytes(b []byte) (pattern string, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return "", b, err
 	}
-	if tag != tagRegexp {
-		return "", b, badPrefix(majorTypeTag, majorTypeTag)
+	if tag != cbortagRegexp {
+		return "", b, cborbadPrefix(cbormajorTypeTag, cbormajorTypeTag)
 	}
-	return ReadStringBytes(o)
+	return cborReadStringBytes(o)
 }
 
 // ReadMIMEStringBytes reads tag(36) MIME message as text string
-func ReadMIMEStringBytes(b []byte) (mime string, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadMIMEStringBytes(b []byte) (mime string, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return "", b, err
 	}
-	if tag != tagMIME {
-		return "", b, badPrefix(majorTypeTag, majorTypeTag)
+	if tag != cbortagMIME {
+		return "", b, cborbadPrefix(cbormajorTypeTag, cbormajorTypeTag)
 	}
-	return ReadStringBytes(o)
+	return cborReadStringBytes(o)
 }
 
 // StripSelfDescribeCBOR checks for and consumes a self-describe CBOR tag (0xd9d9f7)
-func StripSelfDescribeCBOR(b []byte) (rest []byte, found bool, err error) {
+func cborStripSelfDescribeCBOR(b []byte) (rest []byte, found bool, err error) {
 	if len(b) < 1 {
-		return b, false, ErrShortBytes
+		return b, false, cborErrShortBytes
 	}
-	if getMajorType(b[0]) != majorTypeTag {
+	if cborgetMajorType(b[0]) != cbormajorTypeTag {
 		return b, false, nil
 	}
-	tag, o, e := ReadTagBytes(b)
+	tag, o, e := cborReadTagBytes(b)
 	if e != nil {
 		return b, false, e
 	}
-	if tag != tagSelfDescribeCBOR {
+	if tag != cbortagSelfDescribeCBOR {
 		return b, false, nil
 	}
 	return o, true, nil
 }
 
 // ReadRegexpBytes reads tag(35) and compiles the contained pattern into *regexp.Regexp
-func ReadRegexpBytes(b []byte) (re *regexp.Regexp, o []byte, err error) {
-	s, o, err := ReadRegexpStringBytes(b)
+func cborReadRegexpBytes(b []byte) (re *regexp.Regexp, o []byte, err error) {
+	s, o, err := cborReadRegexpStringBytes(b)
 	if err != nil {
 		return nil, b, err
 	}
@@ -3512,117 +3512,117 @@ func ReadRegexpBytes(b []byte) (re *regexp.Regexp, o []byte, err error) {
 }
 
 // ReadBigIntBytes reads a bignum (tag 2 or 3) into a big.Int
-func ReadBigIntBytes(b []byte) (z *bigmath.Int, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadBigIntBytes(b []byte) (z *bigmath.Int, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return nil, b, err
 	}
-	bs, o2, err := ReadBytesBytes(o, nil)
+	bs, o2, err := cborReadBytesBytes(o, nil)
 	if err != nil {
 		return nil, b, err
 	}
 	mag := new(bigmath.Int).SetBytes(bs)
 	switch tag {
-	case tagPosBignum:
+	case cbortagPosBignum:
 		return mag, o2, nil
-	case tagNegBignum:
+	case cbortagNegBignum:
 		mag.Add(mag, bigmath.NewInt(1))
 		mag.Neg(mag)
 		return mag, o2, nil
 	default:
-		return nil, b, badPrefix(majorTypeTag, majorTypeTag)
+		return nil, b, cborbadPrefix(cbormajorTypeTag, cbormajorTypeTag)
 	}
 }
 
 // readCBORIntegerAsBigInt reads a CBOR integer (major type 0/1) or bignum (tags 2/3) into big.Int
-func readCBORIntegerAsBigInt(b []byte) (*bigmath.Int, []byte, error) {
+func cborreadCBORIntegerAsBigInt(b []byte) (*bigmath.Int, []byte, error) {
 	if len(b) < 1 {
-		return nil, b, ErrShortBytes
+		return nil, b, cborErrShortBytes
 	}
-	major := getMajorType(b[0])
+	major := cborgetMajorType(b[0])
 	switch major {
-	case majorTypeUint:
-		u, o, err := readUintCore(b, majorTypeUint)
+	case cbormajorTypeUint:
+		u, o, err := cborreadUintCore(b, cbormajorTypeUint)
 		if err != nil {
 			return nil, b, err
 		}
 		zz := new(bigmath.Int).SetUint64(u)
 		return zz, o, nil
-	case majorTypeNegInt:
-		i, o, err := ReadInt64Bytes(b)
+	case cbormajorTypeNegInt:
+		i, o, err := cborReadInt64Bytes(b)
 		if err != nil {
 			return nil, b, err
 		}
 		zz := bigmath.NewInt(i)
 		return zz, o, nil
-	case majorTypeTag:
-		tag, o, err := ReadTagBytes(b)
+	case cbormajorTypeTag:
+		tag, o, err := cborReadTagBytes(b)
 		if err != nil {
 			return nil, b, err
 		}
-		if tag != tagPosBignum && tag != tagNegBignum {
-			return nil, b, &ErrUnsupportedType{}
+		if tag != cbortagPosBignum && tag != cbortagNegBignum {
+			return nil, b, &cborErrUnsupportedType{}
 		}
-		bs, o2, err := ReadBytesBytes(o, nil)
+		bs, o2, err := cborReadBytesBytes(o, nil)
 		if err != nil {
 			return nil, b, err
 		}
 		mag := new(bigmath.Int).SetBytes(bs)
-		if tag == tagNegBignum {
+		if tag == cbortagNegBignum {
 			mag.Add(mag, bigmath.NewInt(1))
 			mag.Neg(mag)
 		}
 		return mag, o2, nil
 	default:
-		return nil, b, &ErrUnsupportedType{}
+		return nil, b, &cborErrUnsupportedType{}
 	}
 }
 
 // ReadDecimalFractionBytes reads tag(4) decimal fraction [exponent, mantissa]
-func ReadDecimalFractionBytes(b []byte) (exp int64, mant *bigmath.Int, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadDecimalFractionBytes(b []byte) (exp int64, mant *bigmath.Int, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return 0, nil, b, err
 	}
-	if tag != tagDecimalFrac {
-		return 0, nil, b, &ErrUnsupportedType{}
+	if tag != cbortagDecimalFrac {
+		return 0, nil, b, &cborErrUnsupportedType{}
 	}
 	// Handle definite and indefinite arrays
 	if len(o) < 1 {
-		return 0, nil, b, ErrShortBytes
+		return 0, nil, b, cborErrShortBytes
 	}
-	if o[0] == makeByte(majorTypeArray, addInfoIndefinite) {
+	if o[0] == cbormakeByte(cbormajorTypeArray, cboraddInfoIndefinite) {
 		// skip header
 		p := o[1:]
 		// exponent
-		exp, p, err = ReadInt64Bytes(p)
+		exp, p, err = cborReadInt64Bytes(p)
 		if err != nil {
 			return 0, nil, b, err
 		}
 		// mantissa
-		mant, p, err = readCBORIntegerAsBigInt(p)
+		mant, p, err = cborreadCBORIntegerAsBigInt(p)
 		if err != nil {
 			return 0, nil, b, err
 		}
 		// expect break
-		if len(p) < 1 || p[0] != makeByte(majorTypeSimple, simpleBreak) {
-			return 0, nil, b, &ErrUnsupportedType{}
+		if len(p) < 1 || p[0] != cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
+			return 0, nil, b, &cborErrUnsupportedType{}
 		}
 		return exp, mant, p[1:], nil
 	}
 	// definite
-	sz, p, err := ReadArrayHeaderBytes(o)
+	sz, p, err := cborReadArrayHeaderBytes(o)
 	if err != nil {
 		return 0, nil, b, err
 	}
 	if sz != 2 {
-		return 0, nil, b, ArrayError{Wanted: 2, Got: sz}
+		return 0, nil, b, cborArrayError{Wanted: 2, Got: sz}
 	}
-	exp, p, err = ReadInt64Bytes(p)
+	exp, p, err = cborReadInt64Bytes(p)
 	if err != nil {
 		return 0, nil, b, err
 	}
-	mant, p, err = readCBORIntegerAsBigInt(p)
+	mant, p, err = cborreadCBORIntegerAsBigInt(p)
 	if err != nil {
 		return 0, nil, b, err
 	}
@@ -3630,44 +3630,44 @@ func ReadDecimalFractionBytes(b []byte) (exp int64, mant *bigmath.Int, o []byte,
 }
 
 // ReadBigfloatBytes reads tag(5) bigfloat [exponent, mantissa]
-func ReadBigfloatBytes(b []byte) (exp int64, mant *bigmath.Int, o []byte, err error) {
-	tag, o, err := ReadTagBytes(b)
+func cborReadBigfloatBytes(b []byte) (exp int64, mant *bigmath.Int, o []byte, err error) {
+	tag, o, err := cborReadTagBytes(b)
 	if err != nil {
 		return 0, nil, b, err
 	}
-	if tag != tagBigfloat {
-		return 0, nil, b, &ErrUnsupportedType{}
+	if tag != cbortagBigfloat {
+		return 0, nil, b, &cborErrUnsupportedType{}
 	}
 	if len(o) < 1 {
-		return 0, nil, b, ErrShortBytes
+		return 0, nil, b, cborErrShortBytes
 	}
-	if o[0] == makeByte(majorTypeArray, addInfoIndefinite) {
+	if o[0] == cbormakeByte(cbormajorTypeArray, cboraddInfoIndefinite) {
 		p := o[1:]
-		exp, p, err = ReadInt64Bytes(p)
+		exp, p, err = cborReadInt64Bytes(p)
 		if err != nil {
 			return 0, nil, b, err
 		}
-		mant, p, err = readCBORIntegerAsBigInt(p)
+		mant, p, err = cborreadCBORIntegerAsBigInt(p)
 		if err != nil {
 			return 0, nil, b, err
 		}
-		if len(p) < 1 || p[0] != makeByte(majorTypeSimple, simpleBreak) {
-			return 0, nil, b, &ErrUnsupportedType{}
+		if len(p) < 1 || p[0] != cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
+			return 0, nil, b, &cborErrUnsupportedType{}
 		}
 		return exp, mant, p[1:], nil
 	}
-	sz, p, err := ReadArrayHeaderBytes(o)
+	sz, p, err := cborReadArrayHeaderBytes(o)
 	if err != nil {
 		return 0, nil, b, err
 	}
 	if sz != 2 {
-		return 0, nil, b, ArrayError{Wanted: 2, Got: sz}
+		return 0, nil, b, cborArrayError{Wanted: 2, Got: sz}
 	}
-	exp, p, err = ReadInt64Bytes(p)
+	exp, p, err = cborReadInt64Bytes(p)
 	if err != nil {
 		return 0, nil, b, err
 	}
-	mant, p, err = readCBORIntegerAsBigInt(p)
+	mant, p, err = cborreadCBORIntegerAsBigInt(p)
 	if err != nil {
 		return 0, nil, b, err
 	}
@@ -3676,26 +3676,26 @@ func ReadBigfloatBytes(b []byte) (exp int64, mant *bigmath.Int, o []byte, err er
 
 // ReadMapNoDupBytes validates that the next CBOR item is a map and that it has no duplicate keys.
 // Keys are compared by raw CBOR byte representation. Returns the bytes after the map or an error.
-func ReadMapNoDupBytes(b []byte) (o []byte, err error) {
+func cborReadMapNoDupBytes(b []byte) (o []byte, err error) {
 	if len(b) < 1 {
-		return b, ErrShortBytes
+		return b, cborErrShortBytes
 	}
-	if getMajorType(b[0]) != majorTypeMap {
-		return b, badPrefix(majorTypeMap, getMajorType(b[0]))
+	if cborgetMajorType(b[0]) != cbormajorTypeMap {
+		return b, cborbadPrefix(cbormajorTypeMap, cborgetMajorType(b[0]))
 	}
 	// Indefinite-length map
-	if getAddInfo(b[0]) == addInfoIndefinite {
+	if cborgetAddInfo(b[0]) == cboraddInfoIndefinite {
 		seen := make(map[string]struct{})
 		p := b[1:]
 		for {
 			if len(p) < 1 {
-				return b, ErrShortBytes
+				return b, cborErrShortBytes
 			}
-			if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+			if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 				return p[1:], nil
 			}
 			// Capture raw key bytes
-			r, err := Skip(p)
+			r, err := cborSkip(p)
 			if err != nil {
 				return b, err
 			}
@@ -3703,11 +3703,11 @@ func ReadMapNoDupBytes(b []byte) (o []byte, err error) {
 			rawKey := p[:keyLen]
 			keyStr := string(rawKey)
 			if _, ok := seen[keyStr]; ok {
-				return b, ErrDuplicateMapKey
+				return b, cborErrDuplicateMapKey
 			}
 			seen[keyStr] = struct{}{}
 			// Skip value
-			r2, err := Skip(r)
+			r2, err := cborSkip(r)
 			if err != nil {
 				return b, err
 			}
@@ -3715,13 +3715,13 @@ func ReadMapNoDupBytes(b []byte) (o []byte, err error) {
 		}
 	}
 	// Definite-length map
-	sz, p, err := ReadMapHeaderBytes(b)
+	sz, p, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	seen := make(map[string]struct{}, sz)
 	for i := uint32(0); i < sz; i++ {
-		r, err := Skip(p)
+		r, err := cborSkip(p)
 		if err != nil {
 			return b, err
 		}
@@ -3729,11 +3729,11 @@ func ReadMapNoDupBytes(b []byte) (o []byte, err error) {
 		rawKey := p[:keyLen]
 		keyStr := string(rawKey)
 		if _, ok := seen[keyStr]; ok {
-			return b, ErrDuplicateMapKey
+			return b, cborErrDuplicateMapKey
 		}
 		seen[keyStr] = struct{}{}
 		// skip value
-		p2, err := Skip(r)
+		p2, err := cborSkip(r)
 		if err != nil {
 			return b, err
 		}
@@ -3744,10 +3744,10 @@ func ReadMapNoDupBytes(b []byte) (o []byte, err error) {
 
 // ForEachSequenceBytes calls onItem for each CBOR item in a CBOR sequence buffer b.
 // The item passed to onItem is a slice referencing b containing exactly one item.
-func ForEachSequenceBytes(b []byte, onItem func(item []byte) error) error {
+func cborForEachSequenceBytes(b []byte, onItem func(item []byte) error) error {
 	p := b
 	for len(p) > 0 {
-		r, err := Skip(p)
+		r, err := cborSkip(p)
 		if err != nil {
 			return err
 		}
@@ -3761,14 +3761,14 @@ func ForEachSequenceBytes(b []byte, onItem func(item []byte) error) error {
 }
 
 // SplitSequenceBytes splits a CBOR sequence into a slice of item slices referencing the original buffer.
-func SplitSequenceBytes(b []byte) (out [][]byte, err error) {
-	err = ForEachSequenceBytes(b, func(it []byte) error { out = append(out, it); return nil })
+func cborSplitSequenceBytes(b []byte) (out [][]byte, err error) {
+	err = cborForEachSequenceBytes(b, func(it []byte) error { out = append(out, it); return nil })
 	return out, err
 }
 
 // AppendSequence appends a sequence of pre-encoded CBOR items to b.
 // Each item must be a complete CBOR data item.
-func AppendSequence(b []byte, items ...[]byte) []byte {
+func cborAppendSequence(b []byte, items ...[]byte) []byte {
 	for _, it := range items {
 		b = append(b, it...)
 	}
@@ -3776,7 +3776,7 @@ func AppendSequence(b []byte, items ...[]byte) []byte {
 }
 
 // AppendSequenceFunc appends n items produced by fn(i), where each returned []byte is a full CBOR item.
-func AppendSequenceFunc(b []byte, n int, fn func(i int) ([]byte, error)) ([]byte, error) {
+func cborAppendSequenceFunc(b []byte, n int, fn func(i int) ([]byte, error)) ([]byte, error) {
 	for i := 0; i < n; i++ {
 		it, err := fn(i)
 		if err != nil {
@@ -3790,26 +3790,26 @@ func AppendSequenceFunc(b []byte, n int, fn func(i int) ([]byte, error)) ([]byte
 // ReadOrderedMapBytes reads the next CBOR map (definite or indefinite) and
 // returns a slice of RawPair in the order they appeared on the wire.
 // Each Key and Value contains exactly one CBOR item (copied).
-func ReadOrderedMapBytes(b []byte) (pairs []RawPair, o []byte, err error) {
+func cborReadOrderedMapBytes(b []byte) (pairs []cborRawPair, o []byte, err error) {
 	if len(b) < 1 {
-		return nil, b, ErrShortBytes
+		return nil, b, cborErrShortBytes
 	}
-	if getMajorType(b[0]) != majorTypeMap {
-		return nil, b, badPrefix(majorTypeMap, getMajorType(b[0]))
+	if cborgetMajorType(b[0]) != cbormajorTypeMap {
+		return nil, b, cborbadPrefix(cbormajorTypeMap, cborgetMajorType(b[0]))
 	}
 	// Indefinite-length map
-	if getAddInfo(b[0]) == addInfoIndefinite {
+	if cborgetAddInfo(b[0]) == cboraddInfoIndefinite {
 		p := b[1:]
 		var scratch []byte
 		for {
 			if len(p) < 1 {
-				return nil, b, ErrShortBytes
+				return nil, b, cborErrShortBytes
 			}
-			if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+			if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 				return pairs, p[1:], nil
 			}
 			// Capture raw key
-			r1, err := Skip(p)
+			r1, err := cborSkip(p)
 			if err != nil {
 				return nil, b, err
 			}
@@ -3819,7 +3819,7 @@ func ReadOrderedMapBytes(b []byte) (pairs []RawPair, o []byte, err error) {
 			scratch = append(scratch, p[:klen]...)
 			kraw := scratch[startK:]
 			// Capture raw value
-			r2, err := Skip(r1)
+			r2, err := cborSkip(r1)
 			if err != nil {
 				return nil, b, err
 			}
@@ -3827,19 +3827,19 @@ func ReadOrderedMapBytes(b []byte) (pairs []RawPair, o []byte, err error) {
 			startV := len(scratch)
 			scratch = append(scratch, r1[:vlen]...)
 			vraw := scratch[startV:]
-			pairs = append(pairs, RawPair{Key: kraw, Value: vraw})
+			pairs = append(pairs, cborRawPair{Key: kraw, Value: vraw})
 			p = r2
 		}
 	}
 	// Definite-length map
-	sz, p, err := ReadMapHeaderBytes(b)
+	sz, p, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return nil, b, err
 	}
-	pairs = make([]RawPair, 0, sz)
+	pairs = make([]cborRawPair, 0, sz)
 	var scratch []byte
 	for i := uint32(0); i < sz; i++ {
-		r1, err := Skip(p)
+		r1, err := cborSkip(p)
 		if err != nil {
 			return nil, b, err
 		}
@@ -3847,7 +3847,7 @@ func ReadOrderedMapBytes(b []byte) (pairs []RawPair, o []byte, err error) {
 		startK := len(scratch)
 		scratch = append(scratch, p[:klen]...)
 		kraw := scratch[startK:]
-		r2, err := Skip(r1)
+		r2, err := cborSkip(r1)
 		if err != nil {
 			return nil, b, err
 		}
@@ -3855,14 +3855,14 @@ func ReadOrderedMapBytes(b []byte) (pairs []RawPair, o []byte, err error) {
 		startV := len(scratch)
 		scratch = append(scratch, r1[:vlen]...)
 		vraw := scratch[startV:]
-		pairs = append(pairs, RawPair{Key: kraw, Value: vraw})
+		pairs = append(pairs, cborRawPair{Key: kraw, Value: vraw})
 		p = r2
 	}
 	return pairs, p, nil
 }
 
 // float16BitsToFloat32 converts IEEE 754 binary16 bits to float32
-func float16BitsToFloat32(h uint16) float32 {
+func cborfloat16BitsToFloat32(h uint16) float32 {
 	sign := uint32(h>>15) & 0x1
 	exp := (h >> 10) & 0x1F
 	mant := uint32(h & 0x03FF)
@@ -3895,8 +3895,8 @@ func float16BitsToFloat32(h uint16) float32 {
 }
 
 // ReadDurationBytes reads a time.Duration
-func ReadDurationBytes(b []byte) (d time.Duration, o []byte, err error) {
-	i64, o, err := ReadInt64Bytes(b)
+func cborReadDurationBytes(b []byte) (d time.Duration, o []byte, err error) {
+	i64, o, err := cborReadInt64Bytes(b)
 	if err != nil {
 		return 0, b, err
 	}
@@ -3904,19 +3904,19 @@ func ReadDurationBytes(b []byte) (d time.Duration, o []byte, err error) {
 }
 
 // ReadMapStrStrBytes reads a map[string]string
-func ReadMapStrStrBytes(b []byte, m map[string]string) (o []byte, err error) {
-	sz, o, err := ReadMapHeaderBytes(b)
+func cborReadMapStrStrBytes(b []byte, m map[string]string) (o []byte, err error) {
+	sz, o, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 
 	for i := uint32(0); i < sz; i++ {
 		var key, val string
-		key, o, err = ReadStringBytes(o)
+		key, o, err = cborReadStringBytes(o)
 		if err != nil {
 			return b, err
 		}
-		val, o, err = ReadStringBytes(o)
+		val, o, err = cborReadStringBytes(o)
 		if err != nil {
 			return b, err
 		}
@@ -3926,171 +3926,171 @@ func ReadMapStrStrBytes(b []byte, m map[string]string) (o []byte, err error) {
 }
 
 // Skip skips over the next CBOR object
-func Skip(b []byte) ([]byte, error) {
-	return skip(b, 0)
+func cborSkip(b []byte) ([]byte, error) {
+	return cborskip(b, 0)
 }
 
-func skip(b []byte, depth int) ([]byte, error) {
-	if depth > recursionLimit {
-		return b, ErrMaxDepthExceeded
+func cborskip(b []byte, depth int) ([]byte, error) {
+	if depth > cborrecursionLimit {
+		return b, cborErrMaxDepthExceeded
 	}
 	if len(b) < 1 {
-		return b, ErrShortBytes
+		return b, cborErrShortBytes
 	}
 
-	major := getMajorType(b[0])
-	addInfo := getAddInfo(b[0])
+	major := cborgetMajorType(b[0])
+	addInfo := cborgetAddInfo(b[0])
 
 	switch major {
-	case majorTypeUint, majorTypeNegInt, majorTypeTag:
-		_, o, err := readUintCore(b, major)
+	case cbormajorTypeUint, cbormajorTypeNegInt, cbormajorTypeTag:
+		_, o, err := cborreadUintCore(b, major)
 		if err != nil {
 			return b, err
 		}
-		if major == majorTypeTag {
-			return skip(o, depth+1)
+		if major == cbormajorTypeTag {
+			return cborskip(o, depth+1)
 		}
 		return o, nil
 
-	case majorTypeBytes, majorTypeText:
-		if addInfo == addInfoIndefinite {
+	case cbormajorTypeBytes, cbormajorTypeText:
+		if addInfo == cboraddInfoIndefinite {
 			// Indefinite-length string: series of definite chunks terminated by break
 			o := b[1:]
 			for {
 				if len(o) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if o[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if o[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					return o[1:], nil
 				}
 				// Next must be a definite-length chunk of same major type
-				sz, q, err := readUintCore(o, major)
+				sz, q, err := cborreadUintCore(o, major)
 				if err != nil {
 					return b, err
 				}
 				if uint64(len(q)) < sz {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
 				o = q[sz:]
 			}
 		}
-		sz, o, err := readUintCore(b, major)
+		sz, o, err := cborreadUintCore(b, major)
 		if err != nil {
 			return b, err
 		}
 		if uint64(len(o)) < sz {
-			return b, ErrShortBytes
+			return b, cborErrShortBytes
 		}
 		return o[sz:], nil
 
-	case majorTypeArray:
-		if addInfo == addInfoIndefinite {
+	case cbormajorTypeArray:
+		if addInfo == cboraddInfoIndefinite {
 			o := b[1:]
 			for {
 				if len(o) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if o[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if o[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					return o[1:], nil
 				}
 				var err error
-				o, err = skip(o, depth+1)
+				o, err = cborskip(o, depth+1)
 				if err != nil {
 					return b, err
 				}
 			}
 		}
-		sz, o, err := readUintCore(b, major)
+		sz, o, err := cborreadUintCore(b, major)
 		if err != nil {
 			return b, err
 		}
 		for i := uint64(0); i < sz; i++ {
-			o, err = skip(o, depth+1)
+			o, err = cborskip(o, depth+1)
 			if err != nil {
 				return b, err
 			}
 		}
 		return o, nil
 
-	case majorTypeMap:
-		if addInfo == addInfoIndefinite {
+	case cbormajorTypeMap:
+		if addInfo == cboraddInfoIndefinite {
 			o := b[1:]
 			for {
 				if len(o) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if o[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if o[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					return o[1:], nil
 				}
 				var err error
-				o, err = skip(o, depth+1) // key
+				o, err = cborskip(o, depth+1) // key
 				if err != nil {
 					return b, err
 				}
-				o, err = skip(o, depth+1) // value
+				o, err = cborskip(o, depth+1) // value
 				if err != nil {
 					return b, err
 				}
 			}
 		}
-		sz, o, err := readUintCore(b, major)
+		sz, o, err := cborreadUintCore(b, major)
 		if err != nil {
 			return b, err
 		}
 		for i := uint64(0); i < sz; i++ {
-			o, err = skip(o, depth+1) // key
+			o, err = cborskip(o, depth+1) // key
 			if err != nil {
 				return b, err
 			}
-			o, err = skip(o, depth+1) // value
+			o, err = cborskip(o, depth+1) // value
 			if err != nil {
 				return b, err
 			}
 		}
 		return o, nil
 
-	case majorTypeSimple:
+	case cbormajorTypeSimple:
 		switch addInfo {
-		case simpleFalse, simpleTrue, simpleNull, simpleUndefined:
+		case cborsimpleFalse, cborsimpleTrue, cborsimpleNull, cborsimpleUndefined:
 			return b[1:], nil
-		case simpleFloat16:
+		case cborsimpleFloat16:
 			if len(b) < 3 {
-				return b, ErrShortBytes
+				return b, cborErrShortBytes
 			}
 			return b[3:], nil
-		case simpleFloat32:
+		case cborsimpleFloat32:
 			if len(b) < 5 {
-				return b, ErrShortBytes
+				return b, cborErrShortBytes
 			}
 			return b[5:], nil
-		case simpleFloat64:
+		case cborsimpleFloat64:
 			if len(b) < 9 {
-				return b, ErrShortBytes
+				return b, cborErrShortBytes
 			}
 			return b[9:], nil
 		default:
 			if addInfo < 20 {
 				return b[1:], nil
 			}
-			return b, &ErrUnsupportedType{}
+			return b, &cborErrUnsupportedType{}
 		}
 	}
 
-	return b, &ErrUnsupportedType{}
+	return b, &cborErrUnsupportedType{}
 }
 
 // IsNil checks if the next value is nil
-func IsNil(b []byte) bool {
-	return len(b) > 0 && b[0] == makeByte(majorTypeSimple, simpleNull)
+func cborIsNil(b []byte) bool {
+	return len(b) > 0 && b[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleNull)
 }
 
 // Raw is raw CBOR data
-type Raw []byte
+type cborRaw []byte
 
 // MarshalCBOR implements Marshaler
-func (r Raw) MarshalCBOR(b []byte) ([]byte, error) {
+func (r cborRaw) MarshalCBOR(b []byte) ([]byte, error) {
 	if len(r) == 0 {
-		return AppendNil(b), nil
+		return cborAppendNil(b), nil
 	}
 	return append(b, r...), nil
 }
@@ -4500,18 +4500,18 @@ func (r Raw) MarshalCBOR(b []byte) ([]byte, error) {
 
 // WriteBytes writes a byte string value.
 
-func (r *Raw) UnmarshalCBOR(b []byte) ([]byte, error) {
+func (r *cborRaw) UnmarshalCBOR(b []byte) ([]byte, error) {
 	l := len(b)
-	out, err := Skip(b)
+	out, err := cborSkip(b)
 	if err != nil {
 		return b, err
 	}
 	rlen := l - len(out)
-	if IsNil(b[:rlen]) {
+	if cborIsNil(b[:rlen]) {
 		rlen = 0
 	}
 	if cap(*r) < rlen {
-		*r = make(Raw, rlen)
+		*r = make(cborRaw, rlen)
 	} else {
 		*r = (*r)[0:rlen]
 	}
@@ -4519,100 +4519,100 @@ func (r *Raw) UnmarshalCBOR(b []byte) ([]byte, error) {
 	return out, nil
 }
 
-type Reader struct {
+type cborReader struct {
 	buf           []byte
 	strict        bool
 	deterministic bool
 	maxContainer  uint32
 }
 
-func NewReaderBytes(b []byte) *Reader { return &Reader{buf: b} }
+func cborNewReaderBytes(b []byte) *cborReader { return &cborReader{buf: b} }
 
-func (r *Reader) SetStrictDecode(strict bool) { r.strict = strict }
+func (r *cborReader) SetStrictDecode(strict bool) { r.strict = strict }
 
-func (r *Reader) SetDeterministicDecode(det bool) { r.deterministic = det }
+func (r *cborReader) SetDeterministicDecode(det bool) { r.deterministic = det }
 
-func (r *Reader) SetMaxContainerLen(max uint32) { r.maxContainer = max }
+func (r *cborReader) SetMaxContainerLen(max uint32) { r.maxContainer = max }
 
-func (r *Reader) Remaining() []byte { return r.buf }
+func (r *cborReader) Remaining() []byte { return r.buf }
 
-func (r *Reader) ReadArrayHeader() (uint32, error) {
+func (r *cborReader) ReadArrayHeader() (uint32, error) {
 	if len(r.buf) < 1 {
-		return 0, ErrShortBytes
+		return 0, cborErrShortBytes
 	}
 	if r.strict {
-		nonCanon, err := isNonCanonicalArrayLength(r.buf)
+		nonCanon, err := cborisNonCanonicalArrayLength(r.buf)
 		if err != nil {
 			return 0, err
 		}
 		if nonCanon {
-			return 0, ErrNonCanonicalLength
+			return 0, cborErrNonCanonicalLength
 		}
 	}
-	sz, rest, err := ReadArrayHeaderBytes(r.buf)
+	sz, rest, err := cborReadArrayHeaderBytes(r.buf)
 	if err != nil {
 		return 0, err
 	}
 	if r.maxContainer > 0 && sz > r.maxContainer {
-		return 0, ErrContainerTooLarge
+		return 0, cborErrContainerTooLarge
 	}
 	r.buf = rest
 	return sz, nil
 }
 
-func (r *Reader) ReadArrayStart() (sz uint32, indefinite bool, err error) {
-	sz, indef, rest, err := ReadArrayStartBytes(r.buf)
+func (r *cborReader) ReadArrayStart() (sz uint32, indefinite bool, err error) {
+	sz, indef, rest, err := cborReadArrayStartBytes(r.buf)
 	if err != nil {
 		return 0, false, err
 	}
 	if indef && r.deterministic {
-		return 0, false, ErrIndefiniteForbidden
+		return 0, false, cborErrIndefiniteForbidden
 	}
 	r.buf = rest
 	return sz, indef, nil
 }
 
-func (r *Reader) ReadMapHeader() (uint32, error) {
+func (r *cborReader) ReadMapHeader() (uint32, error) {
 	if len(r.buf) < 1 {
-		return 0, ErrShortBytes
+		return 0, cborErrShortBytes
 	}
 	if r.strict {
-		nonCanon, err := isNonCanonicalMapLength(r.buf)
+		nonCanon, err := cborisNonCanonicalMapLength(r.buf)
 		if err != nil {
 			return 0, err
 		}
 		if nonCanon {
-			return 0, ErrNonCanonicalLength
+			return 0, cborErrNonCanonicalLength
 		}
 	}
-	sz, rest, err := ReadMapHeaderBytes(r.buf)
+	sz, rest, err := cborReadMapHeaderBytes(r.buf)
 	if err != nil {
 		return 0, err
 	}
 	if r.maxContainer > 0 && sz > r.maxContainer {
-		return 0, ErrContainerTooLarge
+		return 0, cborErrContainerTooLarge
 	}
 	r.buf = rest
 	return sz, nil
 }
 
-func (r *Reader) ReadString() (string, error) {
+func (r *cborReader) ReadString() (string, error) {
 	if len(r.buf) < 1 {
-		return "", ErrShortBytes
+		return "", cborErrShortBytes
 	}
 	if r.strict {
-		nonCanon, err := isNonCanonicalTextLength(r.buf)
+		nonCanon, err := cborisNonCanonicalTextLength(r.buf)
 		if err != nil {
 			return "", err
 		}
 		if nonCanon {
-			return "", ErrNonCanonicalLength
+			return "", cborErrNonCanonicalLength
 		}
 	}
-	if r.deterministic && getMajorType(r.buf[0]) == majorTypeText && getAddInfo(r.buf[0]) == addInfoIndefinite {
-		return "", ErrIndefiniteForbidden
+	if r.deterministic && cborgetMajorType(r.buf[0]) == cbormajorTypeText && cborgetAddInfo(r.buf[0]) == cboraddInfoIndefinite {
+		return "", cborErrIndefiniteForbidden
 	}
-	s, rest, err := ReadStringBytes(r.buf)
+	s, rest, err := cborReadStringBytes(r.buf)
 	if err != nil {
 		return "", err
 	}
@@ -4620,23 +4620,23 @@ func (r *Reader) ReadString() (string, error) {
 	return s, nil
 }
 
-func (r *Reader) ReadInt() (int, error) {
+func (r *cborReader) ReadInt() (int, error) {
 	if len(r.buf) < 1 {
-		return 0, ErrShortBytes
+		return 0, cborErrShortBytes
 	}
 	if r.strict {
-		maj := getMajorType(r.buf[0])
-		if maj == majorTypeUint || maj == majorTypeNegInt {
-			nonCanon, err := isNonCanonicalLength(r.buf, maj)
+		maj := cborgetMajorType(r.buf[0])
+		if maj == cbormajorTypeUint || maj == cbormajorTypeNegInt {
+			nonCanon, err := cborisNonCanonicalLength(r.buf, maj)
 			if err != nil {
 				return 0, err
 			}
 			if nonCanon {
-				return 0, ErrNonCanonicalLength
+				return 0, cborErrNonCanonicalLength
 			}
 		}
 	}
-	v, rest, err := ReadIntBytes(r.buf)
+	v, rest, err := cborReadIntBytes(r.buf)
 	if err != nil {
 		return 0, err
 	}
@@ -4644,23 +4644,23 @@ func (r *Reader) ReadInt() (int, error) {
 	return v, nil
 }
 
-func (r *Reader) ReadBytes() ([]byte, error) {
+func (r *cborReader) ReadBytes() ([]byte, error) {
 	if len(r.buf) < 1 {
-		return nil, ErrShortBytes
+		return nil, cborErrShortBytes
 	}
 	if r.strict {
-		nonCanon, err := isNonCanonicalBytesLength(r.buf)
+		nonCanon, err := cborisNonCanonicalBytesLength(r.buf)
 		if err != nil {
 			return nil, err
 		}
 		if nonCanon {
-			return nil, ErrNonCanonicalLength
+			return nil, cborErrNonCanonicalLength
 		}
 	}
-	if r.deterministic && getMajorType(r.buf[0]) == majorTypeBytes && getAddInfo(r.buf[0]) == addInfoIndefinite {
-		return nil, ErrIndefiniteForbidden
+	if r.deterministic && cborgetMajorType(r.buf[0]) == cbormajorTypeBytes && cborgetAddInfo(r.buf[0]) == cboraddInfoIndefinite {
+		return nil, cborErrIndefiniteForbidden
 	}
-	v, rest, err := ReadBytesBytes(r.buf, nil)
+	v, rest, err := cborReadBytesBytes(r.buf, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -4668,8 +4668,8 @@ func (r *Reader) ReadBytes() ([]byte, error) {
 	return v, nil
 }
 
-func (r *Reader) Skip() error {
-	rest, err := Skip(r.buf)
+func (r *cborReader) Skip() error {
+	rest, err := cborSkip(r.buf)
 	if err != nil {
 		return err
 	}
@@ -4677,8 +4677,8 @@ func (r *Reader) Skip() error {
 	return nil
 }
 
-func (r *Reader) ReadBool() (bool, error) {
-	v, rest, err := ReadBoolBytes(r.buf)
+func (r *cborReader) ReadBool() (bool, error) {
+	v, rest, err := cborReadBoolBytes(r.buf)
 	if err != nil {
 		return false, err
 	}
@@ -4686,23 +4686,23 @@ func (r *Reader) ReadBool() (bool, error) {
 	return v, nil
 }
 
-func (r *Reader) ReadInt64() (int64, error) {
+func (r *cborReader) ReadInt64() (int64, error) {
 	if len(r.buf) < 1 {
-		return 0, ErrShortBytes
+		return 0, cborErrShortBytes
 	}
 	if r.strict {
-		maj := getMajorType(r.buf[0])
-		if maj == majorTypeUint || maj == majorTypeNegInt {
-			nonCanon, err := isNonCanonicalLength(r.buf, maj)
+		maj := cborgetMajorType(r.buf[0])
+		if maj == cbormajorTypeUint || maj == cbormajorTypeNegInt {
+			nonCanon, err := cborisNonCanonicalLength(r.buf, maj)
 			if err != nil {
 				return 0, err
 			}
 			if nonCanon {
-				return 0, ErrNonCanonicalLength
+				return 0, cborErrNonCanonicalLength
 			}
 		}
 	}
-	v, rest, err := ReadInt64Bytes(r.buf)
+	v, rest, err := cborReadInt64Bytes(r.buf)
 	if err != nil {
 		return 0, err
 	}
@@ -4710,20 +4710,20 @@ func (r *Reader) ReadInt64() (int64, error) {
 	return v, nil
 }
 
-func (r *Reader) ReadUint() (uint, error) {
+func (r *cborReader) ReadUint() (uint, error) {
 	if len(r.buf) < 1 {
-		return 0, ErrShortBytes
+		return 0, cborErrShortBytes
 	}
-	if r.strict && getMajorType(r.buf[0]) == majorTypeUint {
-		nonCanon, err := isNonCanonicalLength(r.buf, majorTypeUint)
+	if r.strict && cborgetMajorType(r.buf[0]) == cbormajorTypeUint {
+		nonCanon, err := cborisNonCanonicalLength(r.buf, cbormajorTypeUint)
 		if err != nil {
 			return 0, err
 		}
 		if nonCanon {
-			return 0, ErrNonCanonicalLength
+			return 0, cborErrNonCanonicalLength
 		}
 	}
-	v, rest, err := ReadUintBytes(r.buf)
+	v, rest, err := cborReadUintBytes(r.buf)
 	if err != nil {
 		return 0, err
 	}
@@ -4731,20 +4731,20 @@ func (r *Reader) ReadUint() (uint, error) {
 	return v, nil
 }
 
-func (r *Reader) ReadUint64() (uint64, error) {
+func (r *cborReader) ReadUint64() (uint64, error) {
 	if len(r.buf) < 1 {
-		return 0, ErrShortBytes
+		return 0, cborErrShortBytes
 	}
-	if r.strict && getMajorType(r.buf[0]) == majorTypeUint {
-		nonCanon, err := isNonCanonicalLength(r.buf, majorTypeUint)
+	if r.strict && cborgetMajorType(r.buf[0]) == cbormajorTypeUint {
+		nonCanon, err := cborisNonCanonicalLength(r.buf, cbormajorTypeUint)
 		if err != nil {
 			return 0, err
 		}
 		if nonCanon {
-			return 0, ErrNonCanonicalLength
+			return 0, cborErrNonCanonicalLength
 		}
 	}
-	v, rest, err := ReadUint64Bytes(r.buf)
+	v, rest, err := cborReadUint64Bytes(r.buf)
 	if err != nil {
 		return 0, err
 	}
@@ -4752,56 +4752,56 @@ func (r *Reader) ReadUint64() (uint64, error) {
 	return v, nil
 }
 
-func (r *Reader) ReadFloat32() (float32, error) {
+func (r *cborReader) ReadFloat32() (float32, error) {
 	orig := r.buf
-	v, rest, err := ReadFloat32Bytes(r.buf)
+	v, rest, err := cborReadFloat32Bytes(r.buf)
 	if err != nil {
 		return 0, err
 	}
 	if r.strict {
-		canon := AppendFloatCanonical(nil, float64(v))
+		canon := cborAppendFloatCanonical(nil, float64(v))
 		encLen := len(orig) - len(rest)
 		if encLen < 0 || encLen > len(orig) {
-			return 0, ErrShortBytes
+			return 0, cborErrShortBytes
 		}
 		if len(canon) != encLen || !bytes.Equal(orig[:encLen], canon) {
-			return 0, ErrNonCanonicalFloat
+			return 0, cborErrNonCanonicalFloat
 		}
 	}
 	r.buf = rest
 	return v, nil
 }
 
-func (r *Reader) ReadFloat64() (float64, error) {
+func (r *cborReader) ReadFloat64() (float64, error) {
 	orig := r.buf
-	v, rest, err := ReadFloat64Bytes(r.buf)
+	v, rest, err := cborReadFloat64Bytes(r.buf)
 	if err != nil {
 		return 0, err
 	}
 	if r.strict {
-		canon := AppendFloatCanonical(nil, v)
+		canon := cborAppendFloatCanonical(nil, v)
 		encLen := len(orig) - len(rest)
 		if encLen < 0 || encLen > len(orig) {
-			return 0, ErrShortBytes
+			return 0, cborErrShortBytes
 		}
 		if len(canon) != encLen || !bytes.Equal(orig[:encLen], canon) {
-			return 0, ErrNonCanonicalFloat
+			return 0, cborErrNonCanonicalFloat
 		}
 	}
 	r.buf = rest
 	return v, nil
 }
 
-func isNonCanonicalLength(b []byte, expectedMajor uint8) (bool, error) {
+func cborisNonCanonicalLength(b []byte, expectedMajor uint8) (bool, error) {
 	if len(b) < 1 {
-		return false, ErrShortBytes
+		return false, cborErrShortBytes
 	}
-	if getMajorType(b[0]) != expectedMajor {
-		return false, badPrefix(getMajorType(b[0]), expectedMajor)
+	if cborgetMajorType(b[0]) != expectedMajor {
+		return false, cborbadPrefix(cborgetMajorType(b[0]), expectedMajor)
 	}
-	add := getAddInfo(b[0])
+	add := cborgetAddInfo(b[0])
 	switch add {
-	case addInfoIndefinite:
+	case cboraddInfoIndefinite:
 
 		return false, nil
 	case 0, 1, 2, 3, 4, 5, 6, 7,
@@ -4809,36 +4809,36 @@ func isNonCanonicalLength(b []byte, expectedMajor uint8) (bool, error) {
 		16, 17, 18, 19, 20, 21, 22, 23:
 
 		return false, nil
-	case addInfoUint8:
+	case cboraddInfoUint8:
 		if len(b) < 2 {
-			return false, ErrShortBytes
+			return false, cborErrShortBytes
 		}
 		v := uint64(b[1])
 		if v <= 23 {
 			return true, nil
 		}
 		return false, nil
-	case addInfoUint16:
+	case cboraddInfoUint16:
 		if len(b) < 3 {
-			return false, ErrShortBytes
+			return false, cborErrShortBytes
 		}
 		v := uint64(binary.BigEndian.Uint16(b[1:]))
 		if v <= math.MaxUint8 {
 			return true, nil
 		}
 		return false, nil
-	case addInfoUint32:
+	case cboraddInfoUint32:
 		if len(b) < 5 {
-			return false, ErrShortBytes
+			return false, cborErrShortBytes
 		}
 		v := uint64(binary.BigEndian.Uint32(b[1:]))
 		if v <= math.MaxUint16 {
 			return true, nil
 		}
 		return false, nil
-	case addInfoUint64:
+	case cboraddInfoUint64:
 		if len(b) < 9 {
-			return false, ErrShortBytes
+			return false, cborErrShortBytes
 		}
 		v := binary.BigEndian.Uint64(b[1:])
 		if v <= math.MaxUint32 {
@@ -4846,59 +4846,63 @@ func isNonCanonicalLength(b []byte, expectedMajor uint8) (bool, error) {
 		}
 		return false, nil
 	default:
-		return false, &ErrUnsupportedType{}
+		return false, &cborErrUnsupportedType{}
 	}
 }
 
-func isNonCanonicalArrayLength(b []byte) (bool, error) {
-	return isNonCanonicalLength(b, majorTypeArray)
+func cborisNonCanonicalArrayLength(b []byte) (bool, error) {
+	return cborisNonCanonicalLength(b, cbormajorTypeArray)
 }
-func isNonCanonicalMapLength(b []byte) (bool, error) { return isNonCanonicalLength(b, majorTypeMap) }
-func isNonCanonicalBytesLength(b []byte) (bool, error) {
-	return isNonCanonicalLength(b, majorTypeBytes)
+func cborisNonCanonicalMapLength(b []byte) (bool, error) {
+	return cborisNonCanonicalLength(b, cbormajorTypeMap)
 }
-func isNonCanonicalTextLength(b []byte) (bool, error) { return isNonCanonicalLength(b, majorTypeText) }
+func cborisNonCanonicalBytesLength(b []byte) (bool, error) {
+	return cborisNonCanonicalLength(b, cbormajorTypeBytes)
+}
+func cborisNonCanonicalTextLength(b []byte) (bool, error) {
+	return cborisNonCanonicalLength(b, cbormajorTypeText)
+}
 
 const (
-	Int64Size           = 9
-	IntSize             = Int64Size
-	UintSize            = Int64Size
-	Int8Size            = 2
-	Int16Size           = 3
-	Int32Size           = 5
-	Uint8Size           = 2
-	Uint16Size          = 3
-	Uint32Size          = 5
-	Uint64Size          = Int64Size
-	Float64Size         = 9
-	Float32Size         = 5
-	DurationSize        = Int64Size
-	TimeSize            = 15
-	BoolSize            = 1
-	NilSize             = 1
-	MapHeaderSize       = 5
-	ArrayHeaderSize     = 5
-	BytesPrefixSize     = 5
-	StringPrefixSize    = 5
-	ExtensionPrefixSize = 6
+	cborInt64Size           = 9
+	cborIntSize             = cborInt64Size
+	cborUintSize            = cborInt64Size
+	cborInt8Size            = 2
+	cborInt16Size           = 3
+	cborInt32Size           = 5
+	cborUint8Size           = 2
+	cborUint16Size          = 3
+	cborUint32Size          = 5
+	cborUint64Size          = cborInt64Size
+	cborFloat64Size         = 9
+	cborFloat32Size         = 5
+	cborDurationSize        = cborInt64Size
+	cborTimeSize            = 15
+	cborBoolSize            = 1
+	cborNilSize             = 1
+	cborMapHeaderSize       = 5
+	cborArrayHeaderSize     = 5
+	cborBytesPrefixSize     = 5
+	cborStringPrefixSize    = 5
+	cborExtensionPrefixSize = 6
 )
 
-func UnsafeString(b []byte) string {
+func cborUnsafeString(b []byte) string {
 	return *(*string)(unsafe.Pointer(&b))
 }
 
-func UnsafeBytes(s string) []byte { return []byte(s) }
+func cborUnsafeBytes(s string) []byte { return []byte(s) }
 
-var isUTF8Valid = func(b []byte) bool { return utf8.Valid(b) }
+var cborisUTF8Valid = func(b []byte) bool { return utf8.Valid(b) }
 
-func ValidateWellFormedBytes(b []byte) (rest []byte, err error) {
-	return validateWellFormed(b, 0)
+func cborValidateWellFormedBytes(b []byte) (rest []byte, err error) {
+	return cborvalidateWellFormed(b, 0)
 }
 
-func ValidateDocument(b []byte) error {
+func cborValidateDocument(b []byte) error {
 	var err error
 	for len(b) > 0 {
-		b, err = validateWellFormed(b, 0)
+		b, err = cborvalidateWellFormed(b, 0)
 		if err != nil {
 			return err
 		}
@@ -4906,196 +4910,196 @@ func ValidateDocument(b []byte) error {
 	return nil
 }
 
-func validateWellFormed(b []byte, depth int) ([]byte, error) {
-	if depth > recursionLimit {
-		return b, ErrMaxDepthExceeded
+func cborvalidateWellFormed(b []byte, depth int) ([]byte, error) {
+	if depth > cborrecursionLimit {
+		return b, cborErrMaxDepthExceeded
 	}
 	if len(b) < 1 {
-		return b, ErrShortBytes
+		return b, cborErrShortBytes
 	}
 	lead := b[0]
-	major := getMajorType(lead)
-	add := getAddInfo(lead)
+	major := cborgetMajorType(lead)
+	add := cborgetAddInfo(lead)
 
 	if add == 28 || add == 29 || add == 30 {
-		return b, InvalidPrefixError{Want: major, Got: major}
+		return b, cborInvalidPrefixError{Want: major, Got: major}
 	}
 
 	switch major {
-	case majorTypeUint, majorTypeNegInt, majorTypeTag:
-		_, o, err := readUintCore(b, major)
+	case cbormajorTypeUint, cbormajorTypeNegInt, cbormajorTypeTag:
+		_, o, err := cborreadUintCore(b, major)
 		if err != nil {
 			return b, err
 		}
-		if major == majorTypeTag {
-			return validateWellFormed(o, depth+1)
+		if major == cbormajorTypeTag {
+			return cborvalidateWellFormed(o, depth+1)
 		}
 		return o, nil
 
-	case majorTypeBytes:
-		if add == addInfoIndefinite {
+	case cbormajorTypeBytes:
+		if add == cboraddInfoIndefinite {
 
 			p := b[1:]
 			for {
 				if len(p) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					return p[1:], nil
 				}
 
-				sz, o, err := readUintCore(p, majorTypeBytes)
+				sz, o, err := cborreadUintCore(p, cbormajorTypeBytes)
 				if err != nil {
 					return b, err
 				}
 				if uint64(len(o)) < sz {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
 				p = o[sz:]
 			}
 		}
-		sz, o, err := readUintCore(b, majorTypeBytes)
+		sz, o, err := cborreadUintCore(b, cbormajorTypeBytes)
 		if err != nil {
 			return b, err
 		}
 		if uint64(len(o)) < sz {
-			return b, ErrShortBytes
+			return b, cborErrShortBytes
 		}
 		return o[sz:], nil
 
-	case majorTypeText:
-		if add == addInfoIndefinite {
+	case cbormajorTypeText:
+		if add == cboraddInfoIndefinite {
 			p := b[1:]
 
 			for {
 				if len(p) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					return p[1:], nil
 				}
 
-				chunk, o, err := ReadStringZC(p)
+				chunk, o, err := cborReadStringZC(p)
 				if err != nil {
 					return b, err
 				}
-				if !isUTF8Valid(chunk) {
-					return b, ErrInvalidUTF8
+				if !cborisUTF8Valid(chunk) {
+					return b, cborErrInvalidUTF8
 				}
 				p = o
 			}
 		}
 
-		s, o, err := ReadStringZC(b)
+		s, o, err := cborReadStringZC(b)
 		if err != nil {
 			return b, err
 		}
-		if !isUTF8Valid(s) {
-			return b, ErrInvalidUTF8
+		if !cborisUTF8Valid(s) {
+			return b, cborErrInvalidUTF8
 		}
 		return o, nil
 
-	case majorTypeArray:
-		if add == addInfoIndefinite {
+	case cbormajorTypeArray:
+		if add == cboraddInfoIndefinite {
 			p := b[1:]
 			for {
 				if len(p) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					return p[1:], nil
 				}
 				var err error
-				p, err = validateWellFormed(p, depth+1)
+				p, err = cborvalidateWellFormed(p, depth+1)
 				if err != nil {
 					return b, err
 				}
 			}
 		}
-		sz, p, err := readUintCore(b, majorTypeArray)
+		sz, p, err := cborreadUintCore(b, cbormajorTypeArray)
 		if err != nil {
 			return b, err
 		}
 		for i := uint64(0); i < sz; i++ {
-			p, err = validateWellFormed(p, depth+1)
+			p, err = cborvalidateWellFormed(p, depth+1)
 			if err != nil {
 				return b, err
 			}
 		}
 		return p, nil
 
-	case majorTypeMap:
-		if add == addInfoIndefinite {
+	case cbormajorTypeMap:
+		if add == cboraddInfoIndefinite {
 			p := b[1:]
 			for {
 				if len(p) < 1 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
-				if p[0] == makeByte(majorTypeSimple, simpleBreak) {
+				if p[0] == cbormakeByte(cbormajorTypeSimple, cborsimpleBreak) {
 					return p[1:], nil
 				}
 				var err error
-				p, err = validateWellFormed(p, depth+1)
+				p, err = cborvalidateWellFormed(p, depth+1)
 				if err != nil {
 					return b, err
 				}
-				p, err = validateWellFormed(p, depth+1)
+				p, err = cborvalidateWellFormed(p, depth+1)
 				if err != nil {
 					return b, err
 				}
 			}
 		}
-		sz, p, err := readUintCore(b, majorTypeMap)
+		sz, p, err := cborreadUintCore(b, cbormajorTypeMap)
 		if err != nil {
 			return b, err
 		}
 		for i := uint64(0); i < sz; i++ {
-			p, err = validateWellFormed(p, depth+1)
+			p, err = cborvalidateWellFormed(p, depth+1)
 			if err != nil {
 				return b, err
 			}
-			p, err = validateWellFormed(p, depth+1)
+			p, err = cborvalidateWellFormed(p, depth+1)
 			if err != nil {
 				return b, err
 			}
 		}
 		return p, nil
 
-	case majorTypeSimple:
+	case cbormajorTypeSimple:
 		switch add {
-		case simpleFalse, simpleTrue, simpleNull, simpleUndefined:
+		case cborsimpleFalse, cborsimpleTrue, cborsimpleNull, cborsimpleUndefined:
 			return b[1:], nil
-		case simpleFloat16:
+		case cborsimpleFloat16:
 			if len(b) < 3 {
-				return b, ErrShortBytes
+				return b, cborErrShortBytes
 			}
 			return b[3:], nil
-		case simpleFloat32:
+		case cborsimpleFloat32:
 			if len(b) < 5 {
-				return b, ErrShortBytes
+				return b, cborErrShortBytes
 			}
 			return b[5:], nil
-		case simpleFloat64:
+		case cborsimpleFloat64:
 			if len(b) < 9 {
-				return b, ErrShortBytes
+				return b, cborErrShortBytes
 			}
 			return b[9:], nil
-		case addInfoUint8:
+		case cboraddInfoUint8:
 			if len(b) < 2 {
-				return b, ErrShortBytes
+				return b, cborErrShortBytes
 			}
 			return b[2:], nil
 		default:
 			if add < 20 {
 				return b[1:], nil
 			}
-			return b, &ErrUnsupportedType{}
+			return b, &cborErrUnsupportedType{}
 		}
 	}
-	return b, &ErrUnsupportedType{}
+	return b, &cborErrUnsupportedType{}
 }
 
-func ensure(b []byte, sz int) ([]byte, int) {
+func cborensure(b []byte, sz int) ([]byte, int) {
 	l := len(b)
 	c := cap(b)
 	if c-l < sz {
@@ -5106,179 +5110,179 @@ func ensure(b []byte, sz int) ([]byte, int) {
 	return b[:l+sz], l
 }
 
-func appendUintCore(b []byte, majorType uint8, u uint64) []byte {
+func cborappendUintCore(b []byte, majorType uint8, u uint64) []byte {
 	switch {
-	case u <= addInfoDirect:
-		return append(b, makeByte(majorType, uint8(u)))
+	case u <= cboraddInfoDirect:
+		return append(b, cbormakeByte(majorType, uint8(u)))
 	case u <= math.MaxUint8:
-		o, n := ensure(b, 2)
-		o[n] = makeByte(majorType, addInfoUint8)
+		o, n := cborensure(b, 2)
+		o[n] = cbormakeByte(majorType, cboraddInfoUint8)
 		o[n+1] = uint8(u)
 		return o
 	case u <= math.MaxUint16:
-		o, n := ensure(b, 3)
-		o[n] = makeByte(majorType, addInfoUint16)
+		o, n := cborensure(b, 3)
+		o[n] = cbormakeByte(majorType, cboraddInfoUint16)
 		binary.BigEndian.PutUint16(o[n+1:], uint16(u))
 		return o
 	case u <= math.MaxUint32:
-		o, n := ensure(b, 5)
-		o[n] = makeByte(majorType, addInfoUint32)
+		o, n := cborensure(b, 5)
+		o[n] = cbormakeByte(majorType, cboraddInfoUint32)
 		binary.BigEndian.PutUint32(o[n+1:], uint32(u))
 		return o
 	default:
-		o, n := ensure(b, 9)
-		o[n] = makeByte(majorType, addInfoUint64)
+		o, n := cborensure(b, 9)
+		o[n] = cbormakeByte(majorType, cboraddInfoUint64)
 		binary.BigEndian.PutUint64(o[n+1:], u)
 		return o
 	}
 }
 
-func AppendMapHeader(b []byte, sz uint32) []byte {
-	return appendUintCore(b, majorTypeMap, uint64(sz))
+func cborAppendMapHeader(b []byte, sz uint32) []byte {
+	return cborappendUintCore(b, cbormajorTypeMap, uint64(sz))
 }
 
-func AppendArrayHeader(b []byte, sz uint32) []byte {
-	return appendUintCore(b, majorTypeArray, uint64(sz))
+func cborAppendArrayHeader(b []byte, sz uint32) []byte {
+	return cborappendUintCore(b, cbormajorTypeArray, uint64(sz))
 }
 
-func AppendArrayHeaderIndefinite(b []byte) []byte {
-	return append(b, makeByte(majorTypeArray, addInfoIndefinite))
+func cborAppendArrayHeaderIndefinite(b []byte) []byte {
+	return append(b, cbormakeByte(cbormajorTypeArray, cboraddInfoIndefinite))
 }
 
-func AppendNil(b []byte) []byte {
-	return append(b, makeByte(majorTypeSimple, simpleNull))
+func cborAppendNil(b []byte) []byte {
+	return append(b, cbormakeByte(cbormajorTypeSimple, cborsimpleNull))
 }
 
-func AppendUndefined(b []byte) []byte {
-	return append(b, makeByte(majorTypeSimple, simpleUndefined))
+func cborAppendUndefined(b []byte) []byte {
+	return append(b, cbormakeByte(cbormajorTypeSimple, cborsimpleUndefined))
 }
 
-func AppendTextHeaderIndefinite(b []byte) []byte {
-	return append(b, makeByte(majorTypeText, addInfoIndefinite))
+func cborAppendTextHeaderIndefinite(b []byte) []byte {
+	return append(b, cbormakeByte(cbormajorTypeText, cboraddInfoIndefinite))
 }
 
-func AppendBytesHeaderIndefinite(b []byte) []byte {
-	return append(b, makeByte(majorTypeBytes, addInfoIndefinite))
+func cborAppendBytesHeaderIndefinite(b []byte) []byte {
+	return append(b, cbormakeByte(cbormajorTypeBytes, cboraddInfoIndefinite))
 }
 
-func AppendTextChunk(b []byte, s string) []byte { return AppendString(b, s) }
+func cborAppendTextChunk(b []byte, s string) []byte { return cborAppendString(b, s) }
 
-func AppendBytesChunk(b []byte, bs []byte) []byte { return AppendBytes(b, bs) }
+func cborAppendBytesChunk(b []byte, bs []byte) []byte { return cborAppendBytes(b, bs) }
 
-func AppendFloat64(b []byte, f float64) []byte {
-	o, n := ensure(b, 9)
-	o[n] = makeByte(majorTypeSimple, simpleFloat64)
+func cborAppendFloat64(b []byte, f float64) []byte {
+	o, n := cborensure(b, 9)
+	o[n] = cbormakeByte(cbormajorTypeSimple, cborsimpleFloat64)
 	binary.BigEndian.PutUint64(o[n+1:], math.Float64bits(f))
 	return o
 }
 
-func AppendFloat32(b []byte, f float32) []byte {
-	o, n := ensure(b, 5)
-	o[n] = makeByte(majorTypeSimple, simpleFloat32)
+func cborAppendFloat32(b []byte, f float32) []byte {
+	o, n := cborensure(b, 5)
+	o[n] = cbormakeByte(cbormajorTypeSimple, cborsimpleFloat32)
 	binary.BigEndian.PutUint32(o[n+1:], math.Float32bits(f))
 	return o
 }
 
-func AppendFloatCanonical(b []byte, f float64) []byte {
+func cborAppendFloatCanonical(b []byte, f float64) []byte {
 
 	if f == 0 && math.Signbit(f) {
 		f = 0
 	}
 
 	if math.IsNaN(f) {
-		return AppendFloat16(b, float32(f))
+		return cborAppendFloat16(b, float32(f))
 	}
 
-	f16 := float32ToFloat16Bits(float32(f))
-	if float64(float16BitsToFloat32(f16)) == f {
-		return AppendFloat16(b, float32(f))
+	f16 := cborfloat32ToFloat16Bits(float32(f))
+	if float64(cborfloat16BitsToFloat32(f16)) == f {
+		return cborAppendFloat16(b, float32(f))
 	}
 
 	f32 := float32(f)
 	if float64(f32) == f {
-		return AppendFloat32(b, f32)
+		return cborAppendFloat32(b, f32)
 	}
-	return AppendFloat64(b, f)
+	return cborAppendFloat64(b, f)
 }
 
-func AppendFloat16(b []byte, f float32) []byte {
-	o, n := ensure(b, 3)
-	o[n] = makeByte(majorTypeSimple, simpleFloat16)
-	binary.BigEndian.PutUint16(o[n+1:], float32ToFloat16Bits(f))
+func cborAppendFloat16(b []byte, f float32) []byte {
+	o, n := cborensure(b, 3)
+	o[n] = cbormakeByte(cbormajorTypeSimple, cborsimpleFloat16)
+	binary.BigEndian.PutUint16(o[n+1:], cborfloat32ToFloat16Bits(f))
 	return o
 }
 
-func AppendFloat(b []byte, f float64) []byte {
+func cborAppendFloat(b []byte, f float64) []byte {
 	f32 := float32(f)
 	if float64(f32) == f {
-		return AppendFloat32(b, f32)
+		return cborAppendFloat32(b, f32)
 	}
-	return AppendFloat64(b, f)
+	return cborAppendFloat64(b, f)
 }
 
-func AppendDuration(b []byte, d time.Duration) []byte {
-	return AppendInt64(b, int64(d))
+func cborAppendDuration(b []byte, d time.Duration) []byte {
+	return cborAppendInt64(b, int64(d))
 }
 
-func AppendInt64(b []byte, i int64) []byte {
+func cborAppendInt64(b []byte, i int64) []byte {
 
-	if i >= 0 && i <= addInfoDirect {
-		return append(b, makeByte(majorTypeUint, uint8(i)))
+	if i >= 0 && i <= cboraddInfoDirect {
+		return append(b, cbormakeByte(cbormajorTypeUint, uint8(i)))
 	}
 
 	if i < 0 {
 		neg := -1 - i
-		if neg >= 0 && neg <= addInfoDirect {
-			return append(b, makeByte(majorTypeNegInt, uint8(neg)))
+		if neg >= 0 && neg <= cboraddInfoDirect {
+			return append(b, cbormakeByte(cbormajorTypeNegInt, uint8(neg)))
 		}
-		return appendUintCore(b, majorTypeNegInt, uint64(neg))
+		return cborappendUintCore(b, cbormajorTypeNegInt, uint64(neg))
 	}
 
-	return appendUintCore(b, majorTypeUint, uint64(i))
+	return cborappendUintCore(b, cbormajorTypeUint, uint64(i))
 }
 
-func AppendInt(b []byte, i int) []byte {
-	return AppendInt64(b, int64(i))
+func cborAppendInt(b []byte, i int) []byte {
+	return cborAppendInt64(b, int64(i))
 }
 
-func AppendInt8(b []byte, i int8) []byte {
-	return AppendInt64(b, int64(i))
+func cborAppendInt8(b []byte, i int8) []byte {
+	return cborAppendInt64(b, int64(i))
 }
 
-func AppendInt16(b []byte, i int16) []byte {
-	return AppendInt64(b, int64(i))
+func cborAppendInt16(b []byte, i int16) []byte {
+	return cborAppendInt64(b, int64(i))
 }
 
-func AppendInt32(b []byte, i int32) []byte {
-	return AppendInt64(b, int64(i))
+func cborAppendInt32(b []byte, i int32) []byte {
+	return cborAppendInt64(b, int64(i))
 }
 
-func AppendUint64(b []byte, u uint64) []byte {
-	return appendUintCore(b, majorTypeUint, u)
+func cborAppendUint64(b []byte, u uint64) []byte {
+	return cborappendUintCore(b, cbormajorTypeUint, u)
 }
 
-func AppendUint(b []byte, u uint) []byte {
-	return AppendUint64(b, uint64(u))
+func cborAppendUint(b []byte, u uint) []byte {
+	return cborAppendUint64(b, uint64(u))
 }
 
-func AppendUint8(b []byte, u uint8) []byte {
-	return appendUintCore(b, majorTypeUint, uint64(u))
+func cborAppendUint8(b []byte, u uint8) []byte {
+	return cborappendUintCore(b, cbormajorTypeUint, uint64(u))
 }
 
-func AppendUint16(b []byte, u uint16) []byte {
-	return appendUintCore(b, majorTypeUint, uint64(u))
+func cborAppendUint16(b []byte, u uint16) []byte {
+	return cborappendUintCore(b, cbormajorTypeUint, uint64(u))
 }
 
-func AppendUint32(b []byte, u uint32) []byte {
-	return appendUintCore(b, majorTypeUint, uint64(u))
+func cborAppendUint32(b []byte, u uint32) []byte {
+	return cborappendUintCore(b, cbormajorTypeUint, uint64(u))
 }
 
-func AppendBytes(b []byte, data []byte) []byte {
+func cborAppendBytes(b []byte, data []byte) []byte {
 	sz := uint64(len(data))
 
 	var h int
 	switch {
-	case sz <= addInfoDirect:
+	case sz <= cboraddInfoDirect:
 		h = 1
 	case sz <= math.MaxUint8:
 		h = 2
@@ -5289,26 +5293,26 @@ func AppendBytes(b []byte, data []byte) []byte {
 	default:
 		h = 9
 	}
-	o, n := ensure(b, h+int(sz))
+	o, n := cborensure(b, h+int(sz))
 
 	switch h {
 	case 1:
-		o[n] = makeByte(majorTypeBytes, uint8(sz))
+		o[n] = cbormakeByte(cbormajorTypeBytes, uint8(sz))
 		n++
 	case 2:
-		o[n] = makeByte(majorTypeBytes, addInfoUint8)
+		o[n] = cbormakeByte(cbormajorTypeBytes, cboraddInfoUint8)
 		o[n+1] = uint8(sz)
 		n += 2
 	case 3:
-		o[n] = makeByte(majorTypeBytes, addInfoUint16)
+		o[n] = cbormakeByte(cbormajorTypeBytes, cboraddInfoUint16)
 		binary.BigEndian.PutUint16(o[n+1:], uint16(sz))
 		n += 3
 	case 5:
-		o[n] = makeByte(majorTypeBytes, addInfoUint32)
+		o[n] = cbormakeByte(cbormajorTypeBytes, cboraddInfoUint32)
 		binary.BigEndian.PutUint32(o[n+1:], uint32(sz))
 		n += 5
 	case 9:
-		o[n] = makeByte(majorTypeBytes, addInfoUint64)
+		o[n] = cbormakeByte(cbormajorTypeBytes, cboraddInfoUint64)
 		binary.BigEndian.PutUint64(o[n+1:], sz)
 		n += 9
 	}
@@ -5317,12 +5321,12 @@ func AppendBytes(b []byte, data []byte) []byte {
 	return o[:n+int(sz)]
 }
 
-func AppendString(b []byte, s string) []byte {
+func cborAppendString(b []byte, s string) []byte {
 	sz := uint64(len(s))
 
 	var h int
 	switch {
-	case sz <= addInfoDirect:
+	case sz <= cboraddInfoDirect:
 		h = 1
 	case sz <= math.MaxUint8:
 		h = 2
@@ -5333,26 +5337,26 @@ func AppendString(b []byte, s string) []byte {
 	default:
 		h = 9
 	}
-	o, n := ensure(b, h+int(sz))
+	o, n := cborensure(b, h+int(sz))
 
 	switch h {
 	case 1:
-		o[n] = makeByte(majorTypeText, uint8(sz))
+		o[n] = cbormakeByte(cbormajorTypeText, uint8(sz))
 		n++
 	case 2:
-		o[n] = makeByte(majorTypeText, addInfoUint8)
+		o[n] = cbormakeByte(cbormajorTypeText, cboraddInfoUint8)
 		o[n+1] = uint8(sz)
 		n += 2
 	case 3:
-		o[n] = makeByte(majorTypeText, addInfoUint16)
+		o[n] = cbormakeByte(cbormajorTypeText, cboraddInfoUint16)
 		binary.BigEndian.PutUint16(o[n+1:], uint16(sz))
 		n += 3
 	case 5:
-		o[n] = makeByte(majorTypeText, addInfoUint32)
+		o[n] = cbormakeByte(cbormajorTypeText, cboraddInfoUint32)
 		binary.BigEndian.PutUint32(o[n+1:], uint32(sz))
 		n += 5
 	case 9:
-		o[n] = makeByte(majorTypeText, addInfoUint64)
+		o[n] = cbormakeByte(cbormajorTypeText, cboraddInfoUint64)
 		binary.BigEndian.PutUint64(o[n+1:], sz)
 		n += 9
 	}
@@ -5361,162 +5365,162 @@ func AppendString(b []byte, s string) []byte {
 	return o[:n+int(sz)]
 }
 
-func AppendStringFromBytes(b []byte, data []byte) []byte {
+func cborAppendStringFromBytes(b []byte, data []byte) []byte {
 	sz := uint64(len(data))
-	b = appendUintCore(b, majorTypeText, sz)
+	b = cborappendUintCore(b, cbormajorTypeText, sz)
 	return append(b, data...)
 }
 
-func AppendBool(b []byte, val bool) []byte {
+func cborAppendBool(b []byte, val bool) []byte {
 	if val {
-		return append(b, makeByte(majorTypeSimple, simpleTrue))
+		return append(b, cbormakeByte(cbormajorTypeSimple, cborsimpleTrue))
 	}
-	return append(b, makeByte(majorTypeSimple, simpleFalse))
+	return append(b, cbormakeByte(cbormajorTypeSimple, cborsimpleFalse))
 }
 
-func AppendSimpleValue(b []byte, val uint8) []byte {
+func cborAppendSimpleValue(b []byte, val uint8) []byte {
 	switch {
-	case val <= addInfoDirect:
-		return append(b, makeByte(majorTypeSimple, val))
+	case val <= cboraddInfoDirect:
+		return append(b, cbormakeByte(cbormajorTypeSimple, val))
 	default:
-		o, n := ensure(b, 2)
-		o[n] = makeByte(majorTypeSimple, addInfoUint8)
+		o, n := cborensure(b, 2)
+		o[n] = cbormakeByte(cbormajorTypeSimple, cboraddInfoUint8)
 		o[n+1] = val
 		return o
 	}
 }
 
-func AppendTime(b []byte, t time.Time) []byte {
-	b = AppendTag(b, tagEpochDateTime)
+func cborAppendTime(b []byte, t time.Time) []byte {
+	b = cborAppendTag(b, cbortagEpochDateTime)
 	sec := t.Unix()
 	nsec := t.Nanosecond()
 	if nsec == 0 {
-		return AppendInt64(b, sec)
+		return cborAppendInt64(b, sec)
 	}
 	f := float64(sec) + float64(nsec)/1e9
-	return AppendFloat64(b, f)
+	return cborAppendFloat64(b, f)
 }
 
-func AppendTag(b []byte, tag uint64) []byte {
-	return appendUintCore(b, majorTypeTag, tag)
+func cborAppendTag(b []byte, tag uint64) []byte {
+	return cborappendUintCore(b, cbormajorTypeTag, tag)
 }
 
-func AppendTagged(b []byte, tag uint64, value []byte) []byte {
-	b = AppendTag(b, tag)
+func cborAppendTagged(b []byte, tag uint64, value []byte) []byte {
+	b = cborAppendTag(b, tag)
 	return append(b, value...)
 }
 
-func AppendRFC3339Time(b []byte, t time.Time) []byte {
-	b = AppendTag(b, tagDateTimeString)
-	return AppendString(b, t.Format(time.RFC3339Nano))
+func cborAppendRFC3339Time(b []byte, t time.Time) []byte {
+	b = cborAppendTag(b, cbortagDateTimeString)
+	return cborAppendString(b, t.Format(time.RFC3339Nano))
 }
 
-func AppendBase64URLString(b []byte, s string) []byte {
-	b = AppendTag(b, tagBase64URLString)
-	return AppendString(b, s)
+func cborAppendBase64URLString(b []byte, s string) []byte {
+	b = cborAppendTag(b, cbortagBase64URLString)
+	return cborAppendString(b, s)
 }
 
-func AppendBase64String(b []byte, s string) []byte {
-	b = AppendTag(b, tagBase64String)
-	return AppendString(b, s)
+func cborAppendBase64String(b []byte, s string) []byte {
+	b = cborAppendTag(b, cbortagBase64String)
+	return cborAppendString(b, s)
 }
 
-func AppendURI(b []byte, uri string) []byte {
-	b = AppendTag(b, tagURI)
-	return AppendString(b, uri)
+func cborAppendURI(b []byte, uri string) []byte {
+	b = cborAppendTag(b, cbortagURI)
+	return cborAppendString(b, uri)
 }
 
-func AppendEmbeddedCBOR(b []byte, payload []byte) []byte {
-	b = AppendTag(b, tagCBOR)
-	return AppendBytes(b, payload)
+func cborAppendEmbeddedCBOR(b []byte, payload []byte) []byte {
+	b = cborAppendTag(b, cbortagCBOR)
+	return cborAppendBytes(b, payload)
 }
 
-func AppendUUID(b []byte, uuid [16]byte) []byte {
-	b = AppendTag(b, 37)
-	return AppendBytes(b, uuid[:])
+func cborAppendUUID(b []byte, uuid [16]byte) []byte {
+	b = cborAppendTag(b, 37)
+	return cborAppendBytes(b, uuid[:])
 }
 
-func AppendRegexpString(b []byte, re string) []byte {
-	b = AppendTag(b, tagRegexp)
-	return AppendString(b, re)
+func cborAppendRegexpString(b []byte, re string) []byte {
+	b = cborAppendTag(b, cbortagRegexp)
+	return cborAppendString(b, re)
 }
 
-func AppendMIMEString(b []byte, mime string) []byte {
-	b = AppendTag(b, tagMIME)
-	return AppendString(b, mime)
+func cborAppendMIMEString(b []byte, mime string) []byte {
+	b = cborAppendTag(b, cbortagMIME)
+	return cborAppendString(b, mime)
 }
 
-func AppendSelfDescribeCBOR(b []byte) []byte {
-	return appendUintCore(b, majorTypeTag, tagSelfDescribeCBOR)
+func cborAppendSelfDescribeCBOR(b []byte) []byte {
+	return cborappendUintCore(b, cbormajorTypeTag, cbortagSelfDescribeCBOR)
 }
 
-func AppendRegexp(b []byte, re *regexp.Regexp) []byte {
+func cborAppendRegexp(b []byte, re *regexp.Regexp) []byte {
 	if re == nil {
-		return AppendNil(b)
+		return cborAppendNil(b)
 	}
-	return AppendRegexpString(b, re.String())
+	return cborAppendRegexpString(b, re.String())
 }
 
-func AppendBigInt(b []byte, z *bigmath.Int) []byte {
+func cborAppendBigInt(b []byte, z *bigmath.Int) []byte {
 	if z == nil {
-		return AppendNil(b)
+		return cborAppendNil(b)
 	}
 	if z.Sign() >= 0 {
-		b = AppendTag(b, tagPosBignum)
-		return AppendBytes(b, z.Bytes())
+		b = cborAppendTag(b, cbortagPosBignum)
+		return cborAppendBytes(b, z.Bytes())
 	}
 
 	tmp := new(bigmath.Int).Neg(z)
 	tmp.Sub(tmp, bigmath.NewInt(1))
-	b = AppendTag(b, tagNegBignum)
-	return AppendBytes(b, tmp.Bytes())
+	b = cborAppendTag(b, cbortagNegBignum)
+	return cborAppendBytes(b, tmp.Bytes())
 }
 
-func appendCBORIntegerFromBigInt(b []byte, z *bigmath.Int) []byte {
+func cborappendCBORIntegerFromBigInt(b []byte, z *bigmath.Int) []byte {
 	if z == nil {
-		return AppendNil(b)
+		return cborAppendNil(b)
 	}
 	if z.Sign() >= 0 && z.BitLen() <= 64 {
-		return AppendUint64(b, z.Uint64())
+		return cborAppendUint64(b, z.Uint64())
 	}
 	if z.Sign() < 0 && z.BitLen() <= 63 {
-		return AppendInt64(b, z.Int64())
+		return cborAppendInt64(b, z.Int64())
 	}
-	return AppendBigInt(b, z)
+	return cborAppendBigInt(b, z)
 }
 
-func AppendDecimalFraction(b []byte, exponent int64, mantissa *bigmath.Int) []byte {
-	b = AppendTag(b, tagDecimalFrac)
-	b = AppendArrayHeader(b, 2)
-	b = AppendInt64(b, exponent)
-	b = appendCBORIntegerFromBigInt(b, mantissa)
+func cborAppendDecimalFraction(b []byte, exponent int64, mantissa *bigmath.Int) []byte {
+	b = cborAppendTag(b, cbortagDecimalFrac)
+	b = cborAppendArrayHeader(b, 2)
+	b = cborAppendInt64(b, exponent)
+	b = cborappendCBORIntegerFromBigInt(b, mantissa)
 	return b
 }
 
-func AppendBigfloat(b []byte, exponent int64, mantissa *bigmath.Int) []byte {
-	b = AppendTag(b, tagBigfloat)
-	b = AppendArrayHeader(b, 2)
-	b = AppendInt64(b, exponent)
-	b = appendCBORIntegerFromBigInt(b, mantissa)
+func cborAppendBigfloat(b []byte, exponent int64, mantissa *bigmath.Int) []byte {
+	b = cborAppendTag(b, cbortagBigfloat)
+	b = cborAppendArrayHeader(b, 2)
+	b = cborAppendInt64(b, exponent)
+	b = cborappendCBORIntegerFromBigInt(b, mantissa)
 	return b
 }
 
-func AppendBase64URL(b []byte, data []byte) []byte {
-	b = AppendTag(b, tagBase64URL)
-	return AppendBytes(b, data)
+func cborAppendBase64URL(b []byte, data []byte) []byte {
+	b = cborAppendTag(b, cbortagBase64URL)
+	return cborAppendBytes(b, data)
 }
 
-func AppendBase64(b []byte, data []byte) []byte {
-	b = AppendTag(b, tagBase64)
-	return AppendBytes(b, data)
+func cborAppendBase64(b []byte, data []byte) []byte {
+	b = cborAppendTag(b, cbortagBase64)
+	return cborAppendBytes(b, data)
 }
 
-func AppendBase16(b []byte, data []byte) []byte {
-	b = AppendTag(b, tagBase16)
-	return AppendBytes(b, data)
+func cborAppendBase16(b []byte, data []byte) []byte {
+	b = cborAppendTag(b, cbortagBase16)
+	return cborAppendBytes(b, data)
 }
 
-func float32ToFloat16Bits(f float32) uint16 {
+func cborfloat32ToFloat16Bits(f float32) uint16 {
 	bits := math.Float32bits(f)
 	sign := uint16((bits >> 31) & 0x1)
 	exp := int((bits >> 23) & 0xFF)
@@ -5577,23 +5581,23 @@ func float32ToFloat16Bits(f float32) uint16 {
 	return (sign << 15) | h
 }
 
-func AppendMapStrStr(b []byte, m map[string]string) []byte {
+func cborAppendMapStrStr(b []byte, m map[string]string) []byte {
 	sz := uint32(len(m))
-	b = AppendMapHeader(b, sz)
+	b = cborAppendMapHeader(b, sz)
 	for key, val := range m {
-		b = AppendString(b, key)
-		b = AppendString(b, val)
+		b = cborAppendString(b, key)
+		b = cborAppendString(b, val)
 	}
 	return b
 }
 
-func AppendMapStrInterface(b []byte, m map[string]any) ([]byte, error) {
+func cborAppendMapStrInterface(b []byte, m map[string]any) ([]byte, error) {
 	sz := uint32(len(m))
-	b = AppendMapHeader(b, sz)
+	b = cborAppendMapHeader(b, sz)
 	for key, val := range m {
-		b = AppendString(b, key)
+		b = cborAppendString(b, key)
 		var err error
-		b, err = AppendInterface(b, val)
+		b, err = cborAppendInterface(b, val)
 		if err != nil {
 			return b, err
 		}
@@ -5601,26 +5605,26 @@ func AppendMapStrInterface(b []byte, m map[string]any) ([]byte, error) {
 	return b, nil
 }
 
-func AppendStringSlice(b []byte, v []string) []byte {
-	b = AppendArrayHeader(b, uint32(len(v)))
+func cborAppendStringSlice(b []byte, v []string) []byte {
+	b = cborAppendArrayHeader(b, uint32(len(v)))
 	for _, s := range v {
-		b = AppendString(b, s)
+		b = cborAppendString(b, s)
 	}
 	return b
 }
 
-func AppendMapUint64Marshaler[T any](b []byte, m map[uint64]T) ([]byte, error) {
-	b = AppendMapHeader(b, uint32(len(m)))
+func cborAppendMapUint64Marshaler[T any](b []byte, m map[uint64]T) ([]byte, error) {
+	b = cborAppendMapHeader(b, uint32(len(m)))
 	var err error
 	for k, v := range m {
-		b = AppendUint64(b, k)
-		var mval Marshaler
-		if mm, ok := any(v).(Marshaler); ok {
+		b = cborAppendUint64(b, k)
+		var mval cborMarshaler
+		if mm, ok := any(v).(cborMarshaler); ok {
 			mval = mm
-		} else if mm, ok := any(&v).(Marshaler); ok {
+		} else if mm, ok := any(&v).(cborMarshaler); ok {
 			mval = mm
 		} else {
-			return b, &ErrUnsupportedType{}
+			return b, &cborErrUnsupportedType{}
 		}
 		b, err = mval.MarshalCBOR(b)
 		if err != nil {
@@ -5630,36 +5634,36 @@ func AppendMapUint64Marshaler[T any](b []byte, m map[uint64]T) ([]byte, error) {
 	return b, nil
 }
 
-func AppendMapUint64Uint64(b []byte, m map[uint64]uint64) []byte {
-	b = AppendMapHeader(b, uint32(len(m)))
+func cborAppendMapUint64Uint64(b []byte, m map[uint64]uint64) []byte {
+	b = cborAppendMapHeader(b, uint32(len(m)))
 	for k, v := range m {
-		b = AppendUint64(b, k)
-		b = AppendUint64(b, v)
+		b = cborAppendUint64(b, k)
+		b = cborAppendUint64(b, v)
 	}
 	return b
 }
 
-func AppendPtrMarshaler[T any](b []byte, v *T) ([]byte, error) {
+func cborAppendPtrMarshaler[T any](b []byte, v *T) ([]byte, error) {
 	if v == nil {
-		return AppendNil(b), nil
+		return cborAppendNil(b), nil
 	}
-	if m, ok := any(v).(Marshaler); ok {
+	if m, ok := any(v).(cborMarshaler); ok {
 		return m.MarshalCBOR(b)
 	}
-	return b, &ErrUnsupportedType{}
+	return b, &cborErrUnsupportedType{}
 }
 
-func AppendSliceMarshaler[T any](b []byte, v []T) ([]byte, error) {
-	b = AppendArrayHeader(b, uint32(len(v)))
+func cborAppendSliceMarshaler[T any](b []byte, v []T) ([]byte, error) {
+	b = cborAppendArrayHeader(b, uint32(len(v)))
 	var err error
 	for i := range v {
-		var m Marshaler
-		if mm, ok := any(v[i]).(Marshaler); ok {
+		var m cborMarshaler
+		if mm, ok := any(v[i]).(cborMarshaler); ok {
 			m = mm
-		} else if mm, ok := any(&v[i]).(Marshaler); ok {
+		} else if mm, ok := any(&v[i]).(cborMarshaler); ok {
 			m = mm
 		} else {
-			return b, &ErrUnsupportedType{}
+			return b, &cborErrUnsupportedType{}
 		}
 		b, err = m.MarshalCBOR(b)
 		if err != nil {
@@ -5669,180 +5673,180 @@ func AppendSliceMarshaler[T any](b []byte, v []T) ([]byte, error) {
 	return b, nil
 }
 
-func AppendInterface(b []byte, i any) ([]byte, error) {
+func cborAppendInterface(b []byte, i any) ([]byte, error) {
 	if i == nil {
-		return AppendNil(b), nil
+		return cborAppendNil(b), nil
 	}
 
 	switch v := i.(type) {
-	case Marshaler:
+	case cborMarshaler:
 		return v.MarshalCBOR(b)
 	case string:
-		return AppendString(b, v), nil
+		return cborAppendString(b, v), nil
 	case bool:
-		return AppendBool(b, v), nil
+		return cborAppendBool(b, v), nil
 	case int:
-		return AppendInt(b, v), nil
+		return cborAppendInt(b, v), nil
 	case int8:
-		return AppendInt8(b, v), nil
+		return cborAppendInt8(b, v), nil
 	case int16:
-		return AppendInt16(b, v), nil
+		return cborAppendInt16(b, v), nil
 	case int32:
-		return AppendInt32(b, v), nil
+		return cborAppendInt32(b, v), nil
 	case int64:
-		return AppendInt64(b, v), nil
+		return cborAppendInt64(b, v), nil
 	case uint:
-		return AppendUint(b, v), nil
+		return cborAppendUint(b, v), nil
 	case uint8:
-		return AppendUint8(b, v), nil
+		return cborAppendUint8(b, v), nil
 	case uint16:
-		return AppendUint16(b, v), nil
+		return cborAppendUint16(b, v), nil
 	case uint32:
-		return AppendUint32(b, v), nil
+		return cborAppendUint32(b, v), nil
 	case uint64:
-		return AppendUint64(b, v), nil
+		return cborAppendUint64(b, v), nil
 	case float32:
-		return AppendFloat32(b, v), nil
+		return cborAppendFloat32(b, v), nil
 	case float64:
-		return AppendFloat64(b, v), nil
+		return cborAppendFloat64(b, v), nil
 	case []byte:
-		return AppendBytes(b, v), nil
+		return cborAppendBytes(b, v), nil
 	case time.Time:
-		return AppendTime(b, v), nil
+		return cborAppendTime(b, v), nil
 	case time.Duration:
-		return AppendDuration(b, v), nil
+		return cborAppendDuration(b, v), nil
 	case []int:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		for _, elem := range v {
-			b = AppendInt(b, elem)
+			b = cborAppendInt(b, elem)
 		}
 		return b, nil
 	case []int8:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		for _, elem := range v {
-			b = AppendInt8(b, elem)
+			b = cborAppendInt8(b, elem)
 		}
 		return b, nil
 	case []int16:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		for _, elem := range v {
-			b = AppendInt16(b, elem)
+			b = cborAppendInt16(b, elem)
 		}
 		return b, nil
 	case []int32:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		for _, elem := range v {
-			b = AppendInt32(b, elem)
+			b = cborAppendInt32(b, elem)
 		}
 		return b, nil
 	case []int64:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		for _, elem := range v {
-			b = AppendInt64(b, elem)
+			b = cborAppendInt64(b, elem)
 		}
 		return b, nil
 	case []uint:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		for _, elem := range v {
-			b = AppendUint(b, elem)
+			b = cborAppendUint(b, elem)
 		}
 		return b, nil
 	case []uint16:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		for _, elem := range v {
-			b = AppendUint16(b, elem)
+			b = cborAppendUint16(b, elem)
 		}
 		return b, nil
 	case []uint32:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		for _, elem := range v {
-			b = AppendUint32(b, elem)
+			b = cborAppendUint32(b, elem)
 		}
 		return b, nil
 	case []uint64:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		for _, elem := range v {
-			b = AppendUint64(b, elem)
+			b = cborAppendUint64(b, elem)
 		}
 		return b, nil
 	case []float32:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		for _, elem := range v {
-			b = AppendFloat32(b, elem)
+			b = cborAppendFloat32(b, elem)
 		}
 		return b, nil
 	case []float64:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		for _, elem := range v {
-			b = AppendFloat64(b, elem)
+			b = cborAppendFloat64(b, elem)
 		}
 		return b, nil
 	case []string:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		for _, elem := range v {
-			b = AppendString(b, elem)
+			b = cborAppendString(b, elem)
 		}
 		return b, nil
 	case map[string]int:
-		b = AppendMapHeader(b, uint32(len(v)))
+		b = cborAppendMapHeader(b, uint32(len(v)))
 		for k, val := range v {
-			b = AppendString(b, k)
-			b = AppendInt(b, val)
+			b = cborAppendString(b, k)
+			b = cborAppendInt(b, val)
 		}
 		return b, nil
 	case map[string]int64:
-		b = AppendMapHeader(b, uint32(len(v)))
+		b = cborAppendMapHeader(b, uint32(len(v)))
 		for k, val := range v {
-			b = AppendString(b, k)
-			b = AppendInt64(b, val)
+			b = cborAppendString(b, k)
+			b = cborAppendInt64(b, val)
 		}
 		return b, nil
 	case map[string]uint:
-		b = AppendMapHeader(b, uint32(len(v)))
+		b = cborAppendMapHeader(b, uint32(len(v)))
 		for k, val := range v {
-			b = AppendString(b, k)
-			b = AppendUint(b, val)
+			b = cborAppendString(b, k)
+			b = cborAppendUint(b, val)
 		}
 		return b, nil
 	case map[string]uint64:
-		b = AppendMapHeader(b, uint32(len(v)))
+		b = cborAppendMapHeader(b, uint32(len(v)))
 		for k, val := range v {
-			b = AppendString(b, k)
-			b = AppendUint64(b, val)
+			b = cborAppendString(b, k)
+			b = cborAppendUint64(b, val)
 		}
 		return b, nil
 	case map[string]float64:
-		b = AppendMapHeader(b, uint32(len(v)))
+		b = cborAppendMapHeader(b, uint32(len(v)))
 		for k, val := range v {
-			b = AppendString(b, k)
-			b = AppendFloat64(b, val)
+			b = cborAppendString(b, k)
+			b = cborAppendFloat64(b, val)
 		}
 		return b, nil
 	case map[string]string:
-		b = AppendMapHeader(b, uint32(len(v)))
+		b = cborAppendMapHeader(b, uint32(len(v)))
 		for k, val := range v {
-			b = AppendString(b, k)
-			b = AppendString(b, val)
+			b = cborAppendString(b, k)
+			b = cborAppendString(b, val)
 		}
 		return b, nil
 	case json.RawMessage:
 
-		return AppendBytes(b, []byte(v)), nil
+		return cborAppendBytes(b, []byte(v)), nil
 	case json.Number:
 		if iv, err := v.Int64(); err == nil {
-			return AppendInt64(b, iv), nil
+			return cborAppendInt64(b, iv), nil
 		}
 		if fv, err := v.Float64(); err == nil {
-			return AppendFloat64(b, fv), nil
+			return cborAppendFloat64(b, fv), nil
 		}
-		return b, &ErrUnsupportedType{}
+		return b, &cborErrUnsupportedType{}
 	case map[string]any:
-		return AppendMapStrInterface(b, v)
+		return cborAppendMapStrInterface(b, v)
 	case []any:
-		b = AppendArrayHeader(b, uint32(len(v)))
+		b = cborAppendArrayHeader(b, uint32(len(v)))
 		var err error
 		for _, elem := range v {
-			b, err = AppendInterface(b, elem)
+			b, err = cborAppendInterface(b, elem)
 			if err != nil {
 				return b, err
 			}
@@ -5853,16 +5857,16 @@ func AppendInterface(b []byte, i any) ([]byte, error) {
 		rv := reflect.ValueOf(i)
 		t := rv.Type()
 		if rv.Kind() == reflect.Slice {
-			b = AppendArrayHeader(b, uint32(rv.Len()))
+			b = cborAppendArrayHeader(b, uint32(rv.Len()))
 			for idx := 0; idx < rv.Len(); idx++ {
 				val := rv.Index(idx)
 				elem := val.Interface()
-				m, ok := elem.(Marshaler)
+				m, ok := elem.(cborMarshaler)
 				if !ok && val.CanAddr() {
-					m, ok = val.Addr().Interface().(Marshaler)
+					m, ok = val.Addr().Interface().(cborMarshaler)
 				}
 				if !ok {
-					return b, &ErrUnsupportedType{}
+					return b, &cborErrUnsupportedType{}
 				}
 				var err error
 				b, err = m.MarshalCBOR(b)
@@ -5875,24 +5879,24 @@ func AppendInterface(b []byte, i any) ([]byte, error) {
 		if rv.Kind() == reflect.Map {
 			keyKind := t.Key().Kind()
 			keys := rv.MapKeys()
-			b = AppendMapHeader(b, uint32(len(keys)))
+			b = cborAppendMapHeader(b, uint32(len(keys)))
 			for _, k := range keys {
 
 				switch keyKind {
 				case reflect.String:
-					b = AppendString(b, k.String())
+					b = cborAppendString(b, k.String())
 				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-					b = AppendUint64(b, k.Uint())
+					b = cborAppendUint64(b, k.Uint())
 				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-					b = AppendInt64(b, k.Int())
+					b = cborAppendInt64(b, k.Int())
 				default:
-					return b, &ErrUnsupportedType{}
+					return b, &cborErrUnsupportedType{}
 				}
 
 				mv := rv.MapIndex(k)
 				val := mv.Interface()
 
-				if m, ok := val.(Marshaler); ok {
+				if m, ok := val.(cborMarshaler); ok {
 					var err error
 					b, err = m.MarshalCBOR(b)
 					if err != nil {
@@ -5902,7 +5906,7 @@ func AppendInterface(b []byte, i any) ([]byte, error) {
 
 					ptr := reflect.New(mv.Type())
 					ptr.Elem().Set(mv)
-					if m, ok := ptr.Interface().(Marshaler); ok {
+					if m, ok := ptr.Interface().(cborMarshaler); ok {
 						var err error
 						b, err = m.MarshalCBOR(b)
 						if err != nil {
@@ -5912,7 +5916,7 @@ func AppendInterface(b []byte, i any) ([]byte, error) {
 					}
 
 					var err error
-					b, err = AppendInterface(b, val)
+					b, err = cborAppendInterface(b, val)
 					if err != nil {
 						return b, err
 					}
@@ -5920,45 +5924,45 @@ func AppendInterface(b []byte, i any) ([]byte, error) {
 			}
 			return b, nil
 		}
-		return b, &ErrUnsupportedType{}
+		return b, &cborErrUnsupportedType{}
 	}
 }
 
-func AppendMapStrStrDeterministic(b []byte, m map[string]string) []byte {
+func cborAppendMapStrStrDeterministic(b []byte, m map[string]string) []byte {
 	sz := uint32(len(m))
-	b = AppendMapHeader(b, sz)
+	b = cborAppendMapHeader(b, sz)
 	type kv struct {
 		key string
 		enc []byte
 	}
 	arr := make([]kv, 0, len(m))
 	for k := range m {
-		arr = append(arr, kv{key: k, enc: AppendString(nil, k)})
+		arr = append(arr, kv{key: k, enc: cborAppendString(nil, k)})
 	}
 	sort.Slice(arr, func(i, j int) bool { return bytes.Compare(arr[i].enc, arr[j].enc) < 0 })
 	for _, it := range arr {
-		b = AppendString(b, it.key)
-		b = AppendString(b, m[it.key])
+		b = cborAppendString(b, it.key)
+		b = cborAppendString(b, m[it.key])
 	}
 	return b
 }
 
-func AppendMapStrInterfaceDeterministic(b []byte, m map[string]any) ([]byte, error) {
+func cborAppendMapStrInterfaceDeterministic(b []byte, m map[string]any) ([]byte, error) {
 	sz := uint32(len(m))
-	b = AppendMapHeader(b, sz)
+	b = cborAppendMapHeader(b, sz)
 	type kv struct {
 		key string
 		enc []byte
 	}
 	arr := make([]kv, 0, len(m))
 	for k := range m {
-		arr = append(arr, kv{key: k, enc: AppendString(nil, k)})
+		arr = append(arr, kv{key: k, enc: cborAppendString(nil, k)})
 	}
 	sort.Slice(arr, func(i, j int) bool { return bytes.Compare(arr[i].enc, arr[j].enc) < 0 })
 	for _, it := range arr {
-		b = AppendString(b, it.key)
+		b = cborAppendString(b, it.key)
 		var err error
-		b, err = AppendInterface(b, m[it.key])
+		b, err = cborAppendInterface(b, m[it.key])
 		if err != nil {
 			return b, err
 		}
@@ -5966,19 +5970,19 @@ func AppendMapStrInterfaceDeterministic(b []byte, m map[string]any) ([]byte, err
 	return b, nil
 }
 
-func AppendMapHeaderIndefinite(b []byte) []byte {
-	return append(b, makeByte(majorTypeMap, addInfoIndefinite))
+func cborAppendMapHeaderIndefinite(b []byte) []byte {
+	return append(b, cbormakeByte(cbormajorTypeMap, cboraddInfoIndefinite))
 }
 
-func AppendBreak(b []byte) []byte {
-	return append(b, makeByte(majorTypeSimple, simpleBreak))
+func cborAppendBreak(b []byte) []byte {
+	return append(b, cbormakeByte(cbormajorTypeSimple, cborsimpleBreak))
 }
 
-func AppendRawMapDeterministic(b []byte, pairs []RawPair) []byte {
+func cborAppendRawMapDeterministic(b []byte, pairs []cborRawPair) []byte {
 
 	n := len(pairs)
 	if n == 0 {
-		return AppendMapHeader(b, 0)
+		return cborAppendMapHeader(b, 0)
 	}
 
 	byLen := make(map[int][]int)
@@ -6036,7 +6040,7 @@ func AppendRawMapDeterministic(b []byte, pairs []RawPair) []byte {
 		}
 		order = append(order, cur...)
 	}
-	b = AppendMapHeader(b, uint32(n))
+	b = cborAppendMapHeader(b, uint32(n))
 	for _, i := range order {
 		b = append(b, pairs[i].Key...)
 		b = append(b, pairs[i].Value...)
@@ -6044,7 +6048,7 @@ func AppendRawMapDeterministic(b []byte, pairs []RawPair) []byte {
 	return b
 }
 
-func AppendMapDeterministic[K comparable, V any](b []byte, m map[K]V,
+func cborAppendMapDeterministic[K comparable, V any](b []byte, m map[K]V,
 	encKey func(dst []byte, k K) []byte,
 	encVal func(dst []byte, v V) ([]byte, error),
 ) ([]byte, error) {
@@ -6117,7 +6121,7 @@ func AppendMapDeterministic[K comparable, V any](b []byte, m map[K]V,
 		}
 		order = append(order, cur...)
 	}
-	b = AppendMapHeader(b, uint32(len(items)))
+	b = cborAppendMapHeader(b, uint32(len(items)))
 	var err error
 	for _, oi := range order {
 		b = append(b, items[oi].keyEnc...)
@@ -6129,120 +6133,120 @@ func AppendMapDeterministic[K comparable, V any](b []byte, m map[K]V,
 	return b, nil
 }
 
-func EncKeyString(dst []byte, s string) []byte   { return AppendString(dst, s) }
-func EncKeyBytes(dst []byte, bs []byte) []byte   { return AppendBytes(dst, bs) }
-func EncKeyInt(dst []byte, i int) []byte         { return AppendInt(dst, i) }
-func EncKeyInt64(dst []byte, i int64) []byte     { return AppendInt64(dst, i) }
-func EncKeyUint64(dst []byte, u uint64) []byte   { return AppendUint64(dst, u) }
-func EncKeyBool(dst []byte, v bool) []byte       { return AppendBool(dst, v) }
-func EncKeyFloat64(dst []byte, f float64) []byte { return AppendFloat64(dst, f) }
-func EncKeyTime(dst []byte, t time.Time) []byte  { return AppendTime(dst, t) }
+func cborEncKeyString(dst []byte, s string) []byte   { return cborAppendString(dst, s) }
+func cborEncKeyBytes(dst []byte, bs []byte) []byte   { return cborAppendBytes(dst, bs) }
+func cborEncKeyInt(dst []byte, i int) []byte         { return cborAppendInt(dst, i) }
+func cborEncKeyInt64(dst []byte, i int64) []byte     { return cborAppendInt64(dst, i) }
+func cborEncKeyUint64(dst []byte, u uint64) []byte   { return cborAppendUint64(dst, u) }
+func cborEncKeyBool(dst []byte, v bool) []byte       { return cborAppendBool(dst, v) }
+func cborEncKeyFloat64(dst []byte, f float64) []byte { return cborAppendFloat64(dst, f) }
+func cborEncKeyTime(dst []byte, t time.Time) []byte  { return cborAppendTime(dst, t) }
 
-func EncValString(dst []byte, s string) ([]byte, error)   { return AppendString(dst, s), nil }
-func EncValBytes(dst []byte, bs []byte) ([]byte, error)   { return AppendBytes(dst, bs), nil }
-func EncValInt(dst []byte, i int) ([]byte, error)         { return AppendInt(dst, i), nil }
-func EncValInt64(dst []byte, i int64) ([]byte, error)     { return AppendInt64(dst, i), nil }
-func EncValUint64(dst []byte, u uint64) ([]byte, error)   { return AppendUint64(dst, u), nil }
-func EncValBool(dst []byte, v bool) ([]byte, error)       { return AppendBool(dst, v), nil }
-func EncValFloat64(dst []byte, f float64) ([]byte, error) { return AppendFloat64(dst, f), nil }
-func EncValFloat32(dst []byte, f float32) ([]byte, error) { return AppendFloat32(dst, f), nil }
-func EncValTime(dst []byte, t time.Time) ([]byte, error)  { return AppendTime(dst, t), nil }
+func cborEncValString(dst []byte, s string) ([]byte, error)   { return cborAppendString(dst, s), nil }
+func cborEncValBytes(dst []byte, bs []byte) ([]byte, error)   { return cborAppendBytes(dst, bs), nil }
+func cborEncValInt(dst []byte, i int) ([]byte, error)         { return cborAppendInt(dst, i), nil }
+func cborEncValInt64(dst []byte, i int64) ([]byte, error)     { return cborAppendInt64(dst, i), nil }
+func cborEncValUint64(dst []byte, u uint64) ([]byte, error)   { return cborAppendUint64(dst, u), nil }
+func cborEncValBool(dst []byte, v bool) ([]byte, error)       { return cborAppendBool(dst, v), nil }
+func cborEncValFloat64(dst []byte, f float64) ([]byte, error) { return cborAppendFloat64(dst, f), nil }
+func cborEncValFloat32(dst []byte, f float32) ([]byte, error) { return cborAppendFloat32(dst, f), nil }
+func cborEncValTime(dst []byte, t time.Time) ([]byte, error)  { return cborAppendTime(dst, t), nil }
 
-func EncValInterface(dst []byte, v any) ([]byte, error) { return AppendInterface(dst, v) }
+func cborEncValInterface(dst []byte, v any) ([]byte, error) { return cborAppendInterface(dst, v) }
 
-func AppendMapDeterministicStrStr(b []byte, m map[string]string) []byte {
-	out, _ := AppendMapDeterministic(b, m, EncKeyString, EncValString)
+func cborAppendMapDeterministicStrStr(b []byte, m map[string]string) []byte {
+	out, _ := cborAppendMapDeterministic(b, m, cborEncKeyString, cborEncValString)
 	return out
 }
 
-func AppendMapDeterministicStrInt64(b []byte, m map[string]int64) []byte {
-	out, _ := AppendMapDeterministic(b, m, EncKeyString, EncValInt64)
+func cborAppendMapDeterministicStrInt64(b []byte, m map[string]int64) []byte {
+	out, _ := cborAppendMapDeterministic(b, m, cborEncKeyString, cborEncValInt64)
 	return out
 }
 
-func AppendMapDeterministicStrInt(b []byte, m map[string]int) []byte {
-	out, _ := AppendMapDeterministic(b, m, EncKeyString, EncValInt)
+func cborAppendMapDeterministicStrInt(b []byte, m map[string]int) []byte {
+	out, _ := cborAppendMapDeterministic(b, m, cborEncKeyString, cborEncValInt)
 	return out
 }
 
-func AppendMapDeterministicStrUint64(b []byte, m map[string]uint64) []byte {
-	out, _ := AppendMapDeterministic(b, m, EncKeyString, EncValUint64)
+func cborAppendMapDeterministicStrUint64(b []byte, m map[string]uint64) []byte {
+	out, _ := cborAppendMapDeterministic(b, m, cborEncKeyString, cborEncValUint64)
 	return out
 }
 
-func AppendMapDeterministicStrBool(b []byte, m map[string]bool) []byte {
-	out, _ := AppendMapDeterministic(b, m, EncKeyString, EncValBool)
+func cborAppendMapDeterministicStrBool(b []byte, m map[string]bool) []byte {
+	out, _ := cborAppendMapDeterministic(b, m, cborEncKeyString, cborEncValBool)
 	return out
 }
 
-func AppendMapDeterministicStrFloat64(b []byte, m map[string]float64) []byte {
-	out, _ := AppendMapDeterministic(b, m, EncKeyString, EncValFloat64)
+func cborAppendMapDeterministicStrFloat64(b []byte, m map[string]float64) []byte {
+	out, _ := cborAppendMapDeterministic(b, m, cborEncKeyString, cborEncValFloat64)
 	return out
 }
 
-func AppendMapDeterministicStrBytes(b []byte, m map[string][]byte) []byte {
-	out, _ := AppendMapDeterministic(b, m, EncKeyString, EncValBytes)
+func cborAppendMapDeterministicStrBytes(b []byte, m map[string][]byte) []byte {
+	out, _ := cborAppendMapDeterministic(b, m, cborEncKeyString, cborEncValBytes)
 	return out
 }
 
-func AppendMapDeterministicStrInterface(b []byte, m map[string]any) ([]byte, error) {
-	return AppendMapDeterministic(b, m, EncKeyString, EncValInterface)
+func cborAppendMapDeterministicStrInterface(b []byte, m map[string]any) ([]byte, error) {
+	return cborAppendMapDeterministic(b, m, cborEncKeyString, cborEncValInterface)
 }
 
-type Writer struct {
-	bb *ByteBuffer
+type cborWriter struct {
+	bb *cborByteBuffer
 }
 
-func NewWriter(bb *ByteBuffer) *Writer { return &Writer{bb: bb} }
+func cborNewWriter(bb *cborByteBuffer) *cborWriter { return &cborWriter{bb: bb} }
 
-func (w *Writer) Bytes() []byte { return w.bb.Bytes() }
+func (w *cborWriter) Bytes() []byte { return w.bb.Bytes() }
 
-func (w *Writer) WriteMapHeader(sz uint32) error {
+func (w *cborWriter) WriteMapHeader(sz uint32) error {
 	w.bb.AppendMapHeader(sz)
 	return nil
 }
 
-func (w *Writer) WriteString(s string) error {
+func (w *cborWriter) WriteString(s string) error {
 	w.bb.AppendString(s)
 	return nil
 }
 
-func (w *Writer) WriteBool(v bool) error {
+func (w *cborWriter) WriteBool(v bool) error {
 	w.bb.AppendBool(v)
 	return nil
 }
 
-func (w *Writer) WriteInt(v int) error {
+func (w *cborWriter) WriteInt(v int) error {
 	w.bb.AppendInt64(int64(v))
 	return nil
 }
 
-func (w *Writer) WriteInt64(v int64) error {
+func (w *cborWriter) WriteInt64(v int64) error {
 	w.bb.AppendInt64(v)
 	return nil
 }
 
-func (w *Writer) WriteUint(v uint) error {
+func (w *cborWriter) WriteUint(v uint) error {
 	w.bb.AppendUint64(uint64(v))
 	return nil
 }
 
-func (w *Writer) WriteUint64(v uint64) error {
+func (w *cborWriter) WriteUint64(v uint64) error {
 	w.bb.AppendUint64(v)
 	return nil
 }
 
-func (w *Writer) WriteFloat32(v float32) error {
+func (w *cborWriter) WriteFloat32(v float32) error {
 	w.bb.AppendFloat32(v)
 	return nil
 }
 
-func (w *Writer) WriteFloat64(v float64) error {
+func (w *cborWriter) WriteFloat64(v float64) error {
 	w.bb.AppendFloat64(v)
 	return nil
 }
 
-func (w *Writer) WriteBytes(v []byte) error {
+func (w *cborWriter) WriteBytes(v []byte) error {
 	w.bb.AppendBytes(v)
 	return nil
 }

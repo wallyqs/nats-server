@@ -5,16 +5,16 @@ package metasnapshot
 import "time"
 
 func (x ClientInfo) Msgsize() (s int) {
-	s = MapHeaderSize + StringPrefixSize + len("acc") + StringPrefixSize + len(x.Account) + StringPrefixSize + len("svc") + StringPrefixSize + len(x.Service) + StringPrefixSize + len("cluster") + StringPrefixSize + len(x.Cluster)
+	s = cborMapHeaderSize + cborStringPrefixSize + len("acc") + cborStringPrefixSize + len(x.Account) + cborStringPrefixSize + len("svc") + cborStringPrefixSize + len(x.Service) + cborStringPrefixSize + len("cluster") + cborStringPrefixSize + len(x.Cluster)
 	return
 }
 
 func (x *ClientInfo) MarshalCBOR(b []byte) ([]byte, error) {
 	if x == nil {
-		return AppendNil(b), nil
+		return cborAppendNil(b), nil
 	}
 
-	b = Require(b, x.Msgsize())
+	b = cborRequire(b, x.Msgsize())
 
 	count := uint32(0)
 	if !(x.Account == "") {
@@ -26,25 +26,25 @@ func (x *ClientInfo) MarshalCBOR(b []byte) ([]byte, error) {
 	if !(x.Cluster == "") {
 		count++
 	}
-	b = AppendMapHeader(b, count)
+	b = cborAppendMapHeader(b, count)
 	var err error
 	if !(x.Account == "") {
-		b = AppendString(b, "acc")
-		b, err = AppendString(b, x.Account), nil
+		b = cborAppendString(b, "acc")
+		b, err = cborAppendString(b, x.Account), nil
 		if err != nil {
 			return b, err
 		}
 	}
 	if !(x.Service == "") {
-		b = AppendString(b, "svc")
-		b, err = AppendString(b, x.Service), nil
+		b = cborAppendString(b, "svc")
+		b, err = cborAppendString(b, x.Service), nil
 		if err != nil {
 			return b, err
 		}
 	}
 	if !(x.Cluster == "") {
-		b = AppendString(b, "cluster")
-		b, err = AppendString(b, x.Cluster), nil
+		b = cborAppendString(b, "cluster")
+		b, err = cborAppendString(b, x.Cluster), nil
 		if err != nil {
 			return b, err
 		}
@@ -56,14 +56,14 @@ func (x *ClientInfo) MarshalCBOR(b []byte) ([]byte, error) {
 // DecodeSafe decodes using validated, allocating string handling.
 func (x *ClientInfo) DecodeSafe(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		key, v, err := ReadStringBytes(rest)
+		key, v, err := cborReadStringBytes(rest)
 		if err != nil {
 			return b, err
 		}
@@ -71,7 +71,7 @@ func (x *ClientInfo) DecodeSafe(b []byte) ([]byte, error) {
 		case "acc":
 
 			var tmp string
-			tmp, v, err = ReadStringBytes(v)
+			tmp, v, err = cborReadStringBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -79,7 +79,7 @@ func (x *ClientInfo) DecodeSafe(b []byte) ([]byte, error) {
 		case "svc":
 
 			var tmp string
-			tmp, v, err = ReadStringBytes(v)
+			tmp, v, err = cborReadStringBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -87,13 +87,13 @@ func (x *ClientInfo) DecodeSafe(b []byte) ([]byte, error) {
 		case "cluster":
 
 			var tmp string
-			tmp, v, err = ReadStringBytes(v)
+			tmp, v, err = cborReadStringBytes(v)
 			if err != nil {
 				return b, err
 			}
 			x.Cluster = tmp
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -106,45 +106,45 @@ func (x *ClientInfo) DecodeSafe(b []byte) ([]byte, error) {
 // DecodeTrusted decodes using zero-copy strings and no per-string UTF-8 validation.
 func (x *ClientInfo) DecodeTrusted(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		keyBytes, v, err := ReadStringZC(rest)
+		keyBytes, v, err := cborReadStringZC(rest)
 		if err != nil {
 			return b, err
 		}
-		key := UnsafeString(keyBytes)
+		key := cborUnsafeString(keyBytes)
 		switch key {
 		case "acc":
 
 			var tmpBytes []byte
-			tmpBytes, v, err = ReadStringZC(v)
+			tmpBytes, v, err = cborReadStringZC(v)
 			if err != nil {
 				return b, err
 			}
-			x.Account = UnsafeString(tmpBytes)
+			x.Account = cborUnsafeString(tmpBytes)
 		case "svc":
 
 			var tmpBytes []byte
-			tmpBytes, v, err = ReadStringZC(v)
+			tmpBytes, v, err = cborReadStringZC(v)
 			if err != nil {
 				return b, err
 			}
-			x.Service = UnsafeString(tmpBytes)
+			x.Service = cborUnsafeString(tmpBytes)
 		case "cluster":
 
 			var tmpBytes []byte
-			tmpBytes, v, err = ReadStringZC(v)
+			tmpBytes, v, err = cborReadStringZC(v)
 			if err != nil {
 				return b, err
 			}
-			x.Cluster = UnsafeString(tmpBytes)
+			x.Cluster = cborUnsafeString(tmpBytes)
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -160,16 +160,16 @@ func (x *ClientInfo) UnmarshalCBOR(b []byte) ([]byte, error) {
 }
 
 func (x RaftGroup) Msgsize() (s int) {
-	s = MapHeaderSize + StringPrefixSize + len("name") + StringPrefixSize + len(x.Name) + StringPrefixSize + len("peers") + ArrayHeaderSize + len(x.Peers)*StringPrefixSize + StringPrefixSize + len("cluster") + StringPrefixSize + len(x.Cluster) + StringPrefixSize + len("preferred") + StringPrefixSize + len(x.Preferred) + StringPrefixSize + len("scale_up") + BoolSize
+	s = cborMapHeaderSize + cborStringPrefixSize + len("name") + cborStringPrefixSize + len(x.Name) + cborStringPrefixSize + len("peers") + cborArrayHeaderSize + len(x.Peers)*cborStringPrefixSize + cborStringPrefixSize + len("cluster") + cborStringPrefixSize + len(x.Cluster) + cborStringPrefixSize + len("preferred") + cborStringPrefixSize + len(x.Preferred) + cborStringPrefixSize + len("scale_up") + cborBoolSize
 	return
 }
 
 func (x *RaftGroup) MarshalCBOR(b []byte) ([]byte, error) {
 	if x == nil {
-		return AppendNil(b), nil
+		return cborAppendNil(b), nil
 	}
 
-	b = Require(b, x.Msgsize())
+	b = cborRequire(b, x.Msgsize())
 
 	count := uint32(0)
 	count++
@@ -184,41 +184,41 @@ func (x *RaftGroup) MarshalCBOR(b []byte) ([]byte, error) {
 	if !(!x.ScaleUp) {
 		count++
 	}
-	b = AppendMapHeader(b, count)
+	b = cborAppendMapHeader(b, count)
 	var err error
-	b = AppendString(b, "name")
-	b, err = AppendString(b, x.Name), nil
+	b = cborAppendString(b, "name")
+	b, err = cborAppendString(b, x.Name), nil
 	if err != nil {
 		return b, err
 	}
 
-	b = AppendString(b, "peers")
-	b = AppendArrayHeader(b, uint32(len(x.Peers)))
+	b = cborAppendString(b, "peers")
+	b = cborAppendArrayHeader(b, uint32(len(x.Peers)))
 	for _, v := range x.Peers {
-		b = AppendString(b, v)
+		b = cborAppendString(b, v)
 	}
-	b = AppendString(b, "store")
+	b = cborAppendString(b, "store")
 	b, err = x.Storage.MarshalCBOR(b)
 	if err != nil {
 		return b, err
 	}
 	if !(x.Cluster == "") {
-		b = AppendString(b, "cluster")
-		b, err = AppendString(b, x.Cluster), nil
+		b = cborAppendString(b, "cluster")
+		b, err = cborAppendString(b, x.Cluster), nil
 		if err != nil {
 			return b, err
 		}
 	}
 	if !(x.Preferred == "") {
-		b = AppendString(b, "preferred")
-		b, err = AppendString(b, x.Preferred), nil
+		b = cborAppendString(b, "preferred")
+		b, err = cborAppendString(b, x.Preferred), nil
 		if err != nil {
 			return b, err
 		}
 	}
 	if !(!x.ScaleUp) {
-		b = AppendString(b, "scale_up")
-		b, err = AppendBool(b, x.ScaleUp), nil
+		b = cborAppendString(b, "scale_up")
+		b, err = cborAppendBool(b, x.ScaleUp), nil
 		if err != nil {
 			return b, err
 		}
@@ -230,14 +230,14 @@ func (x *RaftGroup) MarshalCBOR(b []byte) ([]byte, error) {
 // DecodeSafe decodes using validated, allocating string handling.
 func (x *RaftGroup) DecodeSafe(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		key, v, err := ReadStringBytes(rest)
+		key, v, err := cborReadStringBytes(rest)
 		if err != nil {
 			return b, err
 		}
@@ -245,7 +245,7 @@ func (x *RaftGroup) DecodeSafe(b []byte) ([]byte, error) {
 		case "name":
 
 			var tmp string
-			tmp, v, err = ReadStringBytes(v)
+			tmp, v, err = cborReadStringBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -253,7 +253,7 @@ func (x *RaftGroup) DecodeSafe(b []byte) ([]byte, error) {
 		case "peers":
 
 			var sz uint32
-			sz, v, err = ReadArrayHeaderBytes(v)
+			sz, v, err = cborReadArrayHeaderBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -267,7 +267,7 @@ func (x *RaftGroup) DecodeSafe(b []byte) ([]byte, error) {
 			}
 			for iPeers := uint32(0); iPeers < sz; iPeers++ {
 				var tmp string
-				tmp, v, err = ReadStringBytes(v)
+				tmp, v, err = cborReadStringBytes(v)
 				if err != nil {
 					return b, err
 				}
@@ -282,7 +282,7 @@ func (x *RaftGroup) DecodeSafe(b []byte) ([]byte, error) {
 		case "cluster":
 
 			var tmp string
-			tmp, v, err = ReadStringBytes(v)
+			tmp, v, err = cborReadStringBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -290,7 +290,7 @@ func (x *RaftGroup) DecodeSafe(b []byte) ([]byte, error) {
 		case "preferred":
 
 			var tmp string
-			tmp, v, err = ReadStringBytes(v)
+			tmp, v, err = cborReadStringBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -298,13 +298,13 @@ func (x *RaftGroup) DecodeSafe(b []byte) ([]byte, error) {
 		case "scale_up":
 
 			var tmp bool
-			tmp, v, err = ReadBoolBytes(v)
+			tmp, v, err = cborReadBoolBytes(v)
 			if err != nil {
 				return b, err
 			}
 			x.ScaleUp = tmp
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -317,31 +317,31 @@ func (x *RaftGroup) DecodeSafe(b []byte) ([]byte, error) {
 // DecodeTrusted decodes using zero-copy strings and no per-string UTF-8 validation.
 func (x *RaftGroup) DecodeTrusted(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		keyBytes, v, err := ReadStringZC(rest)
+		keyBytes, v, err := cborReadStringZC(rest)
 		if err != nil {
 			return b, err
 		}
-		key := UnsafeString(keyBytes)
+		key := cborUnsafeString(keyBytes)
 		switch key {
 		case "name":
 
 			var tmpBytes []byte
-			tmpBytes, v, err = ReadStringZC(v)
+			tmpBytes, v, err = cborReadStringZC(v)
 			if err != nil {
 				return b, err
 			}
-			x.Name = UnsafeString(tmpBytes)
+			x.Name = cborUnsafeString(tmpBytes)
 		case "peers":
 
 			var sz uint32
-			sz, v, err = ReadArrayHeaderBytes(v)
+			sz, v, err = cborReadArrayHeaderBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -355,7 +355,7 @@ func (x *RaftGroup) DecodeTrusted(b []byte) ([]byte, error) {
 			}
 			for iPeers := uint32(0); iPeers < sz; iPeers++ {
 				var tmp string
-				tmp, v, err = ReadStringBytes(v)
+				tmp, v, err = cborReadStringBytes(v)
 				if err != nil {
 					return b, err
 				}
@@ -370,29 +370,29 @@ func (x *RaftGroup) DecodeTrusted(b []byte) ([]byte, error) {
 		case "cluster":
 
 			var tmpBytes []byte
-			tmpBytes, v, err = ReadStringZC(v)
+			tmpBytes, v, err = cborReadStringZC(v)
 			if err != nil {
 				return b, err
 			}
-			x.Cluster = UnsafeString(tmpBytes)
+			x.Cluster = cborUnsafeString(tmpBytes)
 		case "preferred":
 
 			var tmpBytes []byte
-			tmpBytes, v, err = ReadStringZC(v)
+			tmpBytes, v, err = cborReadStringZC(v)
 			if err != nil {
 				return b, err
 			}
-			x.Preferred = UnsafeString(tmpBytes)
+			x.Preferred = cborUnsafeString(tmpBytes)
 		case "scale_up":
 
 			var tmp bool
-			tmp, v, err = ReadBoolBytes(v)
+			tmp, v, err = cborReadBoolBytes(v)
 			if err != nil {
 				return b, err
 			}
 			x.ScaleUp = tmp
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -408,26 +408,26 @@ func (x *RaftGroup) UnmarshalCBOR(b []byte) ([]byte, error) {
 }
 
 func (x SequencePair) Msgsize() (s int) {
-	s = MapHeaderSize + StringPrefixSize + len("consumer_seq") + Uint64Size + StringPrefixSize + len("stream_seq") + Uint64Size
+	s = cborMapHeaderSize + cborStringPrefixSize + len("consumer_seq") + cborUint64Size + cborStringPrefixSize + len("stream_seq") + cborUint64Size
 	return
 }
 
 func (x *SequencePair) MarshalCBOR(b []byte) ([]byte, error) {
 	if x == nil {
-		return AppendNil(b), nil
+		return cborAppendNil(b), nil
 	}
 
-	b = Require(b, x.Msgsize())
+	b = cborRequire(b, x.Msgsize())
 
-	b = AppendMapHeader(b, uint32(2))
+	b = cborAppendMapHeader(b, uint32(2))
 	var err error
-	b = AppendString(b, "consumer_seq")
-	b, err = AppendUint64(b, x.Consumer), nil
+	b = cborAppendString(b, "consumer_seq")
+	b, err = cborAppendUint64(b, x.Consumer), nil
 	if err != nil {
 		return b, err
 	}
-	b = AppendString(b, "stream_seq")
-	b, err = AppendUint64(b, x.Stream), nil
+	b = cborAppendString(b, "stream_seq")
+	b, err = cborAppendUint64(b, x.Stream), nil
 	if err != nil {
 		return b, err
 	}
@@ -438,14 +438,14 @@ func (x *SequencePair) MarshalCBOR(b []byte) ([]byte, error) {
 // DecodeSafe decodes using validated, allocating string handling.
 func (x *SequencePair) DecodeSafe(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		key, v, err := ReadStringBytes(rest)
+		key, v, err := cborReadStringBytes(rest)
 		if err != nil {
 			return b, err
 		}
@@ -453,7 +453,7 @@ func (x *SequencePair) DecodeSafe(b []byte) ([]byte, error) {
 		case "consumer_seq":
 
 			var tmp uint64
-			tmp, v, err = ReadUint64Bytes(v)
+			tmp, v, err = cborReadUint64Bytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -461,13 +461,13 @@ func (x *SequencePair) DecodeSafe(b []byte) ([]byte, error) {
 		case "stream_seq":
 
 			var tmp uint64
-			tmp, v, err = ReadUint64Bytes(v)
+			tmp, v, err = cborReadUint64Bytes(v)
 			if err != nil {
 				return b, err
 			}
 			x.Stream = tmp
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -480,23 +480,23 @@ func (x *SequencePair) DecodeSafe(b []byte) ([]byte, error) {
 // DecodeTrusted decodes using zero-copy strings and no per-string UTF-8 validation.
 func (x *SequencePair) DecodeTrusted(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		keyBytes, v, err := ReadStringZC(rest)
+		keyBytes, v, err := cborReadStringZC(rest)
 		if err != nil {
 			return b, err
 		}
-		key := UnsafeString(keyBytes)
+		key := cborUnsafeString(keyBytes)
 		switch key {
 		case "consumer_seq":
 
 			var tmp uint64
-			tmp, v, err = ReadUint64Bytes(v)
+			tmp, v, err = cborReadUint64Bytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -504,13 +504,13 @@ func (x *SequencePair) DecodeTrusted(b []byte) ([]byte, error) {
 		case "stream_seq":
 
 			var tmp uint64
-			tmp, v, err = ReadUint64Bytes(v)
+			tmp, v, err = cborReadUint64Bytes(v)
 			if err != nil {
 				return b, err
 			}
 			x.Stream = tmp
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -526,26 +526,26 @@ func (x *SequencePair) UnmarshalCBOR(b []byte) ([]byte, error) {
 }
 
 func (x Pending) Msgsize() (s int) {
-	s = MapHeaderSize + StringPrefixSize + len("sequence") + Uint64Size + StringPrefixSize + len("ts") + Int64Size
+	s = cborMapHeaderSize + cborStringPrefixSize + len("sequence") + cborUint64Size + cborStringPrefixSize + len("ts") + cborInt64Size
 	return
 }
 
 func (x *Pending) MarshalCBOR(b []byte) ([]byte, error) {
 	if x == nil {
-		return AppendNil(b), nil
+		return cborAppendNil(b), nil
 	}
 
-	b = Require(b, x.Msgsize())
+	b = cborRequire(b, x.Msgsize())
 
-	b = AppendMapHeader(b, uint32(2))
+	b = cborAppendMapHeader(b, uint32(2))
 	var err error
-	b = AppendString(b, "sequence")
-	b, err = AppendUint64(b, x.Sequence), nil
+	b = cborAppendString(b, "sequence")
+	b, err = cborAppendUint64(b, x.Sequence), nil
 	if err != nil {
 		return b, err
 	}
-	b = AppendString(b, "ts")
-	b, err = AppendInt64(b, x.Timestamp), nil
+	b = cborAppendString(b, "ts")
+	b, err = cborAppendInt64(b, x.Timestamp), nil
 	if err != nil {
 		return b, err
 	}
@@ -556,14 +556,14 @@ func (x *Pending) MarshalCBOR(b []byte) ([]byte, error) {
 // DecodeSafe decodes using validated, allocating string handling.
 func (x *Pending) DecodeSafe(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		key, v, err := ReadStringBytes(rest)
+		key, v, err := cborReadStringBytes(rest)
 		if err != nil {
 			return b, err
 		}
@@ -571,7 +571,7 @@ func (x *Pending) DecodeSafe(b []byte) ([]byte, error) {
 		case "sequence":
 
 			var tmp uint64
-			tmp, v, err = ReadUint64Bytes(v)
+			tmp, v, err = cborReadUint64Bytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -579,13 +579,13 @@ func (x *Pending) DecodeSafe(b []byte) ([]byte, error) {
 		case "ts":
 
 			var tmp int64
-			tmp, v, err = ReadInt64Bytes(v)
+			tmp, v, err = cborReadInt64Bytes(v)
 			if err != nil {
 				return b, err
 			}
 			x.Timestamp = tmp
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -598,23 +598,23 @@ func (x *Pending) DecodeSafe(b []byte) ([]byte, error) {
 // DecodeTrusted decodes using zero-copy strings and no per-string UTF-8 validation.
 func (x *Pending) DecodeTrusted(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		keyBytes, v, err := ReadStringZC(rest)
+		keyBytes, v, err := cborReadStringZC(rest)
 		if err != nil {
 			return b, err
 		}
-		key := UnsafeString(keyBytes)
+		key := cborUnsafeString(keyBytes)
 		switch key {
 		case "sequence":
 
 			var tmp uint64
-			tmp, v, err = ReadUint64Bytes(v)
+			tmp, v, err = cborReadUint64Bytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -622,13 +622,13 @@ func (x *Pending) DecodeTrusted(b []byte) ([]byte, error) {
 		case "ts":
 
 			var tmp int64
-			tmp, v, err = ReadInt64Bytes(v)
+			tmp, v, err = cborReadInt64Bytes(v)
 			if err != nil {
 				return b, err
 			}
 			x.Timestamp = tmp
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -645,7 +645,7 @@ func (x *Pending) UnmarshalCBOR(b []byte) ([]byte, error) {
 
 func (x *ConsumerState) MarshalCBOR(b []byte) ([]byte, error) {
 	if x == nil {
-		return AppendNil(b), nil
+		return cborAppendNil(b), nil
 	}
 
 	count := uint32(0)
@@ -657,26 +657,26 @@ func (x *ConsumerState) MarshalCBOR(b []byte) ([]byte, error) {
 	if !(len(x.Redelivered) == 0) {
 		count++
 	}
-	b = AppendMapHeader(b, count)
+	b = cborAppendMapHeader(b, count)
 	var err error
-	b = AppendString(b, "delivered")
+	b = cborAppendString(b, "delivered")
 	b, err = x.Delivered.MarshalCBOR(b)
 	if err != nil {
 		return b, err
 	}
-	b = AppendString(b, "ack_floor")
+	b = cborAppendString(b, "ack_floor")
 	b, err = x.AckFloor.MarshalCBOR(b)
 	if err != nil {
 		return b, err
 	}
 	if !(len(x.Pending) == 0) {
 
-		b = AppendString(b, "pending")
-		b = AppendMapHeader(b, uint32(len(x.Pending)))
+		b = cborAppendString(b, "pending")
+		b = cborAppendMapHeader(b, uint32(len(x.Pending)))
 		for k, v := range x.Pending {
-			b = AppendUint64(b, k)
+			b = cborAppendUint64(b, k)
 			if v == nil {
-				b = AppendNil(b)
+				b = cborAppendNil(b)
 			} else {
 				b, err = v.MarshalCBOR(b)
 				if err != nil {
@@ -687,11 +687,11 @@ func (x *ConsumerState) MarshalCBOR(b []byte) ([]byte, error) {
 	}
 	if !(len(x.Redelivered) == 0) {
 
-		b = AppendString(b, "redelivered")
-		b = AppendMapHeader(b, uint32(len(x.Redelivered)))
+		b = cborAppendString(b, "redelivered")
+		b = cborAppendMapHeader(b, uint32(len(x.Redelivered)))
 		for k, v := range x.Redelivered {
-			b = AppendUint64(b, k)
-			b = AppendUint64(b, v)
+			b = cborAppendUint64(b, k)
+			b = cborAppendUint64(b, v)
 		}
 	}
 
@@ -701,14 +701,14 @@ func (x *ConsumerState) MarshalCBOR(b []byte) ([]byte, error) {
 // DecodeSafe decodes using validated, allocating string handling.
 func (x *ConsumerState) DecodeSafe(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		key, v, err := ReadStringBytes(rest)
+		key, v, err := cborReadStringBytes(rest)
 		if err != nil {
 			return b, err
 		}
@@ -728,7 +728,7 @@ func (x *ConsumerState) DecodeSafe(b []byte) ([]byte, error) {
 		case "pending":
 
 			var sz uint32
-			sz, v, err = ReadMapHeaderBytes(v)
+			sz, v, err = cborReadMapHeaderBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -739,16 +739,16 @@ func (x *ConsumerState) DecodeSafe(b []byte) ([]byte, error) {
 			}
 			for iPending := uint32(0); iPending < sz; iPending++ {
 				var key uint64
-				key, v, err = ReadUint64Bytes(v)
+				key, v, err = cborReadUint64Bytes(v)
 				if err != nil {
 					return b, err
 				}
 				if len(v) == 0 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
 				if v[0] == 0xf6 { // null
 					var tmpBytes []byte
-					tmpBytes, err = ReadNilBytes(v)
+					tmpBytes, err = cborReadNilBytes(v)
 					if err != nil {
 						return b, err
 					}
@@ -766,7 +766,7 @@ func (x *ConsumerState) DecodeSafe(b []byte) ([]byte, error) {
 		case "redelivered":
 
 			var sz uint32
-			sz, v, err = ReadMapHeaderBytes(v)
+			sz, v, err = cborReadMapHeaderBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -777,19 +777,19 @@ func (x *ConsumerState) DecodeSafe(b []byte) ([]byte, error) {
 			}
 			for iRedelivered := uint32(0); iRedelivered < sz; iRedelivered++ {
 				var key uint64
-				key, v, err = ReadUint64Bytes(v)
+				key, v, err = cborReadUint64Bytes(v)
 				if err != nil {
 					return b, err
 				}
 				var val uint64
-				val, v, err = ReadUint64Bytes(v)
+				val, v, err = cborReadUint64Bytes(v)
 				if err != nil {
 					return b, err
 				}
 				x.Redelivered[key] = val
 			}
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -802,18 +802,18 @@ func (x *ConsumerState) DecodeSafe(b []byte) ([]byte, error) {
 // DecodeTrusted decodes using zero-copy strings and no per-string UTF-8 validation.
 func (x *ConsumerState) DecodeTrusted(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		keyBytes, v, err := ReadStringZC(rest)
+		keyBytes, v, err := cborReadStringZC(rest)
 		if err != nil {
 			return b, err
 		}
-		key := UnsafeString(keyBytes)
+		key := cborUnsafeString(keyBytes)
 		switch key {
 		case "delivered":
 
@@ -830,7 +830,7 @@ func (x *ConsumerState) DecodeTrusted(b []byte) ([]byte, error) {
 		case "pending":
 
 			var sz uint32
-			sz, v, err = ReadMapHeaderBytes(v)
+			sz, v, err = cborReadMapHeaderBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -839,16 +839,16 @@ func (x *ConsumerState) DecodeTrusted(b []byte) ([]byte, error) {
 			}
 			for iPending := uint32(0); iPending < sz; iPending++ {
 				var key uint64
-				key, v, err = ReadUint64Bytes(v)
+				key, v, err = cborReadUint64Bytes(v)
 				if err != nil {
 					return b, err
 				}
 				if len(v) == 0 {
-					return b, ErrShortBytes
+					return b, cborErrShortBytes
 				}
 				if v[0] == 0xf6 { // null
 					var tmp []byte
-					tmp, err = ReadNilBytes(v)
+					tmp, err = cborReadNilBytes(v)
 					if err != nil {
 						return b, err
 					}
@@ -866,7 +866,7 @@ func (x *ConsumerState) DecodeTrusted(b []byte) ([]byte, error) {
 		case "redelivered":
 
 			var sz uint32
-			sz, v, err = ReadMapHeaderBytes(v)
+			sz, v, err = cborReadMapHeaderBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -875,19 +875,19 @@ func (x *ConsumerState) DecodeTrusted(b []byte) ([]byte, error) {
 			}
 			for iRedelivered := uint32(0); iRedelivered < sz; iRedelivered++ {
 				var key uint64
-				key, v, err = ReadUint64Bytes(v)
+				key, v, err = cborReadUint64Bytes(v)
 				if err != nil {
 					return b, err
 				}
 				var val uint64
-				val, v, err = ReadUint64Bytes(v)
+				val, v, err = cborReadUint64Bytes(v)
 				if err != nil {
 					return b, err
 				}
 				x.Redelivered[key] = val
 			}
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -903,16 +903,16 @@ func (x *ConsumerState) UnmarshalCBOR(b []byte) ([]byte, error) {
 }
 
 func (x WriteableConsumerAssignment) Msgsize() (s int) {
-	s = MapHeaderSize + StringPrefixSize + len("created") + TimeSize + StringPrefixSize + len("name") + StringPrefixSize + len(x.Name) + StringPrefixSize + len("stream") + StringPrefixSize + len(x.Stream)
+	s = cborMapHeaderSize + cborStringPrefixSize + len("created") + cborTimeSize + cborStringPrefixSize + len("name") + cborStringPrefixSize + len(x.Name) + cborStringPrefixSize + len("stream") + cborStringPrefixSize + len(x.Stream)
 	return
 }
 
 func (x *WriteableConsumerAssignment) MarshalCBOR(b []byte) ([]byte, error) {
 	if x == nil {
-		return AppendNil(b), nil
+		return cborAppendNil(b), nil
 	}
 
-	b = Require(b, x.Msgsize())
+	b = cborRequire(b, x.Msgsize())
 
 	count := uint32(0)
 	if !(x.Client == nil) {
@@ -926,43 +926,43 @@ func (x *WriteableConsumerAssignment) MarshalCBOR(b []byte) ([]byte, error) {
 	if !(x.State == nil) {
 		count++
 	}
-	b = AppendMapHeader(b, count)
+	b = cborAppendMapHeader(b, count)
 	var err error
 	if !(x.Client == nil) {
-		b = AppendString(b, "client")
-		b, err = AppendPtrMarshaler(b, x.Client)
+		b = cborAppendString(b, "client")
+		b, err = cborAppendPtrMarshaler(b, x.Client)
 		if err != nil {
 			return b, err
 		}
 	}
-	b = AppendString(b, "created")
-	b, err = AppendTime(b, x.Created), nil
+	b = cborAppendString(b, "created")
+	b, err = cborAppendTime(b, x.Created), nil
 	if err != nil {
 		return b, err
 	}
-	b = AppendString(b, "name")
-	b, err = AppendString(b, x.Name), nil
+	b = cborAppendString(b, "name")
+	b, err = cborAppendString(b, x.Name), nil
 	if err != nil {
 		return b, err
 	}
-	b = AppendString(b, "stream")
-	b, err = AppendString(b, x.Stream), nil
+	b = cborAppendString(b, "stream")
+	b, err = cborAppendString(b, x.Stream), nil
 	if err != nil {
 		return b, err
 	}
-	b = AppendString(b, "consumer")
-	b, err = AppendBytes(b, []byte(x.ConfigJSON)), nil
+	b = cborAppendString(b, "consumer")
+	b, err = cborAppendBytes(b, []byte(x.ConfigJSON)), nil
 	if err != nil {
 		return b, err
 	}
-	b = AppendString(b, "group")
-	b, err = AppendPtrMarshaler(b, x.Group)
+	b = cborAppendString(b, "group")
+	b, err = cborAppendPtrMarshaler(b, x.Group)
 	if err != nil {
 		return b, err
 	}
 	if !(x.State == nil) {
-		b = AppendString(b, "state")
-		b, err = AppendPtrMarshaler(b, x.State)
+		b = cborAppendString(b, "state")
+		b, err = cborAppendPtrMarshaler(b, x.State)
 		if err != nil {
 			return b, err
 		}
@@ -974,14 +974,14 @@ func (x *WriteableConsumerAssignment) MarshalCBOR(b []byte) ([]byte, error) {
 // DecodeSafe decodes using validated, allocating string handling.
 func (x *WriteableConsumerAssignment) DecodeSafe(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		key, v, err := ReadStringBytes(rest)
+		key, v, err := cborReadStringBytes(rest)
 		if err != nil {
 			return b, err
 		}
@@ -998,7 +998,7 @@ func (x *WriteableConsumerAssignment) DecodeSafe(b []byte) ([]byte, error) {
 		case "created":
 
 			var tmp time.Time
-			tmp, v, err = ReadTimeBytes(v)
+			tmp, v, err = cborReadTimeBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -1006,7 +1006,7 @@ func (x *WriteableConsumerAssignment) DecodeSafe(b []byte) ([]byte, error) {
 		case "name":
 
 			var tmp string
-			tmp, v, err = ReadStringBytes(v)
+			tmp, v, err = cborReadStringBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -1014,14 +1014,14 @@ func (x *WriteableConsumerAssignment) DecodeSafe(b []byte) ([]byte, error) {
 		case "stream":
 
 			var tmp string
-			tmp, v, err = ReadStringBytes(v)
+			tmp, v, err = cborReadStringBytes(v)
 			if err != nil {
 				return b, err
 			}
 			x.Stream = tmp
 		case "consumer":
 
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -1044,7 +1044,7 @@ func (x *WriteableConsumerAssignment) DecodeSafe(b []byte) ([]byte, error) {
 				return b, err
 			}
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -1057,18 +1057,18 @@ func (x *WriteableConsumerAssignment) DecodeSafe(b []byte) ([]byte, error) {
 // DecodeTrusted decodes using zero-copy strings and no per-string UTF-8 validation.
 func (x *WriteableConsumerAssignment) DecodeTrusted(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		keyBytes, v, err := ReadStringZC(rest)
+		keyBytes, v, err := cborReadStringZC(rest)
 		if err != nil {
 			return b, err
 		}
-		key := UnsafeString(keyBytes)
+		key := cborUnsafeString(keyBytes)
 		switch key {
 		case "client":
 
@@ -1082,7 +1082,7 @@ func (x *WriteableConsumerAssignment) DecodeTrusted(b []byte) ([]byte, error) {
 		case "created":
 
 			var tmp time.Time
-			tmp, v, err = ReadTimeBytes(v)
+			tmp, v, err = cborReadTimeBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -1090,22 +1090,22 @@ func (x *WriteableConsumerAssignment) DecodeTrusted(b []byte) ([]byte, error) {
 		case "name":
 
 			var tmpBytes []byte
-			tmpBytes, v, err = ReadStringZC(v)
+			tmpBytes, v, err = cborReadStringZC(v)
 			if err != nil {
 				return b, err
 			}
-			x.Name = UnsafeString(tmpBytes)
+			x.Name = cborUnsafeString(tmpBytes)
 		case "stream":
 
 			var tmpBytes []byte
-			tmpBytes, v, err = ReadStringZC(v)
+			tmpBytes, v, err = cborReadStringZC(v)
 			if err != nil {
 				return b, err
 			}
-			x.Stream = UnsafeString(tmpBytes)
+			x.Stream = cborUnsafeString(tmpBytes)
 		case "consumer":
 
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -1128,7 +1128,7 @@ func (x *WriteableConsumerAssignment) DecodeTrusted(b []byte) ([]byte, error) {
 				return b, err
 			}
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -1144,16 +1144,16 @@ func (x *WriteableConsumerAssignment) UnmarshalCBOR(b []byte) ([]byte, error) {
 }
 
 func (x WriteableStreamAssignment) Msgsize() (s int) {
-	s = MapHeaderSize + StringPrefixSize + len("created") + TimeSize + StringPrefixSize + len("sync") + StringPrefixSize + len(x.Sync)
+	s = cborMapHeaderSize + cborStringPrefixSize + len("created") + cborTimeSize + cborStringPrefixSize + len("sync") + cborStringPrefixSize + len(x.Sync)
 	return
 }
 
 func (x *WriteableStreamAssignment) MarshalCBOR(b []byte) ([]byte, error) {
 	if x == nil {
-		return AppendNil(b), nil
+		return cborAppendNil(b), nil
 	}
 
-	b = Require(b, x.Msgsize())
+	b = cborRequire(b, x.Msgsize())
 
 	count := uint32(0)
 	if !(x.Client == nil) {
@@ -1166,42 +1166,42 @@ func (x *WriteableStreamAssignment) MarshalCBOR(b []byte) ([]byte, error) {
 	if !(len(x.Consumers) == 0) {
 		count++
 	}
-	b = AppendMapHeader(b, count)
+	b = cborAppendMapHeader(b, count)
 	var err error
 	if !(x.Client == nil) {
-		b = AppendString(b, "client")
-		b, err = AppendPtrMarshaler(b, x.Client)
+		b = cborAppendString(b, "client")
+		b, err = cborAppendPtrMarshaler(b, x.Client)
 		if err != nil {
 			return b, err
 		}
 	}
-	b = AppendString(b, "created")
-	b, err = AppendTime(b, x.Created), nil
+	b = cborAppendString(b, "created")
+	b, err = cborAppendTime(b, x.Created), nil
 	if err != nil {
 		return b, err
 	}
-	b = AppendString(b, "stream")
-	b, err = AppendBytes(b, []byte(x.ConfigJSON)), nil
+	b = cborAppendString(b, "stream")
+	b, err = cborAppendBytes(b, []byte(x.ConfigJSON)), nil
 	if err != nil {
 		return b, err
 	}
-	b = AppendString(b, "group")
-	b, err = AppendPtrMarshaler(b, x.Group)
+	b = cborAppendString(b, "group")
+	b, err = cborAppendPtrMarshaler(b, x.Group)
 	if err != nil {
 		return b, err
 	}
-	b = AppendString(b, "sync")
-	b, err = AppendString(b, x.Sync), nil
+	b = cborAppendString(b, "sync")
+	b, err = cborAppendString(b, x.Sync), nil
 	if err != nil {
 		return b, err
 	}
 	if !(len(x.Consumers) == 0) {
 
-		b = AppendString(b, "consumers")
-		b = AppendArrayHeader(b, uint32(len(x.Consumers)))
+		b = cborAppendString(b, "consumers")
+		b = cborAppendArrayHeader(b, uint32(len(x.Consumers)))
 		for _, w := range x.Consumers {
 			if w == nil {
-				b = AppendNil(b)
+				b = cborAppendNil(b)
 			} else {
 				b, err = w.MarshalCBOR(b)
 				if err != nil {
@@ -1217,14 +1217,14 @@ func (x *WriteableStreamAssignment) MarshalCBOR(b []byte) ([]byte, error) {
 // DecodeSafe decodes using validated, allocating string handling.
 func (x *WriteableStreamAssignment) DecodeSafe(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		key, v, err := ReadStringBytes(rest)
+		key, v, err := cborReadStringBytes(rest)
 		if err != nil {
 			return b, err
 		}
@@ -1241,14 +1241,14 @@ func (x *WriteableStreamAssignment) DecodeSafe(b []byte) ([]byte, error) {
 		case "created":
 
 			var tmp time.Time
-			tmp, v, err = ReadTimeBytes(v)
+			tmp, v, err = cborReadTimeBytes(v)
 			if err != nil {
 				return b, err
 			}
 			x.Created = tmp
 		case "stream":
 
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -1264,7 +1264,7 @@ func (x *WriteableStreamAssignment) DecodeSafe(b []byte) ([]byte, error) {
 		case "sync":
 
 			var tmp string
-			tmp, v, err = ReadStringBytes(v)
+			tmp, v, err = cborReadStringBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -1272,7 +1272,7 @@ func (x *WriteableStreamAssignment) DecodeSafe(b []byte) ([]byte, error) {
 		case "consumers":
 
 			var sz uint32
-			sz, v, err = ReadArrayHeaderBytes(v)
+			sz, v, err = cborReadArrayHeaderBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -1294,7 +1294,7 @@ func (x *WriteableStreamAssignment) DecodeSafe(b []byte) ([]byte, error) {
 				}
 			}
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -1307,18 +1307,18 @@ func (x *WriteableStreamAssignment) DecodeSafe(b []byte) ([]byte, error) {
 // DecodeTrusted decodes using zero-copy strings and no per-string UTF-8 validation.
 func (x *WriteableStreamAssignment) DecodeTrusted(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		keyBytes, v, err := ReadStringZC(rest)
+		keyBytes, v, err := cborReadStringZC(rest)
 		if err != nil {
 			return b, err
 		}
-		key := UnsafeString(keyBytes)
+		key := cborUnsafeString(keyBytes)
 		switch key {
 		case "client":
 
@@ -1332,14 +1332,14 @@ func (x *WriteableStreamAssignment) DecodeTrusted(b []byte) ([]byte, error) {
 		case "created":
 
 			var tmp time.Time
-			tmp, v, err = ReadTimeBytes(v)
+			tmp, v, err = cborReadTimeBytes(v)
 			if err != nil {
 				return b, err
 			}
 			x.Created = tmp
 		case "stream":
 
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -1355,15 +1355,15 @@ func (x *WriteableStreamAssignment) DecodeTrusted(b []byte) ([]byte, error) {
 		case "sync":
 
 			var tmpBytes []byte
-			tmpBytes, v, err = ReadStringZC(v)
+			tmpBytes, v, err = cborReadStringZC(v)
 			if err != nil {
 				return b, err
 			}
-			x.Sync = UnsafeString(tmpBytes)
+			x.Sync = cborUnsafeString(tmpBytes)
 		case "consumers":
 
 			var sz uint32
-			sz, v, err = ReadArrayHeaderBytes(v)
+			sz, v, err = cborReadArrayHeaderBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -1385,7 +1385,7 @@ func (x *WriteableStreamAssignment) DecodeTrusted(b []byte) ([]byte, error) {
 				}
 			}
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -1401,22 +1401,22 @@ func (x *WriteableStreamAssignment) UnmarshalCBOR(b []byte) ([]byte, error) {
 }
 
 func (x MetaSnapshot) Msgsize() (s int) {
-	s = MapHeaderSize + StringPrefixSize + len("streams") + ArrayHeaderSize + len(x.Streams)*0
+	s = cborMapHeaderSize + cborStringPrefixSize + len("streams") + cborArrayHeaderSize + len(x.Streams)*0
 	return
 }
 
 func (x *MetaSnapshot) MarshalCBOR(b []byte) ([]byte, error) {
 	if x == nil {
-		return AppendNil(b), nil
+		return cborAppendNil(b), nil
 	}
 
-	b = Require(b, x.Msgsize())
+	b = cborRequire(b, x.Msgsize())
 
-	b = AppendMapHeader(b, uint32(1))
+	b = cborAppendMapHeader(b, uint32(1))
 	var err error
 
-	b = AppendString(b, "streams")
-	b = AppendArrayHeader(b, uint32(len(x.Streams)))
+	b = cborAppendString(b, "streams")
+	b = cborAppendArrayHeader(b, uint32(len(x.Streams)))
 	for i := range x.Streams {
 		b, err = x.Streams[i].MarshalCBOR(b)
 		if err != nil {
@@ -1430,14 +1430,14 @@ func (x *MetaSnapshot) MarshalCBOR(b []byte) ([]byte, error) {
 // DecodeSafe decodes using validated, allocating string handling.
 func (x *MetaSnapshot) DecodeSafe(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		key, v, err := ReadStringBytes(rest)
+		key, v, err := cborReadStringBytes(rest)
 		if err != nil {
 			return b, err
 		}
@@ -1445,7 +1445,7 @@ func (x *MetaSnapshot) DecodeSafe(b []byte) ([]byte, error) {
 		case "streams":
 
 			var sz uint32
-			sz, v, err = ReadArrayHeaderBytes(v)
+			sz, v, err = cborReadArrayHeaderBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -1466,7 +1466,7 @@ func (x *MetaSnapshot) DecodeSafe(b []byte) ([]byte, error) {
 				x.Streams[iStreams] = tmp
 			}
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}
@@ -1479,23 +1479,23 @@ func (x *MetaSnapshot) DecodeSafe(b []byte) ([]byte, error) {
 // DecodeTrusted decodes using zero-copy strings and no per-string UTF-8 validation.
 func (x *MetaSnapshot) DecodeTrusted(b []byte) ([]byte, error) {
 	if x == nil {
-		return b, ErrNotNil
+		return b, cborErrNotNil
 	}
-	sz, rest, err := ReadMapHeaderBytes(b)
+	sz, rest, err := cborReadMapHeaderBytes(b)
 	if err != nil {
 		return b, err
 	}
 	for i := uint32(0); i < sz; i++ {
-		keyBytes, v, err := ReadStringZC(rest)
+		keyBytes, v, err := cborReadStringZC(rest)
 		if err != nil {
 			return b, err
 		}
-		key := UnsafeString(keyBytes)
+		key := cborUnsafeString(keyBytes)
 		switch key {
 		case "streams":
 
 			var sz uint32
-			sz, v, err = ReadArrayHeaderBytes(v)
+			sz, v, err = cborReadArrayHeaderBytes(v)
 			if err != nil {
 				return b, err
 			}
@@ -1516,7 +1516,7 @@ func (x *MetaSnapshot) DecodeTrusted(b []byte) ([]byte, error) {
 				x.Streams[iStreams] = tmp
 			}
 		default:
-			v, err = Skip(v)
+			v, err = cborSkip(v)
 			if err != nil {
 				return b, err
 			}

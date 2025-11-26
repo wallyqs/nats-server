@@ -4,7 +4,7 @@ go 1.25
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.4.3-default-no-op
-	github.com/delaneyj/cbor v0.0.5
+	github.com/delaneyj/cbor v0.0.6
 	github.com/google/go-tpm v0.9.6
 	github.com/klauspost/compress v1.18.1
 
