@@ -1133,3 +1133,94 @@ func TestKeyInterpolationQuoted(t *testing.T) {
 	test(t, `KEY = "mykey"
 "${KEY}" = "value1"`, ex)
 }
+
+func TestKeyInterpolationAccounts(t *testing.T) {
+	ex := map[string]any{
+		"ACCOUNT_A": "AccountA",
+		"ACCOUNT_B": "AccountB",
+		"accounts": map[string]any{
+			"AccountA": map[string]any{
+				"users": []any{
+					map[string]any{"user": "alice"},
+				},
+			},
+			"AccountB": map[string]any{
+				"users": []any{
+					map[string]any{"user": "bob"},
+				},
+			},
+		},
+	}
+	test(t, `ACCOUNT_A = "AccountA"
+ACCOUNT_B = "AccountB"
+accounts {
+  ${ACCOUNT_A} {
+    users = [{user = "alice"}]
+  }
+  ${ACCOUNT_B} {
+    users = [{user = "bob"}]
+  }
+}`, ex)
+}
+
+func TestKeyInterpolationAccountsWithEnv(t *testing.T) {
+	// Set up environment variables for account names
+	os.Setenv("PRIMARY_ACCOUNT", "SYS")
+	os.Setenv("USER_ACCOUNT", "USERS")
+	defer os.Unsetenv("PRIMARY_ACCOUNT")
+	defer os.Unsetenv("USER_ACCOUNT")
+
+	ex := map[string]any{
+		"accounts": map[string]any{
+			"SYS": map[string]any{
+				"users": []any{
+					map[string]any{"user": "admin"},
+				},
+			},
+			"USERS": map[string]any{
+				"users": []any{
+					map[string]any{"user": "user1"},
+					map[string]any{"user": "user2"},
+				},
+			},
+		},
+	}
+	test(t, `accounts {
+  ${PRIMARY_ACCOUNT} {
+    users = [{user = "admin"}]
+  }
+  ${USER_ACCOUNT} {
+    users = [
+      {user = "user1"},
+      {user = "user2"}
+    ]
+  }
+}`, ex)
+}
+
+func TestKeyInterpolationAccountsWithPrefix(t *testing.T) {
+	ex := map[string]any{
+		"ENV": "prod",
+		"accounts": map[string]any{
+			"prod_system": map[string]any{
+				"users": []any{
+					map[string]any{"user": "sysadmin"},
+				},
+			},
+			"prod_users": map[string]any{
+				"users": []any{
+					map[string]any{"user": "user1"},
+				},
+			},
+		},
+	}
+	test(t, `ENV = "prod"
+accounts {
+  ${ENV}_system {
+    users = [{user = "sysadmin"}]
+  }
+  ${ENV}_users {
+    users = [{user = "user1"}]
+  }
+}`, ex)
+}
