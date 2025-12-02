@@ -5420,7 +5420,23 @@ func parseWebsocket(v any, o *Options, errors *[]error) error {
 				}
 			}
 		case "ping_interval":
-			o.Websocket.PingInterval = parseDuration("ping_interval", tk, mv, errors, nil)
+			pi := time.Duration(0)
+			switch mv := mv.(type) {
+			case int64:
+				pi = time.Duration(mv) * time.Second
+			case string:
+				var err error
+				pi, err = time.ParseDuration(mv)
+				if err != nil {
+					err := &configErr{tk, err.Error()}
+					*errors = append(*errors, err)
+					continue
+				}
+			default:
+				err := &configErr{tk, fmt.Sprintf("error parsing ping interval: unsupported type %T", mv)}
+				*errors = append(*errors, err)
+			}
+			o.Websocket.PingInterval = pi
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
