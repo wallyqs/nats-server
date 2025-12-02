@@ -4842,43 +4842,123 @@ func Benchmark_WS_Subx5_CY__4096b(b *testing.B) {
 }
 
 func TestWebsocketPingIntervalE2E(t *testing.T) {
-	// Test that WebSocket-specific ping interval is actually used
+	// Test that WebSocket-specific ping interval is actually used while
+	// regular NATS clients use the default ping interval
 	opts := testWSOptions()
 	// Set a short ping interval for WebSocket connections (1 second)
 	opts.Websocket.PingInterval = 1 * time.Second
 	// Set a different default ping interval to ensure WebSocket-specific one is used
 	opts.PingInterval = 10 * time.Second
+	// Enable a regular port for non-WebSocket clients
+	opts.Port = -1
 
 	s := RunServer(opts)
 	defer s.Shutdown()
 
 	// Create a WebSocket client
-	wsc, br := testWSCreateClient(t, false, false, opts.Websocket.Host, opts.Websocket.Port)
+	wsc, wsBr := testWSCreateClient(t, false, false, opts.Websocket.Host, opts.Websocket.Port)
 	defer wsc.Close()
 
-	// Collect PING messages for ~3.5 seconds
-	// We should receive approximately 3-4 PINGs (at 1 second intervals)
-	pingCount := 0
-	deadline := time.Now().Add(3500 * time.Millisecond)
+	// Create a regular NATS client (raw TCP connection)
+	nc, err := net.Dial("tcp", fmt.Sprintf("%s:%d", opts.Host, opts.Port))
+	if err != nil {
+		t.Fatalf("Error creating regular NATS client: %v", err)
+	}
+	defer nc.Close()
+
+	natsBr := bufio.NewReader(nc)
+	// Read INFO from server
+	line, _, _ := natsBr.ReadLine()
+	if !bytes.HasPrefix(line, []byte("INFO")) {
+		t.Fatalf("Expected INFO, got: %s", line)
+	}
+	// Send CONNECT and PING
+	if _, err := nc.Write([]byte("CONNECT {\"verbose\":false,\"protocol\":1}\r\nPING\r\n")); err != nil {
+		t.Fatalf("Error sending CONNECT: %v", err)
+	}
+	// Wait for PONG
+	line, _, _ = natsBr.ReadLine()
+	if string(line) != "PONG" {
+		t.Fatalf("Expected PONG, got: %s", line)
+	}
+
+	// Use channels to track pings from both clients
+	wsPingChan := make(chan struct{}, 15)
+	natsPingChan := make(chan struct{}, 5)
+	done := make(chan struct{})
+
+	// Monitor WebSocket client in a goroutine
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				wsc.SetReadDeadline(time.Now().Add(2 * time.Second))
+				msg := testWSReadFrame(t, wsBr)
+				if bytes.Contains(msg, []byte("PING\r\n")) {
+					wsPingChan <- struct{}{}
+					// Send PONG response
+					pongMsg := testWSCreateClientMsg(wsBinaryMessage, 1, true, false, []byte("PONG\r\n"))
+					wsc.Write(pongMsg)
+				}
+			}
+		}
+	}()
+
+	// Monitor regular NATS client in a goroutine
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				nc.SetReadDeadline(time.Now().Add(2 * time.Second))
+				line, _, err := natsBr.ReadLine()
+				if err != nil {
+					continue
+				}
+				if string(line) == "PING" {
+					natsPingChan <- struct{}{}
+					// Send PONG response
+					nc.Write([]byte("PONG\r\n"))
+				}
+			}
+		}
+	}()
+
+	// Collect PING counts over 12 seconds
+	// WebSocket: should get ~12 PINGs (at 1s interval)
+	// Regular NATS: should get ~1 PING (at 10s interval)
+	wsPingCount := 0
+	natsPingCount := 0
+	deadline := time.Now().Add(12 * time.Second)
 
 	for time.Now().Before(deadline) {
-		// Set a read deadline to avoid blocking forever
-		wsc.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
-
-		msg := testWSReadFrame(t, br)
-		if bytes.Contains(msg, []byte("PING\r\n")) {
-			pingCount++
-			// Send PONG response
-			pongMsg := testWSCreateClientMsg(wsBinaryMessage, 1, true, false, []byte("PONG\r\n"))
-			wsc.Write(pongMsg)
+		select {
+		case <-wsPingChan:
+			wsPingCount++
+		case <-natsPingChan:
+			natsPingCount++
+		case <-time.After(100 * time.Millisecond):
+			// Continue
 		}
 	}
+	close(done)
 
-	// We expect approximately 3 PINGs in 3.5 seconds with 1 second interval
-	// Allow some variance due to timing (2-4 is acceptable)
-	if pingCount < 2 || pingCount > 4 {
-		t.Fatalf("Expected 2-4 PINGs with 1s interval over 3.5s, got %d", pingCount)
+	// WebSocket should receive 10-13 PINGs in 12 seconds with 1 second interval
+	if wsPingCount < 10 || wsPingCount > 13 {
+		t.Fatalf("Expected 10-13 WebSocket PINGs with 1s interval over 12s, got %d", wsPingCount)
 	}
+
+	// Regular NATS client should receive 0-2 PINGs in 12 seconds with 10 second interval
+	// (0 if first ping hasn't fired yet, 1-2 depending on timing)
+	if natsPingCount > 2 {
+		t.Fatalf("Expected 0-2 regular NATS PINGs with 10s interval over 12s, got %d", natsPingCount)
+	}
+
+	t.Logf("WebSocket client received %d PINGs (1s interval)", wsPingCount)
+	t.Logf("Regular NATS client received %d PINGs (10s interval)", natsPingCount)
 }
 
 func TestWebsocketPingIntervalUsesDefault(t *testing.T) {
