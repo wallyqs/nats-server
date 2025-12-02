@@ -4841,6 +4841,82 @@ func Benchmark_WS_Subx5_CY__4096b(b *testing.B) {
 	wsBenchSub(b, 5, true, s)
 }
 
+func TestWebsocketPingIntervalE2E(t *testing.T) {
+	// Test that WebSocket-specific ping interval is actually used
+	opts := testWSOptions()
+	// Set a short ping interval for WebSocket connections (1 second)
+	opts.Websocket.PingInterval = 1 * time.Second
+	// Set a different default ping interval to ensure WebSocket-specific one is used
+	opts.PingInterval = 10 * time.Second
+
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	// Create a WebSocket client
+	wsc, br := testWSCreateClient(t, false, false, opts.Websocket.Host, opts.Websocket.Port)
+	defer wsc.Close()
+
+	// Collect PING messages for ~3.5 seconds
+	// We should receive approximately 3-4 PINGs (at 1 second intervals)
+	pingCount := 0
+	deadline := time.Now().Add(3500 * time.Millisecond)
+
+	for time.Now().Before(deadline) {
+		// Set a read deadline to avoid blocking forever
+		wsc.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+
+		msg := testWSReadFrame(t, br)
+		if bytes.Contains(msg, []byte("PING\r\n")) {
+			pingCount++
+			// Send PONG response
+			pongMsg := testWSCreateClientMsg(wsBinaryMessage, 1, true, false, []byte("PONG\r\n"))
+			wsc.Write(pongMsg)
+		}
+	}
+
+	// We expect approximately 3 PINGs in 3.5 seconds with 1 second interval
+	// Allow some variance due to timing (2-4 is acceptable)
+	if pingCount < 2 || pingCount > 4 {
+		t.Fatalf("Expected 2-4 PINGs with 1s interval over 3.5s, got %d", pingCount)
+	}
+}
+
+func TestWebsocketPingIntervalUsesDefault(t *testing.T) {
+	// Test that when WebSocket ping interval is not set, default is used
+	opts := testWSOptions()
+	// Set a short default ping interval
+	opts.PingInterval = 1 * time.Second
+	// Don't set Websocket.PingInterval (should default to 0)
+
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	// Create a WebSocket client
+	wsc, br := testWSCreateClient(t, false, false, opts.Websocket.Host, opts.Websocket.Port)
+	defer wsc.Close()
+
+	// Collect PING messages for ~3.5 seconds
+	pingCount := 0
+	deadline := time.Now().Add(3500 * time.Millisecond)
+
+	for time.Now().Before(deadline) {
+		wsc.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+
+		msg := testWSReadFrame(t, br)
+		if bytes.Contains(msg, []byte("PING\r\n")) {
+			pingCount++
+			pongMsg := testWSCreateClientMsg(wsBinaryMessage, 1, true, false, []byte("PONG\r\n"))
+			wsc.Write(pongMsg)
+		}
+	}
+
+	// We expect approximately 3 PINGs in 3.5 seconds with 1 second interval
+	// This confirms the default PingInterval was used
+	if pingCount < 2 || pingCount > 4 {
+		t.Fatalf("Expected 2-4 PINGs with default 1s interval over 3.5s, got %d", pingCount)
+	}
+}
+
 func Benchmark_WS_Subx5_CN__8192b(b *testing.B) {
 	s := sizedString(8192)
 	wsBenchSub(b, 5, false, s)
