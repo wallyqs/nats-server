@@ -861,6 +861,15 @@ func (o *mqttInactiveThresholdReload) Apply(s *Server) {
 	s.Noticef("Reloaded: MQTT consumer_inactive_threshold = %v", o.newValue)
 }
 
+type websocketPingIntervalReload struct {
+	noopOption
+	newValue time.Duration
+}
+
+func (o *websocketPingIntervalReload) Apply(s *Server) {
+	s.Noticef("Reloaded: WebSocket ping_interval = %v", o.newValue)
+}
+
 type profBlockRateReload struct {
 	noopOption
 	newValue int
@@ -1662,11 +1671,15 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 		case "jetstreammetacompact", "jetstreammetacompactsize":
 			// Allowed at runtime but monitorCluster looks at s.opts directly, so no further work needed here.
 		case "websocket":
-			// Similar to gateways
+			diffOpts = append(diffOpts, &websocketPingIntervalReload{newValue: newValue.(WebsocketOpts).PingInterval})
+
+			// Nil out/set to 0 the options that we allow to be reloaded so that
+			// we only fail reload if some that we don't support are changed.
 			tmpOld := oldValue.(WebsocketOpts)
 			tmpNew := newValue.(WebsocketOpts)
-			tmpOld.TLSConfig, tmpOld.tlsConfigOpts = nil, nil
-			tmpNew.TLSConfig, tmpNew.tlsConfigOpts = nil, nil
+			tmpOld.TLSConfig, tmpOld.tlsConfigOpts, tmpOld.PingInterval = nil, nil, 0
+			tmpNew.TLSConfig, tmpNew.tlsConfigOpts, tmpNew.PingInterval = nil, nil, 0
+
 			// If there is really a change prevents reload.
 			if !reflect.DeepEqual(tmpOld, tmpNew) {
 				// See TODO(ik) note below about printing old/new values.

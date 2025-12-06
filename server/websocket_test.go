@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -4866,6 +4867,141 @@ func TestWebsocketPingInterval(t *testing.T) {
 	}
 	if pingCount < 2 {
 		t.Fatalf("Expected at least 2 PINGs, got %d", pingCount)
+	}
+}
+
+func TestWebsocketPingIntervalReload(t *testing.T) {
+	// Helper function to count pings over a time period
+	countPings := func(t *testing.T, wsc net.Conn, br *bufio.Reader, duration time.Duration) int {
+		t.Helper()
+		pingCount := 0
+		deadline := time.Now().Add(duration)
+
+		for time.Now().Before(deadline) {
+			wsc.SetReadDeadline(time.Now().Add(3 * time.Second))
+			msg := testWSReadFrame(t, br)
+			if bytes.Contains(msg, []byte("PING\r\n")) {
+				pingCount++
+				pongMsg := testWSCreateClientMsg(wsBinaryMessage, 1, true, false, []byte("PONG\r\n"))
+				wsc.Write(pongMsg)
+			}
+		}
+		return pingCount
+	}
+
+	// Initial configuration with 2-second WebSocket ping interval
+	initialConfig := `
+		port: -1
+		ping_interval: "10s"
+		websocket {
+			port: -1
+			no_tls: true
+			ping_interval: "2s"
+		}
+	`
+
+	// Create temporary config file
+	tmpFile, err := os.CreateTemp(t.TempDir(), "ws_ping_reload_test_")
+	require_NoError(t, err)
+	conf := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(conf)
+
+	err = os.WriteFile(conf, []byte(initialConfig), 0644)
+	require_NoError(t, err)
+
+	opts, err := ProcessConfigFile(conf)
+	require_NoError(t, err)
+	opts.NoLog = true
+	opts.NoSigs = true
+
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	// Create WebSocket client (no TLS since server has no_tls: true)
+	wsc, br, _ := testNewWSClient(t, testWSClientOptions{
+		compress: false,
+		web:      false,
+		host:     opts.Websocket.Host,
+		port:     opts.Websocket.Port,
+		noTLS:    true,
+	})
+	defer wsc.Close()
+
+	// Send CONNECT and PING like testWSCreateClient does
+	wsmsg := testWSCreateClientMsg(wsBinaryMessage, 1, true, false, []byte("CONNECT {\"verbose\":false,\"protocol\":1}\r\nPING\r\n"))
+	if _, err := wsc.Write(wsmsg); err != nil {
+		t.Fatalf("Error sending message: %v", err)
+	}
+	// Wait for the PONG
+	if msg := testWSReadFrame(t, br); !bytes.HasPrefix(msg, []byte("PONG\r\n")) {
+		t.Fatalf("Expected PONG, got %s", msg)
+	}
+
+	// Test initial ping interval (2 seconds) - expect 2-4 pings in 6 seconds
+	// (accounting for first ping delay and timing variations)
+	pingCount1 := countPings(t, wsc, br, 6*time.Second)
+	if pingCount1 < 1 || pingCount1 > 4 {
+		t.Fatalf("Expected 1-4 PINGs with initial 2s interval over 6s, got %d", pingCount1)
+	}
+
+	// Updated configuration with 1-second WebSocket ping interval
+	updatedConfig := `
+		port: ` + fmt.Sprintf("%d", opts.Port) + `
+		ping_interval: "10s"
+		websocket {
+			port: ` + fmt.Sprintf("%d", opts.Websocket.Port) + `
+			no_tls: true
+			ping_interval: "1s"
+		}
+	`
+
+	// Update config file and reload
+	err = os.WriteFile(conf, []byte(updatedConfig), 0644)
+	require_NoError(t, err)
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Error reloading config: %v", err)
+	}
+
+	// Wait a moment for reload to settle
+	time.Sleep(100 * time.Millisecond)
+
+	// Test new ping interval (1 second) - expect 4-8 pings in 6 seconds
+	// Note: Existing connection should start using new ping interval after next ping timer reset
+	pingCount2 := countPings(t, wsc, br, 6*time.Second)
+	if pingCount2 < 3 || pingCount2 > 8 {
+		t.Fatalf("Expected 3-8 PINGs with updated 1s interval over 6s, got %d", pingCount2)
+	}
+
+	// Verify the new ping interval is faster than the old one
+	if pingCount2 <= pingCount1 {
+		t.Fatalf("Expected more pings after reload (1s interval) than before (2s interval), got %d before and %d after", pingCount1, pingCount2)
+	}
+
+	// Test that new WebSocket connections also use the updated ping interval
+	wsc2, br2, _ := testNewWSClient(t, testWSClientOptions{
+		compress: false,
+		web:      false,
+		host:     opts.Websocket.Host,
+		port:     opts.Websocket.Port,
+		noTLS:    true,
+	})
+	defer wsc2.Close()
+
+	// Send CONNECT and PING
+	wsmsg2 := testWSCreateClientMsg(wsBinaryMessage, 1, true, false, []byte("CONNECT {\"verbose\":false,\"protocol\":1}\r\nPING\r\n"))
+	if _, err := wsc2.Write(wsmsg2); err != nil {
+		t.Fatalf("Error sending message: %v", err)
+	}
+	// Wait for the PONG
+	if msg := testWSReadFrame(t, br2); !bytes.HasPrefix(msg, []byte("PONG\r\n")) {
+		t.Fatalf("Expected PONG, got %s", msg)
+	}
+
+	// New connection should immediately use the 1-second interval
+	pingCount3 := countPings(t, wsc2, br2, 6*time.Second)
+	if pingCount3 < 3 || pingCount3 > 8 {
+		t.Fatalf("Expected 3-8 PINGs for new connection with 1s interval over 6s, got %d", pingCount3)
 	}
 }
 
