@@ -34,7 +34,6 @@ import (
 	"time"
 
 	"github.com/antithesishq/antithesis-sdk-go/assert"
-	cbor "github.com/delaneyj/cbor/runtime"
 	"github.com/klauspost/compress/s2"
 	"github.com/minio/highwayhash"
 	"github.com/nats-io/nuid"
@@ -1641,7 +1640,7 @@ func marshalInternal(useCBOR bool, v any) ([]byte, error) {
 		return nil, err
 	}
 	if useCBOR {
-		return cbor.FromJSONBytes(raw)
+		return cborFromJSONBytes(raw)
 	}
 	return raw, nil
 }
@@ -1653,10 +1652,10 @@ func unmarshalInternal(data []byte, v any) error {
 
 	if err := json.Unmarshal(data, v); err == nil {
 		return nil
-	} else if cbor.IsLikelyJSON(data) {
+	} else if cborIsLikelyJSON(data) {
 		return err
 	}
-	jse, rest, err := cbor.ToJSONBytes(data)
+	jse, rest, err := cborToJSONBytes(data)
 	if err != nil {
 		return err
 	}
@@ -1760,7 +1759,7 @@ func unmarshalInternalCBOR(data []byte, v any) (bool, error) {
 		}
 		rest, err := decodeWriteableStreamAssignmentsCBOR(data, out)
 		if err != nil {
-			if cbor.IsLikelyJSON(data) {
+			if cborIsLikelyJSON(data) {
 				return false, nil
 			}
 			return true, err
@@ -1775,7 +1774,7 @@ func unmarshalInternalCBOR(data []byte, v any) (bool, error) {
 		}
 		rest, err := out.DecodeTrusted(data)
 		if err != nil {
-			if cbor.IsLikelyJSON(data) {
+			if cborIsLikelyJSON(data) {
 				return false, nil
 			}
 			return true, err
@@ -1790,7 +1789,7 @@ func unmarshalInternalCBOR(data []byte, v any) (bool, error) {
 		}
 		rest, err := out.DecodeTrusted(data)
 		if err != nil {
-			if cbor.IsLikelyJSON(data) {
+			if cborIsLikelyJSON(data) {
 				return false, nil
 			}
 			return true, err
@@ -1805,7 +1804,7 @@ func unmarshalInternalCBOR(data []byte, v any) (bool, error) {
 		}
 		rest, err := out.DecodeTrusted(data)
 		if err != nil {
-			if cbor.IsLikelyJSON(data) {
+			if cborIsLikelyJSON(data) {
 				return false, nil
 			}
 			return true, err
@@ -1820,7 +1819,7 @@ func unmarshalInternalCBOR(data []byte, v any) (bool, error) {
 		}
 		rest, err := out.DecodeTrusted(data)
 		if err != nil {
-			if cbor.IsLikelyJSON(data) {
+			if cborIsLikelyJSON(data) {
 				return false, nil
 			}
 			return true, err
@@ -1835,7 +1834,7 @@ func unmarshalInternalCBOR(data []byte, v any) (bool, error) {
 		}
 		rest, err := out.DecodeTrusted(data)
 		if err != nil {
-			if cbor.IsLikelyJSON(data) {
+			if cborIsLikelyJSON(data) {
 				return false, nil
 			}
 			return true, err
@@ -1850,7 +1849,7 @@ func unmarshalInternalCBOR(data []byte, v any) (bool, error) {
 		}
 		rest, err := out.DecodeTrusted(data)
 		if err != nil {
-			if cbor.IsLikelyJSON(data) {
+			if cborIsLikelyJSON(data) {
 				return false, nil
 			}
 			return true, err
@@ -1865,7 +1864,7 @@ func unmarshalInternalCBOR(data []byte, v any) (bool, error) {
 		}
 		rest, err := out.DecodeTrusted(data)
 		if err != nil {
-			if cbor.IsLikelyJSON(data) {
+			if cborIsLikelyJSON(data) {
 				return false, nil
 			}
 			return true, err

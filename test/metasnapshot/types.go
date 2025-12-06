@@ -23,8 +23,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	cbor "github.com/delaneyj/cbor/runtime"
 )
 
 // StorageType matches the JSON "store" field: "memory" / "file".
@@ -37,11 +35,11 @@ const (
 
 func (st StorageType) MarshalCBOR(b []byte) ([]byte, error) {
 	// Encode as small int as in the cborgen examples.
-	return cbor.AppendInt(b, int(st)), nil
+	return cborAppendInt(b, int(st)), nil
 }
 
 func (st *StorageType) UnmarshalCBOR(b []byte) ([]byte, error) {
-	v, rest, err := cbor.ReadIntBytes(b)
+	v, rest, err := cborReadIntBytes(b)
 	if err != nil {
 		return b, err
 	}

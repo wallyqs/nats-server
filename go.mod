@@ -4,7 +4,6 @@ go 1.24
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.4.3-default-no-op
-	github.com/delaneyj/cbor v0.0.6
 	github.com/google/go-tpm v0.9.7
 	github.com/klauspost/compress v1.18.1
 
@@ -22,12 +21,7 @@ require (
 	golang.org/x/time v0.14.0
 )
 
-require (
-	github.com/alecthomas/kong v1.13.0 // indirect
-	golang.org/x/mod v0.30.0 // indirect
-	golang.org/x/sync v0.18.0 // indirect
-	golang.org/x/tools v0.39.0 // indirect
-)
-
-// Go 1.25+ tool directive - uncomment when Go 1.25 is available:
-// tool github.com/delaneyj/cbor/cborgen
+// To regenerate CBOR code, Go 1.25+ is required with:
+//   require github.com/delaneyj/cbor v0.0.6
+//   tool github.com/delaneyj/cbor/cborgen
+// Then run: cd server && go generate ./...
