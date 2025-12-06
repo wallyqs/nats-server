@@ -1,6 +1,6 @@
 module github.com/nats-io/nats-server/v2
 
-go 1.25
+go 1.24
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.4.3-default-no-op
@@ -29,4 +29,5 @@ require (
 	golang.org/x/tools v0.39.0 // indirect
 )
 
-tool github.com/delaneyj/cbor/cborgen
+// Go 1.25+ tool directive - uncomment when Go 1.25 is available:
+// tool github.com/delaneyj/cbor/cborgen
