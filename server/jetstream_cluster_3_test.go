@@ -4080,9 +4080,10 @@ func TestJetStreamClusterStreamScaleUpNoGroupCluster(t *testing.T) {
 	if sjs := s.getJetStream(); sjs != nil {
 		sjs.mu.RLock()
 		meta := sjs.cluster.meta
+		useCBOR := s.getOpts().UseCBORInternally
 		sjs.mu.RUnlock()
 		if meta != nil {
-			meta.ForwardProposal(encodeUpdateStreamAssignment(sa))
+			meta.ForwardProposal(encodeUpdateStreamAssignment(sa, useCBOR))
 		}
 	}
 	// Make sure it got propagated..

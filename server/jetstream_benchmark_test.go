@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats-server/v2/internal/fastrand"
+	"github.com/nats-io/nats-server/v2/test/metasnapshot"
 	"github.com/nats-io/nats.go"
 )
 
@@ -1011,6 +1012,7 @@ func BenchmarkJetStreamMetaSnapshot(b *testing.B) {
 		numStreams := 200
 		numConsumers := 500
 		ci := &ClientInfo{Cluster: "R3S", Account: globalAccountName}
+		useCBOR := ml.getOpts().UseCBORInternally
 		js.mu.Lock()
 		metadata := map[string]string{JSRequiredLevelMetadataKey: reqLevel}
 		for i := 0; i < numStreams; i++ {
@@ -1023,7 +1025,7 @@ func BenchmarkJetStreamMetaSnapshot(b *testing.B) {
 			cfg, _ := ml.checkStreamCfg(scfg, acc, false)
 			rg, _ := js.createGroupForStream(ci, &cfg)
 			sa := &streamAssignment{Group: rg, Sync: syncSubjForStream(), Config: &cfg, Client: ci, Created: time.Now().UTC()}
-			n.Propose(encodeAddStreamAssignment(sa))
+			n.Propose(encodeAddStreamAssignment(sa, useCBOR))
 
 			for j := 0; j < numConsumers; j++ {
 				ccfg := &ConsumerConfig{
@@ -1036,7 +1038,7 @@ func BenchmarkJetStreamMetaSnapshot(b *testing.B) {
 				setConsumerConfigDefaults(ccfg, &cfg, srvLim, selectedLimits, false)
 				rg = js.cluster.createGroupForConsumer(ccfg, sa)
 				ca := &consumerAssignment{Group: rg, Stream: cfg.Name, Name: ccfg.Durable, Config: ccfg, Client: ci, Created: time.Now().UTC()}
-				n.Propose(encodeAddConsumerAssignment(ca))
+				n.Propose(encodeAddConsumerAssignment(ca, useCBOR))
 			}
 		}
 		js.mu.Unlock()
@@ -1067,11 +1069,25 @@ func BenchmarkJetStreamMetaSnapshot(b *testing.B) {
 	for _, t := range []struct {
 		title    string
 		reqLevel string
+		useCBOR  bool
 	}{
-		{title: "Default", reqLevel: "0"},
-		{title: "AllUnsupported", reqLevel: strconv.Itoa(math.MaxInt)},
+		{title: "JSON_Default", reqLevel: "0", useCBOR: false},
+		{title: "JSON_AllUnsupported", reqLevel: strconv.Itoa(math.MaxInt), useCBOR: false},
+		{title: "CBOR_Default", reqLevel: "0", useCBOR: true},
+		{title: "CBOR_AllUnsupported", reqLevel: strconv.Itoa(math.MaxInt), useCBOR: true},
 	} {
 		b.Run(t.title, func(b *testing.B) {
+			// Toggle internal encoding for this sub-benchmark.
+			ol := c.servers[0].opts
+			for _, s := range c.servers {
+				s.getOpts().UseCBORInternally = t.useCBOR
+			}
+			defer func() {
+				for _, s := range c.servers {
+					s.getOpts().UseCBORInternally = ol.UseCBORInternally
+				}
+			}()
+
 			js := setup(t.reqLevel)
 			b.ResetTimer()
 			for range b.N {
@@ -1080,6 +1096,83 @@ func BenchmarkJetStreamMetaSnapshot(b *testing.B) {
 			b.StopTimer()
 		})
 	}
+}
+
+// BenchmarkJetStreamMetaSnapshotCodec measures raw encode/decode costs
+// for the meta snapshot using JSON/CBOR with and without S2.
+func BenchmarkJetStreamMetaSnapshotCodec(b *testing.B) {
+	// Use a dedicated MetaSnapshot model for codec benchmarking, similar
+	// to github.com/delaneyj/cbor/tests/jetstreammeta.
+	snap := metasnapshot.BuildMetaSnapshotFixture(
+		metasnapshot.DefaultNumStreams,
+		metasnapshot.DefaultNumConsumers,
+	)
+
+	ms := snap
+
+	// Precompute encoded forms for decode-only benchmarks.
+	jsonRaw, err := json.Marshal(snap)
+	if err != nil {
+		b.Fatalf("json.Marshal (precompute) failed: %v", err)
+	}
+
+	cborRaw, err := ms.MarshalCBOR(nil)
+	if err != nil {
+		b.Fatalf("MarshalCBOR (precompute) failed: %v", err)
+	}
+
+	// JSON, no S2: encode only.
+	b.Run("JSON_NoS2_Encode", func(b *testing.B) {
+		b.ReportAllocs()
+		var buf []byte
+		for i := 0; i < b.N; i++ {
+			var err error
+			buf, err = json.Marshal(snap)
+			if err != nil {
+				b.Fatalf("json.Marshal failed: %v", err)
+			}
+			_ = buf
+		}
+	})
+
+	// JSON, no S2: decode only.
+	b.Run("JSON_NoS2_Decode", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var out metasnapshot.MetaSnapshot
+			if err := json.Unmarshal(jsonRaw, &out); err != nil {
+				b.Fatalf("json.Unmarshal failed: %v", err)
+			}
+		}
+	})
+
+	// CBOR, no S2: encode only (reuse buffer).
+	b.Run("CBOR_NoS2_Encode", func(b *testing.B) {
+		b.ReportAllocs()
+		buf := make([]byte, 0, len(cborRaw))
+		for i := 0; i < b.N; i++ {
+			var err error
+			buf, err = ms.MarshalCBOR(buf[:0])
+			if err != nil {
+				b.Fatalf("MarshalCBOR failed: %v", err)
+			}
+			_ = buf
+		}
+	})
+
+	// CBOR, no S2: decode only (reuse decoded struct).
+	b.Run("CBOR_NoS2_Decode", func(b *testing.B) {
+		b.ReportAllocs()
+		var out metasnapshot.MetaSnapshot
+		for i := 0; i < b.N; i++ {
+			if _, err := out.DecodeTrusted(cborRaw); err != nil {
+				b.Fatalf("DecodeTrusted failed: %v", err)
+			}
+		}
+	})
+
+	// S2 variants intentionally omitted here so we can focus on pure
+	// codec performance for JSON vs CBOR on the dedicated model.
 }
 
 func BenchmarkJetStreamCounters(b *testing.B) {

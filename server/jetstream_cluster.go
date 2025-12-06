@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"os"
@@ -33,6 +34,7 @@ import (
 	"time"
 
 	"github.com/antithesishq/antithesis-sdk-go/assert"
+	cbor "github.com/delaneyj/cbor/runtime"
 	"github.com/klauspost/compress/s2"
 	"github.com/minio/highwayhash"
 	"github.com/nats-io/nuid"
@@ -1627,6 +1629,304 @@ type writeableStreamAssignment struct {
 	Consumers  []*writeableConsumerAssignment
 }
 
+func marshalInternal(useCBOR bool, v any) ([]byte, error) {
+	if useCBOR {
+		if raw, handled, err := marshalInternalCBOR(v); handled || err != nil {
+			return raw, err
+		}
+	}
+
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	if useCBOR {
+		return cbor.FromJSONBytes(raw)
+	}
+	return raw, nil
+}
+
+func unmarshalInternal(data []byte, v any) error {
+	if handled, err := unmarshalInternalCBOR(data, v); handled {
+		return err
+	}
+
+	if err := json.Unmarshal(data, v); err == nil {
+		return nil
+	} else if cbor.IsLikelyJSON(data) {
+		return err
+	}
+	jse, rest, err := cbor.ToJSONBytes(data)
+	if err != nil {
+		return err
+	}
+	if len(rest) > 0 {
+		return fmt.Errorf("internal message contained trailing data")
+	}
+	return json.Unmarshal(jse, v)
+}
+
+func marshalInternalCBOR(v any) ([]byte, bool, error) {
+	switch val := v.(type) {
+	case []writeableStreamAssignment:
+		raw, err := marshalWriteableStreamAssignmentsCBOR(val, 0, nil)
+		return raw, true, err
+	case *[]writeableStreamAssignment:
+		if val == nil {
+			return nil, true, cborErrNotNil
+		}
+		raw, err := marshalWriteableStreamAssignmentsCBOR(*val, 0, nil)
+		return raw, true, err
+	case *writeableStreamAssignment:
+		if val == nil {
+			return nil, true, cborErrNotNil
+		}
+		raw, err := val.MarshalCBOR(nil)
+		return raw, true, err
+	case writeableStreamAssignment:
+		tmp := val
+		raw, err := tmp.MarshalCBOR(nil)
+		return raw, true, err
+	case *writeableConsumerAssignment:
+		if val == nil {
+			return nil, true, cborErrNotNil
+		}
+		raw, err := val.MarshalCBOR(nil)
+		return raw, true, err
+	case writeableConsumerAssignment:
+		tmp := val
+		raw, err := tmp.MarshalCBOR(nil)
+		return raw, true, err
+	case *raftGroup:
+		if val == nil {
+			return nil, true, cborErrNotNil
+		}
+		raw, err := val.MarshalCBOR(nil)
+		return raw, true, err
+	case raftGroup:
+		tmp := val
+		raw, err := tmp.MarshalCBOR(nil)
+		return raw, true, err
+	case *ConsumerState:
+		if val == nil {
+			return nil, true, cborErrNotNil
+		}
+		raw, err := val.MarshalCBOR(nil)
+		return raw, true, err
+	case ConsumerState:
+		tmp := val
+		raw, err := tmp.MarshalCBOR(nil)
+		return raw, true, err
+	case *SequencePair:
+		if val == nil {
+			return nil, true, cborErrNotNil
+		}
+		raw, err := val.MarshalCBOR(nil)
+		return raw, true, err
+	case SequencePair:
+		tmp := val
+		raw, err := tmp.MarshalCBOR(nil)
+		return raw, true, err
+	case *Pending:
+		if val == nil {
+			return nil, true, cborErrNotNil
+		}
+		raw, err := val.MarshalCBOR(nil)
+		return raw, true, err
+	case Pending:
+		tmp := val
+		raw, err := tmp.MarshalCBOR(nil)
+		return raw, true, err
+	case *ClientInfo:
+		if val == nil {
+			return nil, true, cborErrNotNil
+		}
+		raw, err := val.MarshalCBOR(nil)
+		return raw, true, err
+	case ClientInfo:
+		tmp := val
+		raw, err := tmp.MarshalCBOR(nil)
+		return raw, true, err
+	}
+
+	return nil, false, nil
+}
+
+func unmarshalInternalCBOR(data []byte, v any) (bool, error) {
+	switch out := v.(type) {
+	case *[]writeableStreamAssignment:
+		if out == nil {
+			return true, cborErrNotNil
+		}
+		rest, err := decodeWriteableStreamAssignmentsCBOR(data, out)
+		if err != nil {
+			if cbor.IsLikelyJSON(data) {
+				return false, nil
+			}
+			return true, err
+		}
+		if len(rest) > 0 {
+			return true, fmt.Errorf("internal message contained trailing data")
+		}
+		return true, nil
+	case *writeableStreamAssignment:
+		if out == nil {
+			return true, cborErrNotNil
+		}
+		rest, err := out.DecodeTrusted(data)
+		if err != nil {
+			if cbor.IsLikelyJSON(data) {
+				return false, nil
+			}
+			return true, err
+		}
+		if len(rest) > 0 {
+			return true, fmt.Errorf("internal message contained trailing data")
+		}
+		return true, nil
+	case *writeableConsumerAssignment:
+		if out == nil {
+			return true, cborErrNotNil
+		}
+		rest, err := out.DecodeTrusted(data)
+		if err != nil {
+			if cbor.IsLikelyJSON(data) {
+				return false, nil
+			}
+			return true, err
+		}
+		if len(rest) > 0 {
+			return true, fmt.Errorf("internal message contained trailing data")
+		}
+		return true, nil
+	case *raftGroup:
+		if out == nil {
+			return true, cborErrNotNil
+		}
+		rest, err := out.DecodeTrusted(data)
+		if err != nil {
+			if cbor.IsLikelyJSON(data) {
+				return false, nil
+			}
+			return true, err
+		}
+		if len(rest) > 0 {
+			return true, fmt.Errorf("internal message contained trailing data")
+		}
+		return true, nil
+	case *ConsumerState:
+		if out == nil {
+			return true, cborErrNotNil
+		}
+		rest, err := out.DecodeTrusted(data)
+		if err != nil {
+			if cbor.IsLikelyJSON(data) {
+				return false, nil
+			}
+			return true, err
+		}
+		if len(rest) > 0 {
+			return true, fmt.Errorf("internal message contained trailing data")
+		}
+		return true, nil
+	case *SequencePair:
+		if out == nil {
+			return true, cborErrNotNil
+		}
+		rest, err := out.DecodeTrusted(data)
+		if err != nil {
+			if cbor.IsLikelyJSON(data) {
+				return false, nil
+			}
+			return true, err
+		}
+		if len(rest) > 0 {
+			return true, fmt.Errorf("internal message contained trailing data")
+		}
+		return true, nil
+	case *Pending:
+		if out == nil {
+			return true, cborErrNotNil
+		}
+		rest, err := out.DecodeTrusted(data)
+		if err != nil {
+			if cbor.IsLikelyJSON(data) {
+				return false, nil
+			}
+			return true, err
+		}
+		if len(rest) > 0 {
+			return true, fmt.Errorf("internal message contained trailing data")
+		}
+		return true, nil
+	case *ClientInfo:
+		if out == nil {
+			return true, cborErrNotNil
+		}
+		rest, err := out.DecodeTrusted(data)
+		if err != nil {
+			if cbor.IsLikelyJSON(data) {
+				return false, nil
+			}
+			return true, err
+		}
+		if len(rest) > 0 {
+			return true, fmt.Errorf("internal message contained trailing data")
+		}
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func marshalWriteableStreamAssignmentsCBOR(streams []writeableStreamAssignment, minCap int, dst []byte) ([]byte, error) {
+	if minCap < 0 {
+		minCap = 0
+	}
+	if cap(dst) < minCap {
+		dst = make([]byte, 0, minCap)
+	} else {
+		dst = dst[:0]
+	}
+
+	b := cborAppendArrayHeader(dst, uint32(len(streams)))
+	for i := range streams {
+		var err error
+		b, err = streams[i].MarshalCBOR(b)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return b, nil
+}
+
+func decodeWriteableStreamAssignmentsCBOR(data []byte, dst *[]writeableStreamAssignment) ([]byte, error) {
+	if dst == nil {
+		return data, cborErrNotNil
+	}
+	sz, rest, err := cborReadArrayHeaderBytes(data)
+	if err != nil {
+		return data, err
+	}
+	if cap(*dst) >= int(sz) {
+		*dst = (*dst)[:sz]
+	} else {
+		*dst = make([]writeableStreamAssignment, sz)
+	}
+	if sz > 0 {
+		_ = (*dst)[sz-1]
+	}
+	for i := uint32(0); i < sz; i++ {
+		var tmp writeableStreamAssignment
+		rest, err = (&tmp).DecodeTrusted(rest)
+		if err != nil {
+			return data, err
+		}
+		(*dst)[i] = tmp
+	}
+	return rest, nil
+}
+
 func (js *jetStream) clusterStreamConfig(accName, streamName string) (StreamConfig, bool) {
 	js.mu.RLock()
 	defer js.mu.RUnlock()
@@ -1643,27 +1943,90 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 	cc := js.cluster
 	nsa := 0
 	nca := 0
+	cborEstimate := 0
 	for _, asa := range cc.streams {
 		nsa += len(asa)
 	}
-	streams := make([]writeableStreamAssignment, 0, nsa)
+	streamsCap := nsa
+	consumersCap := 0
 	for _, asa := range cc.streams {
 		for _, sa := range asa {
+			consumersCap += len(sa.consumers)
+		}
+	}
+
+	if cap(js.metaSnapStreams) < streamsCap {
+		js.metaSnapStreams = make([]writeableStreamAssignment, 0, streamsCap)
+	}
+	streams := js.metaSnapStreams[:0]
+
+	if cap(js.metaSnapConsumers) < consumersCap {
+		js.metaSnapConsumers = make([]writeableConsumerAssignment, 0, consumersCap)
+	}
+	consumerPool := js.metaSnapConsumers[:0]
+
+	if cap(js.metaSnapConsumerPtrs) < consumersCap {
+		js.metaSnapConsumerPtrs = make([]*writeableConsumerAssignment, 0, consumersCap)
+	}
+	consumerPtrs := js.metaSnapConsumerPtrs[:0]
+
+	for _, asa := range cc.streams {
+		for _, sa := range asa {
+			consumerCount := len(sa.consumers)
+			// Reserve pointer slots for this stream up front.
+			startIdx := len(consumerPtrs)
+			endIdx := startIdx + consumerCount
+			if endIdx > cap(consumerPtrs) {
+				// Should not happen due to consumersCap, but guard anyway.
+				newCap := consumersCap
+				if endIdx > newCap {
+					newCap = endIdx
+				}
+				tmp := make([]*writeableConsumerAssignment, len(consumerPtrs), newCap)
+				copy(tmp, consumerPtrs)
+				consumerPtrs = tmp
+			}
+			consumerPtrs = consumerPtrs[:endIdx]
+			writeIdx := startIdx
+
 			wsa := writeableStreamAssignment{
 				Client:     sa.Client.forAssignmentSnap(),
 				Created:    sa.Created,
 				ConfigJSON: sa.ConfigJSON,
 				Group:      sa.Group,
 				Sync:       sa.Sync,
-				Consumers:  make([]*writeableConsumerAssignment, 0, len(sa.consumers)),
 			}
+			cborEstimate += len(sa.ConfigJSON) + len(sa.Sync) + 64
+			if sa.Group != nil {
+				cborEstimate += len(sa.Group.Name) + len(sa.Group.Cluster) + len(sa.Group.Preferred) + len(sa.Group.Peers)*16 + 32
+			}
+
 			for _, ca := range sa.consumers {
 				// Skip if the consumer is pending, we can't include it in our snapshot.
 				// If the proposal fails after we marked it pending, it would result in a ghost consumer.
 				if ca.pending {
 					continue
 				}
-				wca := writeableConsumerAssignment{
+				cborEstimate += len(ca.ConfigJSON) + len(ca.Name) + len(ca.Stream) + 48
+				if ca.Group != nil {
+					cborEstimate += len(ca.Group.Name) + len(ca.Group.Cluster) + len(ca.Group.Preferred) + len(ca.Group.Peers)*16 + 32
+				}
+				if ca.State != nil {
+					cborEstimate += len(ca.State.Pending)*48 + len(ca.State.Redelivered)*24 + 32
+				}
+
+				if len(consumerPool) == cap(consumerPool) {
+					newCap := consumersCap
+					if newCap < len(consumerPool)+1 {
+						newCap = len(consumerPool) + 1
+					}
+					tmp := make([]writeableConsumerAssignment, len(consumerPool), newCap)
+					copy(tmp, consumerPool)
+					consumerPool = tmp
+				}
+				consumerPool = consumerPool[:len(consumerPool)+1]
+				wca := &consumerPool[len(consumerPool)-1]
+				*wca = writeableConsumerAssignment{
 					Client:     ca.Client.forAssignmentSnap(),
 					Created:    ca.Created,
 					Name:       ca.Name,
@@ -1672,40 +2035,56 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 					Group:      ca.Group,
 					State:      ca.State,
 				}
-				wsa.Consumers = append(wsa.Consumers, &wca)
+				consumerPtrs[writeIdx] = wca
+				writeIdx++
 				nca++
 			}
+			wsa.Consumers = consumerPtrs[startIdx:writeIdx]
 			streams = append(streams, wsa)
 		}
 	}
+
+	// Persist pooled slices (with current length) for reuse on next snapshot.
+	js.metaSnapStreams = streams
+	js.metaSnapConsumers = consumerPool
+	js.metaSnapConsumerPtrs = consumerPtrs
 
 	if len(streams) == 0 {
 		js.mu.RUnlock()
 		return nil, nil
 	}
 
-	// Track how long it took to marshal the JSON
+	useCBOR := s.getOpts().UseCBORInternally
+
+	// Track how long it took to encode the snapshot.
 	mstart := time.Now()
-	b, err := json.Marshal(streams)
+	var raw []byte
+	var err error
+	if useCBOR {
+		raw, err = marshalWriteableStreamAssignmentsCBOR(streams, cborEstimate, js.metaSnapCBORBuf)
+		js.metaSnapCBORBuf = raw
+	} else {
+		raw, err = json.Marshal(streams)
+	}
 	mend := time.Since(mstart)
 
 	js.mu.RUnlock()
 
-	// Must not be possible for a JSON marshaling error to result
+	// Must not be possible for a marshaling error to result
 	// in an empty snapshot.
 	if err != nil {
 		return nil, err
 	}
 
-	// Track how long it took to compress the JSON.
+	// Track how long it took to compress the snapshot.
 	cstart := time.Now()
-	snap := s2.Encode(nil, b)
+	snap := s2.Encode(nil, raw)
 	cend := time.Since(cstart)
 	took := time.Since(start)
 
 	if took > time.Second {
 		s.rateLimitFormatWarnf("Metalayer snapshot took %.3fs (streams: %d, consumers: %d, marshal: %.3fs, s2: %.3fs, uncompressed: %d, compressed: %d)",
-			took.Seconds(), nsa, nca, mend.Seconds(), cend.Seconds(), len(b), len(snap))
+			took.Seconds(), nsa, nca, mend.Seconds(), cend.Seconds(), len(raw), len(snap))
 	}
 
 	// Track in jsz monitoring as well.
@@ -1724,7 +2103,7 @@ func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecove
 		if err != nil {
 			return err
 		}
-		if err = json.Unmarshal(jse, &wsas); err != nil {
+		if err = unmarshalInternal(jse, &wsas); err != nil {
 			return err
 		}
 	}
@@ -1934,6 +2313,8 @@ func (js *jetStream) processAddPeer(peer string) {
 	}
 	si := sir.(nodeInfo)
 
+	useCBOR := s.getOpts().UseCBORInternally
+
 	for _, asa := range cc.streams {
 		for _, sa := range asa {
 			if sa.unsupported != nil {
@@ -1948,7 +2329,7 @@ func (js *jetStream) processAddPeer(peer string) {
 				csa := sa.copyGroup()
 				csa.Group.Peers = append(csa.Group.Peers, peer)
 				// Send our proposal for this csa. Also use same group definition for all the consumers as well.
-				cc.meta.Propose(encodeAddStreamAssignment(csa))
+				cc.meta.Propose(encodeAddStreamAssignment(csa, useCBOR))
 				for _, ca := range sa.consumers {
 					if ca.unsupported != nil {
 						continue
@@ -1957,7 +2338,7 @@ func (js *jetStream) processAddPeer(peer string) {
 					if ca.Config.Durable != _EMPTY_ || len(ca.Group.Peers) > 1 {
 						cca := ca.copyGroup()
 						cca.Group.Peers = csa.Group.Peers
-						cc.meta.Propose(encodeAddConsumerAssignment(cca))
+						cc.meta.Propose(encodeAddConsumerAssignment(cca, useCBOR))
 					}
 				}
 			}
@@ -2043,7 +2424,8 @@ func (js *jetStream) removePeerFromStreamLocked(sa *streamAssignment, peer strin
 	}
 
 	// Send our proposal for this csa. Also use same group definition for all the consumers as well.
-	cc.meta.Propose(encodeAddStreamAssignment(csa))
+	useCBOR := s.getOpts().UseCBORInternally
+	cc.meta.Propose(encodeAddStreamAssignment(csa, useCBOR))
 	rg := csa.Group
 	for _, ca := range sa.consumers {
 		if ca.unsupported != nil {
@@ -2053,10 +2435,10 @@ func (js *jetStream) removePeerFromStreamLocked(sa *streamAssignment, peer strin
 		if ca.Config.Durable != _EMPTY_ {
 			cca := ca.copyGroup()
 			cca.Group.Peers, cca.Group.Preferred = rg.Peers, _EMPTY_
-			cc.meta.Propose(encodeAddConsumerAssignment(cca))
+			cc.meta.Propose(encodeAddConsumerAssignment(cca, useCBOR))
 		} else if ca.Group.isMember(peer) {
 			// These are ephemerals. Check to see if we deleted this peer.
-			cc.meta.Propose(encodeDeleteConsumerAssignment(ca))
+			cc.meta.Propose(encodeDeleteConsumerAssignment(ca, useCBOR))
 		}
 	}
 	return replaced
@@ -2528,6 +2910,8 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 	meta := cc.meta
 	js.mu.RUnlock()
 
+	useCBOR := s.getOpts().UseCBORInternally
+
 	if n == nil || meta == nil {
 		s.Warnf("No RAFT group for '%s > %s'", sa.Client.serviceAccount(), sa.Config.Name)
 		return
@@ -2974,7 +3358,7 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 				csa.Group.Peers = newPeers
 				csa.Group.Preferred = ourPeerId
 				csa.Group.Cluster = s.cachedClusterName()
-				cc.meta.ForwardProposal(encodeUpdateStreamAssignment(csa))
+				cc.meta.ForwardProposal(encodeUpdateStreamAssignment(csa, useCBOR))
 				s.Noticef("Scaling down '%s > %s' to %+v", accName, sa.Config.Name, s.peerSetToNames(newPeers))
 			} else {
 				// We are the old leader here, from the original peer set.
@@ -3043,7 +3427,9 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 				result.Restore.Error = NewJSStreamAssignmentError(err, Unless(err))
 				js.mu.Unlock()
 				// Send response to the metadata leader. They will forward to the user as needed.
-				s.sendInternalMsgLocked(streamAssignmentSubj, _EMPTY_, nil, result)
+				if b, err := marshalInternal(useCBOR, result); err == nil {
+					s.sendInternalMsgLocked(streamAssignmentSubj, _EMPTY_, nil, b)
+				}
 				return
 			}
 
@@ -3078,7 +3464,7 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 					}
 
 					// We make these compressed in case state is complex.
-					addEntry := encodeAddConsumerAssignmentCompressed(ca)
+					addEntry := encodeAddConsumerAssignmentCompressed(ca, useCBOR)
 					cc.meta.ForwardProposal(addEntry)
 
 					// Check to make sure we see the assignment.
@@ -4143,7 +4529,10 @@ func (js *jetStream) processStreamAssignment(sa *streamAssignment) {
 					Response: &JSApiStreamCreateResponse{ApiResponse: ApiResponse{Type: JSApiStreamCreateResponseType}},
 				}
 				result.Response.Error = NewJSNoAccountError()
-				s.sendInternalMsgLocked(streamAssignmentSubj, _EMPTY_, nil, result)
+				useCBOR := s.getOpts().UseCBORInternally
+				if b, err := marshalInternal(useCBOR, result); err == nil {
+					s.sendInternalMsgLocked(streamAssignmentSubj, _EMPTY_, nil, b)
+				}
 			}
 			s.Warnf(ll)
 		} else {
@@ -4413,7 +4802,10 @@ func (js *jetStream) processClusterUpdateStream(acc *Account, osa, sa *streamAss
 		js.mu.Unlock()
 
 		// Send response to the metadata leader. They will forward to the user as needed.
-		s.sendInternalMsgLocked(streamAssignmentSubj, _EMPTY_, nil, result)
+		useCBOR := s.getOpts().UseCBORInternally
+		if b, err := marshalInternal(useCBOR, result); err == nil {
+			s.sendInternalMsgLocked(streamAssignmentSubj, _EMPTY_, nil, b)
+		}
 		return
 	}
 
@@ -4605,7 +4997,10 @@ func (js *jetStream) processClusterCreateStream(acc *Account, sa *streamAssignme
 
 		// Send response to the metadata leader. They will forward to the user as needed.
 		if result != nil {
-			s.sendInternalMsgLocked(streamAssignmentSubj, _EMPTY_, nil, result)
+			useCBOR := s.getOpts().UseCBORInternally
+			if b, err := marshalInternal(useCBOR, result); err == nil {
+				s.sendInternalMsgLocked(streamAssignmentSubj, _EMPTY_, nil, b)
+			}
 		}
 		return
 	}
@@ -4641,6 +5036,7 @@ func (js *jetStream) processClusterCreateStream(acc *Account, sa *streamAssignme
 			restoreDoneCh := s.processStreamRestore(sa.Client, acc, sa.Config, _EMPTY_, sa.Reply, _EMPTY_)
 			s.startGoRoutine(func() {
 				defer s.grWG.Done()
+				useCBOR := s.getOpts().UseCBORInternally
 				select {
 				case err := <-restoreDoneCh:
 					if err == nil {
@@ -4664,7 +5060,7 @@ func (js *jetStream) processClusterCreateStream(acc *Account, sa *streamAssignme
 						result.Restore.Error = NewJSStreamRestoreError(err, Unless(err))
 						js.mu.Unlock()
 						// Send response to the metadata leader. They will forward to the user as needed.
-						b, _ := json.Marshal(result) // Avoids auto-processing and doing fancy json with newlines.
+						b, _ := marshalInternal(useCBOR, result) // Avoids auto-processing and doing fancy json with newlines.
 						s.sendInternalMsgLocked(streamAssignmentSubj, _EMPTY_, nil, b)
 						return
 					}
@@ -4691,7 +5087,7 @@ func (js *jetStream) processClusterCreateStream(acc *Account, sa *streamAssignme
 								Created: o.createdTime(),
 							}
 
-							addEntry := encodeAddConsumerAssignment(ca)
+							addEntry := encodeAddConsumerAssignment(ca, useCBOR)
 							cc.meta.ForwardProposal(addEntry)
 
 							// Check to make sure we see the assignment.
@@ -4981,7 +5377,10 @@ func (js *jetStream) processConsumerAssignment(ca *consumerAssignment) {
 					Response: &JSApiConsumerCreateResponse{ApiResponse: ApiResponse{Type: JSApiConsumerCreateResponseType}},
 				}
 				result.Response.Error = NewJSNoAccountError()
-				s.sendInternalMsgLocked(consumerAssignmentSubj, _EMPTY_, nil, result)
+				useCBOR := s.getOpts().UseCBORInternally
+				if b, err := marshalInternal(useCBOR, result); err == nil {
+					s.sendInternalMsgLocked(consumerAssignmentSubj, _EMPTY_, nil, b)
+				}
 			}
 			s.Warnf(ll)
 		} else {
@@ -5142,7 +5541,10 @@ func (js *jetStream) processClusterCreateConsumer(ca *consumerAssignment, state 
 				Response: &JSApiConsumerCreateResponse{ApiResponse: ApiResponse{Type: JSApiConsumerCreateResponseType}},
 			}
 			result.Response.Error = NewJSStreamNotFoundError()
-			s.sendInternalMsgLocked(consumerAssignmentSubj, _EMPTY_, nil, result)
+			useCBOR := s.getOpts().UseCBORInternally
+			if b, err := marshalInternal(useCBOR, result); err == nil {
+				s.sendInternalMsgLocked(consumerAssignmentSubj, _EMPTY_, nil, b)
+			}
 			js.mu.Unlock()
 		}
 		return
@@ -5193,7 +5595,10 @@ func (js *jetStream) processClusterCreateConsumer(ca *consumerAssignment, state 
 						Response: &JSApiConsumerCreateResponse{ApiResponse: ApiResponse{Type: JSApiConsumerCreateResponseType}},
 					}
 					result.Response.Error = NewJSConsumerNameExistError()
-					s.sendInternalMsgLocked(consumerAssignmentSubj, _EMPTY_, nil, result)
+					useCBOR := s.getOpts().UseCBORInternally
+					if b, err := marshalInternal(useCBOR, result); err == nil {
+						s.sendInternalMsgLocked(consumerAssignmentSubj, _EMPTY_, nil, b)
+					}
 				}
 				s.Warnf("Consumer create failed during update for '%s > %s > %s': %v", ca.Client.serviceAccount(), ca.Stream, ca.Name, err)
 				js.mu.RUnlock()
@@ -5295,8 +5700,10 @@ func (js *jetStream) processClusterCreateConsumer(ca *consumerAssignment, state 
 
 		if result != nil {
 			// Send response to the metadata leader. They will forward to the user as needed.
-			b, _ := json.Marshal(result) // Avoids auto-processing and doing fancy json with newlines.
-			s.sendInternalMsgLocked(consumerAssignmentSubj, _EMPTY_, nil, b)
+			useCBOR := s.getOpts().UseCBORInternally
+			if b, err := marshalInternal(useCBOR, result); err == nil {
+				s.sendInternalMsgLocked(consumerAssignmentSubj, _EMPTY_, nil, b)
+			}
 		}
 	} else {
 		js.mu.RLock()
@@ -5757,7 +6164,8 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 				cca := ca.copyGroup()
 				cca.Group.Peers = newPeers
 				cca.Group.Cluster = s.cachedClusterName()
-				meta.ForwardProposal(encodeAddConsumerAssignment(cca))
+				useCBOR := s.getOpts().UseCBORInternally
+				meta.ForwardProposal(encodeAddConsumerAssignment(cca, useCBOR))
 				s.Noticef("Scaling down '%s > %s > %s' to %+v", ca.Client.serviceAccount(), ca.Stream, ca.Name, s.peerSetToNames(newPeers))
 
 			} else {
@@ -6197,7 +6605,7 @@ func isInsufficientResourcesErr(resp *JSApiStreamCreateResponse) bool {
 // Success will be handled by stream leader.
 func (js *jetStream) processStreamAssignmentResults(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 	var result streamAssignmentResult
-	if err := json.Unmarshal(msg, &result); err != nil {
+	if err := unmarshalInternal(msg, &result); err != nil {
 		// TODO(dlc) - log
 		return
 	}
@@ -6214,6 +6622,7 @@ func (js *jetStream) processStreamAssignmentResults(sub *subscription, c *client
 	if cc == nil || cc.meta == nil {
 		return
 	}
+	useCBOR := s.getOpts().UseCBORInternally
 
 	// This should have been done already in processStreamAssignment, but in
 	// case we have a code path that gets here with no processStreamAssignment,
@@ -6242,10 +6651,10 @@ func (js *jetStream) processStreamAssignmentResults(sub *subscription, c *client
 						// Pick a new preferred leader.
 						rg.setPreferred(s)
 						// Get rid of previous attempt.
-						cc.meta.Propose(encodeDeleteStreamAssignment(sa))
+						cc.meta.Propose(encodeDeleteStreamAssignment(sa, useCBOR))
 						// Propose new.
 						sa.Group, sa.err = rg, nil
-						cc.meta.Propose(encodeAddStreamAssignment(sa))
+						cc.meta.Propose(encodeAddStreamAssignment(sa, useCBOR))
 						// When the new stream assignment is processed, sa.reassigning will be
 						// automatically set back to false. Until then, don't process any more
 						// assignment results.
@@ -6270,14 +6679,14 @@ func (js *jetStream) processStreamAssignmentResults(sub *subscription, c *client
 		// Remove this assignment if possible.
 		if canDelete {
 			sa.err = NewJSClusterNotAssignedError()
-			cc.meta.Propose(encodeDeleteStreamAssignment(sa))
+			cc.meta.Propose(encodeDeleteStreamAssignment(sa, useCBOR))
 		}
 	}
 }
 
 func (js *jetStream) processConsumerAssignmentResults(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 	var result consumerAssignmentResult
-	if err := json.Unmarshal(msg, &result); err != nil {
+	if err := unmarshalInternal(msg, &result); err != nil {
 		// TODO(dlc) - log
 		return
 	}
@@ -6458,6 +6867,7 @@ func (js *jetStream) processLeaderChange(isLeader bool) {
 	// assignments with no sync subject after an update and no way to sync/catchup outside of the RAFT layer.
 	if isLeader && js.cluster.streamsCheck {
 		cc := js.cluster
+		useCBOR := s.getOpts().UseCBORInternally
 		for acc, asa := range cc.streams {
 			for _, sa := range asa {
 				if sa.unsupported != nil {
@@ -6467,7 +6877,7 @@ func (js *jetStream) processLeaderChange(isLeader bool) {
 					s.Warnf("Stream assignment corrupt for stream '%s > %s'", acc, sa.Config.Name)
 					nsa := &streamAssignment{Group: sa.Group, Config: sa.Config, Subject: sa.Subject, Reply: sa.Reply, Client: sa.Client, Created: sa.Created}
 					nsa.Sync = syncSubjForStream()
-					cc.meta.Propose(encodeUpdateStreamAssignment(nsa))
+					cc.meta.Propose(encodeUpdateStreamAssignment(nsa, useCBOR))
 				}
 			}
 		}
@@ -7130,7 +7540,8 @@ func (s *Server) jsClusteredStreamRequest(ci *ClientInfo, acc *Account, subject,
 	}
 	// Sync subject for post snapshot sync.
 	sa := &streamAssignment{Group: rg, Sync: syncSubject, Config: cfg, Subject: subject, Reply: reply, Client: ci, Created: time.Now().UTC()}
-	if err := cc.meta.Propose(encodeAddStreamAssignment(sa)); err == nil {
+	useCBOR := s.getOpts().UseCBORInternally
+	if err := cc.meta.Propose(encodeAddStreamAssignment(sa, useCBOR)); err == nil {
 		// On success, add this as an inflight proposal so we can apply limits
 		// on concurrent create requests while this stream assignment has
 		// possibly not been processed yet.
@@ -7551,11 +7962,12 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 	}
 
 	sa := &streamAssignment{Group: rg, Sync: osa.Sync, Created: osa.Created, Config: newCfg, Subject: subject, Reply: reply, Client: ci}
-	meta.Propose(encodeUpdateStreamAssignment(sa))
+	useCBOR := s.getOpts().UseCBORInternally
+	meta.Propose(encodeUpdateStreamAssignment(sa, useCBOR))
 
 	// Process any staged consumers.
 	for _, ca := range consumers {
-		meta.Propose(encodeAddConsumerAssignment(ca))
+		meta.Propose(encodeAddConsumerAssignment(ca, useCBOR))
 	}
 }
 
@@ -7581,7 +7993,8 @@ func (s *Server) jsClusteredStreamDeleteRequest(ci *ClientInfo, acc *Account, st
 	}
 
 	sa := &streamAssignment{Group: osa.Group, Config: osa.Config, Subject: subject, Reply: reply, Client: ci, Created: osa.Created}
-	cc.meta.Propose(encodeDeleteStreamAssignment(sa))
+	useCBOR := s.getOpts().UseCBORInternally
+	cc.meta.Propose(encodeDeleteStreamAssignment(sa, useCBOR))
 }
 
 // Process a clustered purge request.
@@ -7610,7 +8023,8 @@ func (s *Server) jsClusteredStreamPurgeRequest(
 
 	if n := sa.Group.node; n != nil {
 		sp := &streamPurge{Stream: stream, LastSeq: mset.state().LastSeq, Subject: subject, Reply: reply, Client: ci, Request: preq}
-		n.Propose(encodeStreamPurge(sp))
+		useCBOR := s.getOpts().UseCBORInternally
+		n.Propose(encodeStreamPurge(sp, useCBOR))
 		js.mu.Unlock()
 		return
 	}
@@ -7676,7 +8090,8 @@ func (s *Server) jsClusteredStreamRestoreRequest(
 	sa := &streamAssignment{Group: rg, Sync: syncSubjForStream(), Config: cfg, Subject: subject, Reply: reply, Client: ci, Created: time.Now().UTC()}
 	// Now add in our restore state and pre-select a peer to handle the actual receipt of the snapshot.
 	sa.Restore = &req.State
-	cc.meta.Propose(encodeAddStreamAssignment(sa))
+	useCBOR := s.getOpts().UseCBORInternally
+	cc.meta.Propose(encodeAddStreamAssignment(sa, useCBOR))
 }
 
 // Determine if all peers for this group are offline.
@@ -8008,16 +8423,20 @@ LOOP:
 	s.sendAPIResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(resp))
 }
 
-func encodeStreamPurge(sp *streamPurge) []byte {
+func encodeStreamPurge(sp *streamPurge, useCBOR bool) []byte {
+	raw, err := marshalInternal(useCBOR, sp)
+	if err != nil {
+		return nil
+	}
 	var bb bytes.Buffer
 	bb.WriteByte(byte(purgeStreamOp))
-	json.NewEncoder(&bb).Encode(sp)
+	bb.Write(raw)
 	return bb.Bytes()
 }
 
 func decodeStreamPurge(buf []byte) (*streamPurge, error) {
 	var sp streamPurge
-	err := json.Unmarshal(buf, &sp)
+	err := unmarshalInternal(buf, &sp)
 	return &sp, err
 }
 
@@ -8056,19 +8475,24 @@ func (s *Server) jsClusteredConsumerDeleteRequest(ci *ClientInfo, acc *Account, 
 	}
 	oca.deleted = true
 	ca := &consumerAssignment{Group: oca.Group, Stream: stream, Name: consumer, Config: oca.Config, Subject: subject, Reply: reply, Client: ci, Created: oca.Created}
-	cc.meta.Propose(encodeDeleteConsumerAssignment(ca))
+	useCBOR := s.getOpts().UseCBORInternally
+	cc.meta.Propose(encodeDeleteConsumerAssignment(ca, useCBOR))
 }
 
-func encodeMsgDelete(md *streamMsgDelete) []byte {
+func encodeMsgDelete(md *streamMsgDelete, useCBOR bool) []byte {
+	raw, err := marshalInternal(useCBOR, md)
+	if err != nil {
+		return nil
+	}
 	var bb bytes.Buffer
 	bb.WriteByte(byte(deleteMsgOp))
-	json.NewEncoder(&bb).Encode(md)
+	bb.Write(raw)
 	return bb.Bytes()
 }
 
 func decodeMsgDelete(buf []byte) (*streamMsgDelete, error) {
 	var md streamMsgDelete
-	err := json.Unmarshal(buf, &md)
+	err := unmarshalInternal(buf, &md)
 	return &md, err
 }
 
@@ -8089,7 +8513,8 @@ func (s *Server) jsClusteredMsgDeleteRequest(ci *ClientInfo, acc *Account, mset 
 	// Check for single replica items.
 	if n := sa.Group.node; n != nil {
 		md := streamMsgDelete{Seq: req.Seq, NoErase: req.NoErase, Stream: stream, Subject: subject, Reply: reply, Client: ci}
-		n.Propose(encodeMsgDelete(&md))
+		useCBOR := s.getOpts().UseCBORInternally
+		n.Propose(encodeMsgDelete(&md, useCBOR))
 		js.mu.Unlock()
 		return
 	}
@@ -8117,39 +8542,51 @@ func (s *Server) jsClusteredMsgDeleteRequest(ci *ClientInfo, acc *Account, mset 
 	s.sendAPIResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(resp))
 }
 
-func encodeAddStreamAssignment(sa *streamAssignment) []byte {
+func encodeAddStreamAssignment(sa *streamAssignment, useCBOR bool) []byte {
 	csa := *sa
 	csa.Client = csa.Client.forProposal()
 	csa.ConfigJSON, _ = json.Marshal(sa.Config)
+	raw, err := marshalInternal(useCBOR, csa)
+	if err != nil {
+		return nil
+	}
 	var bb bytes.Buffer
 	bb.WriteByte(byte(assignStreamOp))
-	json.NewEncoder(&bb).Encode(csa)
+	bb.Write(raw)
 	return bb.Bytes()
 }
 
-func encodeUpdateStreamAssignment(sa *streamAssignment) []byte {
+func encodeUpdateStreamAssignment(sa *streamAssignment, useCBOR bool) []byte {
 	csa := *sa
 	csa.Client = csa.Client.forProposal()
 	csa.ConfigJSON, _ = json.Marshal(sa.Config)
+	raw, err := marshalInternal(useCBOR, csa)
+	if err != nil {
+		return nil
+	}
 	var bb bytes.Buffer
 	bb.WriteByte(byte(updateStreamOp))
-	json.NewEncoder(&bb).Encode(csa)
+	bb.Write(raw)
 	return bb.Bytes()
 }
 
-func encodeDeleteStreamAssignment(sa *streamAssignment) []byte {
+func encodeDeleteStreamAssignment(sa *streamAssignment, useCBOR bool) []byte {
 	csa := *sa
 	csa.Client = csa.Client.forProposal()
 	csa.ConfigJSON, _ = json.Marshal(sa.Config)
+	raw, err := marshalInternal(useCBOR, csa)
+	if err != nil {
+		return nil
+	}
 	var bb bytes.Buffer
 	bb.WriteByte(byte(removeStreamOp))
-	json.NewEncoder(&bb).Encode(csa)
+	bb.Write(raw)
 	return bb.Bytes()
 }
 
 func decodeStreamAssignment(s *Server, buf []byte) (*streamAssignment, error) {
 	var sa streamAssignment
-	if err := json.Unmarshal(buf, &sa); err != nil {
+	if err := unmarshalInternal(buf, &sa); err != nil {
 		return nil, err
 	}
 	if err := decodeStreamAssignmentConfig(s, &sa); err != nil {
@@ -8180,16 +8617,20 @@ func decodeStreamAssignmentConfig(s *Server, sa *streamAssignment) error {
 	return nil
 }
 
-func encodeDeleteRange(dr *DeleteRange) []byte {
+func encodeDeleteRange(dr *DeleteRange, useCBOR bool) []byte {
+	raw, err := marshalInternal(useCBOR, dr)
+	if err != nil {
+		return nil
+	}
 	var bb bytes.Buffer
 	bb.WriteByte(byte(deleteRangeOp))
-	json.NewEncoder(&bb).Encode(dr)
+	bb.Write(raw)
 	return bb.Bytes()
 }
 
 func decodeDeleteRange(buf []byte) (*DeleteRange, error) {
 	var dr DeleteRange
-	err := json.Unmarshal(buf, &dr)
+	err := unmarshalInternal(buf, &dr)
 	if err != nil {
 		return nil, err
 	}
@@ -8582,7 +9023,8 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 	}
 
 	// Do formal proposal.
-	if err := cc.meta.Propose(encodeAddConsumerAssignment(ca)); err == nil {
+	useCBOR := s.getOpts().UseCBORInternally
+	if err := cc.meta.Propose(encodeAddConsumerAssignment(ca, useCBOR)); err == nil {
 		// Mark this as pending.
 		if sa.consumers == nil {
 			sa.consumers = make(map[string]*consumerAssignment)
@@ -8592,29 +9034,53 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 	}
 }
 
-func encodeAddConsumerAssignment(ca *consumerAssignment) []byte {
+func encodeAddConsumerAssignment(ca *consumerAssignment, useCBOR bool) []byte {
 	cca := *ca
 	cca.Client = cca.Client.forProposal()
 	cca.ConfigJSON, _ = json.Marshal(ca.Config)
+	raw, err := marshalInternal(useCBOR, cca)
+	if err != nil {
+		return nil
+	}
 	var bb bytes.Buffer
 	bb.WriteByte(byte(assignConsumerOp))
-	json.NewEncoder(&bb).Encode(cca)
+	bb.Write(raw)
 	return bb.Bytes()
 }
 
-func encodeDeleteConsumerAssignment(ca *consumerAssignment) []byte {
+func encodeDeleteConsumerAssignment(ca *consumerAssignment, useCBOR bool) []byte {
 	cca := *ca
 	cca.Client = cca.Client.forProposal()
 	cca.ConfigJSON, _ = json.Marshal(ca.Config)
+	raw, err := marshalInternal(useCBOR, cca)
+	if err != nil {
+		return nil
+	}
 	var bb bytes.Buffer
 	bb.WriteByte(byte(removeConsumerOp))
-	json.NewEncoder(&bb).Encode(cca)
+	bb.Write(raw)
+	return bb.Bytes()
+}
+
+func encodeAddConsumerAssignmentCompressed(ca *consumerAssignment, useCBOR bool) []byte {
+	cca := *ca
+	cca.Client = cca.Client.forProposal()
+	cca.ConfigJSON, _ = json.Marshal(ca.Config)
+	raw, err := marshalInternal(useCBOR, cca)
+	if err != nil {
+		return nil
+	}
+	var bb bytes.Buffer
+	bb.WriteByte(byte(assignCompressedConsumerOp))
+	s2e := s2.NewWriter(&bb)
+	s2e.Write(raw)
+	s2e.Close()
 	return bb.Bytes()
 }
 
 func decodeConsumerAssignment(buf []byte) (*consumerAssignment, error) {
 	var ca consumerAssignment
-	if err := json.Unmarshal(buf, &ca); err != nil {
+	if err := unmarshalInternal(buf, &ca); err != nil {
 		return nil, err
 	}
 	if err := decodeConsumerAssignmentConfig(&ca); err != nil {
@@ -8643,24 +9109,15 @@ func decodeConsumerAssignmentConfig(ca *consumerAssignment) error {
 	return nil
 }
 
-func encodeAddConsumerAssignmentCompressed(ca *consumerAssignment) []byte {
-	cca := *ca
-	cca.Client = cca.Client.forProposal()
-	cca.ConfigJSON, _ = json.Marshal(ca.Config)
-	var bb bytes.Buffer
-	bb.WriteByte(byte(assignCompressedConsumerOp))
-	s2e := s2.NewWriter(&bb)
-	json.NewEncoder(s2e).Encode(cca)
-	s2e.Close()
-	return bb.Bytes()
-}
-
 func decodeConsumerAssignmentCompressed(buf []byte) (*consumerAssignment, error) {
 	var ca consumerAssignment
 	bb := bytes.NewBuffer(buf)
 	s2d := s2.NewReader(bb)
-	decoder := json.NewDecoder(s2d)
-	if err := decoder.Decode(&ca); err != nil {
+	payload, err := io.ReadAll(s2d)
+	if err != nil {
+		return nil, err
+	}
+	if err := unmarshalInternal(payload, &ca); err != nil {
 		return nil, err
 	}
 	if err := decodeConsumerAssignmentConfig(&ca); err != nil {
@@ -9296,6 +9753,7 @@ func (mset *stream) processSnapshot(snap *StreamReplicatedState, index uint64) (
 	}
 	s, js, subject, n, st := mset.srv, mset.js, mset.sa.Sync, mset.node, mset.cfg.Storage
 	qname := fmt.Sprintf("[ACC:%s] stream '%s' snapshot", mset.acc.Name, mset.cfg.Name)
+	useCBOR := s.getOpts().UseCBORInternally
 	mset.mu.Unlock()
 
 	// Always try to resume applies, we might be paused already if we timed out of processing the snapshot previously.
@@ -9467,7 +9925,7 @@ RETRY:
 	}
 
 	// Send our sync request.
-	b, _ := json.Marshal(sreq)
+	b, _ := marshalInternal(useCBOR, sreq)
 	s.sendInternalMsgLocked(subject, reply, nil, b)
 
 	// Remember when we sent this out to avoid loop spins on errors below.
@@ -9675,7 +10133,7 @@ func (mset *stream) flushAllPending() {
 
 func (mset *stream) handleClusterSyncRequest(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 	var sreq streamSyncRequest
-	if err := json.Unmarshal(msg, &sreq); err != nil {
+	if err := unmarshalInternal(msg, &sreq); err != nil {
 		// Log error.
 		return
 	}
@@ -10081,6 +10539,8 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 			spb = 0
 		}
 
+		useCBOR := s.getOpts().UseCBORInternally
+
 		// Send an encoded msg.
 		sendEM := func(em []byte) {
 			// Place size in reply subject for flow control.
@@ -10104,7 +10564,7 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 				sendEM(encodeStreamMsg(_EMPTY_, _EMPTY_, nil, nil, dr.First, 0, false))
 			} else {
 				// We have a run, send a gap record. We send these without reply or tracking.
-				s.sendInternalMsgLocked(sendSubject, _EMPTY_, nil, encodeDeleteRange(&dr))
+				s.sendInternalMsgLocked(sendSubject, _EMPTY_, nil, encodeDeleteRange(&dr, useCBOR))
 				// Clear out the pending for catchup.
 				mset.decrementCatchupPeer(sreq.Peer, dr.Num)
 			}

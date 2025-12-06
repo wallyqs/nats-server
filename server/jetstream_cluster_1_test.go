@@ -6555,21 +6555,22 @@ func TestJetStreamClusterMetaRecoveryUpdatesDeletesConsumers(t *testing.T) {
 	defer c.shutdown()
 
 	js := c.leader().getJetStream()
+	useCBOR := c.leader().getOpts().UseCBORInternally
 
 	create := []*Entry{
 		{EntryNormal, encodeAddStreamAssignment(&streamAssignment{
 			Config: &StreamConfig{Name: "TEST", Storage: FileStorage},
-		})},
+		}, useCBOR)},
 		{EntryNormal, encodeAddConsumerAssignment(&consumerAssignment{
 			Stream: "TEST",
 			Config: &ConsumerConfig{Name: "consumer"},
-		})},
+		}, useCBOR)},
 	}
 
 	delete := []*Entry{
 		{EntryNormal, encodeDeleteStreamAssignment(&streamAssignment{
 			Config: &StreamConfig{Name: "TEST", Storage: FileStorage},
-		})},
+		}, useCBOR)},
 	}
 
 	// Need to be recovering so that we accumulate recoveryUpdates.
@@ -6600,30 +6601,31 @@ func TestJetStreamClusterMetaRecoveryRecreateFileStreamAsMemory(t *testing.T) {
 	defer c.shutdown()
 
 	js := c.leader().getJetStream()
+	useCBOR := c.leader().getOpts().UseCBORInternally
 
 	createFileStream := []*Entry{
 		{EntryNormal, encodeAddStreamAssignment(&streamAssignment{
 			Config: &StreamConfig{Name: "TEST", Storage: FileStorage},
-		})},
+		}, useCBOR)},
 	}
 
 	deleteFileStream := []*Entry{
 		{EntryNormal, encodeDeleteStreamAssignment(&streamAssignment{
 			Config: &StreamConfig{Name: "TEST", Storage: FileStorage},
-		})},
+		}, useCBOR)},
 	}
 
 	createMemoryStream := []*Entry{
 		{EntryNormal, encodeAddStreamAssignment(&streamAssignment{
 			Config: &StreamConfig{Name: "TEST", Storage: FileStorage},
-		})},
+		}, useCBOR)},
 	}
 
 	createConsumer := []*Entry{
 		{EntryNormal, encodeAddConsumerAssignment(&consumerAssignment{
 			Stream: "TEST",
 			Config: &ConsumerConfig{Name: "consumer"},
-		})},
+		}, useCBOR)},
 	}
 
 	// Need to be recovering so that we accumulate recoveryUpdates.
@@ -6667,7 +6669,7 @@ func TestJetStreamClusterMetaRecoveryRecreateFileStreamAsMemory(t *testing.T) {
 func TestJetStreamClusterMetaRecoveryConsumerCreateAndRemove(t *testing.T) {
 	tests := []struct {
 		title                       string
-		encodeAddConsumerAssignment func(ca *consumerAssignment) []byte
+		encodeAddConsumerAssignment func(ca *consumerAssignment, useCBOR bool) []byte
 	}{
 		{title: "simple", encodeAddConsumerAssignment: encodeAddConsumerAssignment},
 		{title: "compressed", encodeAddConsumerAssignment: encodeAddConsumerAssignmentCompressed},
@@ -6678,10 +6680,11 @@ func TestJetStreamClusterMetaRecoveryConsumerCreateAndRemove(t *testing.T) {
 			defer c.shutdown()
 
 			js := c.leader().getJetStream()
+			useCBOR := c.leader().getOpts().UseCBORInternally
 
 			ca := &consumerAssignment{Stream: "TEST", Name: "consumer"}
-			createConsumer := []*Entry{{EntryNormal, test.encodeAddConsumerAssignment(ca)}}
-			deleteConsumer := []*Entry{{EntryNormal, encodeDeleteConsumerAssignment(ca)}}
+			createConsumer := []*Entry{{EntryNormal, test.encodeAddConsumerAssignment(ca, useCBOR)}}
+			deleteConsumer := []*Entry{{EntryNormal, encodeDeleteConsumerAssignment(ca, useCBOR)}}
 
 			// Need to be recovering so that we accumulate recoveryUpdates.
 			js.setMetaRecovering()
@@ -8269,7 +8272,8 @@ func TestJetStreamClusterUpgradeStreamVersioning(t *testing.T) {
 	rg, perr := sjs.createGroupForStream(ci, &cfg)
 	require_True(t, perr == nil)
 	sa := &streamAssignment{Group: rg, Sync: syncSubjForStream(), Config: &cfg, Client: ci, Created: time.Now().UTC()}
-	require_NoError(t, rn.Propose(encodeAddStreamAssignment(sa)))
+	useCBOR := sjs.srv.getOpts().UseCBORInternally
+	require_NoError(t, rn.Propose(encodeAddStreamAssignment(sa, useCBOR)))
 
 	// Wait for the stream assignment to have gone through.
 	checkFor(t, 2*time.Second, 500*time.Millisecond, func() error {
@@ -8363,7 +8367,8 @@ func TestJetStreamClusterUpgradeConsumerVersioning(t *testing.T) {
 	ci := &ClientInfo{Cluster: "R3S", Account: globalAccountName}
 	rg := sjs.cluster.createGroupForConsumer(cfg, sa)
 	ca := &consumerAssignment{Group: rg, Stream: "TEST", Name: "CONSUMER", Config: cfg, Client: ci, Created: time.Now().UTC()}
-	require_NoError(t, rn.Propose(encodeAddConsumerAssignment(ca)))
+	useCBOR := sjs.srv.getOpts().UseCBORInternally
+	require_NoError(t, rn.Propose(encodeAddConsumerAssignment(ca, useCBOR)))
 
 	// Wait for the consumer assignment to have gone through.
 	checkFor(t, 2*time.Second, 500*time.Millisecond, func() error {
@@ -9619,6 +9624,7 @@ func TestJetStreamClusterOfflineStreamAndConsumerAfterAssetCreateOrUpdate(t *tes
 		sjs.mu.Unlock()
 		t.Fatalf("Expected cluster to be initialized")
 	}
+	useCBOR := sjs.srv.getOpts().UseCBORInternally
 
 	restart := func() {
 		t.Helper()
@@ -9681,7 +9687,7 @@ func TestJetStreamClusterOfflineStreamAndConsumerAfterAssetCreateOrUpdate(t *tes
 		Created: time.Now().UTC(),
 		Client:  ci,
 	}
-	err := cc.meta.Propose(encodeAddStreamAssignment(sa))
+	err := cc.meta.Propose(encodeAddStreamAssignment(sa, useCBOR))
 	sjs.mu.Unlock()
 	require_NoError(t, err)
 	c.waitOnAllCurrent()
@@ -9737,7 +9743,7 @@ func TestJetStreamClusterOfflineStreamAndConsumerAfterAssetCreateOrUpdate(t *tes
 	// Update a stream that's unsupported.
 	sjs.mu.Lock()
 	scfg.Metadata = map[string]string{"_nats.req.level": strconv.Itoa(math.MaxInt)}
-	err = cc.meta.Propose(encodeUpdateStreamAssignment(sa))
+	err = cc.meta.Propose(encodeUpdateStreamAssignment(sa, useCBOR))
 	sjs.mu.Unlock()
 	require_NoError(t, err)
 	c.waitOnAllCurrent()
@@ -9786,7 +9792,7 @@ func TestJetStreamClusterOfflineStreamAndConsumerAfterAssetCreateOrUpdate(t *tes
 		Created: time.Now().UTC(),
 		Client:  ci,
 	}
-	err = cc.meta.Propose(encodeAddConsumerAssignment(ca))
+	err = cc.meta.Propose(encodeAddConsumerAssignment(ca, useCBOR))
 	sjs.mu.Unlock()
 	require_NoError(t, err)
 	c.waitOnAllCurrent()
@@ -9858,7 +9864,8 @@ func TestJetStreamClusterOfflineStreamAndConsumerAfterAssetCreateOrUpdate(t *tes
 	// Update a consumer (with compressed data) that's unsupported.
 	ccfg.Metadata = map[string]string{"_nats.req.level": strconv.Itoa(math.MaxInt)}
 	sjs.mu.Lock()
-	err = cc.meta.Propose(encodeAddConsumerAssignmentCompressed(ca))
+	useCBOR = sjs.srv.getOpts().UseCBORInternally
+	err = cc.meta.Propose(encodeAddConsumerAssignmentCompressed(ca, useCBOR))
 	sjs.mu.Unlock()
 	require_NoError(t, err)
 	c.waitOnAllCurrent()
@@ -9985,7 +9992,8 @@ func TestJetStreamClusterOfflineStreamAndConsumerAfterDowngrade(t *testing.T) {
 		Created: time.Now().UTC(),
 		Client:  ci,
 	}
-	err := cc.meta.Propose(encodeAddStreamAssignment(sa))
+	useCBOR := sjs.srv.getOpts().UseCBORInternally
+	err := cc.meta.Propose(encodeAddStreamAssignment(sa, useCBOR))
 	sjs.mu.Unlock()
 	require_NoError(t, err)
 	c.waitOnStreamLeader(globalAccountName, "DowngradeStreamTest")
@@ -10027,7 +10035,7 @@ func TestJetStreamClusterOfflineStreamAndConsumerAfterDowngrade(t *testing.T) {
 	// Update a stream to be unsupported.
 	sjs.mu.Lock()
 	scfg.Metadata = map[string]string{"_nats.req.level": strconv.Itoa(math.MaxInt)}
-	err = cc.meta.Propose(encodeUpdateStreamAssignment(sa))
+	err = cc.meta.Propose(encodeUpdateStreamAssignment(sa, useCBOR))
 	sjs.mu.Unlock()
 	require_NoError(t, err)
 	c.waitOnAllCurrent()
@@ -10072,7 +10080,8 @@ func TestJetStreamClusterOfflineStreamAndConsumerAfterDowngrade(t *testing.T) {
 		Created: time.Now().UTC(),
 		Client:  ci,
 	}
-	err = cc.meta.Propose(encodeAddConsumerAssignment(ca))
+	useCBOR = sjs.srv.getOpts().UseCBORInternally
+	err = cc.meta.Propose(encodeAddConsumerAssignment(ca, useCBOR))
 	sjs.mu.Unlock()
 	require_NoError(t, err)
 	c.waitOnConsumerLeader(globalAccountName, "DowngradeConsumerTest", "DowngradeConsumerTest")
@@ -10115,7 +10124,8 @@ func TestJetStreamClusterOfflineStreamAndConsumerAfterDowngrade(t *testing.T) {
 	// Update a consumer to be unsupported.
 	ccfg.Metadata = map[string]string{"_nats.req.level": strconv.Itoa(math.MaxInt)}
 	sjs.mu.Lock()
-	err = cc.meta.Propose(encodeAddConsumerAssignment(ca))
+	useCBOR = sjs.srv.getOpts().UseCBORInternally
+	err = cc.meta.Propose(encodeAddConsumerAssignment(ca, useCBOR))
 	sjs.mu.Unlock()
 	require_NoError(t, err)
 	c.waitOnAllCurrent()
@@ -10201,14 +10211,15 @@ func TestJetStreamClusterOfflineStreamAndConsumerUpdate(t *testing.T) {
 	// Update a consumer to be unsupported.
 	sjs.mu.Lock()
 	ca.Config.Metadata = map[string]string{"_nats.req.level": strconv.Itoa(math.MaxInt)}
-	err = sjs.cluster.meta.Propose(encodeAddConsumerAssignment(ca))
+	useCBOR := sjs.srv.getOpts().UseCBORInternally
+	err = sjs.cluster.meta.Propose(encodeAddConsumerAssignment(ca, useCBOR))
 	sjs.mu.Unlock()
 	require_NoError(t, err)
 
 	// Update the stream to be unsupported.
 	sjs.mu.Lock()
 	sa.Config.Metadata = map[string]string{"_nats.req.level": strconv.Itoa(math.MaxInt)}
-	err = sjs.cluster.meta.Propose(encodeUpdateStreamAssignment(sa))
+	err = sjs.cluster.meta.Propose(encodeUpdateStreamAssignment(sa, useCBOR))
 	sjs.mu.Unlock()
 	require_NoError(t, err)
 	c.waitOnAllCurrent()

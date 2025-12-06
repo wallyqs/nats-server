@@ -4636,7 +4636,8 @@ func (mset *stream) setupStore(fsCfg *FileStoreConfig) error {
 			if mset.IsLeader() {
 				mset.mu.RLock()
 				md := streamMsgDelete{Seq: seq, NoErase: true, Stream: mset.cfg.Name}
-				mset.node.Propose(encodeMsgDelete(&md))
+				useCBOR := mset.srv.getOpts().UseCBORInternally
+				mset.node.Propose(encodeMsgDelete(&md, useCBOR))
 				mset.mu.RUnlock()
 			}
 		} else {
@@ -7711,7 +7712,8 @@ func (mset *stream) ackMsg(o *consumer, seq uint64) bool {
 	}
 
 	md := streamMsgDelete{Seq: seq, NoErase: true, Stream: mset.cfg.Name}
-	mset.node.ForwardProposal(encodeMsgDelete(&md))
+	useCBOR := mset.srv.getOpts().UseCBORInternally
+	mset.node.ForwardProposal(encodeMsgDelete(&md, useCBOR))
 	mset.mu.Unlock()
 	return true
 }
