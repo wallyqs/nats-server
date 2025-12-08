@@ -5356,6 +5356,99 @@ func TestFileStoreSyncIntervals(t *testing.T) {
 	checkSyncFlag(false)
 }
 
+func TestFileStoreBatchedFsync(t *testing.T) {
+	// Test that the batched fsync mechanism works correctly for SyncAlways mode.
+	// This test verifies that:
+	// 1. The syncer goroutine is started when SyncAlways is enabled
+	// 2. Messages are still stored correctly with batched fsync
+	// 3. The sync generation advances properly
+	// 4. Concurrent writers work correctly
+
+	fcfg := FileStoreConfig{StoreDir: t.TempDir(), SyncInterval: 10 * time.Second, SyncAlways: true}
+	fs, err := newFileStore(fcfg, StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	// Store a message and verify it works
+	seq, _, err := fs.StoreMsg("A", nil, []byte("hello"), 0)
+	require_NoError(t, err)
+	require_Equal(t, seq, uint64(1))
+
+	// Check that we can load the message back
+	sm, err := fs.LoadMsg(1, nil)
+	require_NoError(t, err)
+	require_Equal(t, string(sm.msg), "hello")
+
+	// Store multiple messages
+	for i := 0; i < 10; i++ {
+		_, _, err := fs.StoreMsg("B", nil, []byte(fmt.Sprintf("msg-%d", i)), 0)
+		require_NoError(t, err)
+	}
+
+	// Verify state
+	var state StreamState
+	fs.FastState(&state)
+	require_Equal(t, state.Msgs, uint64(11))
+
+	// Check the syncer was started
+	fs.mu.RLock()
+	lmb := fs.lmb
+	fs.mu.RUnlock()
+
+	lmb.mu.RLock()
+	hasSyncer := lmb.syncer
+	hasSyncCond := lmb.syncCond != nil
+	syncGen := lmb.syncGen
+	lmb.mu.RUnlock()
+
+	// Syncer should be running and sync generation should have advanced
+	require_True(t, hasSyncer)
+	require_True(t, hasSyncCond)
+	require_True(t, syncGen > 0)
+}
+
+func TestFileStoreBatchedFsyncConcurrent(t *testing.T) {
+	// Test concurrent writers with batched fsync
+	fcfg := FileStoreConfig{StoreDir: t.TempDir(), SyncInterval: 10 * time.Second, SyncAlways: true}
+	fs, err := newFileStore(fcfg, StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	const numWriters = 10
+	const msgsPerWriter = 100
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, numWriters*msgsPerWriter)
+
+	// Start concurrent writers
+	for w := 0; w < numWriters; w++ {
+		wg.Add(1)
+		go func(writerId int) {
+			defer wg.Done()
+			for i := 0; i < msgsPerWriter; i++ {
+				_, _, err := fs.StoreMsg("test", nil, []byte(fmt.Sprintf("writer-%d-msg-%d", writerId, i)), 0)
+				if err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}(w)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	// Check for errors
+	for err := range errCh {
+		t.Fatalf("Writer error: %v", err)
+	}
+
+	// Verify all messages were stored
+	var state StreamState
+	fs.FastState(&state)
+	require_Equal(t, state.Msgs, uint64(numWriters*msgsPerWriter))
+}
+
 // https://github.com/nats-io/nats-server/issues/4529
 // Run this wuth --race and you will see the unlocked access that probably caused this.
 func TestFileStoreRecalcFirstSequenceBug(t *testing.T) {

@@ -262,6 +262,15 @@ type msgBlock struct {
 
 	// Used to mock write failures.
 	mockWriteErr bool
+
+	// Batched sync support for SyncAlways mode.
+	// This allows multiple writers to share a single fsync call.
+	syncCond *sync.Cond // Condition variable for sync waiters
+	syncGen  uint64     // Current completed sync generation
+	syncReq  uint64     // Next sync generation requested
+	sch      chan struct{}
+	sqch     chan struct{}
+	syncer   bool // Whether a sync flusher is running
 }
 
 // Write through caching layer that is also used on loading messages.
@@ -325,6 +334,8 @@ const (
 	coalesceMinimum = 16 * 1024
 	// maxFlushWait is maximum we will wait to gather messages to flush.
 	maxFlushWait = 8 * time.Millisecond
+	// maxSyncWait is the maximum time to wait for batching fsync calls in SyncAlways mode.
+	maxSyncWait = 10 * time.Millisecond
 
 	// Metafiles for streams and consumers.
 	JetStreamMetaFile    = "meta.inf"
@@ -1039,6 +1050,12 @@ func (fs *fileStore) initMsgBlock(index uint32) *msgBlock {
 		key := sha256.Sum256(fs.hashKeyForBlock(index))
 		mb.hh, _ = highwayhash.NewDigest64(key[:])
 	}
+
+	// Initialize batched sync support for SyncAlways mode.
+	if mb.syncAlways {
+		mb.syncCond = sync.NewCond(&mb.mu)
+	}
+
 	return mb
 }
 
@@ -5663,6 +5680,111 @@ func (mb *msgBlock) flushLoop(fch, qch chan struct{}) {
 	}
 }
 
+// spinUpSyncLoopLocked starts the batched sync flusher goroutine for SyncAlways mode.
+// This allows multiple writers to share a single fsync call.
+// Lock should be held.
+func (mb *msgBlock) spinUpSyncLoopLocked() {
+	// Are we already running or closed?
+	if mb.syncer || mb.closed || !mb.syncAlways {
+		return
+	}
+	mb.syncer = true
+	mb.sch = make(chan struct{}, 1)
+	mb.sqch = make(chan struct{})
+	sch, sqch := mb.sch, mb.sqch
+
+	go mb.syncLoop(sch, sqch)
+}
+
+// kickSyncer signals the sync flusher that a sync is needed.
+func kickSyncer(sch chan struct{}) {
+	if sch != nil {
+		select {
+		case sch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (mb *msgBlock) setInSyncer() {
+	mb.mu.Lock()
+	mb.syncer = true
+	mb.mu.Unlock()
+}
+
+func (mb *msgBlock) clearInSyncer() {
+	mb.mu.Lock()
+	mb.syncer = false
+	if mb.sqch != nil {
+		close(mb.sqch)
+		mb.sqch = nil
+	}
+	if mb.sch != nil {
+		close(mb.sch)
+		mb.sch = nil
+	}
+	// Wake up any remaining waiters when shutting down.
+	if mb.syncCond != nil {
+		mb.syncCond.Broadcast()
+	}
+	mb.mu.Unlock()
+}
+
+// syncLoop is the batched sync flusher goroutine.
+// It waits for sync requests, batches them briefly, and performs a single fsync.
+func (mb *msgBlock) syncLoop(sch, sqch chan struct{}) {
+	mb.setInSyncer()
+	defer mb.clearInSyncer()
+
+	for {
+		select {
+		case <-sch:
+			// Brief wait to allow more sync requests to accumulate.
+			// This is the key to batching - we delay slightly to coalesce
+			// multiple concurrent writes into a single fsync.
+			timer := time.NewTimer(maxSyncWait)
+			select {
+			case <-timer.C:
+			case <-sqch:
+				timer.Stop()
+				return
+			}
+
+			// Perform the sync with lock held.
+			mb.mu.Lock()
+			if !mb.closed && mb.mfd != nil && mb.syncReq > mb.syncGen {
+				mb.mfd.Sync()
+				mb.syncGen = mb.syncReq
+				// Wake all waiters - their sync is now complete.
+				mb.syncCond.Broadcast()
+			}
+			mb.mu.Unlock()
+
+		case <-sqch:
+			return
+		}
+	}
+}
+
+// requestSyncLocked records that a sync is needed and returns the generation
+// number the caller should wait for. Lock should be held.
+func (mb *msgBlock) requestSyncLocked() uint64 {
+	mb.syncReq++
+	// Spin up the syncer if not already running.
+	mb.spinUpSyncLoopLocked()
+	// Kick the syncer to let it know there's work to do.
+	kickSyncer(mb.sch)
+	return mb.syncReq
+}
+
+// waitForSyncLocked waits for the specified sync generation to complete.
+// Lock should be held. The lock is released while waiting.
+func (mb *msgBlock) waitForSyncLocked(gen uint64) {
+	for mb.syncGen < gen && !mb.closed {
+		mb.syncCond.Wait()
+	}
+}
+
 // Lock should be held.
 func (mb *msgBlock) eraseMsg(seq uint64, ri, rl int, isLastBlock bool) error {
 	var le = binary.LittleEndian
@@ -7426,7 +7548,10 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 
 	// Check if we are in sync always mode.
 	if mb.syncAlways {
-		mb.mfd.Sync()
+		// Use batched sync - request sync and wait for it to complete.
+		// This allows multiple concurrent writers to share a single fsync call.
+		gen := mb.requestSyncLocked()
+		mb.waitForSyncLocked(gen)
 	} else {
 		mb.needSync = true
 	}
@@ -9696,6 +9821,15 @@ func (mb *msgBlock) dirtyCloseWithRemove(remove bool) error {
 		close(mb.qch)
 		mb.qch = nil
 	}
+	// Quit syncer loop.
+	if mb.sqch != nil {
+		close(mb.sqch)
+		mb.sqch = nil
+	}
+	// Wake any sync waiters since we're closing.
+	if mb.syncCond != nil {
+		mb.syncCond.Broadcast()
+	}
 	if mb.mfd != nil {
 		mb.mfd.Close()
 		mb.mfd = nil
@@ -10026,6 +10160,15 @@ func (mb *msgBlock) close(sync bool) {
 	if mb.qch != nil {
 		close(mb.qch)
 		mb.qch = nil
+	}
+	// Quit syncer loop.
+	if mb.sqch != nil {
+		close(mb.sqch)
+		mb.sqch = nil
+	}
+	// Wake any sync waiters since we're closing.
+	if mb.syncCond != nil {
+		mb.syncCond.Broadcast()
 	}
 	if mb.mfd != nil {
 		if sync {
