@@ -8128,99 +8128,63 @@ func TestFileStoreRestoreDeleteTombstonesExceedingMaxBlkSize(t *testing.T) {
 ///////////////////////////////////////////////////////////////////////////
 
 // Benchmark_FileStoreSyncModes compares the performance of different sync modes:
-// - NoSync: No immediate fsync, background sync only
+// - NoSync: No immediate fsync, background sync only (fip=true by default)
+// - AsyncFlush: No immediate fsync, async batched writes (fip=false)
 // - SyncAlways: Immediate fsync after every write
 // - SyncBatched: Batched fsync where multiple writes share a single fsync call
 func Benchmark_FileStoreSyncModes(b *testing.B) {
 	msg := bytes.Repeat([]byte("A"), 128) // 128 byte message
 
-	b.Run("NoSync-Sequential", func(b *testing.B) {
-		fs, err := newFileStore(
-			FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute},
-			StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
-		require_NoError(b, err)
-		defer fs.Stop()
+	type syncMode struct {
+		name        string
+		syncAlways  bool
+		syncBatched bool
+		asyncFlush  bool
+	}
 
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			fs.StoreMsg("test", nil, msg, 0)
-		}
-	})
+	modes := []syncMode{
+		{"NoSync", false, false, false},
+		{"AsyncFlush", false, false, true},
+		{"SyncAlways", true, false, false},
+		{"SyncBatched", false, true, false},
+	}
 
-	b.Run("SyncAlways-Sequential", func(b *testing.B) {
-		fs, err := newFileStore(
-			FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute, SyncAlways: true},
-			StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
-		require_NoError(b, err)
-		defer fs.Stop()
+	for _, mode := range modes {
+		b.Run(mode.name+"-Sequential", func(b *testing.B) {
+			fs, err := newFileStore(
+				FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute,
+					SyncAlways: mode.syncAlways, SyncBatched: mode.syncBatched, AsyncFlush: mode.asyncFlush},
+				StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
+			require_NoError(b, err)
+			defer fs.Stop()
 
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			fs.StoreMsg("test", nil, msg, 0)
-		}
-	})
-
-	b.Run("SyncBatched-Sequential", func(b *testing.B) {
-		fs, err := newFileStore(
-			FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute, SyncBatched: true},
-			StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
-		require_NoError(b, err)
-		defer fs.Stop()
-
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			fs.StoreMsg("test", nil, msg, 0)
-		}
-	})
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				fs.StoreMsg("test", nil, msg, 0)
+			}
+		})
+	}
 
 	// Concurrent benchmarks with multiple goroutines
 	for _, numWriters := range []int{4, 8, 16} {
-		b.Run(fmt.Sprintf("NoSync-Concurrent-%dWriters", numWriters), func(b *testing.B) {
-			fs, err := newFileStore(
-				FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute},
-				StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
-			require_NoError(b, err)
-			defer fs.Stop()
+		for _, mode := range modes {
+			b.Run(fmt.Sprintf("%s-Concurrent-%dWriters", mode.name, numWriters), func(b *testing.B) {
+				fs, err := newFileStore(
+					FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute,
+						SyncAlways: mode.syncAlways, SyncBatched: mode.syncBatched, AsyncFlush: mode.asyncFlush},
+					StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
+				require_NoError(b, err)
+				defer fs.Stop()
 
-			b.ResetTimer()
-			b.RunParallel(func(pb *testing.PB) {
-				for pb.Next() {
-					fs.StoreMsg("test", nil, msg, 0)
-				}
+				b.SetParallelism(numWriters)
+				b.ResetTimer()
+				b.RunParallel(func(pb *testing.PB) {
+					for pb.Next() {
+						fs.StoreMsg("test", nil, msg, 0)
+					}
+				})
 			})
-		})
-
-		b.Run(fmt.Sprintf("SyncAlways-Concurrent-%dWriters", numWriters), func(b *testing.B) {
-			fs, err := newFileStore(
-				FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute, SyncAlways: true},
-				StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
-			require_NoError(b, err)
-			defer fs.Stop()
-
-			b.SetParallelism(numWriters)
-			b.ResetTimer()
-			b.RunParallel(func(pb *testing.PB) {
-				for pb.Next() {
-					fs.StoreMsg("test", nil, msg, 0)
-				}
-			})
-		})
-
-		b.Run(fmt.Sprintf("SyncBatched-Concurrent-%dWriters", numWriters), func(b *testing.B) {
-			fs, err := newFileStore(
-				FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute, SyncBatched: true},
-				StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
-			require_NoError(b, err)
-			defer fs.Stop()
-
-			b.SetParallelism(numWriters)
-			b.ResetTimer()
-			b.RunParallel(func(pb *testing.PB) {
-				for pb.Next() {
-					fs.StoreMsg("test", nil, msg, 0)
-				}
-			})
-		})
+		}
 	}
 }
 
