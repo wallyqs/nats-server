@@ -22147,3 +22147,100 @@ func TestJetStreamImplicitRePublishAfterSubjectTransform(t *testing.T) {
 	_, err = js.UpdateStream(cfg)
 	require_Error(t, err, NewJSStreamInvalidConfigError(fmt.Errorf("stream configuration for republish destination forms a cycle")))
 }
+
+// Benchmark_JetStreamSyncModes compares the performance of JetStream publish
+// with different sync modes: NoSync (default), SyncAlways, and SyncBatched.
+func Benchmark_JetStreamSyncModes(b *testing.B) {
+	msg := bytes.Repeat([]byte("A"), 128) // 128 byte message
+
+	type syncMode struct {
+		name        string
+		syncAlways  bool
+		syncBatched bool
+	}
+
+	modes := []syncMode{
+		{"NoSync", false, false},
+		{"SyncAlways", true, false},
+		{"SyncBatched", false, true},
+	}
+
+	for _, mode := range modes {
+		b.Run(mode.name+"-Sequential", func(b *testing.B) {
+			opts := DefaultTestOptions
+			opts.Port = -1
+			opts.JetStream = true
+			opts.StoreDir = b.TempDir()
+			opts.SyncAlways = mode.syncAlways
+			opts.SyncBatched = mode.syncBatched
+			s := RunServer(&opts)
+			defer s.Shutdown()
+
+			mset, err := s.GlobalAccount().addStream(&StreamConfig{Name: "TEST", Subjects: []string{"test"}})
+			if err != nil {
+				b.Fatalf("Unexpected error adding stream: %v", err)
+			}
+			defer mset.delete()
+
+			nc, err := nats.Connect(s.ClientURL())
+			if err != nil {
+				b.Fatalf("Failed to create client: %v", err)
+			}
+			defer nc.Close()
+
+			js, err := nc.JetStream()
+			if err != nil {
+				b.Fatalf("Failed to get JetStream context: %v", err)
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := js.Publish("test", msg); err != nil {
+					b.Fatalf("Publish error: %v", err)
+				}
+			}
+			b.StopTimer()
+		})
+
+		for _, numPublishers := range []int{4, 8, 16} {
+			b.Run(fmt.Sprintf("%s-Concurrent-%dPublishers", mode.name, numPublishers), func(b *testing.B) {
+				opts := DefaultTestOptions
+				opts.Port = -1
+				opts.JetStream = true
+				opts.StoreDir = b.TempDir()
+				opts.SyncAlways = mode.syncAlways
+				opts.SyncBatched = mode.syncBatched
+				s := RunServer(&opts)
+				defer s.Shutdown()
+
+				mset, err := s.GlobalAccount().addStream(&StreamConfig{Name: "TEST", Subjects: []string{"test"}})
+				if err != nil {
+					b.Fatalf("Unexpected error adding stream: %v", err)
+				}
+				defer mset.delete()
+
+				b.SetParallelism(numPublishers)
+				b.ResetTimer()
+				b.RunParallel(func(pb *testing.PB) {
+					nc, err := nats.Connect(s.ClientURL())
+					if err != nil {
+						b.Fatalf("Failed to create client: %v", err)
+					}
+					defer nc.Close()
+
+					js, err := nc.JetStream()
+					if err != nil {
+						b.Fatalf("Failed to get JetStream context: %v", err)
+					}
+
+					for pb.Next() {
+						if _, err := js.Publish("test", msg); err != nil {
+							b.Fatalf("Publish error: %v", err)
+						}
+					}
+				})
+				b.StopTimer()
+			})
+		}
+	}
+}

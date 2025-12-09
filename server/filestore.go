@@ -339,8 +339,9 @@ const (
 	coalesceMinimum = 16 * 1024
 	// maxFlushWait is maximum we will wait to gather messages to flush.
 	maxFlushWait = 8 * time.Millisecond
-	// maxSyncWait is the maximum time to wait for batching fsync calls in SyncAlways mode.
-	maxSyncWait = 10 * time.Millisecond
+	// maxSyncWait is the maximum time to wait for batching fsync calls in SyncBatched mode.
+	// This should be short to minimize latency while still allowing concurrent writes to batch.
+	maxSyncWait = 1 * time.Millisecond
 
 	// Metafiles for streams and consumers.
 	JetStreamMetaFile    = "meta.inf"
@@ -5707,12 +5708,11 @@ func (mb *msgBlock) spinUpSyncLoopLocked() {
 	mb.sqch = make(chan struct{})
 	sch, sqch := mb.sch, mb.sqch
 
-	// Use startGoRoutine for proper server shutdown coordination when available.
-	if mb.fs != nil && mb.fs.srv != nil {
-		mb.fs.srv.startGoRoutine(func() { mb.syncLoop(sch, sqch) })
-	} else {
-		go mb.syncLoop(sch, sqch)
-	}
+	// Note: We intentionally do NOT use startGoRoutine here because:
+	// 1. The syncLoop is properly terminated via sqch when the msgBlock closes
+	// 2. Using startGoRoutine would cause shutdown deadlock since grWG.Wait()
+	//    happens after JetStream shutdown, but sqch isn't closed until then
+	go mb.syncLoop(sch, sqch)
 }
 
 // kickSyncer signals the sync flusher that a sync is needed.
@@ -5759,18 +5759,11 @@ func (mb *msgBlock) syncLoop(sch, sqch chan struct{}) {
 	for {
 		select {
 		case <-sch:
-			// Brief wait to allow more sync requests to accumulate.
-			// This is the key to batching - we delay slightly to coalesce
-			// multiple concurrent writes into a single fsync.
-			timer := time.NewTimer(maxSyncWait)
-			select {
-			case <-timer.C:
-			case <-sqch:
-				timer.Stop()
-				return
-			}
-
-			// Perform the sync with lock held.
+			// Perform the sync immediately - waiters are already blocked.
+			// The batching benefit comes from multiple writers accumulating
+			// their requests while we're doing the sync (which takes ~2ms).
+			// When the next sync request comes in while we're syncing, it
+			// will be queued and handled in the next iteration.
 			mb.mu.Lock()
 			if !mb.closed && mb.mfd != nil && mb.syncReq > mb.syncGen {
 				mb.mfd.Sync()
