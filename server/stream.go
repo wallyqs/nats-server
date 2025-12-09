@@ -885,14 +885,16 @@ func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileSt
 	// Grab configured sync interval.
 	fsCfg.SyncInterval = s.getOpts().SyncInterval
 	fsCfg.SyncAlways = s.getOpts().SyncAlways
+	fsCfg.SyncBatched = s.getOpts().SyncBatched
 	fsCfg.Compression = config.Compression
 	// Async flushing is only allowed if the stream has a sync log backing it.
-	fsCfg.AsyncFlush = !fsCfg.SyncAlways && config.Replicas > 1
+	fsCfg.AsyncFlush = !fsCfg.SyncAlways && !fsCfg.SyncBatched && config.Replicas > 1
 
 	// Async persist mode opts in to async flushing,
-	// sync always would also be disabled if it was configured.
+	// sync always/batched would also be disabled if it was configured.
 	if config.PersistMode == AsyncPersistMode {
 		fsCfg.SyncAlways = false
+		fsCfg.SyncBatched = false
 		fsCfg.AsyncFlush = true
 	}
 	if err := mset.setupStore(fsCfg); err != nil {

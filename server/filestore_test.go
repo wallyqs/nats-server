@@ -5357,14 +5357,14 @@ func TestFileStoreSyncIntervals(t *testing.T) {
 }
 
 func TestFileStoreBatchedFsync(t *testing.T) {
-	// Test that the batched fsync mechanism works correctly for SyncAlways mode.
+	// Test that the batched fsync mechanism works correctly for SyncBatched mode.
 	// This test verifies that:
-	// 1. The syncer goroutine is started when SyncAlways is enabled
+	// 1. The syncer goroutine is started when SyncBatched is enabled
 	// 2. Messages are still stored correctly with batched fsync
 	// 3. The sync generation advances properly
 	// 4. Concurrent writers work correctly
 
-	fcfg := FileStoreConfig{StoreDir: t.TempDir(), SyncInterval: 10 * time.Second, SyncAlways: true}
+	fcfg := FileStoreConfig{StoreDir: t.TempDir(), SyncInterval: 10 * time.Second, SyncBatched: true}
 	fs, err := newFileStore(fcfg, StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
 	require_NoError(t, err)
 	defer fs.Stop()
@@ -5409,7 +5409,7 @@ func TestFileStoreBatchedFsync(t *testing.T) {
 
 func TestFileStoreBatchedFsyncConcurrent(t *testing.T) {
 	// Test concurrent writers with batched fsync
-	fcfg := FileStoreConfig{StoreDir: t.TempDir(), SyncInterval: 10 * time.Second, SyncAlways: true}
+	fcfg := FileStoreConfig{StoreDir: t.TempDir(), SyncInterval: 10 * time.Second, SyncBatched: true}
 	fs, err := newFileStore(fcfg, StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
 	require_NoError(t, err)
 	defer fs.Stop()
@@ -8127,6 +8127,103 @@ func TestFileStoreRestoreDeleteTombstonesExceedingMaxBlkSize(t *testing.T) {
 ///////////////////////////////////////////////////////////////////////////
 // Benchmarks
 ///////////////////////////////////////////////////////////////////////////
+
+// Benchmark_FileStoreSyncModes compares the performance of different sync modes:
+// - NoSync: No immediate fsync, background sync only
+// - SyncAlways: Immediate fsync after every write
+// - SyncBatched: Batched fsync where multiple writes share a single fsync call
+func Benchmark_FileStoreSyncModes(b *testing.B) {
+	msg := bytes.Repeat([]byte("A"), 128) // 128 byte message
+
+	b.Run("NoSync-Sequential", func(b *testing.B) {
+		fs, err := newFileStore(
+			FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute},
+			StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
+		require_NoError(b, err)
+		defer fs.Stop()
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			fs.StoreMsg("test", nil, msg, 0)
+		}
+	})
+
+	b.Run("SyncAlways-Sequential", func(b *testing.B) {
+		fs, err := newFileStore(
+			FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute, SyncAlways: true},
+			StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
+		require_NoError(b, err)
+		defer fs.Stop()
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			fs.StoreMsg("test", nil, msg, 0)
+		}
+	})
+
+	b.Run("SyncBatched-Sequential", func(b *testing.B) {
+		fs, err := newFileStore(
+			FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute, SyncBatched: true},
+			StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
+		require_NoError(b, err)
+		defer fs.Stop()
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			fs.StoreMsg("test", nil, msg, 0)
+		}
+	})
+
+	// Concurrent benchmarks with multiple goroutines
+	for _, numWriters := range []int{4, 8, 16} {
+		b.Run(fmt.Sprintf("NoSync-Concurrent-%dWriters", numWriters), func(b *testing.B) {
+			fs, err := newFileStore(
+				FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute},
+				StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
+			require_NoError(b, err)
+			defer fs.Stop()
+
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					fs.StoreMsg("test", nil, msg, 0)
+				}
+			})
+		})
+
+		b.Run(fmt.Sprintf("SyncAlways-Concurrent-%dWriters", numWriters), func(b *testing.B) {
+			fs, err := newFileStore(
+				FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute, SyncAlways: true},
+				StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
+			require_NoError(b, err)
+			defer fs.Stop()
+
+			b.SetParallelism(numWriters)
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					fs.StoreMsg("test", nil, msg, 0)
+				}
+			})
+		})
+
+		b.Run(fmt.Sprintf("SyncBatched-Concurrent-%dWriters", numWriters), func(b *testing.B) {
+			fs, err := newFileStore(
+				FileStoreConfig{StoreDir: b.TempDir(), SyncInterval: 2 * time.Minute, SyncBatched: true},
+				StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage})
+			require_NoError(b, err)
+			defer fs.Stop()
+
+			b.SetParallelism(numWriters)
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					fs.StoreMsg("test", nil, msg, 0)
+				}
+			})
+		})
+	}
+}
 
 func Benchmark_FileStoreSelectMsgBlock(b *testing.B) {
 	// We use small block size to create lots of blocks for this test.

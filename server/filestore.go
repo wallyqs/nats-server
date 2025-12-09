@@ -63,8 +63,12 @@ type FileStoreConfig struct {
 	SubjectStateExpire time.Duration
 	// SyncInterval is how often we sync to disk in the background.
 	SyncInterval time.Duration
-	// SyncAlways is when the stream should sync all data writes.
+	// SyncAlways is when the stream should sync all data writes immediately.
 	SyncAlways bool
+	// SyncBatched enables batched fsync where multiple writes share a single fsync call.
+	// This provides durability guarantees similar to SyncAlways but with better performance
+	// under concurrent write load by coalescing fsync operations.
+	SyncBatched bool
 	// AsyncFlush allows async flush to batch write operations.
 	AsyncFlush bool
 	// Cipher is the cipher to use when encrypting.
@@ -252,18 +256,19 @@ type msgBlock struct {
 	lchk       [8]byte
 	loading    bool
 	flusher    bool
-	noTrack    bool
-	needSync   bool
-	syncAlways bool
-	noCompact  bool
-	closed     bool
-	ttls       uint64 // How many msgs have TTLs?
-	schedules  uint64 // How many msgs have schedules?
+	noTrack     bool
+	needSync    bool
+	syncAlways  bool
+	syncBatched bool
+	noCompact   bool
+	closed      bool
+	ttls        uint64 // How many msgs have TTLs?
+	schedules   uint64 // How many msgs have schedules?
 
 	// Used to mock write failures.
 	mockWriteErr bool
 
-	// Batched sync support for SyncAlways mode.
+	// Batched sync support for SyncBatched mode.
 	// This allows multiple writers to share a single fsync call.
 	syncCond *sync.Cond // Condition variable for sync waiters
 	syncGen  uint64     // Current completed sync generation
@@ -1035,12 +1040,13 @@ func (fs *fileStore) noTrackSubjects() bool {
 // Will init the basics for a message block.
 func (fs *fileStore) initMsgBlock(index uint32) *msgBlock {
 	mb := &msgBlock{
-		fs:         fs,
-		index:      index,
-		cexp:       fs.fcfg.CacheExpire,
-		fexp:       fs.fcfg.SubjectStateExpire,
-		noTrack:    fs.noTrackSubjects(),
-		syncAlways: fs.fcfg.SyncAlways,
+		fs:          fs,
+		index:       index,
+		cexp:        fs.fcfg.CacheExpire,
+		fexp:        fs.fcfg.SubjectStateExpire,
+		noTrack:     fs.noTrackSubjects(),
+		syncAlways:  fs.fcfg.SyncAlways,
+		syncBatched: fs.fcfg.SyncBatched,
 	}
 
 	mdir := filepath.Join(fs.fcfg.StoreDir, msgDir)
@@ -1051,8 +1057,8 @@ func (fs *fileStore) initMsgBlock(index uint32) *msgBlock {
 		mb.hh, _ = highwayhash.NewDigest64(key[:])
 	}
 
-	// Initialize batched sync support for SyncAlways mode.
-	if mb.syncAlways {
+	// Initialize batched sync support for SyncBatched mode.
+	if mb.syncBatched {
 		mb.syncCond = sync.NewCond(&mb.mu)
 	}
 
@@ -5680,12 +5686,12 @@ func (mb *msgBlock) flushLoop(fch, qch chan struct{}) {
 	}
 }
 
-// spinUpSyncLoopLocked starts the batched sync flusher goroutine for SyncAlways mode.
+// spinUpSyncLoopLocked starts the batched sync flusher goroutine for SyncBatched mode.
 // This allows multiple writers to share a single fsync call.
 // Lock should be held.
 func (mb *msgBlock) spinUpSyncLoopLocked() {
 	// Are we already running or closed?
-	if mb.syncer || mb.closed || !mb.syncAlways {
+	if mb.syncer || mb.closed || !mb.syncBatched {
 		return
 	}
 	mb.syncer = true
@@ -5693,7 +5699,12 @@ func (mb *msgBlock) spinUpSyncLoopLocked() {
 	mb.sqch = make(chan struct{})
 	sch, sqch := mb.sch, mb.sqch
 
-	go mb.syncLoop(sch, sqch)
+	// Use startGoRoutine for proper server shutdown coordination when available.
+	if mb.fs != nil && mb.fs.srv != nil {
+		mb.fs.srv.startGoRoutine(func() { mb.syncLoop(sch, sqch) })
+	} else {
+		go mb.syncLoop(sch, sqch)
+	}
 }
 
 // kickSyncer signals the sync flusher that a sync is needed.
@@ -7546,8 +7557,11 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 	// Update write pointer.
 	mb.cache.wp = int(wp)
 
-	// Check if we are in sync always mode.
+	// Check sync mode.
 	if mb.syncAlways {
+		// Immediate fsync for every write.
+		mb.mfd.Sync()
+	} else if mb.syncBatched {
 		// Use batched sync - request sync and wait for it to complete.
 		// This allows multiple concurrent writers to share a single fsync call.
 		gen := mb.requestSyncLocked()
