@@ -339,9 +339,6 @@ const (
 	coalesceMinimum = 16 * 1024
 	// maxFlushWait is maximum we will wait to gather messages to flush.
 	maxFlushWait = 8 * time.Millisecond
-	// maxSyncWait is the maximum time to wait for batching fsync calls in SyncBatched mode.
-	// This should be short to minimize latency while still allowing concurrent writes to batch.
-	maxSyncWait = 1 * time.Millisecond
 
 	// Metafiles for streams and consumers.
 	JetStreamMetaFile    = "meta.inf"
