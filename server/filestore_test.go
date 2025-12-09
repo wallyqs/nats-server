@@ -5397,13 +5397,11 @@ func TestFileStoreBatchedFsync(t *testing.T) {
 
 	lmb.mu.RLock()
 	hasSyncer := lmb.syncer
-	hasSyncCond := lmb.syncCond != nil
 	syncGen := lmb.syncGen
 	lmb.mu.RUnlock()
 
 	// Syncer should be running and sync generation should have advanced
 	require_True(t, hasSyncer)
-	require_True(t, hasSyncCond)
 	require_True(t, syncGen > 0)
 }
 
@@ -6023,7 +6021,8 @@ func TestFileStoreMsgBlockHolesAndIndexing(t *testing.T) {
 	mb := fs.getFirstBlock()
 	writeMsg := func(subj string, seq uint64) {
 		rl := fileStoreMsgSize(subj, nil, []byte(subj))
-		require_NoError(t, mb.writeMsgRecord(rl, seq, subj, nil, []byte(subj), time.Now().UnixNano(), true))
+		err, _ := mb.writeMsgRecord(rl, seq, subj, nil, []byte(subj), time.Now().UnixNano(), true)
+		require_NoError(t, err)
 		fs.rebuildState(nil)
 	}
 	readMsg := func(seq uint64, expectedSubj string) {
@@ -10695,7 +10694,7 @@ func TestFileStoreCorruptedNonOrderedSequences(t *testing.T) {
 				defer fs.Stop()
 
 				for _, seq := range test.seqs {
-					_, err = fs.writeMsgRecord(seq, 0, _EMPTY_, nil, nil)
+					_, err, _ = fs.writeMsgRecord(seq, 0, _EMPTY_, nil, nil)
 					require_NoError(t, err)
 				}
 
@@ -11095,7 +11094,8 @@ func TestFileStoreTombstonesSelectNextFirstCleanupOnRecovery(t *testing.T) {
 
 		// Explicitly write tombstone instead of calling fs.RemoveMsg,
 		// so we need to recover from a hard kill.
-		require_NoError(t, fs.writeTombstone(1, 0))
+		err, _ = fs.writeTombstone(1, 0)
+		require_NoError(t, err)
 		before = StreamState{FirstSeq: 101, FirstTime: time.Time{}, LastSeq: 100, LastTime: before.LastTime}
 
 		// Make sure we can recover properly with no index.db present.

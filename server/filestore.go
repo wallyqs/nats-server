@@ -270,12 +270,12 @@ type msgBlock struct {
 
 	// Batched sync support for SyncBatched mode.
 	// This allows multiple writers to share a single fsync call.
-	syncCond *sync.Cond // Condition variable for sync waiters
-	syncGen  uint64     // Current completed sync generation
-	syncReq  uint64     // Next sync generation requested
-	sch      chan struct{}
-	sqch     chan struct{}
-	syncer   bool // Whether a sync flusher is running
+	syncWaiters []chan struct{} // Channels to notify when sync completes
+	syncGen     uint64          // Current completed sync generation
+	syncReq     uint64          // Next sync generation requested
+	sch         chan struct{}
+	sqch        chan struct{}
+	syncer      bool // Whether a sync flusher is running
 }
 
 // Write through caching layer that is also used on loading messages.
@@ -523,7 +523,7 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 			}
 			if fs.ld != nil {
 				if _, err := fs.newMsgBlockForWrite(); err == nil {
-					if err = fs.writeTombstone(prior.LastSeq, prior.LastTime.UnixNano()); err != nil {
+					if err, _ = fs.writeTombstone(prior.LastSeq, prior.LastTime.UnixNano()); err != nil {
 						return nil, err
 					}
 				} else {
@@ -1055,11 +1055,6 @@ func (fs *fileStore) initMsgBlock(index uint32) *msgBlock {
 	if mb.hh == nil {
 		key := sha256.Sum256(fs.hashKeyForBlock(index))
 		mb.hh, _ = highwayhash.NewDigest64(key[:])
-	}
-
-	// Initialize batched sync support for SyncBatched mode.
-	if mb.syncBatched {
-		mb.syncCond = sync.NewCond(&mb.mu)
 	}
 
 	return mb
@@ -4447,9 +4442,10 @@ func (fs *fileStore) genEncryptionKeysForBlock(mb *msgBlock) error {
 
 // Stores a raw message with expected sequence number and timestamp.
 // Lock should be held.
-func (fs *fileStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, ttl int64, discardNewCheck bool) (err error) {
+// storeRawMsg stores a message and returns error and optional sync channel for SyncBatched mode.
+func (fs *fileStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, ttl int64, discardNewCheck bool) (err error, syncCh <-chan struct{}) {
 	if fs.closed {
-		return ErrStoreClosed
+		return ErrStoreClosed, nil
 	}
 
 	// Per subject max check needed.
@@ -4471,19 +4467,19 @@ func (fs *fileStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, t
 		if psmax && psmc >= mmp {
 			// If we are instructed to discard new per subject, this is an error.
 			if fs.cfg.DiscardNewPer {
-				return ErrMaxMsgsPerSubject
+				return ErrMaxMsgsPerSubject, nil
 			}
 			if fseq, err = fs.firstSeqForSubj(subj); err != nil {
-				return err
+				return err, nil
 			}
 			asl = true
 		}
 		if fs.cfg.MaxMsgs > 0 && fs.state.Msgs >= uint64(fs.cfg.MaxMsgs) && !asl {
-			return ErrMaxMsgs
+			return ErrMaxMsgs, nil
 		}
 		if fs.cfg.MaxBytes > 0 && fs.state.Bytes+fileStoreMsgSize(subj, hdr, msg) > uint64(fs.cfg.MaxBytes) {
 			if !asl || fs.sizeForSeq(fseq) < int(fileStoreMsgSize(subj, hdr, msg)) {
-				return ErrMaxBytes
+				return ErrMaxBytes, nil
 			}
 		}
 	}
@@ -4491,7 +4487,7 @@ func (fs *fileStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, t
 	// Check sequence.
 	if seq != fs.state.LastSeq+1 {
 		if seq > 0 {
-			return ErrSequenceMismatch
+			return ErrSequenceMismatch, nil
 		}
 		seq = fs.state.LastSeq + 1
 	}
@@ -4499,9 +4495,9 @@ func (fs *fileStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, t
 	// Write msg record.
 	// Add expiry bit to sequence if needed. This is so that if we need to
 	// rebuild, we know which messages to look at more quickly.
-	n, err := fs.writeMsgRecord(seq, ts, subj, hdr, msg)
+	n, err, syncCh := fs.writeMsgRecord(seq, ts, subj, hdr, msg)
 	if err != nil {
-		return err
+		return err, nil
 	}
 
 	// Adjust top level tracking of per subject msg counts.
@@ -4603,13 +4599,13 @@ func (fs *fileStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, t
 		}
 	}
 
-	return nil
+	return nil, syncCh
 }
 
 // StoreRawMsg stores a raw message with expected sequence number and timestamp.
 func (fs *fileStore) StoreRawMsg(subj string, hdr, msg []byte, seq uint64, ts, ttl int64, discardNewCheck bool) error {
 	fs.mu.Lock()
-	err := fs.storeRawMsg(subj, hdr, msg, seq, ts, ttl, discardNewCheck)
+	err, syncCh := fs.storeRawMsg(subj, hdr, msg, seq, ts, ttl, discardNewCheck)
 	cb := fs.scb
 	// Check if first message timestamp requires expiry
 	// sooner than initial replica expiry timer set to MaxAge when initializing.
@@ -4618,6 +4614,12 @@ func (fs *fileStore) StoreRawMsg(subj string, hdr, msg []byte, seq uint64, ts, t
 		fs.resetAgeChk(0)
 	}
 	fs.mu.Unlock()
+
+	// Wait for sync AFTER releasing fs.mu to enable true batching.
+	// This allows other writers to proceed and share the same fsync call.
+	if syncCh != nil {
+		<-syncCh
+	}
 
 	if err == nil && cb != nil {
 		cb(1, int64(fileStoreMsgSize(subj, hdr, msg)), seq, subj)
@@ -4631,9 +4633,15 @@ func (fs *fileStore) StoreMsg(subj string, hdr, msg []byte, ttl int64) (uint64, 
 	fs.mu.Lock()
 	seq, ts := fs.state.LastSeq+1, time.Now().UnixNano()
 	// This is called for a R1 with no expected sequence number, so perform DiscardNew checks on the store-level.
-	err := fs.storeRawMsg(subj, hdr, msg, seq, ts, ttl, true)
+	err, syncCh := fs.storeRawMsg(subj, hdr, msg, seq, ts, ttl, true)
 	cb := fs.scb
 	fs.mu.Unlock()
+
+	// Wait for sync AFTER releasing fs.mu to enable true batching.
+	// This allows other writers to proceed and share the same fsync call.
+	if syncCh != nil {
+		<-syncCh
+	}
 
 	if err != nil {
 		seq, ts = 0, 0
@@ -5228,7 +5236,7 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 			fsUnlock()
 			return false, err
 		}
-		if err := lmb.writeTombstone(sm.seq, sm.ts); err != nil {
+		if err, _ := lmb.writeTombstone(sm.seq, sm.ts); err != nil {
 			finishedWithCache()
 			fsUnlock()
 			return false, err
@@ -5325,7 +5333,7 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 	}
 
 	if secure {
-		if ld, _ := mb.flushPendingMsgsLocked(); ld != nil {
+		if ld, _, _ := mb.flushPendingMsgsLocked(); ld != nil {
 			// We have the mb lock here, this needs the mb locks so do in its own go routine.
 			go fs.rebuildState(ld)
 		}
@@ -5734,10 +5742,11 @@ func (mb *msgBlock) clearInSyncer() {
 		close(mb.sch)
 		mb.sch = nil
 	}
-	// Wake up any remaining waiters when shutting down.
-	if mb.syncCond != nil {
-		mb.syncCond.Broadcast()
+	// Wake up any remaining waiters when shutting down by closing their channels.
+	for _, ch := range mb.syncWaiters {
+		close(ch)
 	}
+	mb.syncWaiters = nil
 	mb.mu.Unlock()
 }
 
@@ -5766,8 +5775,11 @@ func (mb *msgBlock) syncLoop(sch, sqch chan struct{}) {
 			if !mb.closed && mb.mfd != nil && mb.syncReq > mb.syncGen {
 				mb.mfd.Sync()
 				mb.syncGen = mb.syncReq
-				// Wake all waiters - their sync is now complete.
-				mb.syncCond.Broadcast()
+				// Wake all waiters by closing their channels.
+				for _, ch := range mb.syncWaiters {
+					close(ch)
+				}
+				mb.syncWaiters = nil
 			}
 			mb.mu.Unlock()
 
@@ -5777,23 +5789,19 @@ func (mb *msgBlock) syncLoop(sch, sqch chan struct{}) {
 	}
 }
 
-// requestSyncLocked records that a sync is needed and returns the generation
-// number the caller should wait for. Lock should be held.
-func (mb *msgBlock) requestSyncLocked() uint64 {
+// requestSyncLocked records that a sync is needed and returns a channel
+// that will be closed when the sync completes. Lock should be held.
+// Caller should wait on the returned channel AFTER releasing locks.
+func (mb *msgBlock) requestSyncLocked() <-chan struct{} {
 	mb.syncReq++
+	// Create a channel for this waiter.
+	ch := make(chan struct{})
+	mb.syncWaiters = append(mb.syncWaiters, ch)
 	// Spin up the syncer if not already running.
 	mb.spinUpSyncLoopLocked()
 	// Kick the syncer to let it know there's work to do.
 	kickSyncer(mb.sch)
-	return mb.syncReq
-}
-
-// waitForSyncLocked waits for the specified sync generation to complete.
-// Lock should be held. The lock is released while waiting.
-func (mb *msgBlock) waitForSyncLocked(gen uint64) {
-	for mb.syncGen < gen && !mb.closed {
-		mb.syncCond.Wait()
-	}
+	return ch
 }
 
 // Lock should be held.
@@ -5864,7 +5872,7 @@ func (mb *msgBlock) truncate(tseq uint64, ts int64) (nmsgs, nbytes uint64, err e
 
 	// FIXME(dlc) - We could be smarter here.
 	if buf, _ := mb.bytesPending(); len(buf) > 0 {
-		ld, err := mb.flushPendingMsgsLocked()
+		ld, err, _ := mb.flushPendingMsgsLocked()
 		if ld != nil && mb.fs != nil {
 			// We do not know if fs is locked or not at this point.
 			// This should be an exceptional condition so do so in Go routine.
@@ -6492,7 +6500,7 @@ func (fs *fileStore) checkAndFlushLastBlock() {
 	if lmb.pendingWriteSize() > 0 {
 		// Since fs lock is held need to pull this apart in case we need to rebuild state.
 		lmb.mu.Lock()
-		ld, _ := lmb.flushPendingMsgsLocked()
+		ld, _, _ := lmb.flushPendingMsgsLocked()
 		lmb.mu.Unlock()
 		if ld != nil {
 			fs.rebuildStateLocked(ld)
@@ -6549,13 +6557,15 @@ func (mb *msgBlock) enableForWriting(fip bool) error {
 }
 
 // Helper function to place a delete tombstone.
-func (mb *msgBlock) writeTombstone(seq uint64, ts int64) error {
+// Returns error and optional sync channel for SyncBatched mode.
+func (mb *msgBlock) writeTombstone(seq uint64, ts int64) (error, <-chan struct{}) {
 	return mb.writeMsgRecord(emptyRecordLen, seq|tbit, _EMPTY_, nil, nil, ts, true)
 }
 
 // Helper function to place a delete tombstone without flush.
 // Lock should not be held.
-func (mb *msgBlock) writeTombstoneNoFlush(seq uint64, ts int64) error {
+// Returns error and optional sync channel for SyncBatched mode.
+func (mb *msgBlock) writeTombstoneNoFlush(seq uint64, ts int64) (error, <-chan struct{}) {
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 	return mb.writeMsgRecordLocked(emptyRecordLen, seq|tbit, _EMPTY_, nil, nil, ts, false, false)
@@ -6563,7 +6573,8 @@ func (mb *msgBlock) writeTombstoneNoFlush(seq uint64, ts int64) error {
 
 // Will write the message record to the underlying message block.
 // filestore lock will be held.
-func (mb *msgBlock) writeMsgRecord(rl, seq uint64, subj string, mhdr, msg []byte, ts int64, flush bool) error {
+// Returns error and optional sync channel for SyncBatched mode.
+func (mb *msgBlock) writeMsgRecord(rl, seq uint64, subj string, mhdr, msg []byte, ts int64, flush bool) (error, <-chan struct{}) {
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 	return mb.writeMsgRecordLocked(rl, seq, subj, mhdr, msg, ts, flush, true)
@@ -6572,11 +6583,12 @@ func (mb *msgBlock) writeMsgRecord(rl, seq uint64, subj string, mhdr, msg []byte
 // Will write the message record to the underlying message block.
 // filestore lock will be held.
 // mb lock should be held.
-func (mb *msgBlock) writeMsgRecordLocked(rl, seq uint64, subj string, mhdr, msg []byte, ts int64, flush, kick bool) error {
+// Returns error and optional sync channel for SyncBatched mode.
+func (mb *msgBlock) writeMsgRecordLocked(rl, seq uint64, subj string, mhdr, msg []byte, ts int64, flush, kick bool) (error, <-chan struct{}) {
 	// Enable for writing if our mfd is not open.
 	if mb.mfd == nil {
 		if err := mb.enableForWriting(flush && kick); err != nil {
-			return err
+			return err, nil
 		}
 	}
 
@@ -6586,7 +6598,7 @@ func (mb *msgBlock) writeMsgRecordLocked(rl, seq uint64, subj string, mhdr, msg 
 	// Note that tombstones have no subject so will not trigger here.
 	if len(subj) > 0 && !mb.noTrack {
 		if err := mb.ensurePerSubjectInfoLoaded(); err != nil {
-			return err
+			return err, nil
 		}
 		// Mark fss activity.
 		mb.lsts = ats.AccessTime()
@@ -6602,7 +6614,7 @@ func (mb *msgBlock) writeMsgRecordLocked(rl, seq uint64, subj string, mhdr, msg 
 	// Make sure we have a cache setup. Do so after ensurePerSubjectInfoLoaded as it may
 	// have already brought in a cache for us.
 	if err := mb.setupWriteCache(nil); err != nil {
-		return err
+		return err, nil
 	}
 
 	// Make sure that the GC can't take away our writes by strengthening the elastic
@@ -6700,19 +6712,20 @@ func (mb *msgBlock) writeMsgRecordLocked(rl, seq uint64, subj string, mhdr, msg 
 
 	// If we should be flushing, or had a write error, do so here.
 	if (flush && mb.fs.fip) || werr != nil {
-		ld, err := mb.flushPendingMsgsLocked()
+		ld, err, syncCh := mb.flushPendingMsgsLocked()
 		if ld != nil {
 			// We have the mb lock here, this needs the mb locks so do in its own go routine.
 			go mb.fs.rebuildState(ld)
 		}
 		if err != nil {
-			return err
+			return err, nil
 		}
+		return nil, syncCh
 	} else if kick {
 		// Kick the flusher here.
 		kickFlusher(fch)
 	}
-	return nil
+	return nil, nil
 }
 
 // How many bytes pending to be written for this message block.
@@ -6828,34 +6841,36 @@ func (fs *fileStore) checkLastBlock(rl uint64) (lmb *msgBlock, err error) {
 }
 
 // Lock should be held.
-func (fs *fileStore) writeMsgRecord(seq uint64, ts int64, subj string, hdr, msg []byte) (uint64, error) {
+// Returns size, error, and optional sync channel for SyncBatched mode.
+func (fs *fileStore) writeMsgRecord(seq uint64, ts int64, subj string, hdr, msg []byte) (uint64, error, <-chan struct{}) {
 	// Get size for this message.
 	rl := fileStoreMsgSize(subj, hdr, msg)
 	if rl&hbit != 0 || rl > rlBadThresh {
-		return 0, ErrMsgTooLarge
+		return 0, ErrMsgTooLarge, nil
 	}
 	// Grab our current last message block.
 	mb, err := fs.checkLastBlock(rl)
 	if err != nil {
-		return 0, err
+		return 0, err, nil
 	}
 
 	// Mark as dirty for stream state.
 	fs.dirty++
 
 	// Ask msg block to store in write through cache.
-	err = mb.writeMsgRecord(rl, seq, subj, hdr, msg, ts, fs.fip)
+	err, syncCh := mb.writeMsgRecord(rl, seq, subj, hdr, msg, ts, fs.fip)
 
-	return rl, err
+	return rl, err, syncCh
 }
 
 // For writing tombstones to our lmb. This version will enforce maximum block sizes.
 // Lock should be held.
-func (fs *fileStore) writeTombstone(seq uint64, ts int64) error {
+// Returns error and optional sync channel for SyncBatched mode.
+func (fs *fileStore) writeTombstone(seq uint64, ts int64) (error, <-chan struct{}) {
 	// Grab our current last message block.
 	lmb, err := fs.checkLastBlock(emptyRecordLen)
 	if err != nil {
-		return err
+		return err, nil
 	}
 	return lmb.writeTombstone(seq, ts)
 }
@@ -6863,10 +6878,11 @@ func (fs *fileStore) writeTombstone(seq uint64, ts int64) error {
 // For writing tombstones to our lmb. This version will enforce maximum block sizes.
 // This version does not flush contents.
 // Lock should be held.
-func (fs *fileStore) writeTombstoneNoFlush(seq uint64, ts int64) error {
+// Returns error and optional sync channel for SyncBatched mode.
+func (fs *fileStore) writeTombstoneNoFlush(seq uint64, ts int64) (error, <-chan struct{}) {
 	lmb, err := fs.checkLastBlock(emptyRecordLen)
 	if err != nil {
-		return err
+		return err, nil
 	}
 	// Write tombstone without flush or kick.
 	return lmb.writeTombstoneNoFlush(seq, ts)
@@ -7455,7 +7471,7 @@ func (mb *msgBlock) indexCacheBuf(buf []byte) error {
 // flushPendingMsgs writes out any messages for this message block.
 func (mb *msgBlock) flushPendingMsgs() error {
 	mb.mu.Lock()
-	fsLostData, err := mb.flushPendingMsgsLocked()
+	fsLostData, err, _ := mb.flushPendingMsgsLocked()
 	fs := mb.fs
 	mb.mu.Unlock()
 
@@ -7485,7 +7501,10 @@ func (mb *msgBlock) writeAt(buf []byte, woff int64) (int, error) {
 
 // flushPendingMsgsLocked writes out any messages for this message block.
 // Lock should be held.
-func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
+// Returns lost data, error, and optional sync channel for SyncBatched mode.
+// The sync channel will be closed when fsync completes; caller should wait on it
+// AFTER releasing locks to enable true batching.
+func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error, <-chan struct{}) {
 	// Signals us that we need to rebuild filestore state.
 	var fsLostData *LostStreamData
 
@@ -7495,7 +7514,7 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 		weakenCache = mb.cache != nil
 	}
 	if mb.cache == nil || mb.mfd == nil {
-		return nil, errNoCache
+		return nil, errNoCache, nil
 	}
 
 	buf, err := mb.bytesPending()
@@ -7505,7 +7524,7 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 		if err == errNoPending || err == errNoCache {
 			err = nil
 		}
-		return nil, err
+		return nil, err, nil
 	}
 
 	wp := int64(mb.cache.wp)
@@ -7517,7 +7536,7 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 
 	// Check if we need to encrypt.
 	if err := mb.checkAndLoadEncryption(); err != nil {
-		return nil, err
+		return nil, err, nil
 	}
 	if mb.bek != nil && lob > 0 {
 		// Need to leave original alone.
@@ -7539,7 +7558,7 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 			mb.dirtyCloseWithRemove(false)
 			ld, _, _ := mb.rebuildStateLocked()
 			mb.werr = err
-			return ld, err
+			return ld, err, nil
 		}
 		// Update our write offset.
 		wp += int64(n)
@@ -7551,7 +7570,7 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 
 	// Cache may be gone.
 	if mb.cache == nil || mb.mfd == nil {
-		return fsLostData, mb.werr
+		return fsLostData, mb.werr, nil
 	}
 
 	// Update write pointer.
@@ -7562,10 +7581,11 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 		// Immediate fsync for every write.
 		mb.mfd.Sync()
 	} else if mb.syncBatched {
-		// Use batched sync - request sync and wait for it to complete.
+		// Use batched sync - request sync and return channel to wait on.
+		// Caller should wait on this channel AFTER releasing locks.
 		// This allows multiple concurrent writers to share a single fsync call.
-		gen := mb.requestSyncLocked()
-		mb.waitForSyncLocked(gen)
+		syncCh := mb.requestSyncLocked()
+		return fsLostData, nil, syncCh
 	} else {
 		mb.needSync = true
 	}
@@ -7575,7 +7595,7 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 	// not releasing the lock during I/O operation. Therefore this will always
 	// return zero.
 	if mb.pendingWriteSizeLocked() > 0 {
-		return fsLostData, mb.werr
+		return fsLostData, mb.werr, nil
 	}
 
 	// Check last access time. If we think the block still has read interest
@@ -7586,13 +7606,13 @@ func (mb *msgBlock) flushPendingMsgsLocked() (*LostStreamData, error) {
 			mb.ecache.Weaken()
 		}
 		mb.resetCacheExpireTimer(0)
-		return fsLostData, mb.werr
+		return fsLostData, mb.werr, nil
 	}
 
 	// If not, we'll just drop the cache altogether & recycle the buffer.
 	mb.cache.nra = false
 	mb.expireCacheLocked()
-	return fsLostData, mb.werr
+	return fsLostData, mb.werr, nil
 }
 
 // Lock should be held.
@@ -7724,7 +7744,7 @@ checkCache:
 
 	// FIXME(dlc) - We could be smarter here.
 	if buf, _ := mb.bytesPending(); len(buf) > 0 {
-		ld, err := mb.flushPendingMsgsLocked()
+		ld, err, _ := mb.flushPendingMsgsLocked()
 		if ld != nil && mb.fs != nil {
 			// We do not know if fs is locked or not at this point.
 			// This should be an exceptional condition so do so in Go routine.
@@ -8994,7 +9014,7 @@ func (fs *fileStore) PurgeEx(subject string, sequence, keep uint64) (purged uint
 	// When writing multiple tombstones we will flush at the end.
 	if len(tombs) > 0 {
 		for _, tomb := range tombs {
-			if err := fs.writeTombstoneNoFlush(tomb.seq, tomb.ts); err != nil {
+			if err, _ := fs.writeTombstoneNoFlush(tomb.seq, tomb.ts); err != nil {
 				return purged, err
 			}
 		}
@@ -9294,7 +9314,7 @@ SKIP:
 	// When writing multiple tombstones we will flush at the end.
 	if len(tombs) > 0 {
 		for _, tomb := range tombs {
-			if err := fs.writeTombstoneNoFlush(tomb.seq, tomb.ts); err != nil {
+			if err, _ := fs.writeTombstoneNoFlush(tomb.seq, tomb.ts); err != nil {
 				return purged, err
 			}
 		}
@@ -9841,9 +9861,10 @@ func (mb *msgBlock) dirtyCloseWithRemove(remove bool) error {
 		mb.sqch = nil
 	}
 	// Wake any sync waiters since we're closing.
-	if mb.syncCond != nil {
-		mb.syncCond.Broadcast()
+	for _, ch := range mb.syncWaiters {
+		close(ch)
 	}
+	mb.syncWaiters = nil
 	if mb.mfd != nil {
 		mb.mfd.Close()
 		mb.mfd = nil
@@ -10181,9 +10202,10 @@ func (mb *msgBlock) close(sync bool) {
 		mb.sqch = nil
 	}
 	// Wake any sync waiters since we're closing.
-	if mb.syncCond != nil {
-		mb.syncCond.Broadcast()
+	for _, ch := range mb.syncWaiters {
+		close(ch)
 	}
+	mb.syncWaiters = nil
 	if mb.mfd != nil {
 		if sync {
 			mb.mfd.Sync()
