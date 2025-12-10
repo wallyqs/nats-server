@@ -2909,7 +2909,7 @@ type JSzOptions struct {
 	Limit            int    `json:"limit,omitempty"`
 	RaftGroups       bool   `json:"raft,omitempty"`
 	StreamLeaderOnly bool   `json:"stream_leader_only,omitempty"`
-	BlockDigests     bool   `json:"block_digests,omitempty"`
+	BlocksInfo       bool   `json:"blocks_info,omitempty"`
 }
 
 // HealthzOptions are options passed to Healthz
@@ -2957,7 +2957,17 @@ type StreamDetail struct {
 	Sources            []*StreamSourceInfo `json:"sources,omitempty"`
 	RaftGroup          string              `json:"stream_raft_group,omitempty"`
 	ConsumerRaftGroups []*RaftGroupDetail  `json:"consumer_raft_groups,omitempty"`
-	BlockDigests       map[uint32]string   `json:"block_digests,omitempty"`
+	BlocksInfo         []StreamBlockInfo   `json:"blocks_info,omitempty"`
+}
+
+// StreamBlockInfo contains information about a message block for monitoring.
+type StreamBlockInfo struct {
+	Index    uint32 `json:"index"`
+	Bytes    uint64 `json:"bytes"`
+	FirstSeq uint64 `json:"first_seq"`
+	LastSeq  uint64 `json:"last_seq"`
+	NumMsgs  uint64 `json:"num_msgs"`
+	Digest   string `json:"digest"`
 }
 
 // RaftGroupDetail shows information details about the Raft group.
@@ -3011,7 +3021,7 @@ type JSInfo struct {
 	Total           int              `json:"total"`
 }
 
-func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optDirectConsumers, optCfg, optRaft, optStreamLeader, optBlockDigests bool) *AccountDetail {
+func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optDirectConsumers, optCfg, optRaft, optStreamLeader, optBlocksInfo bool) *AccountDetail {
 	jsa.mu.RLock()
 	acc := jsa.account
 	name := acc.GetName()
@@ -3074,11 +3084,18 @@ func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optDire
 				sdet.RaftGroup = rgroup.Name
 				sdet.ConsumerRaftGroups = make([]*RaftGroupDetail, 0)
 			}
-			if optBlockDigests {
-				if digests := stream.store.BlockDigests(); digests != nil {
-					sdet.BlockDigests = make(map[uint32]string, len(digests))
-					for blkIndex, digest := range digests {
-						sdet.BlockDigests[blkIndex] = fmt.Sprintf("%x", digest)
+			if optBlocksInfo {
+				if blocks := stream.store.BlocksInfo(); blocks != nil {
+					sdet.BlocksInfo = make([]StreamBlockInfo, 0, len(blocks))
+					for _, blk := range blocks {
+						sdet.BlocksInfo = append(sdet.BlocksInfo, StreamBlockInfo{
+							Index:    blk.Index,
+							Bytes:    blk.Bytes,
+							FirstSeq: blk.FirstSeq,
+							LastSeq:  blk.LastSeq,
+							NumMsgs:  blk.NumMsgs,
+							Digest:   fmt.Sprintf("%x", blk.Digest),
+						})
 					}
 				}
 			}
@@ -3136,7 +3153,7 @@ func (s *Server) JszAccount(opts *JSzOptions) (*AccountDetail, error) {
 	if !ok {
 		return nil, fmt.Errorf("account %q not jetstream enabled", acc)
 	}
-	return s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.DirectConsumer, opts.Config, opts.RaftGroups, opts.StreamLeaderOnly, opts.BlockDigests), nil
+	return s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.DirectConsumer, opts.Config, opts.RaftGroups, opts.StreamLeaderOnly, opts.BlocksInfo), nil
 }
 
 // helper to get cluster info from node via dummy group
@@ -3304,7 +3321,7 @@ func (s *Server) Jsz(opts *JSzOptions) (*JSInfo, error) {
 		jsi.AccountDetails = make([]*AccountDetail, 0, len(accounts))
 
 		for _, jsa := range accounts {
-			detail := s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.DirectConsumer, opts.Config, opts.RaftGroups, opts.StreamLeaderOnly, opts.BlockDigests)
+			detail := s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.DirectConsumer, opts.Config, opts.RaftGroups, opts.StreamLeaderOnly, opts.BlocksInfo)
 			jsi.AccountDetails = append(jsi.AccountDetails, detail)
 		}
 	}
@@ -3358,7 +3375,7 @@ func (s *Server) HandleJsz(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	blockDigests, err := decodeBool(w, r, "block-digests")
+	blocksInfo, err := decodeBool(w, r, "blocks-info")
 	if err != nil {
 		return
 	}
@@ -3375,7 +3392,7 @@ func (s *Server) HandleJsz(w http.ResponseWriter, r *http.Request) {
 		Limit:            limit,
 		RaftGroups:       rgroups,
 		StreamLeaderOnly: sleader,
-		BlockDigests:     blockDigests,
+		BlocksInfo:       blocksInfo,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)

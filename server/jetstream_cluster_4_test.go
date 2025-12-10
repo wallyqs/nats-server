@@ -7358,7 +7358,7 @@ func TestJetStreamClusterMetaCompactSizeThreshold(t *testing.T) {
 	}
 }
 
-func TestJetStreamClusterBlockDigestsConsistency(t *testing.T) {
+func TestJetStreamClusterBlocksInfoConsistency(t *testing.T) {
 	// Create a 3-node cluster
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -7368,7 +7368,7 @@ func TestJetStreamClusterBlockDigestsConsistency(t *testing.T) {
 	defer nc.Close()
 
 	// Create a stream with 3 replicas
-	streamName := "TEST_DIGESTS"
+	streamName := "TEST_BLOCKS_INFO"
 	_, err := js.AddStream(&nats.StreamConfig{
 		Name:     streamName,
 		Subjects: []string{"foo.>"},
@@ -7385,7 +7385,7 @@ func TestJetStreamClusterBlockDigestsConsistency(t *testing.T) {
 	defer cancel()
 
 	var msgCount int
-	msg := []byte("Hello World - this is a test message for block digest consistency checking")
+	msg := []byte("Hello World - this is a test message for block info consistency checking")
 
 	t.Log("Starting message production for 1 minute...")
 	for {
@@ -7414,12 +7414,12 @@ done:
 		return checkState(t, c, globalAccountName, streamName)
 	})
 
-	// Collect block digests from all replicas
-	type replicaDigests struct {
+	// Collect block info from all replicas
+	type replicaBlocksInfo struct {
 		serverName string
-		digests    map[uint32][8]byte
+		blocks     []BlockInfo
 	}
-	var allDigests []replicaDigests
+	var allBlocksInfo []replicaBlocksInfo
 
 	for _, srv := range c.servers {
 		acc, err := srv.LookupAccount(globalAccountName)
@@ -7431,42 +7431,63 @@ done:
 			t.Fatalf("Failed to lookup stream on %s: %v", srv.Name(), err)
 		}
 
-		digests := mset.store.BlockDigests()
-		allDigests = append(allDigests, replicaDigests{
+		blocks := mset.store.BlocksInfo()
+		allBlocksInfo = append(allBlocksInfo, replicaBlocksInfo{
 			serverName: srv.Name(),
-			digests:    digests,
+			blocks:     blocks,
 		})
-		t.Logf("Server %s has %d blocks", srv.Name(), len(digests))
+		t.Logf("Server %s has %d blocks", srv.Name(), len(blocks))
 	}
 
-	// Verify we have digests from all 3 replicas
-	require_Equal(t, len(allDigests), 3)
+	// Verify we have block info from all 3 replicas
+	require_Equal(t, len(allBlocksInfo), 3)
 
 	// Verify all replicas have the same number of blocks
-	firstDigests := allDigests[0]
-	for i := 1; i < len(allDigests); i++ {
-		if len(allDigests[i].digests) != len(firstDigests.digests) {
+	firstBlocks := allBlocksInfo[0]
+	for i := 1; i < len(allBlocksInfo); i++ {
+		if len(allBlocksInfo[i].blocks) != len(firstBlocks.blocks) {
 			t.Fatalf("Block count mismatch: %s has %d blocks, %s has %d blocks",
-				firstDigests.serverName, len(firstDigests.digests),
-				allDigests[i].serverName, len(allDigests[i].digests))
+				firstBlocks.serverName, len(firstBlocks.blocks),
+				allBlocksInfo[i].serverName, len(allBlocksInfo[i].blocks))
 		}
 	}
 
-	// Verify all replicas have the same digests for each block
-	for blockIndex, expectedDigest := range firstDigests.digests {
-		for i := 1; i < len(allDigests); i++ {
-			actualDigest, ok := allDigests[i].digests[blockIndex]
-			if !ok {
-				t.Fatalf("Block %d missing on %s", blockIndex, allDigests[i].serverName)
+	// Verify all replicas have the same block info for each block
+	for idx, expectedBlock := range firstBlocks.blocks {
+		for i := 1; i < len(allBlocksInfo); i++ {
+			actualBlock := allBlocksInfo[i].blocks[idx]
+			if actualBlock.Index != expectedBlock.Index {
+				t.Fatalf("Block index mismatch at position %d:\n  %s: %d\n  %s: %d",
+					idx, firstBlocks.serverName, expectedBlock.Index,
+					allBlocksInfo[i].serverName, actualBlock.Index)
 			}
-			if actualDigest != expectedDigest {
+			if actualBlock.Bytes != expectedBlock.Bytes {
+				t.Fatalf("Block %d bytes mismatch:\n  %s: %d\n  %s: %d",
+					expectedBlock.Index, firstBlocks.serverName, expectedBlock.Bytes,
+					allBlocksInfo[i].serverName, actualBlock.Bytes)
+			}
+			if actualBlock.FirstSeq != expectedBlock.FirstSeq {
+				t.Fatalf("Block %d first_seq mismatch:\n  %s: %d\n  %s: %d",
+					expectedBlock.Index, firstBlocks.serverName, expectedBlock.FirstSeq,
+					allBlocksInfo[i].serverName, actualBlock.FirstSeq)
+			}
+			if actualBlock.LastSeq != expectedBlock.LastSeq {
+				t.Fatalf("Block %d last_seq mismatch:\n  %s: %d\n  %s: %d",
+					expectedBlock.Index, firstBlocks.serverName, expectedBlock.LastSeq,
+					allBlocksInfo[i].serverName, actualBlock.LastSeq)
+			}
+			if actualBlock.NumMsgs != expectedBlock.NumMsgs {
+				t.Fatalf("Block %d num_msgs mismatch:\n  %s: %d\n  %s: %d",
+					expectedBlock.Index, firstBlocks.serverName, expectedBlock.NumMsgs,
+					allBlocksInfo[i].serverName, actualBlock.NumMsgs)
+			}
+			if actualBlock.Digest != expectedBlock.Digest {
 				t.Fatalf("Block %d digest mismatch:\n  %s: %x\n  %s: %x",
-					blockIndex,
-					firstDigests.serverName, expectedDigest,
-					allDigests[i].serverName, actualDigest)
+					expectedBlock.Index, firstBlocks.serverName, expectedBlock.Digest,
+					allBlocksInfo[i].serverName, actualBlock.Digest)
 			}
 		}
 	}
 
-	t.Logf("All %d blocks have consistent digests across all 3 replicas", len(firstDigests.digests))
+	t.Logf("All %d blocks have consistent info across all 3 replicas", len(firstBlocks.blocks))
 }

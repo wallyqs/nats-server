@@ -11556,7 +11556,7 @@ func TestJetStreamFileStoreSubjectsRemovedAfterSecureErase(t *testing.T) {
 	require_Equal(t, si.State.Subjects["test.3"], uint64(1))
 }
 
-func TestFileStoreBlockDigests(t *testing.T) {
+func TestFileStoreBlocksInfo(t *testing.T) {
 	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
 		fcfg.BlockSize = 256 // Small block size to force multiple blocks
 		fs, err := newFileStoreWithCreated(fcfg, StreamConfig{Name: "zzz", Storage: FileStorage}, time.Now(), prf(&fcfg), nil)
@@ -11564,8 +11564,8 @@ func TestFileStoreBlockDigests(t *testing.T) {
 		defer fs.Stop()
 
 		// Initially should return nil since there are no blocks with messages
-		digests := fs.BlockDigests()
-		require_True(t, digests == nil || len(digests) == 0)
+		blocks := fs.BlocksInfo()
+		require_True(t, blocks == nil || len(blocks) == 0)
 
 		// Store a message
 		subj, msg := "foo", []byte("Hello World")
@@ -11573,32 +11573,34 @@ func TestFileStoreBlockDigests(t *testing.T) {
 		require_NoError(t, err)
 		require_Equal(t, seq, uint64(1))
 
-		// Now should have one block with a digest
-		digests = fs.BlockDigests()
-		require_True(t, len(digests) >= 1)
+		// Now should have one block with info
+		blocks = fs.BlocksInfo()
+		require_True(t, len(blocks) >= 1)
 
-		// Save the first digest
-		var firstDigest [8]byte
-		var firstBlockIndex uint32
-		for idx, digest := range digests {
-			firstBlockIndex = idx
-			firstDigest = digest
-			break
-		}
+		// Check first block info
+		firstBlock := blocks[0]
+		require_True(t, firstBlock.Index > 0)
+		require_True(t, firstBlock.NumMsgs == 1)
+		require_True(t, firstBlock.FirstSeq == 1)
+		require_True(t, firstBlock.LastSeq == 1)
+		require_True(t, firstBlock.Bytes > 0)
 
 		// Digest should not be all zeros
 		var zeroDigest [8]byte
-		require_True(t, firstDigest != zeroDigest)
+		require_True(t, firstBlock.Digest != zeroDigest)
+
+		firstDigest := firstBlock.Digest
 
 		// Store another message
 		_, _, err = fs.StoreMsg(subj, nil, msg, 0)
 		require_NoError(t, err)
 
-		// Digest should have changed
-		digests = fs.BlockDigests()
-		require_True(t, len(digests) >= 1)
-		secondDigest := digests[firstBlockIndex]
-		require_True(t, secondDigest != firstDigest)
+		// Block info should have changed
+		blocks = fs.BlocksInfo()
+		require_True(t, len(blocks) >= 1)
+		require_True(t, blocks[0].NumMsgs == 2)
+		require_True(t, blocks[0].LastSeq == 2)
+		require_True(t, blocks[0].Digest != firstDigest)
 
 		// Store enough messages to potentially create multiple blocks
 		for i := 0; i < 100; i++ {
@@ -11607,21 +11609,28 @@ func TestFileStoreBlockDigests(t *testing.T) {
 		}
 
 		// Should have multiple blocks due to small block size
-		digests = fs.BlockDigests()
-		require_True(t, len(digests) >= 1)
+		blocks = fs.BlocksInfo()
+		require_True(t, len(blocks) >= 1)
 
-		// Each block should have a unique digest
+		// Each block should have valid info and unique digest
 		seenDigests := make(map[[8]byte]bool)
-		for _, digest := range digests {
-			require_True(t, digest != zeroDigest)
+		var lastSeq uint64
+		for _, blk := range blocks {
+			require_True(t, blk.Index > 0)
+			require_True(t, blk.NumMsgs > 0)
+			require_True(t, blk.FirstSeq > lastSeq)
+			require_True(t, blk.LastSeq >= blk.FirstSeq)
+			require_True(t, blk.Bytes > 0)
+			require_True(t, blk.Digest != zeroDigest)
 			// Check for uniqueness
-			require_False(t, seenDigests[digest])
-			seenDigests[digest] = true
+			require_False(t, seenDigests[blk.Digest])
+			seenDigests[blk.Digest] = true
+			lastSeq = blk.LastSeq
 		}
 	})
 }
 
-func TestFileStoreBlockDigestsAfterDelete(t *testing.T) {
+func TestFileStoreBlocksInfoAfterDelete(t *testing.T) {
 	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
 		fs, err := newFileStoreWithCreated(fcfg, StreamConfig{Name: "zzz", Storage: FileStorage}, time.Now(), prf(&fcfg), nil)
 		require_NoError(t, err)
@@ -11634,27 +11643,22 @@ func TestFileStoreBlockDigestsAfterDelete(t *testing.T) {
 			require_NoError(t, err)
 		}
 
-		// Get initial digests
-		initialDigests := fs.BlockDigests()
-		require_True(t, len(initialDigests) >= 1)
+		// Get initial block info
+		initialBlocks := fs.BlocksInfo()
+		require_True(t, len(initialBlocks) >= 1)
 
-		var firstBlockIndex uint32
-		var initialDigest [8]byte
-		for idx, digest := range initialDigests {
-			firstBlockIndex = idx
-			initialDigest = digest
-			break
-		}
+		initialDigest := initialBlocks[0].Digest
+		initialNumMsgs := initialBlocks[0].NumMsgs
 
 		// Remove a message - this should change the block state
 		removed, err := fs.RemoveMsg(1)
 		require_NoError(t, err)
 		require_True(t, removed)
 
-		// Digest should have changed after removal
-		newDigests := fs.BlockDigests()
-		require_True(t, len(newDigests) >= 1)
-		newDigest := newDigests[firstBlockIndex]
-		require_True(t, newDigest != initialDigest)
+		// Block info should have changed after removal
+		newBlocks := fs.BlocksInfo()
+		require_True(t, len(newBlocks) >= 1)
+		require_True(t, newBlocks[0].NumMsgs == initialNumMsgs-1)
+		require_True(t, newBlocks[0].Digest != initialDigest)
 	})
 }

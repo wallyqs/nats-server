@@ -8488,10 +8488,9 @@ func (fs *fileStore) ResetState() {
 	}
 }
 
-// BlockDigests returns a map of message block indices to their digests.
-// Each digest represents the current state of a message block, computed from:
-// first seq/ts, last seq/ts, message count, byte count, and last checksum.
-func (fs *fileStore) BlockDigests() map[uint32][8]byte {
+// BlocksInfo returns information about each message block in the store including
+// block index, size, sequence range, message count, and a digest of the block state.
+func (fs *fileStore) BlocksInfo() []BlockInfo {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 
@@ -8499,13 +8498,21 @@ func (fs *fileStore) BlockDigests() map[uint32][8]byte {
 		return nil
 	}
 
-	digests := make(map[uint32][8]byte, len(fs.blks))
+	infos := make([]BlockInfo, 0, len(fs.blks))
 	for _, mb := range fs.blks {
 		mb.mu.RLock()
-		digests[mb.index] = mb.computeDigest()
+		info := BlockInfo{
+			Index:    mb.index,
+			Bytes:    mb.bytes,
+			FirstSeq: atomic.LoadUint64(&mb.first.seq),
+			LastSeq:  atomic.LoadUint64(&mb.last.seq),
+			NumMsgs:  mb.msgs,
+			Digest:   mb.computeDigest(),
+		}
 		mb.mu.RUnlock()
+		infos = append(infos, info)
 	}
-	return digests
+	return infos
 }
 
 // computeDigest computes a digest for the message block that represents its current state.

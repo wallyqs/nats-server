@@ -2128,8 +2128,8 @@ func (ms *memStore) ResetState() {
 	}
 }
 
-// BlockDigests returns nil for memory stores as they don't use message blocks.
-func (ms *memStore) BlockDigests() map[uint32][8]byte {
+// BlocksInfo returns nil for memory stores as they don't use message blocks.
+func (ms *memStore) BlocksInfo() []BlockInfo {
 	return nil
 }
 
