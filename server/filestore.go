@@ -5758,37 +5758,17 @@ func (mb *msgBlock) clearInSyncer() {
 	}
 }
 
-// syncCoalesceWindow is the time to wait for additional writes to coalesce
-// before flushing. This trades a small amount of latency for better throughput
-// by batching multiple writes into a single WriteAt + Sync call.
-const syncCoalesceWindow = 100 * time.Microsecond
-
 // syncLoop is the batched sync flusher goroutine.
-// It waits for sync requests, coalesces writes briefly, then performs
-// a batched WriteAt followed by a single fsync.
+// It waits for sync requests then performs a batched WriteAt followed by a single fsync.
+// Multiple concurrent writers naturally batch together as they wait for the sync to complete.
 func (mb *msgBlock) syncLoop(sch, sqch chan struct{}) {
 	mb.setInSyncer()
 	defer mb.clearInSyncer()
 
-	// Timer for coalescing window - reused to avoid allocations.
-	coalesceTimer := time.NewTimer(syncCoalesceWindow)
-	coalesceTimer.Stop()
-	defer coalesceTimer.Stop()
-
 	for {
 		select {
 		case <-sch:
-			// Wait briefly to coalesce more writes.
-			// This allows multiple concurrent writers to batch together.
-			coalesceTimer.Reset(syncCoalesceWindow)
-			select {
-			case <-coalesceTimer.C:
-				// Coalesce window expired, proceed with flush+sync
-			case <-sqch:
-				return
-			}
-
-			// Drain any additional sync requests that arrived during coalescing.
+			// Drain any additional sync requests that arrived.
 			// This ensures we process all pending writes in one batch.
 		drainLoop:
 			for {
