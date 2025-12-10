@@ -187,8 +187,10 @@ type jetStream struct {
 	storeReserved int64
 	memUsed       int64
 	storeUsed     int64
-	queueLimit    int64
-	clustered     int32
+	queueLimit      int64
+	acksTotal       int64 // Dedicated counter for ACKs (highest traffic)
+	heartbeatsTotal int64 // Dedicated counter for outgoing idle heartbeats
+	clustered       int32
 
 	// Traffic counters for each JS API type (must be 64-bit aligned for atomics on 32-bit systems)
 	apiTraffic [JSAPITypeCount]int64
@@ -2630,8 +2632,27 @@ func (js *jetStream) trackAPICall(apiType JSAPIType) {
 	}
 }
 
-// apiTrafficStats returns the current traffic statistics for all JS API types.
-func (js *jetStream) apiTrafficStats() *JSAPITrafficStats {
+// trackAPICall increments the traffic counter for the given API type via the server's JetStream instance.
+func (s *Server) trackAPICall(apiType JSAPIType) {
+	if js := s.getJetStream(); js != nil {
+		js.trackAPICall(apiType)
+	}
+}
+
+// trackAck increments the dedicated ACK traffic counter.
+// This is separate from apiTraffic to avoid cache line contention since ACKs are the highest traffic.
+func (js *jetStream) trackAck() {
+	atomic.AddInt64(&js.acksTotal, 1)
+}
+
+// trackHeartbeat increments the dedicated heartbeat counter.
+// This is separate from apiTraffic to avoid cache line contention since heartbeats can be high traffic.
+func (js *jetStream) trackHeartbeat() {
+	atomic.AddInt64(&js.heartbeatsTotal, 1)
+}
+
+// apiStats returns the current traffic statistics for all JS API types.
+func (js *jetStream) apiStats() *JSAPITrafficStats {
 	return &JSAPITrafficStats{
 		Info:                     uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIInfo])),
 		StreamCreate:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamCreate])),
@@ -2662,9 +2683,9 @@ func (js *jetStream) apiTrafficStats() *JSAPITrafficStats {
 		AccountPurge:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIAccountPurge])),
 		AccountStreamMove:        uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIAccountStreamMove])),
 		AccountStreamCancelMove:  uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIAccountStreamCancelMove])),
-		Ack:                      uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIAck])),
+		Ack:                      uint64(atomic.LoadInt64(&js.acksTotal)),
 		FlowControl:              uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIFlowControl])),
-		Heartbeat:                uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIHeartbeat])),
+		Heartbeat:                uint64(atomic.LoadInt64(&js.heartbeatsTotal)),
 		Unknown:                  uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIUnknown])),
 	}
 }

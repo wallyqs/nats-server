@@ -5003,6 +5003,10 @@ func (mset *stream) processDirectGetRequest(_ *subscription, c *client, _ *Accou
 	if len(reply) == 0 {
 		return
 	}
+	// Track the API call for traffic stats.
+	if mset.js != nil {
+		mset.js.trackAPICall(JSAPIDirectGet)
+	}
 	hdr, msg := c.msgParts(rmsg)
 	if errorOnRequiredApiLevel(hdr) {
 		hdr := []byte("NATS/1.0 412 Required Api Level\r\n\r\n")

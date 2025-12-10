@@ -2529,9 +2529,9 @@ func (am *jsAckMsg) returnToPool() {
 // Push the ack message to the consumer's ackMsgs queue
 func (o *consumer) pushAck(_ *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
 	atomic.AddInt64(&o.awl, 1)
-	// Track the ACK for traffic stats.
+	// Track the ACK for traffic stats using dedicated counter.
 	if o.js != nil {
-		o.js.trackAPICall(JSAPIAck)
+		o.js.trackAck()
 	}
 	o.ackMsgs.push(newJSAckMsg(subject, reply, c.pa.hdr, copyBytes(rmsg)))
 }
@@ -4114,6 +4114,11 @@ func (o *consumer) processNextMsgReq(_ *subscription, c *client, _ *Account, _, 
 		return
 	}
 
+	// Track the API call for traffic stats.
+	if o.js != nil {
+		o.js.trackAPICall(JSAPIConsumerMsgNext)
+	}
+
 	// Short circuit error here.
 	if o.nextMsgReqs == nil {
 		hdr := []byte("NATS/1.0 409 Consumer is push based\r\n\r\n")
@@ -5079,6 +5084,10 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 
 // Lock should be held.
 func (o *consumer) sendIdleHeartbeat(subj string) {
+	// Track heartbeat for traffic stats using dedicated counter.
+	if o.js != nil {
+		o.js.trackHeartbeat()
+	}
 	const t = "NATS/1.0 100 Idle Heartbeat\r\n%s: %d\r\n%s: %d\r\n\r\n"
 	sseq, dseq := o.sseq-1, o.dseq-1
 	hdr := fmt.Appendf(nil, t, JSLastConsumerSeq, dseq, JSLastStreamSeq, sseq)
