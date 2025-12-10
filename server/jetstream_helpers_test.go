@@ -2228,3 +2228,193 @@ func checkState(t *testing.T, c *cluster, accountName, streamName string) error 
 	}
 	return nil
 }
+
+// BlockDifference describes a difference in a specific block between replicas.
+type BlockDifference struct {
+	BlockIndex uint32
+	Field      string // "bytes", "first_seq", "last_seq", "num_msgs", "digest", "missing"
+	Server1    string
+	Server2    string
+	Value1     any
+	Value2     any
+}
+
+func (bd BlockDifference) String() string {
+	if bd.Field == "missing" {
+		return fmt.Sprintf("block %d: missing on %s (present on %s)", bd.BlockIndex, bd.Value2, bd.Value1)
+	}
+	return fmt.Sprintf("block %d %s mismatch: %s=%v, %s=%v",
+		bd.BlockIndex, bd.Field, bd.Server1, bd.Value1, bd.Server2, bd.Value2)
+}
+
+// BlocksCheckResult contains the results of comparing block info across replicas.
+type BlocksCheckResult struct {
+	Stream      string
+	Servers     []string
+	BlockCounts map[string]int            // server name -> block count
+	BlocksInfo  map[string][]BlockInfo    // server name -> blocks info
+	Differences []BlockDifference
+}
+
+// OK returns true if there are no differences between replicas.
+func (r *BlocksCheckResult) OK() bool {
+	return len(r.Differences) == 0
+}
+
+// Error returns an error describing the differences, or nil if OK.
+func (r *BlocksCheckResult) Error() error {
+	if r.OK() {
+		return nil
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("stream %q has %d block differences across replicas:\n", r.Stream, len(r.Differences)))
+	for _, diff := range r.Differences {
+		sb.WriteString("  - ")
+		sb.WriteString(diff.String())
+		sb.WriteString("\n")
+	}
+	return errors.New(sb.String())
+}
+
+// BlocksCheck collects block info from all servers for a stream and compares them.
+// It returns a BlocksCheckResult containing detailed information about any differences.
+func (c *cluster) BlocksCheck(accountName, streamName string) *BlocksCheckResult {
+	result := &BlocksCheckResult{
+		Stream:      streamName,
+		Servers:     make([]string, 0, len(c.servers)),
+		BlockCounts: make(map[string]int),
+		BlocksInfo:  make(map[string][]BlockInfo),
+	}
+
+	// Collect block info from all servers
+	for _, srv := range c.servers {
+		if srv.isShuttingDown() {
+			continue
+		}
+		acc, err := srv.LookupAccount(accountName)
+		if err != nil {
+			continue
+		}
+		mset, err := acc.lookupStream(streamName)
+		if err != nil {
+			continue
+		}
+
+		serverName := srv.Name()
+		blocks := mset.store.BlocksInfo()
+		result.Servers = append(result.Servers, serverName)
+		result.BlockCounts[serverName] = len(blocks)
+		result.BlocksInfo[serverName] = blocks
+	}
+
+	// Need at least 2 servers to compare
+	if len(result.Servers) < 2 {
+		return result
+	}
+
+	// Use first server as reference
+	refServer := result.Servers[0]
+	refBlocks := result.BlocksInfo[refServer]
+
+	// Build a map of block index -> BlockInfo for reference server
+	refBlockMap := make(map[uint32]BlockInfo, len(refBlocks))
+	for _, blk := range refBlocks {
+		refBlockMap[blk.Index] = blk
+	}
+
+	// Compare each other server against the reference
+	for i := 1; i < len(result.Servers); i++ {
+		otherServer := result.Servers[i]
+		otherBlocks := result.BlocksInfo[otherServer]
+
+		// Build a map for other server
+		otherBlockMap := make(map[uint32]BlockInfo, len(otherBlocks))
+		for _, blk := range otherBlocks {
+			otherBlockMap[blk.Index] = blk
+		}
+
+		// Check all blocks in reference server
+		for idx, refBlock := range refBlockMap {
+			otherBlock, exists := otherBlockMap[idx]
+			if !exists {
+				result.Differences = append(result.Differences, BlockDifference{
+					BlockIndex: idx,
+					Field:      "missing",
+					Server1:    refServer,
+					Server2:    otherServer,
+					Value1:     refServer,
+					Value2:     otherServer,
+				})
+				continue
+			}
+
+			// Compare fields
+			if refBlock.Bytes != otherBlock.Bytes {
+				result.Differences = append(result.Differences, BlockDifference{
+					BlockIndex: idx,
+					Field:      "bytes",
+					Server1:    refServer,
+					Server2:    otherServer,
+					Value1:     refBlock.Bytes,
+					Value2:     otherBlock.Bytes,
+				})
+			}
+			if refBlock.FirstSeq != otherBlock.FirstSeq {
+				result.Differences = append(result.Differences, BlockDifference{
+					BlockIndex: idx,
+					Field:      "first_seq",
+					Server1:    refServer,
+					Server2:    otherServer,
+					Value1:     refBlock.FirstSeq,
+					Value2:     otherBlock.FirstSeq,
+				})
+			}
+			if refBlock.LastSeq != otherBlock.LastSeq {
+				result.Differences = append(result.Differences, BlockDifference{
+					BlockIndex: idx,
+					Field:      "last_seq",
+					Server1:    refServer,
+					Server2:    otherServer,
+					Value1:     refBlock.LastSeq,
+					Value2:     otherBlock.LastSeq,
+				})
+			}
+			if refBlock.NumMsgs != otherBlock.NumMsgs {
+				result.Differences = append(result.Differences, BlockDifference{
+					BlockIndex: idx,
+					Field:      "num_msgs",
+					Server1:    refServer,
+					Server2:    otherServer,
+					Value1:     refBlock.NumMsgs,
+					Value2:     otherBlock.NumMsgs,
+				})
+			}
+			if refBlock.Digest != otherBlock.Digest {
+				result.Differences = append(result.Differences, BlockDifference{
+					BlockIndex: idx,
+					Field:      "digest",
+					Server1:    refServer,
+					Server2:    otherServer,
+					Value1:     fmt.Sprintf("%x", refBlock.Digest),
+					Value2:     fmt.Sprintf("%x", otherBlock.Digest),
+				})
+			}
+		}
+
+		// Check for blocks in other server that are missing from reference
+		for idx := range otherBlockMap {
+			if _, exists := refBlockMap[idx]; !exists {
+				result.Differences = append(result.Differences, BlockDifference{
+					BlockIndex: idx,
+					Field:      "missing",
+					Server1:    otherServer,
+					Server2:    refServer,
+					Value1:     otherServer,
+					Value2:     refServer,
+				})
+			}
+		}
+	}
+
+	return result
+}
