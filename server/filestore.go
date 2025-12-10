@@ -8488,6 +8488,49 @@ func (fs *fileStore) ResetState() {
 	}
 }
 
+// BlockDigests returns a map of message block indices to their digests.
+// Each digest represents the current state of a message block, computed from:
+// first seq/ts, last seq/ts, message count, byte count, and last checksum.
+func (fs *fileStore) BlockDigests() map[uint32][8]byte {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	if len(fs.blks) == 0 {
+		return nil
+	}
+
+	digests := make(map[uint32][8]byte, len(fs.blks))
+	for _, mb := range fs.blks {
+		mb.mu.RLock()
+		digests[mb.index] = mb.computeDigest()
+		mb.mu.RUnlock()
+	}
+	return digests
+}
+
+// computeDigest computes a digest for the message block that represents its current state.
+// Lock should be held.
+func (mb *msgBlock) computeDigest() [8]byte {
+	var digest [8]byte
+
+	// Create a buffer with all state information.
+	// first.seq (8) + first.ts (8) + last.seq (8) + last.ts (8) + msgs (8) + bytes (8) + lchk (8) = 56 bytes
+	var buf [56]byte
+	le := binary.LittleEndian
+	le.PutUint64(buf[0:8], atomic.LoadUint64(&mb.first.seq))
+	le.PutUint64(buf[8:16], uint64(mb.first.ts))
+	le.PutUint64(buf[16:24], atomic.LoadUint64(&mb.last.seq))
+	le.PutUint64(buf[24:32], uint64(mb.last.ts))
+	le.PutUint64(buf[32:40], mb.msgs)
+	le.PutUint64(buf[40:48], mb.bytes)
+	copy(buf[48:56], mb.lchk[:])
+
+	// Use SHA256 and take first 8 bytes for the digest.
+	h := sha256.Sum256(buf[:])
+	copy(digest[:], h[:8])
+	return digest
+}
+
 // Determine time since any last activity, read/load, write or remove.
 func (mb *msgBlock) sinceLastActivity() time.Duration {
 	if mb.closed {

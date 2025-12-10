@@ -132,6 +132,10 @@ type StreamStore interface {
 	Snapshot(deadline time.Duration, includeConsumers, checkMsgs bool) (*SnapshotResult, error)
 	Utilization() (total, reported uint64, err error)
 	ResetState()
+	// BlockDigests returns a map of message block indices to their digests.
+	// Each digest represents the current state of a message block.
+	// For memory stores, this returns nil as they don't use message blocks.
+	BlockDigests() map[uint32][8]byte
 }
 
 // RetentionPolicy determines how messages in a set are retained.

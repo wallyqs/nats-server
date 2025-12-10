@@ -2128,6 +2128,11 @@ func (ms *memStore) ResetState() {
 	}
 }
 
+// BlockDigests returns nil for memory stores as they don't use message blocks.
+func (ms *memStore) BlockDigests() map[uint32][8]byte {
+	return nil
+}
+
 // Delete is same as Stop for memory store.
 func (ms *memStore) Delete(_ bool) error {
 	return ms.Stop()

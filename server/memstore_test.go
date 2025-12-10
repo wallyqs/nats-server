@@ -1420,6 +1420,27 @@ func Benchmark_MemStoreNumPendingWithLargeInteriorDeletesExclude(b *testing.B) {
 	}
 }
 
+func TestMemStoreBlockDigests(t *testing.T) {
+	cfg := &StreamConfig{Name: "TEST", Subjects: []string{"foo"}, Storage: MemoryStorage}
+	ms, err := newMemStore(cfg)
+	require_NoError(t, err)
+	defer ms.Stop()
+
+	// MemStore doesn't use blocks, so BlockDigests should return nil
+	digests := ms.BlockDigests()
+	require_True(t, digests == nil)
+
+	// Store some messages
+	_, _, err = ms.StoreMsg("foo", nil, []byte("hello"), 0)
+	require_NoError(t, err)
+	_, _, err = ms.StoreMsg("foo", nil, []byte("world"), 0)
+	require_NoError(t, err)
+
+	// Should still return nil since MemStore doesn't use blocks
+	digests = ms.BlockDigests()
+	require_True(t, digests == nil)
+}
+
 func Benchmark_MemStoreSubjectStateConsistencyOptimizationPerf(b *testing.B) {
 	cfg := &StreamConfig{Name: "TEST", Subjects: []string{"foo.*"}, Storage: MemoryStorage, MaxMsgsPer: 1}
 	ms, err := newMemStore(cfg)
