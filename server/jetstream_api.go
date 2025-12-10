@@ -318,6 +318,99 @@ const (
 var denyAllClientJs = []string{jsAllAPI, "$KV.>", "$OBJ.>"}
 var denyAllJs = []string{jscAllSubj, raftAllSubj, jsAllAPI, "$KV.>", "$OBJ.>"}
 
+// jsAPITypeForSubject returns the JSAPIType for a given subject.
+// This is used for traffic tracking on JetStream API calls.
+func jsAPITypeForSubject(subject string) JSAPIType {
+	// Handle $JS.ACK.* subjects
+	if strings.HasPrefix(subject, jsAckPre) {
+		return JSAPIAck
+	}
+	// Handle $JS.FC.* subjects (flow control)
+	if strings.HasPrefix(subject, jsFlowControlPre) {
+		return JSAPIFlowControl
+	}
+	// Handle $JS.API.* subjects
+	if !strings.HasPrefix(subject, JSApiPrefix) {
+		return JSAPIUnknown
+	}
+
+	// Remove the $JS.API. prefix to simplify matching
+	suffix := subject[len(JSApiPrefix)+1:] // +1 for the dot
+
+	switch {
+	case suffix == "INFO":
+		return JSAPIInfo
+
+	// Stream operations
+	case strings.HasPrefix(suffix, "STREAM.CREATE."):
+		return JSAPIStreamCreate
+	case strings.HasPrefix(suffix, "STREAM.UPDATE."):
+		return JSAPIStreamUpdate
+	case suffix == "STREAM.NAMES":
+		return JSAPIStreamNames
+	case suffix == "STREAM.LIST":
+		return JSAPIStreamList
+	case strings.HasPrefix(suffix, "STREAM.INFO."):
+		return JSAPIStreamInfo
+	case strings.HasPrefix(suffix, "STREAM.DELETE."):
+		return JSAPIStreamDelete
+	case strings.HasPrefix(suffix, "STREAM.PURGE."):
+		return JSAPIStreamPurge
+	case strings.HasPrefix(suffix, "STREAM.SNAPSHOT."):
+		return JSAPIStreamSnapshot
+	case strings.HasPrefix(suffix, "STREAM.RESTORE."):
+		return JSAPIStreamRestore
+	case strings.HasPrefix(suffix, "STREAM.PEER.REMOVE."):
+		return JSAPIStreamRemovePeer
+	case strings.HasPrefix(suffix, "STREAM.LEADER.STEPDOWN."):
+		return JSAPIStreamLeaderStepdown
+	case strings.HasPrefix(suffix, "STREAM.MSG.DELETE."):
+		return JSAPIStreamMsgDelete
+	case strings.HasPrefix(suffix, "STREAM.MSG.GET."):
+		return JSAPIStreamMsgGet
+
+	// Consumer operations
+	case strings.HasPrefix(suffix, "CONSUMER.CREATE."):
+		return JSAPIConsumerCreate
+	case strings.HasPrefix(suffix, "CONSUMER.DURABLE.CREATE."):
+		return JSAPIConsumerCreate
+	case strings.HasPrefix(suffix, "CONSUMER.NAMES."):
+		return JSAPIConsumerNames
+	case strings.HasPrefix(suffix, "CONSUMER.LIST."):
+		return JSAPIConsumerList
+	case strings.HasPrefix(suffix, "CONSUMER.INFO."):
+		return JSAPIConsumerInfo
+	case strings.HasPrefix(suffix, "CONSUMER.DELETE."):
+		return JSAPIConsumerDelete
+	case strings.HasPrefix(suffix, "CONSUMER.PAUSE."):
+		return JSAPIConsumerPause
+	case strings.HasPrefix(suffix, "CONSUMER.MSG.NEXT."):
+		return JSAPIConsumerMsgNext
+	case strings.HasPrefix(suffix, "CONSUMER.LEADER.STEPDOWN."):
+		return JSAPIConsumerLeaderStepdown
+	case strings.HasPrefix(suffix, "CONSUMER.UNPIN."):
+		return JSAPIConsumerUnpin
+
+	// Direct operations
+	case strings.HasPrefix(suffix, "DIRECT.GET."):
+		return JSAPIDirectGet
+
+	// Meta operations
+	case suffix == "META.LEADER.STEPDOWN":
+		return JSAPIMetaLeaderStepdown
+	case suffix == "SERVER.REMOVE":
+		return JSAPIServerRemove
+	case strings.HasPrefix(suffix, "ACCOUNT.PURGE."):
+		return JSAPIAccountPurge
+	case strings.HasPrefix(suffix, "ACCOUNT.STREAM.MOVE."):
+		return JSAPIAccountStreamMove
+	case strings.HasPrefix(suffix, "ACCOUNT.STREAM.CANCEL_MOVE."):
+		return JSAPIAccountStreamCancelMove
+	}
+
+	return JSAPIUnknown
+}
+
 func generateJSMappingTable(domain string) map[string]string {
 	mappings := map[string]string{}
 	// This set of mappings is very very very ugly.
@@ -832,6 +925,9 @@ func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, sub
 
 	// Increment inflight. Do this before queueing.
 	atomic.AddInt64(&js.apiInflight, 1)
+
+	// Track the API call by type for traffic stats.
+	js.trackAPICall(jsAPITypeForSubject(subject))
 
 	// Copy the state. Note the JSAPI only uses the hdr index to piece apart the
 	// header from the msg body. No other references are needed.

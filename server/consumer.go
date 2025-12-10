@@ -2526,6 +2526,10 @@ func (am *jsAckMsg) returnToPool() {
 // Push the ack message to the consumer's ackMsgs queue
 func (o *consumer) pushAck(_ *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
 	atomic.AddInt64(&o.awl, 1)
+	// Track the ACK for traffic stats.
+	if o.js != nil {
+		o.js.trackAPICall(JSAPIAck)
+	}
 	o.ackMsgs.push(newJSAckMsg(subject, reply, c.pa.hdr, copyBytes(rmsg)))
 }
 
@@ -5299,6 +5303,11 @@ func (o *consumer) needFlowControl(sz int) bool {
 }
 
 func (o *consumer) processFlowControl(_ *subscription, c *client, _ *Account, subj, _ string, _ []byte) {
+	// Track flow control for traffic stats.
+	if o.js != nil {
+		o.js.trackAPICall(JSAPIFlowControl)
+	}
+
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
