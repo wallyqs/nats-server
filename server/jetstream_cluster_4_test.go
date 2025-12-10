@@ -7357,3 +7357,116 @@ func TestJetStreamClusterMetaCompactSizeThreshold(t *testing.T) {
 		})
 	}
 }
+
+func TestJetStreamClusterBlockDigestsConsistency(t *testing.T) {
+	// Create a 3-node cluster
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	// Connect to a random server
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Create a stream with 3 replicas
+	streamName := "TEST_DIGESTS"
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     streamName,
+		Subjects: []string{"foo.>"},
+		Replicas: 3,
+		Storage:  nats.FileStorage,
+	})
+	require_NoError(t, err)
+
+	// Wait for stream leader to be elected
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Produce messages for 1 minute
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	var msgCount int
+	msg := []byte("Hello World - this is a test message for block digest consistency checking")
+
+	t.Log("Starting message production for 1 minute...")
+	for {
+		select {
+		case <-ctx.Done():
+			goto done
+		default:
+			subj := fmt.Sprintf("foo.%d", msgCount%100)
+			_, err := js.Publish(subj, msg)
+			if err != nil {
+				t.Logf("Publish error (may be expected during leader changes): %v", err)
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			msgCount++
+			// Small delay to spread messages over time
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+done:
+	t.Logf("Published %d messages", msgCount)
+
+	// Wait for all replicas to be fully synchronized
+	t.Log("Waiting for replicas to synchronize...")
+	checkFor(t, 30*time.Second, 500*time.Millisecond, func() error {
+		return checkState(t, c, globalAccountName, streamName)
+	})
+
+	// Collect block digests from all replicas
+	type replicaDigests struct {
+		serverName string
+		digests    map[uint32][8]byte
+	}
+	var allDigests []replicaDigests
+
+	for _, srv := range c.servers {
+		acc, err := srv.LookupAccount(globalAccountName)
+		if err != nil {
+			t.Fatalf("Failed to lookup account on %s: %v", srv.Name(), err)
+		}
+		mset, err := acc.lookupStream(streamName)
+		if err != nil {
+			t.Fatalf("Failed to lookup stream on %s: %v", srv.Name(), err)
+		}
+
+		digests := mset.store.BlockDigests()
+		allDigests = append(allDigests, replicaDigests{
+			serverName: srv.Name(),
+			digests:    digests,
+		})
+		t.Logf("Server %s has %d blocks", srv.Name(), len(digests))
+	}
+
+	// Verify we have digests from all 3 replicas
+	require_Equal(t, len(allDigests), 3)
+
+	// Verify all replicas have the same number of blocks
+	firstDigests := allDigests[0]
+	for i := 1; i < len(allDigests); i++ {
+		if len(allDigests[i].digests) != len(firstDigests.digests) {
+			t.Fatalf("Block count mismatch: %s has %d blocks, %s has %d blocks",
+				firstDigests.serverName, len(firstDigests.digests),
+				allDigests[i].serverName, len(allDigests[i].digests))
+		}
+	}
+
+	// Verify all replicas have the same digests for each block
+	for blockIndex, expectedDigest := range firstDigests.digests {
+		for i := 1; i < len(allDigests); i++ {
+			actualDigest, ok := allDigests[i].digests[blockIndex]
+			if !ok {
+				t.Fatalf("Block %d missing on %s", blockIndex, allDigests[i].serverName)
+			}
+			if actualDigest != expectedDigest {
+				t.Fatalf("Block %d digest mismatch:\n  %s: %x\n  %s: %x",
+					blockIndex,
+					firstDigests.serverName, expectedDigest,
+					allDigests[i].serverName, actualDigest)
+			}
+		}
+	}
+
+	t.Logf("All %d blocks have consistent digests across all 3 replicas", len(firstDigests.digests))
+}
