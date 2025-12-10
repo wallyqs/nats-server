@@ -2909,6 +2909,7 @@ type JSzOptions struct {
 	Limit            int    `json:"limit,omitempty"`
 	RaftGroups       bool   `json:"raft,omitempty"`
 	StreamLeaderOnly bool   `json:"stream_leader_only,omitempty"`
+	ApiStats         bool   `json:"api_stats,omitempty"`
 }
 
 // HealthzOptions are options passed to Healthz
@@ -2993,20 +2994,21 @@ type MetaClusterInfo struct {
 // JSInfo has detailed information on JetStream.
 type JSInfo struct {
 	JetStreamStats
-	ID              string           `json:"server_id"`
-	Now             time.Time        `json:"now"`
-	Disabled        bool             `json:"disabled,omitempty"`
-	Config          JetStreamConfig  `json:"config,omitempty"`
-	Limits          *JSLimitOpts     `json:"limits,omitempty"`
-	Streams         int              `json:"streams"`
-	StreamsLeader   int              `json:"streams_leader,omitempty"`
-	Consumers       int              `json:"consumers"`
-	ConsumersLeader int              `json:"consumers_leader,omitempty"`
-	Messages        uint64           `json:"messages"`
-	Bytes           uint64           `json:"bytes"`
-	Meta            *MetaClusterInfo `json:"meta_cluster,omitempty"`
-	AccountDetails  []*AccountDetail `json:"account_details,omitempty"`
-	Total           int              `json:"total"`
+	ID              string            `json:"server_id"`
+	Now             time.Time         `json:"now"`
+	Disabled        bool              `json:"disabled,omitempty"`
+	Config          JetStreamConfig   `json:"config,omitempty"`
+	Limits          *JSLimitOpts      `json:"limits,omitempty"`
+	Streams         int               `json:"streams"`
+	StreamsLeader   int               `json:"streams_leader,omitempty"`
+	Consumers       int               `json:"consumers"`
+	ConsumersLeader int               `json:"consumers_leader,omitempty"`
+	Messages        uint64            `json:"messages"`
+	Bytes           uint64            `json:"bytes"`
+	Meta            *MetaClusterInfo  `json:"meta_cluster,omitempty"`
+	ApiStats        JSAPITrafficStats `json:"api_stats,omitempty"`
+	AccountDetails  []*AccountDetail  `json:"account_details,omitempty"`
+	Total           int               `json:"total"`
 }
 
 func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optDirectConsumers, optCfg, optRaft, optStreamLeader bool) *AccountDetail {
@@ -3234,6 +3236,9 @@ func (s *Server) Jsz(opts *JSzOptions) (*JSInfo, error) {
 	}
 
 	jsi.JetStreamStats = *js.usageStats()
+	if opts.ApiStats {
+		jsi.ApiStats = js.apiStats()
+	}
 
 	// If a specific account is requested, track the index.
 	filterIdx := -1
@@ -3349,6 +3354,11 @@ func (s *Server) HandleJsz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	apiStats, err := decodeBool(w, r, "api-stats")
+	if err != nil {
+		return
+	}
+
 	l, err := s.Jsz(&JSzOptions{
 		Account:          r.URL.Query().Get("acc"),
 		Accounts:         accounts,
@@ -3361,6 +3371,7 @@ func (s *Server) HandleJsz(w http.ResponseWriter, r *http.Request) {
 		Limit:            limit,
 		RaftGroups:       rgroups,
 		StreamLeaderOnly: sleader,
+		ApiStats:         apiStats,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
