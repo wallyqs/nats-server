@@ -5758,24 +5758,82 @@ func (mb *msgBlock) clearInSyncer() {
 	}
 }
 
+// syncCoalesceWindow is the time to wait for additional writes to coalesce
+// before flushing. This trades a small amount of latency for better throughput
+// by batching multiple writes into a single WriteAt + Sync call.
+const syncCoalesceWindow = 100 * time.Microsecond
+
 // syncLoop is the batched sync flusher goroutine.
-// It waits for sync requests, batches them briefly, and performs a single fsync.
+// It waits for sync requests, coalesces writes briefly, then performs
+// a batched WriteAt followed by a single fsync.
 func (mb *msgBlock) syncLoop(sch, sqch chan struct{}) {
 	mb.setInSyncer()
 	defer mb.clearInSyncer()
 
+	// Timer for coalescing window - reused to avoid allocations.
+	coalesceTimer := time.NewTimer(syncCoalesceWindow)
+	coalesceTimer.Stop()
+	defer coalesceTimer.Stop()
+
 	for {
 		select {
 		case <-sch:
-			// Perform the sync immediately - waiters are already blocked.
-			// The batching benefit comes from multiple writers accumulating
-			// their requests while we're doing the sync (which takes ~2ms).
-			// When the next sync request comes in while we're syncing, it
-			// will be queued and handled in the next iteration.
+			// Wait briefly to coalesce more writes.
+			// This allows multiple concurrent writers to batch together.
+			coalesceTimer.Reset(syncCoalesceWindow)
+			select {
+			case <-coalesceTimer.C:
+				// Coalesce window expired, proceed with flush+sync
+			case <-sqch:
+				return
+			}
+
+			// Drain any additional sync requests that arrived during coalescing.
+			// This ensures we process all pending writes in one batch.
+		drainLoop:
+			for {
+				select {
+				case <-sch:
+				default:
+					break drainLoop
+				}
+			}
+
+			// Perform flush and sync - all accumulated writes will be processed.
 			mb.mu.Lock()
 			var newGen uint64
 			if !mb.closed && mb.mfd != nil && mb.syncReq > mb.syncGen {
-				mb.mfd.Sync()
+				// First, flush any pending data to disk.
+				// This writes all accumulated messages in a single WriteAt call.
+				if mb.cache != nil && len(mb.cache.buf) > mb.cache.wp {
+					buf := mb.cache.buf[mb.cache.wp:]
+					if len(buf) > 0 {
+						// Handle encryption if needed.
+						if mb.bek != nil {
+							dst := make([]byte, len(buf))
+							mb.bek.XORKeyStream(dst, buf)
+							buf = dst
+						}
+						// Write to disk.
+						wp := int64(mb.cache.wp)
+						for len(buf) > 0 {
+							n, err := mb.writeAt(buf, wp)
+							if err != nil {
+								mb.werr = err
+								break
+							}
+							wp += int64(n)
+							buf = buf[n:]
+						}
+						if mb.werr == nil {
+							mb.cache.wp = int(wp)
+						}
+					}
+				}
+				// Now sync to disk.
+				if mb.werr == nil {
+					mb.mfd.Sync()
+				}
 				newGen = mb.syncReq
 			}
 			mb.mu.Unlock()
@@ -6724,6 +6782,14 @@ func (mb *msgBlock) writeMsgRecordLocked(rl, seq uint64, subj string, mhdr, msg 
 	}
 
 	fch, werr := mb.fch, mb.werr
+
+	// For SyncBatched mode, we defer both WriteAt and Sync to the syncLoop.
+	// This allows multiple writes to coalesce for better throughput.
+	if mb.syncBatched && werr == nil {
+		// Just request sync - the syncLoop will flush and sync together.
+		syncGen := mb.requestSyncLocked()
+		return nil, syncGen
+	}
 
 	// If we should be flushing, or had a write error, do so here.
 	if (flush && mb.fs.fip) || werr != nil {
