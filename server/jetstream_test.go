@@ -22149,20 +22149,22 @@ func TestJetStreamImplicitRePublishAfterSubjectTransform(t *testing.T) {
 }
 
 // Benchmark_JetStreamSyncModes compares the performance of JetStream publish
-// with different sync modes: NoSync (default), SyncAlways, and SyncBatched.
+// with different sync modes: NoSync (default), AsyncFlush, SyncAlways, and SyncBatched.
 func Benchmark_JetStreamSyncModes(b *testing.B) {
 	msg := bytes.Repeat([]byte("A"), 128) // 128 byte message
 
 	type syncMode struct {
-		name        string
-		syncAlways  bool
-		syncBatched bool
+		name         string
+		syncAlways   bool
+		syncBatched  bool
+		asyncPersist bool // Uses PersistMode: AsyncPersistMode on stream config
 	}
 
 	modes := []syncMode{
-		{"NoSync", false, false},
-		{"SyncAlways", true, false},
-		{"SyncBatched", false, true},
+		{"NoSync", false, false, false},
+		{"AsyncFlush", false, false, true},
+		{"SyncAlways", true, false, false},
+		{"SyncBatched", false, true, false},
 	}
 
 	for _, mode := range modes {
@@ -22176,7 +22178,11 @@ func Benchmark_JetStreamSyncModes(b *testing.B) {
 			s := RunServer(&opts)
 			defer s.Shutdown()
 
-			mset, err := s.GlobalAccount().addStream(&StreamConfig{Name: "TEST", Subjects: []string{"test"}})
+			streamCfg := StreamConfig{Name: "TEST", Subjects: []string{"test"}}
+			if mode.asyncPersist {
+				streamCfg.PersistMode = AsyncPersistMode
+			}
+			mset, err := s.GlobalAccount().addStream(&streamCfg)
 			if err != nil {
 				b.Fatalf("Unexpected error adding stream: %v", err)
 			}
@@ -22213,7 +22219,11 @@ func Benchmark_JetStreamSyncModes(b *testing.B) {
 				s := RunServer(&opts)
 				defer s.Shutdown()
 
-				mset, err := s.GlobalAccount().addStream(&StreamConfig{Name: "TEST", Subjects: []string{"test"}})
+				streamCfg := StreamConfig{Name: "TEST", Subjects: []string{"test"}}
+				if mode.asyncPersist {
+					streamCfg.PersistMode = AsyncPersistMode
+				}
+				mset, err := s.GlobalAccount().addStream(&streamCfg)
 				if err != nil {
 					b.Fatalf("Unexpected error adding stream: %v", err)
 				}
