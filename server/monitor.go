@@ -2909,6 +2909,7 @@ type JSzOptions struct {
 	Limit            int    `json:"limit,omitempty"`
 	RaftGroups       bool   `json:"raft,omitempty"`
 	StreamLeaderOnly bool   `json:"stream_leader_only,omitempty"`
+	BlockDigests     bool   `json:"block_digests,omitempty"`
 }
 
 // HealthzOptions are options passed to Healthz
@@ -2956,6 +2957,7 @@ type StreamDetail struct {
 	Sources            []*StreamSourceInfo `json:"sources,omitempty"`
 	RaftGroup          string              `json:"stream_raft_group,omitempty"`
 	ConsumerRaftGroups []*RaftGroupDetail  `json:"consumer_raft_groups,omitempty"`
+	BlockDigests       map[uint32]string   `json:"block_digests,omitempty"`
 }
 
 // RaftGroupDetail shows information details about the Raft group.
@@ -3009,7 +3011,7 @@ type JSInfo struct {
 	Total           int              `json:"total"`
 }
 
-func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optDirectConsumers, optCfg, optRaft, optStreamLeader bool) *AccountDetail {
+func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optDirectConsumers, optCfg, optRaft, optStreamLeader, optBlockDigests bool) *AccountDetail {
 	jsa.mu.RLock()
 	acc := jsa.account
 	name := acc.GetName()
@@ -3072,6 +3074,14 @@ func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optDire
 				sdet.RaftGroup = rgroup.Name
 				sdet.ConsumerRaftGroups = make([]*RaftGroupDetail, 0)
 			}
+			if optBlockDigests {
+				if digests := stream.store.BlockDigests(); digests != nil {
+					sdet.BlockDigests = make(map[uint32]string, len(digests))
+					for blkIndex, digest := range digests {
+						sdet.BlockDigests[blkIndex] = fmt.Sprintf("%x", digest)
+					}
+				}
+			}
 			if optConsumers {
 				for _, consumer := range stream.getPublicConsumers() {
 					cInfo := consumer.info()
@@ -3126,7 +3136,7 @@ func (s *Server) JszAccount(opts *JSzOptions) (*AccountDetail, error) {
 	if !ok {
 		return nil, fmt.Errorf("account %q not jetstream enabled", acc)
 	}
-	return s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.DirectConsumer, opts.Config, opts.RaftGroups, opts.StreamLeaderOnly), nil
+	return s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.DirectConsumer, opts.Config, opts.RaftGroups, opts.StreamLeaderOnly, opts.BlockDigests), nil
 }
 
 // helper to get cluster info from node via dummy group
@@ -3294,7 +3304,7 @@ func (s *Server) Jsz(opts *JSzOptions) (*JSInfo, error) {
 		jsi.AccountDetails = make([]*AccountDetail, 0, len(accounts))
 
 		for _, jsa := range accounts {
-			detail := s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.DirectConsumer, opts.Config, opts.RaftGroups, opts.StreamLeaderOnly)
+			detail := s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.DirectConsumer, opts.Config, opts.RaftGroups, opts.StreamLeaderOnly, opts.BlockDigests)
 			jsi.AccountDetails = append(jsi.AccountDetails, detail)
 		}
 	}
@@ -3348,6 +3358,10 @@ func (s *Server) HandleJsz(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	blockDigests, err := decodeBool(w, r, "block-digests")
+	if err != nil {
+		return
+	}
 
 	l, err := s.Jsz(&JSzOptions{
 		Account:          r.URL.Query().Get("acc"),
@@ -3361,6 +3375,7 @@ func (s *Server) HandleJsz(w http.ResponseWriter, r *http.Request) {
 		Limit:            limit,
 		RaftGroups:       rgroups,
 		StreamLeaderOnly: sleader,
+		BlockDigests:     blockDigests,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
