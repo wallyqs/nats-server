@@ -2529,9 +2529,9 @@ func (am *jsAckMsg) returnToPool() {
 // Push the ack message to the consumer's ackMsgs queue
 func (o *consumer) pushAck(_ *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
 	atomic.AddInt64(&o.awl, 1)
-	// Track the ACK for traffic stats.
+	// Track the ACK for traffic stats using dedicated counter.
 	if o.js != nil {
-		o.js.trackAPICall(JSAPIAck)
+		o.js.trackAck()
 	}
 	o.ackMsgs.push(newJSAckMsg(subject, reply, c.pa.hdr, copyBytes(rmsg)))
 }
