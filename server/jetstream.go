@@ -99,6 +99,84 @@ type JetStreamAPIStats struct {
 	Inflight uint64 `json:"inflight,omitempty"` // Inflight are the number of API requests currently being served
 }
 
+// JSAPIType identifies the type of JetStream API call for traffic tracking
+type JSAPIType int
+
+// JetStream API types for traffic tracking
+const (
+	JSAPIInfo JSAPIType = iota
+	JSAPIStreamCreate
+	JSAPIStreamUpdate
+	JSAPIStreamNames
+	JSAPIStreamList
+	JSAPIStreamInfo
+	JSAPIStreamDelete
+	JSAPIStreamPurge
+	JSAPIStreamSnapshot
+	JSAPIStreamRestore
+	JSAPIStreamRemovePeer
+	JSAPIStreamLeaderStepdown
+	JSAPIStreamMsgDelete
+	JSAPIStreamMsgGet
+	JSAPIConsumerCreate
+	JSAPIConsumerNames
+	JSAPIConsumerList
+	JSAPIConsumerInfo
+	JSAPIConsumerDelete
+	JSAPIConsumerPause
+	JSAPIConsumerLeaderStepdown
+	JSAPIConsumerMsgNext
+	JSAPIConsumerUnpin
+	JSAPIDirectGet
+	JSAPIMetaLeaderStepdown
+	JSAPIServerRemove
+	JSAPIAccountPurge
+	JSAPIAccountStreamMove
+	JSAPIAccountStreamCancelMove
+	JSAPIAck
+	JSAPIFlowControl
+	JSAPIHeartbeat
+	JSAPIUnknown
+	JSAPITypeCount // Must be last, used to size the array
+)
+
+// JSAPITrafficStats holds per-subject traffic counters for JetStream API
+type JSAPITrafficStats struct {
+	Info                     uint64 `json:"info"`
+	StreamCreate             uint64 `json:"stream_create"`
+	StreamUpdate             uint64 `json:"stream_update"`
+	StreamNames              uint64 `json:"stream_names"`
+	StreamList               uint64 `json:"stream_list"`
+	StreamInfo               uint64 `json:"stream_info"`
+	StreamDelete             uint64 `json:"stream_delete"`
+	StreamPurge              uint64 `json:"stream_purge"`
+	StreamSnapshot           uint64 `json:"stream_snapshot"`
+	StreamRestore            uint64 `json:"stream_restore"`
+	StreamRemovePeer         uint64 `json:"stream_remove_peer"`
+	StreamLeaderStepdown     uint64 `json:"stream_leader_stepdown"`
+	StreamMsgDelete          uint64 `json:"stream_msg_delete"`
+	StreamMsgGet             uint64 `json:"stream_msg_get"`
+	ConsumerCreate           uint64 `json:"consumer_create"`
+	ConsumerNames            uint64 `json:"consumer_names"`
+	ConsumerList             uint64 `json:"consumer_list"`
+	ConsumerInfo             uint64 `json:"consumer_info"`
+	ConsumerDelete           uint64 `json:"consumer_delete"`
+	ConsumerPause            uint64 `json:"consumer_pause"`
+	ConsumerLeaderStepdown   uint64 `json:"consumer_leader_stepdown"`
+	ConsumerMsgNext          uint64 `json:"consumer_msg_next"`
+	ConsumerUnpin            uint64 `json:"consumer_unpin"`
+	DirectGet                uint64 `json:"direct_get"`
+	MetaLeaderStepdown       uint64 `json:"meta_leader_stepdown"`
+	ServerRemove             uint64 `json:"server_remove"`
+	AccountPurge             uint64 `json:"account_purge"`
+	AccountStreamMove        uint64 `json:"account_stream_move"`
+	AccountStreamCancelMove  uint64 `json:"account_stream_cancel_move"`
+	Ack                      uint64 `json:"ack"`
+	FlowControl              uint64 `json:"flow_control"`
+	Heartbeat                uint64 `json:"heartbeat"`
+	Unknown                  uint64 `json:"unknown"`
+}
+
 // This is for internal accounting for JetStream for this server.
 type jetStream struct {
 	// These are here first because of atomics on 32bit systems.
@@ -111,7 +189,11 @@ type jetStream struct {
 	storeUsed     int64
 	queueLimit    int64
 	clustered     int32
-	mu            sync.RWMutex
+
+	// Traffic counters for each JS API type (must be 64-bit aligned for atomics on 32-bit systems)
+	apiTraffic [JSAPITypeCount]int64
+
+	mu sync.RWMutex
 	srv           *Server
 	config        JetStreamConfig
 	cluster       *jetStreamCluster
@@ -2539,6 +2621,52 @@ func (js *jetStream) usageStats() *JetStreamStats {
 	stats.Store = uint64(used)
 	stats.HAAssets = s.numRaftNodes()
 	return &stats
+}
+
+// trackAPICall increments the traffic counter for the given API type.
+func (js *jetStream) trackAPICall(apiType JSAPIType) {
+	if apiType >= 0 && apiType < JSAPITypeCount {
+		atomic.AddInt64(&js.apiTraffic[apiType], 1)
+	}
+}
+
+// apiTrafficStats returns the current traffic statistics for all JS API types.
+func (js *jetStream) apiTrafficStats() *JSAPITrafficStats {
+	return &JSAPITrafficStats{
+		Info:                     uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIInfo])),
+		StreamCreate:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamCreate])),
+		StreamUpdate:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamUpdate])),
+		StreamNames:              uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamNames])),
+		StreamList:               uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamList])),
+		StreamInfo:               uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamInfo])),
+		StreamDelete:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamDelete])),
+		StreamPurge:              uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamPurge])),
+		StreamSnapshot:           uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamSnapshot])),
+		StreamRestore:            uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamRestore])),
+		StreamRemovePeer:         uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamRemovePeer])),
+		StreamLeaderStepdown:     uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamLeaderStepdown])),
+		StreamMsgDelete:          uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamMsgDelete])),
+		StreamMsgGet:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamMsgGet])),
+		ConsumerCreate:           uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerCreate])),
+		ConsumerNames:            uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerNames])),
+		ConsumerList:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerList])),
+		ConsumerInfo:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerInfo])),
+		ConsumerDelete:           uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerDelete])),
+		ConsumerPause:            uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerPause])),
+		ConsumerLeaderStepdown:   uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerLeaderStepdown])),
+		ConsumerMsgNext:          uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerMsgNext])),
+		ConsumerUnpin:            uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerUnpin])),
+		DirectGet:                uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIDirectGet])),
+		MetaLeaderStepdown:       uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIMetaLeaderStepdown])),
+		ServerRemove:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIServerRemove])),
+		AccountPurge:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIAccountPurge])),
+		AccountStreamMove:        uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIAccountStreamMove])),
+		AccountStreamCancelMove:  uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIAccountStreamCancelMove])),
+		Ack:                      uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIAck])),
+		FlowControl:              uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIFlowControl])),
+		Heartbeat:                uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIHeartbeat])),
+		Unknown:                  uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIUnknown])),
+	}
 }
 
 // Check to see if we have enough system resources for this account.
