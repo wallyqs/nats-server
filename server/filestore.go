@@ -8489,7 +8489,7 @@ func (fs *fileStore) ResetState() {
 }
 
 // BlocksInfo returns information about each message block in the store including
-// block index, size, sequence range, message count, and a digest of the block state.
+// block index, size, sequence range, message count, and a digest of the block contents.
 func (fs *fileStore) BlocksInfo() []BlockInfo {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
@@ -8501,6 +8501,11 @@ func (fs *fileStore) BlocksInfo() []BlockInfo {
 	infos := make([]BlockInfo, 0, len(fs.blks))
 	for _, mb := range fs.blks {
 		mb.mu.RLock()
+		// Skip blocks with no messages.
+		if mb.msgs == 0 {
+			mb.mu.RUnlock()
+			continue
+		}
 		info := BlockInfo{
 			Index:    mb.index,
 			Bytes:    mb.bytes,
@@ -8512,28 +8517,29 @@ func (fs *fileStore) BlocksInfo() []BlockInfo {
 		mb.mu.RUnlock()
 		infos = append(infos, info)
 	}
+	if len(infos) == 0 {
+		return nil
+	}
 	return infos
 }
 
-// computeDigest computes a digest for the message block that represents its current state.
+// computeDigest computes a digest for the message block based on its actual contents.
+// This reads the block file and computes a SHA256 hash of the raw data.
 // Lock should be held.
 func (mb *msgBlock) computeDigest() [8]byte {
 	var digest [8]byte
 
-	// Create a buffer with all state information.
-	// first.seq (8) + first.ts (8) + last.seq (8) + last.ts (8) + msgs (8) + bytes (8) + lchk (8) = 56 bytes
-	var buf [56]byte
-	le := binary.LittleEndian
-	le.PutUint64(buf[0:8], atomic.LoadUint64(&mb.first.seq))
-	le.PutUint64(buf[8:16], uint64(mb.first.ts))
-	le.PutUint64(buf[16:24], atomic.LoadUint64(&mb.last.seq))
-	le.PutUint64(buf[24:32], uint64(mb.last.ts))
-	le.PutUint64(buf[32:40], mb.msgs)
-	le.PutUint64(buf[40:48], mb.bytes)
-	copy(buf[48:56], mb.lchk[:])
+	// Read the block file contents.
+	buf, err := mb.loadBlock(nil)
+	if err != nil {
+		// If we can't read the block, return a zero digest.
+		return digest
+	}
+	// Return the buffer to the pool when done.
+	defer recycleMsgBlockBuf(buf)
 
-	// Use SHA256 and take first 8 bytes for the digest.
-	h := sha256.Sum256(buf[:])
+	// Use SHA256 of the block contents and take first 8 bytes for the digest.
+	h := sha256.Sum256(buf)
 	copy(digest[:], h[:8])
 	return digest
 }
