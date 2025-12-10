@@ -318,99 +318,6 @@ const (
 var denyAllClientJs = []string{jsAllAPI, "$KV.>", "$OBJ.>"}
 var denyAllJs = []string{jscAllSubj, raftAllSubj, jsAllAPI, "$KV.>", "$OBJ.>"}
 
-// jsAPITypeForSubject returns the JSAPIType for a given subject.
-// This is used for traffic tracking on JetStream API calls.
-func jsAPITypeForSubject(subject string) JSAPIType {
-	// Handle $JS.ACK.* subjects
-	if strings.HasPrefix(subject, jsAckPre) {
-		return JSAPIAck
-	}
-	// Handle $JS.FC.* subjects (flow control)
-	if strings.HasPrefix(subject, jsFlowControlPre) {
-		return JSAPIFlowControl
-	}
-	// Handle $JS.API.* subjects
-	if !strings.HasPrefix(subject, JSApiPrefix) {
-		return JSAPIUnknown
-	}
-
-	// Remove the $JS.API. prefix to simplify matching
-	suffix := subject[len(JSApiPrefix)+1:] // +1 for the dot
-
-	switch {
-	case suffix == "INFO":
-		return JSAPIInfo
-
-	// Stream operations
-	case strings.HasPrefix(suffix, "STREAM.CREATE."):
-		return JSAPIStreamCreate
-	case strings.HasPrefix(suffix, "STREAM.UPDATE."):
-		return JSAPIStreamUpdate
-	case suffix == "STREAM.NAMES":
-		return JSAPIStreamNames
-	case suffix == "STREAM.LIST":
-		return JSAPIStreamList
-	case strings.HasPrefix(suffix, "STREAM.INFO."):
-		return JSAPIStreamInfo
-	case strings.HasPrefix(suffix, "STREAM.DELETE."):
-		return JSAPIStreamDelete
-	case strings.HasPrefix(suffix, "STREAM.PURGE."):
-		return JSAPIStreamPurge
-	case strings.HasPrefix(suffix, "STREAM.SNAPSHOT."):
-		return JSAPIStreamSnapshot
-	case strings.HasPrefix(suffix, "STREAM.RESTORE."):
-		return JSAPIStreamRestore
-	case strings.HasPrefix(suffix, "STREAM.PEER.REMOVE."):
-		return JSAPIStreamRemovePeer
-	case strings.HasPrefix(suffix, "STREAM.LEADER.STEPDOWN."):
-		return JSAPIStreamLeaderStepdown
-	case strings.HasPrefix(suffix, "STREAM.MSG.DELETE."):
-		return JSAPIStreamMsgDelete
-	case strings.HasPrefix(suffix, "STREAM.MSG.GET."):
-		return JSAPIStreamMsgGet
-
-	// Consumer operations
-	case strings.HasPrefix(suffix, "CONSUMER.CREATE."):
-		return JSAPIConsumerCreate
-	case strings.HasPrefix(suffix, "CONSUMER.DURABLE.CREATE."):
-		return JSAPIConsumerCreate
-	case strings.HasPrefix(suffix, "CONSUMER.NAMES."):
-		return JSAPIConsumerNames
-	case strings.HasPrefix(suffix, "CONSUMER.LIST."):
-		return JSAPIConsumerList
-	case strings.HasPrefix(suffix, "CONSUMER.INFO."):
-		return JSAPIConsumerInfo
-	case strings.HasPrefix(suffix, "CONSUMER.DELETE."):
-		return JSAPIConsumerDelete
-	case strings.HasPrefix(suffix, "CONSUMER.PAUSE."):
-		return JSAPIConsumerPause
-	case strings.HasPrefix(suffix, "CONSUMER.MSG.NEXT."):
-		return JSAPIConsumerMsgNext
-	case strings.HasPrefix(suffix, "CONSUMER.LEADER.STEPDOWN."):
-		return JSAPIConsumerLeaderStepdown
-	case strings.HasPrefix(suffix, "CONSUMER.UNPIN."):
-		return JSAPIConsumerUnpin
-
-	// Direct operations
-	case strings.HasPrefix(suffix, "DIRECT.GET."):
-		return JSAPIDirectGet
-
-	// Meta operations
-	case suffix == "META.LEADER.STEPDOWN":
-		return JSAPIMetaLeaderStepdown
-	case suffix == "SERVER.REMOVE":
-		return JSAPIServerRemove
-	case strings.HasPrefix(suffix, "ACCOUNT.PURGE."):
-		return JSAPIAccountPurge
-	case strings.HasPrefix(suffix, "ACCOUNT.STREAM.MOVE."):
-		return JSAPIAccountStreamMove
-	case strings.HasPrefix(suffix, "ACCOUNT.STREAM.CANCEL_MOVE."):
-		return JSAPIAccountStreamCancelMove
-	}
-
-	return JSAPIUnknown
-}
-
 func generateJSMappingTable(domain string) map[string]string {
 	mappings := map[string]string{}
 	// This set of mappings is very very very ugly.
@@ -926,9 +833,6 @@ func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, sub
 	// Increment inflight. Do this before queueing.
 	atomic.AddInt64(&js.apiInflight, 1)
 
-	// Track the API call by type for traffic stats.
-	js.trackAPICall(jsAPITypeForSubject(subject))
-
 	// Copy the state. Note the JSAPI only uses the hdr index to piece apart the
 	// header from the msg body. No other references are needed.
 	// Check pending and warn if getting backed up.
@@ -1312,6 +1216,7 @@ func (s *Server) jsAccountInfoRequest(sub *subscription, c *client, _ *Account, 
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIInfo)
 
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
@@ -1408,6 +1313,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamCreate)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -1524,6 +1430,7 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamUpdate)
 
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
@@ -1628,6 +1535,7 @@ func (s *Server) jsStreamNamesRequest(sub *subscription, c *client, _ *Account, 
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamNames)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -1760,6 +1668,7 @@ func (s *Server) jsStreamListRequest(sub *subscription, c *client, _ *Account, s
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamList)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -1878,6 +1787,7 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamInfo)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -2102,6 +2012,7 @@ func (s *Server) jsStreamLeaderStepDownRequest(sub *subscription, c *client, _ *
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamLeaderStepdown)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -2217,6 +2128,7 @@ func (s *Server) jsConsumerLeaderStepDownRequest(sub *subscription, c *client, _
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIConsumerLeaderStepdown)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -2340,6 +2252,7 @@ func (s *Server) jsStreamRemovePeerRequest(sub *subscription, c *client, _ *Acco
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamRemovePeer)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -3135,6 +3048,7 @@ func (s *Server) jsStreamDeleteRequest(sub *subscription, c *client, _ *Account,
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamDelete)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -3208,6 +3122,7 @@ func (s *Server) jsMsgDeleteRequest(sub *subscription, c *client, _ *Account, su
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamMsgDelete)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -3332,6 +3247,7 @@ func (s *Server) jsMsgGetRequest(sub *subscription, c *client, _ *Account, subje
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamMsgGet)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -3488,6 +3404,7 @@ func (s *Server) jsConsumerUnpinRequest(sub *subscription, c *client, _ *Account
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIConsumerUnpin)
 
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
@@ -3628,6 +3545,7 @@ func (s *Server) jsStreamPurgeRequest(sub *subscription, c *client, _ *Account, 
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamPurge)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -3777,6 +3695,7 @@ func (s *Server) jsStreamRestoreRequest(sub *subscription, c *client, _ *Account
 	if c == nil || !s.JetStreamIsLeader() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamRestore)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -4062,6 +3981,7 @@ func (s *Server) jsStreamSnapshotRequest(sub *subscription, c *client, _ *Accoun
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIStreamSnapshot)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -4302,6 +4222,7 @@ func (s *Server) jsConsumerCreateRequest(sub *subscription, c *client, a *Accoun
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIConsumerCreate)
 
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
@@ -4525,6 +4446,7 @@ func (s *Server) jsConsumerNamesRequest(sub *subscription, c *client, _ *Account
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIConsumerNames)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -4651,6 +4573,7 @@ func (s *Server) jsConsumerListRequest(sub *subscription, c *client, _ *Account,
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIConsumerList)
 
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
@@ -4766,6 +4689,7 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIConsumerInfo)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -4971,6 +4895,7 @@ func (s *Server) jsConsumerDeleteRequest(sub *subscription, c *client, _ *Accoun
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIConsumerDelete)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
@@ -5048,6 +4973,7 @@ func (s *Server) jsConsumerPauseRequest(sub *subscription, c *client, _ *Account
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIConsumerPause)
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)

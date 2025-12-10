@@ -2630,6 +2630,13 @@ func (js *jetStream) trackAPICall(apiType JSAPIType) {
 	}
 }
 
+// trackAPICall increments the traffic counter for the given API type via the server's JetStream instance.
+func (s *Server) trackAPICall(apiType JSAPIType) {
+	if js := s.getJetStream(); js != nil {
+		js.trackAPICall(apiType)
+	}
+}
+
 // apiTrafficStats returns the current traffic statistics for all JS API types.
 func (js *jetStream) apiTrafficStats() *JSAPITrafficStats {
 	return &JSAPITrafficStats{
