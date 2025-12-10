@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -99,6 +100,104 @@ type JetStreamAPIStats struct {
 	Inflight uint64 `json:"inflight,omitempty"` // Inflight are the number of API requests currently being served
 }
 
+// JSAPIType identifies the type of JetStream API call for traffic tracking
+type JSAPIType int
+
+// JetStream API types for traffic tracking
+const (
+	JSAPIInfo JSAPIType = iota
+	JSAPIStreamCreate
+	JSAPIStreamUpdate
+	JSAPIStreamNames
+	JSAPIStreamList
+	JSAPIStreamInfo
+	JSAPIStreamDelete
+	JSAPIStreamPurge
+	JSAPIStreamSnapshot
+	JSAPIStreamRestore
+	JSAPIStreamRemovePeer
+	JSAPIStreamLeaderStepdown
+	JSAPIStreamMsgDelete
+	JSAPIStreamMsgGet
+	JSAPIConsumerCreate
+	JSAPIConsumerNames
+	JSAPIConsumerList
+	JSAPIConsumerInfo
+	JSAPIConsumerDelete
+	JSAPIConsumerPause
+	JSAPIConsumerLeaderStepdown
+	JSAPIConsumerMsgNext
+	JSAPIConsumerUnpin
+	JSAPIDirectGet
+	JSAPIMetaLeaderStepdown
+	JSAPIServerRemove
+	JSAPIAccountPurge
+	JSAPIAccountStreamMove
+	JSAPIAccountStreamCancelMove
+	JSAPIAck
+	JSAPIFlowControl
+	JSAPIHeartbeat
+	JSAPIUnknown
+	JSAPITypeCount // Must be last, used to size the array
+)
+
+// JSAPIOpStats holds count and latency percentiles for a single API operation
+type JSAPIOpStats struct {
+	Count uint64 `json:"count,omitempty"`
+	P50   int64  `json:"p50,omitempty"`
+	P90   int64  `json:"p90,omitempty"`
+	P99   int64  `json:"p99,omitempty"`
+}
+
+// JSAPITrafficStats is a map of API operation name to its statistics
+type JSAPITrafficStats map[string]*JSAPIOpStats
+
+// jsAPITypeNames maps JSAPIType to its JSON field name
+var jsAPITypeNames = [JSAPITypeCount]string{
+	JSAPIInfo:                    "info",
+	JSAPIStreamCreate:            "stream_create",
+	JSAPIStreamUpdate:            "stream_update",
+	JSAPIStreamNames:             "stream_names",
+	JSAPIStreamList:              "stream_list",
+	JSAPIStreamInfo:              "stream_info",
+	JSAPIStreamDelete:            "stream_delete",
+	JSAPIStreamPurge:             "stream_purge",
+	JSAPIStreamSnapshot:          "stream_snapshot",
+	JSAPIStreamRestore:           "stream_restore",
+	JSAPIStreamRemovePeer:        "stream_remove_peer",
+	JSAPIStreamLeaderStepdown:    "stream_leader_stepdown",
+	JSAPIStreamMsgDelete:         "stream_msg_delete",
+	JSAPIStreamMsgGet:            "stream_msg_get",
+	JSAPIConsumerCreate:          "consumer_create",
+	JSAPIConsumerNames:           "consumer_names",
+	JSAPIConsumerList:            "consumer_list",
+	JSAPIConsumerInfo:            "consumer_info",
+	JSAPIConsumerDelete:          "consumer_delete",
+	JSAPIConsumerPause:           "consumer_pause",
+	JSAPIConsumerLeaderStepdown:  "consumer_leader_stepdown",
+	JSAPIConsumerMsgNext:         "consumer_msg_next",
+	JSAPIConsumerUnpin:           "consumer_unpin",
+	JSAPIDirectGet:               "direct_get",
+	JSAPIMetaLeaderStepdown:      "meta_leader_stepdown",
+	JSAPIServerRemove:            "server_remove",
+	JSAPIAccountPurge:            "account_purge",
+	JSAPIAccountStreamMove:       "account_stream_move",
+	JSAPIAccountStreamCancelMove: "account_stream_cancel_move",
+	JSAPIAck:                     "ack",
+	JSAPIFlowControl:             "flow_control",
+	JSAPIHeartbeat:               "heartbeat",
+	JSAPIUnknown:                 "unknown",
+}
+
+// jsAPILatencyTracker tracks latencies for a single API type using a circular buffer
+type jsAPILatencyTracker struct {
+	mu      sync.Mutex
+	samples []int64 // latencies in microseconds
+	pos     int     // current position in circular buffer
+}
+
+const jsAPILatencySampleSize = 1000 // Number of samples to keep per API type
+
 // This is for internal accounting for JetStream for this server.
 type jetStream struct {
 	// These are here first because of atomics on 32bit systems.
@@ -109,9 +208,18 @@ type jetStream struct {
 	storeReserved int64
 	memUsed       int64
 	storeUsed     int64
-	queueLimit    int64
-	clustered     int32
-	mu            sync.RWMutex
+	queueLimit      int64
+	acksTotal       int64 // Dedicated counter for ACKs (highest traffic)
+	heartbeatsTotal int64 // Dedicated counter for outgoing idle heartbeats
+	clustered       int32
+
+	// Traffic counters for each JS API type (must be 64-bit aligned for atomics on 32-bit systems)
+	apiTraffic [JSAPITypeCount]int64
+
+	// Latency trackers for each JS API type (excluding ACK, FlowControl, Heartbeat, Unknown)
+	apiLatency [JSAPITypeCount]*jsAPILatencyTracker
+
+	mu sync.RWMutex
 	srv           *Server
 	config        JetStreamConfig
 	cluster       *jetStreamCluster
@@ -413,6 +521,8 @@ func (s *Server) initJetStreamEncryption() (err error) {
 // enableJetStream will start up the JetStream subsystem.
 func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 	js := &jetStream{srv: s, config: cfg, accounts: make(map[string]*jsAccount), apiSubs: NewSublistNoCache()}
+	js.initAPILatencyTracking()
+
 	s.gcbMu.Lock()
 	if s.gcbOutMax = s.getOpts().JetStreamMaxCatchup; s.gcbOutMax == 0 {
 		s.gcbOutMax = defaultMaxTotalCatchupOutBytes
@@ -2539,6 +2649,138 @@ func (js *jetStream) usageStats() *JetStreamStats {
 	stats.Store = uint64(used)
 	stats.HAAssets = s.numRaftNodes()
 	return &stats
+}
+
+// initAPILatencyTracking initializes latency trackers for all API types that support latency tracking.
+// ACK, FlowControl, Heartbeat, and Unknown are excluded as they are one-way or don't need tracking.
+func (js *jetStream) initAPILatencyTracking() {
+	for i := JSAPIType(0); i < JSAPITypeCount; i++ {
+		if i != JSAPIAck && i != JSAPIFlowControl && i != JSAPIHeartbeat && i != JSAPIUnknown {
+			js.apiLatency[i] = &jsAPILatencyTracker{
+				samples: make([]int64, 0, jsAPILatencySampleSize),
+			}
+		}
+	}
+}
+
+func (js *jetStream) trackAPICall(apiType JSAPIType) {
+	if js == nil {
+		return
+	}
+	if apiType >= 0 && apiType < JSAPITypeCount {
+		atomic.AddInt64(&js.apiTraffic[apiType], 1)
+	}
+}
+
+// trackAPI increments the traffic counter, records the start time, and returns a function
+// that should be called via defer to record the latency when the request completes.
+func (js *jetStream) trackAPI(apiType JSAPIType) func() {
+	if js == nil {
+		return func() {}
+	}
+	atomic.AddInt64(&js.apiTraffic[apiType], 1)
+	start := time.Now()
+	return func() {
+		if tracker := js.apiLatency[apiType]; tracker != nil {
+			tracker.record(time.Since(start).Microseconds())
+		}
+	}
+}
+
+// trackAPI increments the traffic counter, records the start time, and returns a function
+// that should be called via defer to record the latency when the request completes.
+func (s *Server) trackAPI(apiType JSAPIType) func() {
+	return s.getJetStream().trackAPI(apiType)
+}
+
+// record adds a latency sample to the circular buffer.
+func (t *jsAPILatencyTracker) record(latencyMicros int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if len(t.samples) < jsAPILatencySampleSize {
+		// Buffer not full yet, append
+		t.samples = append(t.samples, latencyMicros)
+	} else {
+		// Buffer full, overwrite at current position
+		t.samples[t.pos] = latencyMicros
+		t.pos = (t.pos + 1) % jsAPILatencySampleSize
+	}
+}
+
+// percentiles calculates and returns p50, p90, p99 from the circular buffer.
+// Returns (0, 0, 0) if no samples exist.
+func (t *jsAPILatencyTracker) percentiles() (p50, p90, p99 int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	n := len(t.samples)
+	if n == 0 {
+		return 0, 0, 0
+	}
+
+	// Make a copy to avoid sorting the original
+	sorted := make([]int64, n)
+	copy(sorted, t.samples)
+	slices.Sort(sorted)
+
+	return sorted[n*50/100], sorted[n*90/100], sorted[n*99/100]
+}
+
+// trackAck increments the dedicated ACK traffic counter.
+// This is separate from apiTraffic to avoid cache line contention since ACKs are the highest traffic.
+func (js *jetStream) trackAck() {
+	if js == nil {
+		return
+	}
+	atomic.AddInt64(&js.acksTotal, 1)
+}
+
+// trackHeartbeat increments the dedicated heartbeat counter.
+// This is separate from apiTraffic to avoid cache line contention since heartbeats can be high traffic.
+func (js *jetStream) trackHeartbeat() {
+	if js == nil {
+		return
+	}
+	atomic.AddInt64(&js.heartbeatsTotal, 1)
+}
+
+// apiStats returns the current traffic statistics for all JS API types.
+func (js *jetStream) apiStats() JSAPITrafficStats {
+	stats := make(JSAPITrafficStats)
+
+	for apiType := JSAPIType(0); apiType < JSAPITypeCount; apiType++ {
+		var count uint64
+		// ACK and Heartbeat use dedicated counters
+		switch apiType {
+		case JSAPIAck:
+			count = uint64(atomic.LoadInt64(&js.acksTotal))
+		case JSAPIHeartbeat:
+			count = uint64(atomic.LoadInt64(&js.heartbeatsTotal))
+		default:
+			count = uint64(atomic.LoadInt64(&js.apiTraffic[apiType]))
+		}
+
+		// Skip if no calls recorded
+		if count == 0 {
+			continue
+		}
+
+		name := jsAPITypeNames[apiType]
+		opStats := &JSAPIOpStats{Count: count}
+
+		// Get latency percentiles if tracker exists
+		if tracker := js.apiLatency[apiType]; tracker != nil {
+			opStats.P50, opStats.P90, opStats.P99 = tracker.percentiles()
+		}
+
+		stats[name] = opStats
+	}
+
+	if len(stats) == 0 {
+		return nil
+	}
+	return stats
 }
 
 // Check to see if we have enough system resources for this account.
