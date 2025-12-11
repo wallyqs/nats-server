@@ -5084,9 +5084,9 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 
 // Lock should be held.
 func (o *consumer) sendIdleHeartbeat(subj string) {
-	// Track heartbeat for traffic stats.
+	// Track heartbeat for traffic stats using dedicated counter.
 	if o.js != nil {
-		o.js.trackAPICall(JSAPIHeartbeat)
+		o.js.trackHeartbeat()
 	}
 	const t = "NATS/1.0 100 Idle Heartbeat\r\n%s: %d\r\n%s: %d\r\n\r\n"
 	sseq, dseq := o.sseq-1, o.dseq-1
