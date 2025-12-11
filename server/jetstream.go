@@ -2644,8 +2644,8 @@ func (js *jetStream) trackAck() {
 	atomic.AddInt64(&js.acksTotal, 1)
 }
 
-// apiTrafficStats returns the current traffic statistics for all JS API types.
-func (js *jetStream) apiTrafficStats() *JSAPITrafficStats {
+// apiStats returns the current traffic statistics for all JS API types.
+func (js *jetStream) apiStats() *JSAPITrafficStats {
 	return &JSAPITrafficStats{
 		Info:                     uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIInfo])),
 		StreamCreate:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamCreate])),

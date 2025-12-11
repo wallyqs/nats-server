@@ -3235,7 +3235,7 @@ func (s *Server) Jsz(opts *JSzOptions) (*JSInfo, error) {
 	}
 
 	jsi.JetStreamStats = *js.usageStats()
-	jsi.ApiStats = js.apiTrafficStats()
+	jsi.ApiStats = js.apiStats()
 
 	// If a specific account is requested, track the index.
 	filterIdx := -1
