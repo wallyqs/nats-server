@@ -2360,6 +2360,7 @@ func (s *Server) jsLeaderServerRemoveRequest(sub *subscription, c *client, _ *Ac
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIServerRemove)
 
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
@@ -2491,6 +2492,7 @@ func (s *Server) jsLeaderServerStreamMoveRequest(sub *subscription, c *client, _
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIAccountStreamMove)
 
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
@@ -2655,6 +2657,7 @@ func (s *Server) jsLeaderServerStreamCancelMoveRequest(sub *subscription, c *cli
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIAccountStreamCancelMove)
 
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
@@ -2770,6 +2773,7 @@ func (s *Server) jsLeaderAccountPurgeRequest(sub *subscription, c *client, _ *Ac
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIAccountPurge)
 
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
@@ -2868,6 +2872,7 @@ func (s *Server) jsLeaderStepDownRequest(sub *subscription, c *client, _ *Accoun
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
+	s.trackAPICall(JSAPIMetaLeaderStepdown)
 
 	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
