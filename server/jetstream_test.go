@@ -17690,6 +17690,143 @@ func TestJetStreamBadSubjectMappingStream(t *testing.T) {
 	require_Error(t, err, NewJSStreamUpdateError(errors.New("nats: stream transform source: invalid subject events.>.*")))
 }
 
+// TestJetStreamPartitionMappingWithMultipleStreams tests that partition mappings
+// correctly route messages to different streams based on a hash of specified tokens.
+// This models a scenario where:
+// - Client publishes to orders.US.CUST001.item123
+// - Mapping transforms to orders.{partition}.US.CUST001.item123
+// - 10 streams each capture one partition (orders.0.>, orders.1.>, etc.)
+func TestJetStreamPartitionMappingWithMultipleStreams(t *testing.T) {
+	// Create config with JetStream and partition mapping
+	conf := createConfFile(t, []byte(`
+		listen: 127.0.0.1:-1
+		jetstream: { max_mem_store: 64MB, max_file_store: 10MB }
+		mappings = {
+			# Map orders.region.customer.item to orders.{partition}.region.customer.item
+			# Partition is computed from hash of region + customer (tokens 1 and 2)
+			"orders.*.*.*": "orders.{{partition(10,1,2)}}.$1.$2.$3"
+		}
+	`))
+
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create 10 streams, one for each partition
+	numPartitions := 10
+	for i := 0; i < numPartitions; i++ {
+		streamName := fmt.Sprintf("ORDERS_%d", i)
+		subject := fmt.Sprintf("orders.%d.>", i)
+		_, err := js.AddStream(&nats.StreamConfig{
+			Name:     streamName,
+			Subjects: []string{subject},
+		})
+		require_NoError(t, err)
+	}
+
+	// Helper to get message counts for all streams
+	getStreamMsgCounts := func() map[int]uint64 {
+		counts := make(map[int]uint64)
+		for i := 0; i < numPartitions; i++ {
+			info, err := js.StreamInfo(fmt.Sprintf("ORDERS_%d", i))
+			require_NoError(t, err)
+			counts[i] = info.State.Msgs
+		}
+		return counts
+	}
+
+	// Helper to find which partition received a new message
+	findNewMessagePartition := func(before, after map[int]uint64) int {
+		for i := 0; i < numPartitions; i++ {
+			if after[i] > before[i] {
+				return i
+			}
+		}
+		return -1
+	}
+
+	// Test cases with different region/customer combinations
+	testCases := []struct {
+		region   string
+		customer string
+		item     string
+	}{
+		{"US", "CUST001", "item123"},
+		{"US", "CUST001", "item456"}, // Same region+customer should go to same partition
+		{"EU", "CUST001", "item123"}, // Different region should potentially go to different partition
+		{"US", "CUST002", "item123"}, // Different customer should potentially go to different partition
+		{"APAC", "CUST003", "item789"},
+	}
+
+	// Track which partition each region+customer combo goes to
+	partitionMap := make(map[string]int)
+
+	for _, tc := range testCases {
+		sourceSubject := fmt.Sprintf("orders.%s.%s.%s", tc.region, tc.customer, tc.item)
+		key := tc.region + tc.customer
+
+		// Get counts before publishing
+		countsBefore := getStreamMsgCounts()
+
+		// Publish to the source subject
+		_, err := js.Publish(sourceSubject, []byte("test payload"))
+		require_NoError(t, err)
+
+		// Get counts after publishing
+		countsAfter := getStreamMsgCounts()
+
+		// Find which partition received the message
+		partition := findNewMessagePartition(countsBefore, countsAfter)
+		if partition == -1 {
+			t.Fatalf("Message for %s was not routed to any partition stream", sourceSubject)
+		}
+
+		// Verify deterministic routing: same key should always go to same partition
+		if prevPartition, exists := partitionMap[key]; exists {
+			if prevPartition != partition {
+				t.Fatalf("Determinism violation: key %s went to partition %d before, but %d now",
+					key, prevPartition, partition)
+			}
+		} else {
+			partitionMap[key] = partition
+		}
+
+		t.Logf("Subject %s (key=%s) -> partition %d", sourceSubject, key, partition)
+	}
+
+	// Verify that same region+customer always goes to same partition
+	// US+CUST001 should have 2 messages in its partition
+	usPartition := partitionMap["USCUST001"]
+	streamName := fmt.Sprintf("ORDERS_%d", usPartition)
+	info, err := js.StreamInfo(streamName)
+	require_NoError(t, err)
+
+	// Count how many messages for US+CUST001 key (we published 2)
+	expectedUSCUST001Msgs := uint64(2)
+	// The stream may have other messages too, but should have at least 2
+	if info.State.Msgs < expectedUSCUST001Msgs {
+		t.Fatalf("Expected at least %d messages in partition %d for US+CUST001, got %d",
+			expectedUSCUST001Msgs, usPartition, info.State.Msgs)
+	}
+
+	// Verify we can consume from the partitioned stream and see the transformed subject
+	sub, err := js.SubscribeSync(fmt.Sprintf("orders.%d.>", usPartition))
+	require_NoError(t, err)
+
+	msg, err := sub.NextMsg(time.Second)
+	require_NoError(t, err)
+
+	// The message subject should be transformed to include the partition number
+	expectedPrefix := fmt.Sprintf("orders.%d.", usPartition)
+	if !strings.HasPrefix(msg.Subject, expectedPrefix) {
+		t.Fatalf("Expected message subject to start with %q, got %q", expectedPrefix, msg.Subject)
+	}
+
+	t.Logf("Successfully received message on transformed subject: %s", msg.Subject)
+}
+
 func TestJetStreamInterestStreamWithDuplicateMessages(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
