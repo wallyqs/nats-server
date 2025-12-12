@@ -21573,6 +21573,220 @@ func TestJetStreamPromoteMirrorUpdatingOrigin(t *testing.T) {
 	t.Run("R3", func(t *testing.T) { test(t, 3) })
 }
 
+// TestJetStreamMirrorPromotionWorkflow demonstrates the full workflow of:
+// 1. Creating a stream and populating it with data
+// 2. Creating a mirror of that stream
+// 3. Creating consumers on the mirror
+// 4. Deleting the original stream
+// 5. Promoting the mirror to a regular stream
+// 6. Verifying data integrity, consumer continuity, and normal stream operations
+func TestJetStreamMirrorPromotionWorkflow(t *testing.T) {
+	test := func(t *testing.T, replicas int) {
+		var s *Server
+		if replicas == 1 {
+			s = RunBasicJetStreamServer(t)
+			defer s.Shutdown()
+		} else {
+			c := createJetStreamClusterExplicit(t, "R3S", 3)
+			defer c.shutdown()
+			s = c.randomServer()
+		}
+
+		nc, js := jsClientConnect(t, s)
+		defer nc.Close()
+
+		// Step 1: Create origin stream with subjects
+		originCfg, err := jsStreamCreate(t, nc, &StreamConfig{
+			Name:     "ORIGIN",
+			Subjects: []string{"events.>"},
+			Storage:  FileStorage,
+			Replicas: replicas,
+		})
+		require_NoError(t, err)
+		require_Equal(t, originCfg.Name, "ORIGIN")
+
+		// Step 2: Populate origin stream with messages
+		numMessages := 100
+		for i := 1; i <= numMessages; i++ {
+			data := fmt.Sprintf("message-%d", i)
+			pubAck, err := js.Publish("events.test", []byte(data))
+			require_NoError(t, err)
+			require_Equal(t, pubAck.Sequence, uint64(i))
+		}
+
+		// Verify origin stream has all messages
+		si, err := js.StreamInfo("ORIGIN")
+		require_NoError(t, err)
+		require_Equal(t, si.State.Msgs, uint64(numMessages))
+
+		// Step 3: Create mirror stream
+		mirrorCfg := &StreamConfig{
+			Name:     "MIRROR",
+			Mirror:   &StreamSource{Name: "ORIGIN"},
+			Storage:  FileStorage,
+			Replicas: replicas,
+		}
+		mirrorCfg, err = jsStreamCreate(t, nc, mirrorCfg)
+		require_NoError(t, err)
+		require_NotEqual(t, mirrorCfg.Mirror, nil)
+
+		// Wait for mirror to catch up with all messages
+		checkFor(t, 10*time.Second, 200*time.Millisecond, func() error {
+			si, err := js.StreamInfo("MIRROR")
+			if err != nil {
+				return err
+			}
+			if si.State.Msgs != uint64(numMessages) {
+				return fmt.Errorf("mirror has %d messages, expected %d", si.State.Msgs, numMessages)
+			}
+			return nil
+		})
+
+		// Step 4: Create a durable consumer on the mirror
+		consumerCfg := &nats.ConsumerConfig{
+			Durable:       "test-consumer",
+			AckPolicy:     nats.AckExplicitPolicy,
+			DeliverPolicy: nats.DeliverAllPolicy,
+		}
+		consumer, err := js.AddConsumer("MIRROR", consumerCfg)
+		require_NoError(t, err)
+		require_Equal(t, consumer.Name, "test-consumer")
+
+		// Consume some messages to establish consumer state
+		sub, err := js.PullSubscribe("", "test-consumer", nats.Bind("MIRROR", "test-consumer"))
+		require_NoError(t, err)
+
+		consumedBefore := 50
+		msgs, err := sub.Fetch(consumedBefore)
+		require_NoError(t, err)
+		require_Equal(t, len(msgs), consumedBefore)
+
+		// Ack all fetched messages
+		for _, msg := range msgs {
+			err = msg.Ack()
+			require_NoError(t, err)
+		}
+
+		// Verify consumer state before promotion (wait for acks to propagate in cluster)
+		var ci *nats.ConsumerInfo
+		checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+			ci, err = js.ConsumerInfo("MIRROR", "test-consumer")
+			if err != nil {
+				return err
+			}
+			if ci.AckFloor.Consumer != uint64(consumedBefore) {
+				return fmt.Errorf("ack floor is %d, expected %d", ci.AckFloor.Consumer, consumedBefore)
+			}
+			return nil
+		})
+
+		// Step 5: Verify mirror status shows connection to origin
+		si, err = js.StreamInfo("MIRROR")
+		require_NoError(t, err)
+		require_NotEqual(t, si.Mirror, nil)
+		require_Equal(t, si.Mirror.Name, "ORIGIN")
+
+		// Step 6: Delete the origin stream
+		err = js.DeleteStream("ORIGIN")
+		require_NoError(t, err)
+
+		// Verify origin is gone
+		_, err = js.StreamInfo("ORIGIN")
+		require_Error(t, err)
+
+		// Step 7: Promote the mirror by removing mirror config and adding subjects
+		mirrorCfg.Mirror = nil
+		mirrorCfg.Subjects = []string{"events.>"}
+		mirrorCfg, err = jsStreamUpdate(t, nc, mirrorCfg)
+		require_NoError(t, err)
+		require_Equal(t, mirrorCfg.Mirror, nil)
+		require_Len(t, len(mirrorCfg.Subjects), 1)
+		require_Equal(t, mirrorCfg.Subjects[0], "events.>")
+
+		// Step 8: Verify mirror status is cleared
+		checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+			si, err := js.StreamInfo("MIRROR")
+			if err != nil {
+				return err
+			}
+			if si.Mirror != nil {
+				return fmt.Errorf("expecting no mirror status, got %+v", si.Mirror)
+			}
+			return nil
+		})
+
+		// Step 9: Verify all original data is preserved
+		si, err = js.StreamInfo("MIRROR")
+		require_NoError(t, err)
+		require_Equal(t, si.State.Msgs, uint64(numMessages))
+		require_Equal(t, si.State.FirstSeq, uint64(1))
+		require_Equal(t, si.State.LastSeq, uint64(numMessages))
+
+		// Verify message content is intact
+		msg, err := js.GetMsg("MIRROR", 1)
+		require_NoError(t, err)
+		require_Equal(t, string(msg.Data), "message-1")
+
+		msg, err = js.GetMsg("MIRROR", uint64(numMessages))
+		require_NoError(t, err)
+		require_Equal(t, string(msg.Data), fmt.Sprintf("message-%d", numMessages))
+
+		// Step 10: Verify consumer still works after promotion
+		ci, err = js.ConsumerInfo("MIRROR", "test-consumer")
+		require_NoError(t, err)
+		require_Equal(t, ci.AckFloor.Consumer, uint64(consumedBefore))
+		require_Equal(t, ci.NumPending, uint64(numMessages-consumedBefore))
+
+		// Consume remaining messages through the existing consumer
+		remainingMsgs, err := sub.Fetch(numMessages - consumedBefore)
+		require_NoError(t, err)
+		require_Equal(t, len(remainingMsgs), numMessages-consumedBefore)
+
+		// Verify message content
+		require_Equal(t, string(remainingMsgs[0].Data), fmt.Sprintf("message-%d", consumedBefore+1))
+
+		// Ack remaining messages
+		for _, m := range remainingMsgs {
+			err = m.Ack()
+			require_NoError(t, err)
+		}
+
+		// Step 11: Verify the promoted stream accepts new publishes
+		newMessages := 10
+		for i := 1; i <= newMessages; i++ {
+			data := fmt.Sprintf("new-message-%d", i)
+			pubAck, err := js.Publish("events.test", []byte(data))
+			require_NoError(t, err)
+			require_Equal(t, pubAck.Sequence, uint64(numMessages+i))
+		}
+
+		// Verify stream state after new publishes
+		si, err = js.StreamInfo("MIRROR")
+		require_NoError(t, err)
+		require_Equal(t, si.State.Msgs, uint64(numMessages+newMessages))
+		require_Equal(t, si.State.LastSeq, uint64(numMessages+newMessages))
+
+		// Step 12: Verify new messages are available through consumer
+		newMsgs, err := sub.Fetch(newMessages)
+		require_NoError(t, err)
+		require_Equal(t, len(newMsgs), newMessages)
+		require_Equal(t, string(newMsgs[0].Data), "new-message-1")
+
+		// Step 13: Create a new consumer on the promoted stream
+		newConsumerCfg := &nats.ConsumerConfig{
+			Durable:       "new-consumer",
+			AckPolicy:     nats.AckExplicitPolicy,
+			DeliverPolicy: nats.DeliverAllPolicy,
+		}
+		newConsumer, err := js.AddConsumer("MIRROR", newConsumerCfg)
+		require_NoError(t, err)
+		require_Equal(t, newConsumer.NumPending, uint64(numMessages+newMessages))
+	}
+
+	t.Run("R1", func(t *testing.T) { test(t, 1) })
+	t.Run("R3", func(t *testing.T) { test(t, 3) })
+}
+
 func TestJetStreamScheduledMirrorOrSource(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
