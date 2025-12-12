@@ -2922,3 +2922,129 @@ func TestJetStreamAtomicBatchPublishCommitUnsupported(t *testing.T) {
 	require_NoError(t, err)
 	require_Len(t, len(sliceHeader(JSRequiredApiLevel, sm.Header)), 0)
 }
+
+func TestJetStreamAtomicBatchStatsMetric(t *testing.T) {
+	// Set a short timeout for testing expired batches.
+	streamMaxBatchTimeout = 500 * time.Millisecond
+	defer func() {
+		streamMaxBatchTimeout = streamDefaultMaxBatchTimeout
+	}()
+
+	// Reset global counters to ensure clean state for this test.
+	globalCompletedBatches.Store(0)
+	globalErroredBatches.Store(0)
+	globalExpiredBatches.Store(0)
+
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, _ := jsClientConnect(t, s)
+	defer nc.Close()
+
+	cfg := &StreamConfig{
+		Name:               "TEST",
+		Subjects:           []string{"foo"},
+		Storage:            FileStorage,
+		AllowAtomicPublish: true,
+	}
+	_, err := jsStreamCreate(t, nc, cfg)
+	require_NoError(t, err)
+
+	// Initially there should be no batch stats.
+	jsz, err := s.Jsz(nil)
+	require_NoError(t, err)
+	require_NotNil(t, jsz.Batches)
+	require_Equal(t, jsz.Batches.Inflight, 0)
+	require_Equal(t, jsz.Batches.Total, 0)
+	require_Equal(t, jsz.Batches.Completed, 0)
+	require_Equal(t, jsz.Batches.Errored, 0)
+	require_Equal(t, jsz.Batches.Expired, 0)
+
+	// Start a batch without committing it.
+	m := nats.NewMsg("foo")
+	m.Header.Set("Nats-Batch-Id", "batch1")
+	m.Header.Set("Nats-Batch-Sequence", "1")
+	require_NoError(t, nc.PublishMsg(m))
+
+	// Should now have 1 inflight batch.
+	jsz, err = s.Jsz(nil)
+	require_NoError(t, err)
+	require_Equal(t, jsz.Batches.Inflight, 1)
+
+	// Start another batch.
+	m = nats.NewMsg("foo")
+	m.Header.Set("Nats-Batch-Id", "batch2")
+	m.Header.Set("Nats-Batch-Sequence", "1")
+	require_NoError(t, nc.PublishMsg(m))
+
+	// Should now have 2 inflight batches.
+	jsz, err = s.Jsz(nil)
+	require_NoError(t, err)
+	require_Equal(t, jsz.Batches.Inflight, 2)
+
+	// Commit first batch.
+	m = nats.NewMsg("foo")
+	m.Header.Set("Nats-Batch-Id", "batch1")
+	m.Header.Set("Nats-Batch-Sequence", "2")
+	m.Header.Set("Nats-Batch-Commit", "1")
+	_, err = nc.RequestMsg(m, time.Second)
+	require_NoError(t, err)
+
+	// Should now have 1 inflight batch and 1 completed (total=1).
+	jsz, err = s.Jsz(nil)
+	require_NoError(t, err)
+	require_Equal(t, jsz.Batches.Inflight, 1)
+	require_Equal(t, jsz.Batches.Total, 1)
+	require_Equal(t, jsz.Batches.Completed, 1)
+
+	// Let batch2 expire by waiting for the timeout.
+	time.Sleep(600 * time.Millisecond)
+
+	// Should now have 0 inflight, 1 completed, and 1 expired (total=2).
+	jsz, err = s.Jsz(nil)
+	require_NoError(t, err)
+	require_Equal(t, jsz.Batches.Inflight, 0)
+	require_Equal(t, jsz.Batches.Total, 2)
+	require_Equal(t, jsz.Batches.Completed, 1)
+	require_Equal(t, jsz.Batches.Expired, 1)
+
+	// Test errored batch by sending with a gap in sequence.
+	m = nats.NewMsg("foo")
+	m.Header.Set("Nats-Batch-Id", "batch3")
+	m.Header.Set("Nats-Batch-Sequence", "1")
+	require_NoError(t, nc.PublishMsg(m))
+
+	// Send sequence 3 instead of 2 to create a gap.
+	m = nats.NewMsg("foo")
+	m.Header.Set("Nats-Batch-Id", "batch3")
+	m.Header.Set("Nats-Batch-Sequence", "3")
+	m.Header.Set("Nats-Batch-Commit", "1")
+	_, err = nc.RequestMsg(m, time.Second)
+	require_NoError(t, err)
+
+	// Should now have 0 inflight, 1 completed, 1 errored, and 1 expired (total=3).
+	jsz, err = s.Jsz(nil)
+	require_NoError(t, err)
+	require_Equal(t, jsz.Batches.Inflight, 0)
+	require_Equal(t, jsz.Batches.Total, 3)
+	require_Equal(t, jsz.Batches.Completed, 1)
+	require_Equal(t, jsz.Batches.Errored, 1)
+	require_Equal(t, jsz.Batches.Expired, 1)
+
+	// Commit another successful batch.
+	m = nats.NewMsg("foo")
+	m.Header.Set("Nats-Batch-Id", "batch4")
+	m.Header.Set("Nats-Batch-Sequence", "1")
+	m.Header.Set("Nats-Batch-Commit", "1")
+	_, err = nc.RequestMsg(m, time.Second)
+	require_NoError(t, err)
+
+	// Should now have 0 inflight, 2 completed, 1 errored, and 1 expired (total=4).
+	jsz, err = s.Jsz(nil)
+	require_NoError(t, err)
+	require_Equal(t, jsz.Batches.Inflight, 0)
+	require_Equal(t, jsz.Batches.Total, 4)
+	require_Equal(t, jsz.Batches.Completed, 2)
+	require_Equal(t, jsz.Batches.Errored, 1)
+	require_Equal(t, jsz.Batches.Expired, 1)
+}

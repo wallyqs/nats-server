@@ -2990,6 +2990,15 @@ type MetaClusterInfo struct {
 	Snapshot *MetaSnapshotStats `json:"snapshot"`           // Snapshot contains meta snapshot statistics
 }
 
+// BatchStats contains statistics about atomic batch publishing.
+type BatchStats struct {
+	Inflight  int    `json:"inflight"`
+	Total     uint64 `json:"total"`
+	Completed uint64 `json:"completed"`
+	Errored   uint64 `json:"errored"`
+	Expired   uint64 `json:"expired"`
+}
+
 // JSInfo has detailed information on JetStream.
 type JSInfo struct {
 	JetStreamStats
@@ -3004,6 +3013,7 @@ type JSInfo struct {
 	ConsumersLeader int              `json:"consumers_leader,omitempty"`
 	Messages        uint64           `json:"messages"`
 	Bytes           uint64           `json:"bytes"`
+	Batches         *BatchStats      `json:"batches,omitempty"`
 	Meta            *MetaClusterInfo `json:"meta_cluster,omitempty"`
 	AccountDetails  []*AccountDetail `json:"account_details,omitempty"`
 	Total           int              `json:"total"`
@@ -3234,6 +3244,16 @@ func (s *Server) Jsz(opts *JSzOptions) (*JSInfo, error) {
 	}
 
 	jsi.JetStreamStats = *js.usageStats()
+	completed := globalCompletedBatches.Load()
+	errored := globalErroredBatches.Load()
+	expired := globalExpiredBatches.Load()
+	jsi.Batches = &BatchStats{
+		Inflight:  int(globalInflightBatches.Load()),
+		Total:     completed + errored + expired,
+		Completed: completed,
+		Errored:   errored,
+		Expired:   expired,
+	}
 
 	// If a specific account is requested, track the index.
 	filterIdx := -1

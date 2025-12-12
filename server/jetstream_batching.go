@@ -29,7 +29,10 @@ import (
 
 var (
 	// Tracks the total inflight batches, across all streams and accounts that enable batching.
-	globalInflightBatches atomic.Int32
+	globalInflightBatches  atomic.Int32
+	globalCompletedBatches atomic.Uint64
+	globalErroredBatches   atomic.Uint64
+	globalExpiredBatches   atomic.Uint64
 )
 
 type batching struct {
@@ -58,6 +61,7 @@ func (batches *batching) newBatchGroup(mset *stream, batchId string) (*batchGrou
 	}
 	b.timer = time.AfterFunc(timeout, func() {
 		b.cleanup(batchId, batches)
+		globalExpiredBatches.Add(1)
 		mset.sendStreamBatchAbandonedAdvisory(batchId, BatchTimeout)
 	})
 	return b, nil

@@ -6447,6 +6447,7 @@ func (mset *stream) processJetStreamBatchMsg(batchId, subject, reply string, hdr
 	b.lseq++
 	if b.lseq != batchSeq {
 		b.cleanupLocked(batchId, batches)
+		globalErroredBatches.Add(1)
 		batches.mu.Unlock()
 		mset.sendStreamBatchAbandonedAdvisory(batchId, BatchIncomplete)
 		return respondIncompleteBatch()
@@ -6459,6 +6460,7 @@ func (mset *stream) processJetStreamBatchMsg(batchId, subject, reply string, hdr
 	}
 	if batchSeq > uint64(maxSize) {
 		b.cleanupLocked(batchId, batches)
+		globalErroredBatches.Add(1)
 		batches.mu.Unlock()
 		mset.sendStreamBatchAbandonedAdvisory(batchId, BatchLarge)
 		err := NewJSAtomicPublishTooLargeBatchError(maxSize)
@@ -6475,6 +6477,7 @@ func (mset *stream) processJetStreamBatchMsg(batchId, subject, reply string, hdr
 		seq, _, err := b.store.StoreMsg(subject, hdr, msg, 0)
 		if err != nil || seq != batchSeq {
 			b.cleanupLocked(batchId, batches)
+			globalErroredBatches.Add(1)
 			batches.mu.Unlock()
 			mset.sendStreamBatchAbandonedAdvisory(batchId, BatchIncomplete)
 			return respondIncompleteBatch()
@@ -6665,6 +6668,7 @@ func (mset *stream) processJetStreamBatchMsg(batchId, subject, reply string, hdr
 		mset.clMu.Unlock()
 	}
 	b.cleanupLocked(batchId, batches)
+	globalCompletedBatches.Add(1)
 	batches.mu.Unlock()
 	return nil
 }
