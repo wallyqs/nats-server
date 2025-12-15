@@ -2873,6 +2873,168 @@ func TestJetStreamClusterMirrorAndSourceCrossNonNeighboringDomain(t *testing.T) 
 	})
 }
 
+// TestJetStreamCrossDomainMirrorOverLeafnode tests mirroring a stream from
+// one JetStream domain to another over a leafnode connection.
+// Server A (domain A) has a stream FOO listening on "foo.>"
+// Server B (domain B) connects via leafnode and creates FOO_M mirroring FOO from domain A
+func TestJetStreamCrossDomainMirrorOverLeafnode(t *testing.T) {
+	// Server A: JetStream domain "A" with leafnode port open
+	storeDirA := t.TempDir()
+	confA := createConfFile(t, []byte(fmt.Sprintf(`
+		listen: 127.0.0.1:-1
+		server_name: server_A
+		jetstream: {max_mem_store: 256MB, max_file_store: 256MB, domain: A, store_dir: '%s'}
+		accounts {
+			JS: { jetstream: enable, users: [ {user: js, password: js} ] }
+			SYS: { users: [ {user: sys, password: sys} ] }
+		}
+		system_account: SYS
+		no_auth_user: js
+		leafnodes: {
+			listen: 127.0.0.1:-1
+		}
+	`, storeDirA)))
+	serverA, _ := RunServerWithConfig(confA)
+	defer serverA.Shutdown()
+
+	// Server B: JetStream domain "B" connecting to Server A via leafnode
+	storeDirB := t.TempDir()
+	confB := createConfFile(t, []byte(fmt.Sprintf(`
+		listen: 127.0.0.1:-1
+		server_name: server_B
+		jetstream: {max_mem_store: 256MB, max_file_store: 256MB, domain: B, store_dir: '%s'}
+		accounts {
+			JS: { jetstream: enable, users: [ {user: js, password: js} ] }
+			SYS: { users: [ {user: sys, password: sys} ] }
+		}
+		system_account: SYS
+		no_auth_user: js
+		leafnodes: {
+			remotes: [
+				{ url: nats://js:js@127.0.0.1:%d, account: JS },
+				{ url: nats://sys:sys@127.0.0.1:%d, account: SYS }
+			]
+		}
+	`, storeDirB, serverA.opts.LeafNode.Port, serverA.opts.LeafNode.Port)))
+	serverB, _ := RunServerWithConfig(confB)
+	defer serverB.Shutdown()
+
+	// Wait for leafnode connections to be established
+	// Server A should have 2 leafnode connections (JS and SYS accounts from Server B)
+	checkLeafNodeConnectedCount(t, serverA, 2)
+	checkLeafNodeConnectedCount(t, serverB, 2)
+
+	// Connect to Server A and create stream FOO
+	ncA := natsConnect(t, serverA.ClientURL())
+	defer ncA.Close()
+	jsA, err := ncA.JetStream(nats.Domain("A"))
+	require_NoError(t, err)
+
+	// Verify we're connected to domain A
+	aiA, err := jsA.AccountInfo()
+	require_NoError(t, err)
+	require_Equal(t, aiA.Domain, "A")
+
+	// Create stream FOO on Server A listening on "foo.>"
+	_, err = jsA.AddStream(&nats.StreamConfig{
+		Name:     "FOO",
+		Subjects: []string{"foo.>"},
+		Storage:  nats.FileStorage,
+	})
+	require_NoError(t, err)
+
+	// Publish some messages to FOO on Server A
+	numMessages := 10
+	for i := 1; i <= numMessages; i++ {
+		_, err = jsA.Publish("foo.bar", []byte(fmt.Sprintf("message-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Verify FOO has all messages
+	siA, err := jsA.StreamInfo("FOO")
+	require_NoError(t, err)
+	require_Equal(t, siA.State.Msgs, uint64(numMessages))
+
+	// Connect to Server B and create mirror stream FOO_M
+	ncB := natsConnect(t, serverB.ClientURL())
+	defer ncB.Close()
+	jsB, err := ncB.JetStream(nats.Domain("B"))
+	require_NoError(t, err)
+
+	// Verify we're connected to domain B
+	aiB, err := jsB.AccountInfo()
+	require_NoError(t, err)
+	require_Equal(t, aiB.Domain, "B")
+
+	// Create stream FOO_M on Server B that mirrors FOO from domain A
+	_, err = jsB.AddStream(&nats.StreamConfig{
+		Name:    "FOO_M",
+		Storage: nats.FileStorage,
+		Mirror: &nats.StreamSource{
+			Name: "FOO",
+			External: &nats.ExternalStream{
+				APIPrefix: "$JS.A.API", // Reference domain A
+			},
+		},
+	})
+	require_NoError(t, err)
+
+	// Wait for mirror to sync all messages from FOO
+	checkFor(t, 10*time.Second, 250*time.Millisecond, func() error {
+		si, err := jsB.StreamInfo("FOO_M")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(numMessages) {
+			return fmt.Errorf("mirror has %d messages, expected %d", si.State.Msgs, numMessages)
+		}
+		return nil
+	})
+
+	// Verify mirror info shows correct source
+	siB, err := jsB.StreamInfo("FOO_M")
+	require_NoError(t, err)
+	require_NotEqual(t, siB.Mirror, nil)
+	require_Equal(t, siB.Mirror.Name, "FOO")
+
+	// Verify message content is correctly mirrored
+	msg, err := jsB.GetMsg("FOO_M", 1)
+	require_NoError(t, err)
+	require_Equal(t, string(msg.Data), "message-1")
+
+	msg, err = jsB.GetMsg("FOO_M", uint64(numMessages))
+	require_NoError(t, err)
+	require_Equal(t, string(msg.Data), fmt.Sprintf("message-%d", numMessages))
+
+	// Publish more messages to FOO on Server A and verify they replicate
+	for i := numMessages + 1; i <= numMessages+5; i++ {
+		_, err = jsA.Publish("foo.bar", []byte(fmt.Sprintf("message-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Wait for new messages to replicate to mirror
+	checkFor(t, 10*time.Second, 250*time.Millisecond, func() error {
+		si, err := jsB.StreamInfo("FOO_M")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(numMessages+5) {
+			return fmt.Errorf("mirror has %d messages, expected %d", si.State.Msgs, numMessages+5)
+		}
+		return nil
+	})
+
+	// Create a consumer on the mirror and verify it can read all messages
+	sub, err := jsB.PullSubscribe("", "test-consumer", nats.BindStream("FOO_M"))
+	require_NoError(t, err)
+
+	msgs, err := sub.Fetch(numMessages + 5)
+	require_NoError(t, err)
+	require_Equal(t, len(msgs), numMessages+5)
+	require_Equal(t, string(msgs[0].Data), "message-1")
+	require_Equal(t, string(msgs[numMessages+4].Data), fmt.Sprintf("message-%d", numMessages+5))
+}
+
 func TestJetStreamClusterSeal(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
