@@ -1138,3 +1138,202 @@ func TestJetStreamSourceAcrossIndependentLeafnodes(t *testing.T) {
 
 	t.Log("SUCCESS: Bi-directional JetStream sourcing works across independent leafnodes!")
 }
+
+// TestPromoteRegularStreamToSourced demonstrates that you CAN promote a regular
+// stream (created without sources) to become a stream with sources by using UpdateStream.
+//
+// This is useful when you want to:
+// - Start with a local stream and later add remote sources
+// - Dynamically add data aggregation from other JetStream domains
+func TestPromoteRegularStreamToSourced(t *testing.T) {
+	// HUB server
+	hubConf := createConfFile(t, []byte(`
+		server_name: HUB
+		listen: 127.0.0.1:-1
+		accounts {
+			JS { users = [ { user: "js", pass: "js" } ]; jetstream: enabled }
+			$SYS { users = [ { user: "admin", pass: "admin" } ] }
+		}
+		leafnodes {
+			listen: 127.0.0.1:-1
+		}
+	`))
+	hub, hubOpts := RunServerWithConfig(hubConf)
+	defer hub.Shutdown()
+
+	// LEAF1 - JetStream domain "L1" - will have the source stream
+	leaf1Conf := createConfFile(t, []byte(fmt.Sprintf(`
+		server_name: LEAF1
+		listen: 127.0.0.1:-1
+		jetstream {
+			store_dir: '%s'
+			domain: L1
+		}
+		accounts {
+			JS { users = [ { user: "js", pass: "js" } ]; jetstream: enabled }
+			$SYS { users = [ { user: "admin", pass: "admin" } ] }
+		}
+		leafnodes {
+			remotes = [{
+				url: nats-leaf://js:js@127.0.0.1:%d
+				account: "JS"
+			}]
+		}
+	`, t.TempDir(), hubOpts.LeafNode.Port)))
+	leaf1, _ := RunServerWithConfig(leaf1Conf)
+	defer leaf1.Shutdown()
+
+	// LEAF2 - JetStream domain "L2" - will promote its stream to source from LEAF1
+	leaf2Conf := createConfFile(t, []byte(fmt.Sprintf(`
+		server_name: LEAF2
+		listen: 127.0.0.1:-1
+		jetstream {
+			store_dir: '%s'
+			domain: L2
+		}
+		accounts {
+			JS { users = [ { user: "js", pass: "js" } ]; jetstream: enabled }
+			$SYS { users = [ { user: "admin", pass: "admin" } ] }
+		}
+		leafnodes {
+			remotes = [{
+				url: nats-leaf://js:js@127.0.0.1:%d
+				account: "JS"
+			}]
+		}
+	`, t.TempDir(), hubOpts.LeafNode.Port)))
+	leaf2, _ := RunServerWithConfig(leaf2Conf)
+	defer leaf2.Shutdown()
+
+	// Wait for connections
+	checkLeafNodeConnected(t, leaf1)
+	checkLeafNodeConnected(t, leaf2)
+	checkLeafNodeConnectedCount(t, hub, 2)
+
+	// Connect to both leaves
+	ncLeaf1, err := nats.Connect(leaf1.ClientURL(), nats.UserInfo("js", "js"))
+	require_NoError(t, err)
+	defer ncLeaf1.Close()
+	jsLeaf1, err := jetstream.New(ncLeaf1)
+	require_NoError(t, err)
+
+	ncLeaf2, err := nats.Connect(leaf2.ClientURL(), nats.UserInfo("js", "js"))
+	require_NoError(t, err)
+	defer ncLeaf2.Close()
+	jsLeaf2, err := jetstream.New(ncLeaf2)
+	require_NoError(t, err)
+
+	ctx := t.Context()
+
+	// Step 1: Create a regular stream on LEAF1 (source of data)
+	_, err = jsLeaf1.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     "REMOTE-DATA",
+		Subjects: []string{"remote.>"},
+	})
+	require_NoError(t, err)
+	t.Log("Created REMOTE-DATA stream on LEAF1")
+
+	// Publish some messages to LEAF1's stream
+	for i := 0; i < 50; i++ {
+		_, err := jsLeaf1.Publish(ctx, fmt.Sprintf("remote.%d", i), []byte(fmt.Sprintf("remote-msg-%d", i)))
+		require_NoError(t, err)
+	}
+	t.Log("Published 50 messages to REMOTE-DATA on LEAF1")
+
+	// Step 2: Create a REGULAR stream on LEAF2 (no sources initially)
+	localStream, err := jsLeaf2.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     "LOCAL-DATA",
+		Subjects: []string{"local.>"},
+	})
+	require_NoError(t, err)
+	t.Log("Created LOCAL-DATA stream on LEAF2 (no sources)")
+
+	// Publish some local messages
+	for i := 0; i < 30; i++ {
+		_, err := jsLeaf2.Publish(ctx, fmt.Sprintf("local.%d", i), []byte(fmt.Sprintf("local-msg-%d", i)))
+		require_NoError(t, err)
+	}
+	t.Log("Published 30 messages to LOCAL-DATA on LEAF2")
+
+	// Verify initial state
+	info, err := localStream.Info(ctx)
+	require_NoError(t, err)
+	if info.State.Msgs != 30 {
+		t.Fatalf("Expected 30 messages in LOCAL-DATA, got %d", info.State.Msgs)
+	}
+	if len(info.Config.Sources) != 0 {
+		t.Fatalf("Expected no sources initially, got %d", len(info.Config.Sources))
+	}
+	t.Logf("LOCAL-DATA has %d messages, %d sources (before promotion)", info.State.Msgs, len(info.Config.Sources))
+
+	// Step 3: PROMOTE the regular stream to have sources using UpdateStream
+	t.Log("Promoting LOCAL-DATA to source from REMOTE-DATA on LEAF1...")
+
+	localStream, err = jsLeaf2.UpdateStream(ctx, jetstream.StreamConfig{
+		Name:     "LOCAL-DATA",
+		Subjects: []string{"local.>"},
+		Sources: []*jetstream.StreamSource{
+			{
+				Name: "REMOTE-DATA",
+				External: &jetstream.ExternalStream{
+					APIPrefix: "$JS.L1.API", // Route to LEAF1's JetStream domain
+				},
+			},
+		},
+	})
+	require_NoError(t, err)
+	t.Log("Successfully promoted LOCAL-DATA to source from REMOTE-DATA!")
+
+	// Step 4: Wait for the sourced messages to sync
+	expectedTotal := uint64(30 + 50) // local + sourced
+
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		info, err := localStream.Info(ctx)
+		if err != nil {
+			return err
+		}
+		if info.State.Msgs != expectedTotal {
+			return fmt.Errorf("expected %d messages, got %d", expectedTotal, info.State.Msgs)
+		}
+		return nil
+	})
+
+	info, err = localStream.Info(ctx)
+	require_NoError(t, err)
+	t.Logf("LOCAL-DATA now has %d messages (30 local + 50 sourced)", info.State.Msgs)
+	t.Logf("Sources configured: %d", len(info.Config.Sources))
+
+	// Verify sources are configured
+	if len(info.Config.Sources) != 1 {
+		t.Fatalf("Expected 1 source after promotion, got %d", len(info.Config.Sources))
+	}
+	if info.Config.Sources[0].Name != "REMOTE-DATA" {
+		t.Fatalf("Expected source name 'REMOTE-DATA', got '%s'", info.Config.Sources[0].Name)
+	}
+
+	// Step 5: Verify new messages from the source are also synced
+	t.Log("Publishing additional messages to verify continuous sourcing...")
+
+	for i := 50; i < 70; i++ {
+		_, err := jsLeaf1.Publish(ctx, fmt.Sprintf("remote.%d", i), []byte(fmt.Sprintf("remote-msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	expectedTotal = uint64(30 + 70) // local + all sourced
+
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		info, err := localStream.Info(ctx)
+		if err != nil {
+			return err
+		}
+		if info.State.Msgs != expectedTotal {
+			return fmt.Errorf("expected %d messages, got %d", expectedTotal, info.State.Msgs)
+		}
+		return nil
+	})
+
+	info, _ = localStream.Info(ctx)
+	t.Logf("LOCAL-DATA now has %d messages after additional sourcing", info.State.Msgs)
+
+	t.Log("SUCCESS: Regular stream successfully promoted to source from remote JetStream domain!")
+}
