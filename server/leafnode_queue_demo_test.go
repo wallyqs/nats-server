@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // TestSimpleTwoServerLeafNodeQueueDistribution_LocalPreference demonstrates that
@@ -740,4 +741,400 @@ func TestDistributedQueueClusteredTopology_Comprehensive(t *testing.T) {
 			t.Fatalf("Uneven distribution after adding subscriber: LEAF1=%d, LEAF2=%d", l1, l2)
 		}
 	})
+}
+
+// TestJetStreamMirrorAcrossIndependentLeafnodes demonstrates JetStream stream
+// mirroring between two independent leafnode servers (NO cluster routes between them).
+// Communication happens through the HUB server.
+//
+// Topology:
+//
+//	                         ┌────────────────────────┐
+//	                         │         HUB            │
+//	                         │   (accepts leafnodes)  │
+//	                         │                        │
+//	                         │   leafnodes {          │
+//	                         │     listen: -1         │
+//	                         │   }                    │
+//	                         └───────────┬────────────┘
+//	                                     │
+//	                    ┌────────────────┴────────────────┐
+//	                    │                                 │
+//	            leafnode remote                   leafnode remote
+//	                    │                                 │
+//	                    ▼                                 ▼
+//	    ┌───────────────────────────┐     ┌───────────────────────────┐
+//	    │          LEAF1            │     │          LEAF2            │
+//	    │   JetStream domain: L1    │     │   JetStream domain: L2    │
+//	    │                           │     │                           │
+//	    │   Stream: SOURCE-STREAM   │────►│   Stream: MIRROR-STREAM   │
+//	    │   (original data)         │     │   (mirror of SOURCE)      │
+//	    └───────────────────────────┘     └───────────────────────────┘
+//	                    │                                 │
+//	              NO ROUTES                         NO ROUTES
+//	           (independent)                     (independent)
+//
+// Key insight: LEAF1 and LEAF2 are NOT clustered. They communicate only through
+// the HUB via leafnode connections. JetStream mirroring uses the External API
+// prefix to route requests through the leafnode connection.
+func TestJetStreamMirrorAcrossIndependentLeafnodes(t *testing.T) {
+	// HUB server - accepts leafnode connections, no JetStream needed on HUB
+	// (JetStream is on the leaf nodes)
+	hubConf := createConfFile(t, []byte(`
+		server_name: HUB
+		listen: 127.0.0.1:-1
+		accounts {
+			JS { users = [ { user: "js", pass: "js" } ]; jetstream: enabled }
+			$SYS { users = [ { user: "admin", pass: "admin" } ] }
+		}
+		leafnodes {
+			listen: 127.0.0.1:-1
+		}
+	`))
+	hub, hubOpts := RunServerWithConfig(hubConf)
+	defer hub.Shutdown()
+
+	// LEAF1 - JetStream enabled with domain "L1"
+	leaf1Conf := createConfFile(t, []byte(fmt.Sprintf(`
+		server_name: LEAF1
+		listen: 127.0.0.1:-1
+		jetstream {
+			store_dir: '%s'
+			domain: L1
+		}
+		accounts {
+			JS { users = [ { user: "js", pass: "js" } ]; jetstream: enabled }
+			$SYS { users = [ { user: "admin", pass: "admin" } ] }
+		}
+		leafnodes {
+			remotes = [{
+				url: nats-leaf://js:js@127.0.0.1:%d
+				account: "JS"
+			}]
+		}
+	`, t.TempDir(), hubOpts.LeafNode.Port)))
+	leaf1, _ := RunServerWithConfig(leaf1Conf)
+	defer leaf1.Shutdown()
+
+	// LEAF2 - JetStream enabled with domain "L2" (NO cluster routes to LEAF1!)
+	leaf2Conf := createConfFile(t, []byte(fmt.Sprintf(`
+		server_name: LEAF2
+		listen: 127.0.0.1:-1
+		jetstream {
+			store_dir: '%s'
+			domain: L2
+		}
+		accounts {
+			JS { users = [ { user: "js", pass: "js" } ]; jetstream: enabled }
+			$SYS { users = [ { user: "admin", pass: "admin" } ] }
+		}
+		leafnodes {
+			remotes = [{
+				url: nats-leaf://js:js@127.0.0.1:%d
+				account: "JS"
+			}]
+		}
+	`, t.TempDir(), hubOpts.LeafNode.Port)))
+	leaf2, _ := RunServerWithConfig(leaf2Conf)
+	defer leaf2.Shutdown()
+
+	// Wait for leafnode connections
+	checkLeafNodeConnected(t, leaf1)
+	checkLeafNodeConnected(t, leaf2)
+	checkLeafNodeConnectedCount(t, hub, 2)
+
+	t.Log("Topology established: HUB with 2 independent leafnodes (LEAF1, LEAF2)")
+
+	// Connect to LEAF1 and create the source stream
+	ncLeaf1, err := nats.Connect(leaf1.ClientURL(), nats.UserInfo("js", "js"))
+	require_NoError(t, err)
+	defer ncLeaf1.Close()
+
+	jsLeaf1, err := jetstream.New(ncLeaf1)
+	require_NoError(t, err)
+
+	// Create source stream on LEAF1
+	ctx := t.Context()
+	sourceStream, err := jsLeaf1.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     "SOURCE-STREAM",
+		Subjects: []string{"events.>"},
+	})
+	require_NoError(t, err)
+	t.Logf("Created SOURCE-STREAM on LEAF1 (domain: L1)")
+
+	// Connect to LEAF2 and create the mirror stream
+	ncLeaf2, err := nats.Connect(leaf2.ClientURL(), nats.UserInfo("js", "js"))
+	require_NoError(t, err)
+	defer ncLeaf2.Close()
+
+	jsLeaf2, err := jetstream.New(ncLeaf2)
+	require_NoError(t, err)
+
+	// Create mirror stream on LEAF2 that mirrors from LEAF1
+	// The key is using External.APIPrefix to reach LEAF1's JetStream domain
+	mirrorStream, err := jsLeaf2.CreateStream(ctx, jetstream.StreamConfig{
+		Name: "MIRROR-STREAM",
+		Mirror: &jetstream.StreamSource{
+			Name: "SOURCE-STREAM",
+			External: &jetstream.ExternalStream{
+				APIPrefix: "$JS.L1.API", // Route to LEAF1's JetStream domain
+			},
+		},
+	})
+	require_NoError(t, err)
+	t.Logf("Created MIRROR-STREAM on LEAF2 (domain: L2) mirroring from LEAF1")
+
+	// Publish messages to the source stream on LEAF1
+	numMsgs := 100
+	for i := 0; i < numMsgs; i++ {
+		_, err := jsLeaf1.Publish(ctx, fmt.Sprintf("events.%d", i), []byte(fmt.Sprintf("message-%d", i)))
+		require_NoError(t, err)
+	}
+	t.Logf("Published %d messages to SOURCE-STREAM on LEAF1", numMsgs)
+
+	// Verify source stream has all messages
+	sourceInfo, err := sourceStream.Info(ctx)
+	require_NoError(t, err)
+	if sourceInfo.State.Msgs != uint64(numMsgs) {
+		t.Fatalf("Expected %d messages in SOURCE-STREAM, got %d", numMsgs, sourceInfo.State.Msgs)
+	}
+
+	// Wait for mirror to sync all messages
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		mirrorInfo, err := mirrorStream.Info(ctx)
+		if err != nil {
+			return err
+		}
+		if mirrorInfo.State.Msgs != uint64(numMsgs) {
+			return fmt.Errorf("expected %d messages in MIRROR-STREAM, got %d", numMsgs, mirrorInfo.State.Msgs)
+		}
+		return nil
+	})
+
+	mirrorInfo, _ := mirrorStream.Info(ctx)
+	t.Logf("MIRROR-STREAM on LEAF2 has %d messages (synced from LEAF1)", mirrorInfo.State.Msgs)
+
+	// Verify we can read messages from the mirror
+	consumer, err := mirrorStream.CreateConsumer(ctx, jetstream.ConsumerConfig{
+		Durable:       "test-consumer",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		DeliverPolicy: jetstream.DeliverAllPolicy,
+	})
+	require_NoError(t, err)
+
+	// Fetch and verify messages
+	msgs, err := consumer.Fetch(numMsgs)
+	require_NoError(t, err)
+
+	receivedCount := 0
+	for msg := range msgs.Messages() {
+		receivedCount++
+		msg.Ack()
+	}
+
+	if receivedCount != numMsgs {
+		t.Fatalf("Expected to receive %d messages from mirror, got %d", numMsgs, receivedCount)
+	}
+	t.Logf("Successfully read %d messages from MIRROR-STREAM on LEAF2", receivedCount)
+
+	// Test: Publish more messages and verify they sync
+	t.Run("continuous_sync", func(t *testing.T) {
+		additionalMsgs := 50
+		for i := 0; i < additionalMsgs; i++ {
+			_, err := jsLeaf1.Publish(ctx, fmt.Sprintf("events.additional.%d", i), []byte(fmt.Sprintf("additional-%d", i)))
+			require_NoError(t, err)
+		}
+
+		expectedTotal := numMsgs + additionalMsgs
+
+		// Wait for mirror to sync
+		checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+			mirrorInfo, err := mirrorStream.Info(ctx)
+			if err != nil {
+				return err
+			}
+			if mirrorInfo.State.Msgs != uint64(expectedTotal) {
+				return fmt.Errorf("expected %d messages, got %d", expectedTotal, mirrorInfo.State.Msgs)
+			}
+			return nil
+		})
+
+		t.Logf("Mirror synced additional messages: now has %d total", expectedTotal)
+	})
+
+	t.Log("SUCCESS: JetStream mirroring works across independent leafnodes through HUB!")
+}
+
+// TestJetStreamSourceAcrossIndependentLeafnodes demonstrates JetStream stream
+// sourcing (aggregation) between two independent leafnode servers.
+// This shows bi-directional sourcing where each leaf can source from the other.
+//
+// Topology: Same as mirror test, but using Sources instead of Mirror
+func TestJetStreamSourceAcrossIndependentLeafnodes(t *testing.T) {
+	// HUB server
+	hubConf := createConfFile(t, []byte(`
+		server_name: HUB
+		listen: 127.0.0.1:-1
+		accounts {
+			JS { users = [ { user: "js", pass: "js" } ]; jetstream: enabled }
+			$SYS { users = [ { user: "admin", pass: "admin" } ] }
+		}
+		leafnodes {
+			listen: 127.0.0.1:-1
+		}
+	`))
+	hub, hubOpts := RunServerWithConfig(hubConf)
+	defer hub.Shutdown()
+
+	// LEAF1 - JetStream domain "L1"
+	leaf1Conf := createConfFile(t, []byte(fmt.Sprintf(`
+		server_name: LEAF1
+		listen: 127.0.0.1:-1
+		jetstream {
+			store_dir: '%s'
+			domain: L1
+		}
+		accounts {
+			JS { users = [ { user: "js", pass: "js" } ]; jetstream: enabled }
+			$SYS { users = [ { user: "admin", pass: "admin" } ] }
+		}
+		leafnodes {
+			remotes = [{
+				url: nats-leaf://js:js@127.0.0.1:%d
+				account: "JS"
+			}]
+		}
+	`, t.TempDir(), hubOpts.LeafNode.Port)))
+	leaf1, _ := RunServerWithConfig(leaf1Conf)
+	defer leaf1.Shutdown()
+
+	// LEAF2 - JetStream domain "L2"
+	leaf2Conf := createConfFile(t, []byte(fmt.Sprintf(`
+		server_name: LEAF2
+		listen: 127.0.0.1:-1
+		jetstream {
+			store_dir: '%s'
+			domain: L2
+		}
+		accounts {
+			JS { users = [ { user: "js", pass: "js" } ]; jetstream: enabled }
+			$SYS { users = [ { user: "admin", pass: "admin" } ] }
+		}
+		leafnodes {
+			remotes = [{
+				url: nats-leaf://js:js@127.0.0.1:%d
+				account: "JS"
+			}]
+		}
+	`, t.TempDir(), hubOpts.LeafNode.Port)))
+	leaf2, _ := RunServerWithConfig(leaf2Conf)
+	defer leaf2.Shutdown()
+
+	// Wait for connections
+	checkLeafNodeConnected(t, leaf1)
+	checkLeafNodeConnected(t, leaf2)
+	checkLeafNodeConnectedCount(t, hub, 2)
+
+	// Connect to both leaves
+	ncLeaf1, err := nats.Connect(leaf1.ClientURL(), nats.UserInfo("js", "js"))
+	require_NoError(t, err)
+	defer ncLeaf1.Close()
+	jsLeaf1, err := jetstream.New(ncLeaf1)
+	require_NoError(t, err)
+
+	ncLeaf2, err := nats.Connect(leaf2.ClientURL(), nats.UserInfo("js", "js"))
+	require_NoError(t, err)
+	defer ncLeaf2.Close()
+	jsLeaf2, err := jetstream.New(ncLeaf2)
+	require_NoError(t, err)
+
+	ctx := t.Context()
+
+	// Create streams on each leaf that source from the other
+	// LEAF1: ORDERS stream (local) + sources from LEAF2's ORDERS
+	_, err = jsLeaf1.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     "ORDERS-L1",
+		Subjects: []string{"orders.region1.>"},
+		Sources: []*jetstream.StreamSource{
+			{
+				Name:          "ORDERS-L2",
+				FilterSubject: "orders.region2.>",
+				External: &jetstream.ExternalStream{
+					APIPrefix: "$JS.L2.API",
+				},
+			},
+		},
+	})
+	require_NoError(t, err)
+	t.Log("Created ORDERS-L1 on LEAF1 (sources from LEAF2)")
+
+	// LEAF2: ORDERS stream (local) + sources from LEAF1's ORDERS
+	_, err = jsLeaf2.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     "ORDERS-L2",
+		Subjects: []string{"orders.region2.>"},
+		Sources: []*jetstream.StreamSource{
+			{
+				Name:          "ORDERS-L1",
+				FilterSubject: "orders.region1.>",
+				External: &jetstream.ExternalStream{
+					APIPrefix: "$JS.L1.API",
+				},
+			},
+		},
+	})
+	require_NoError(t, err)
+	t.Log("Created ORDERS-L2 on LEAF2 (sources from LEAF1)")
+
+	// Publish orders to each region
+	numOrders := 50
+	for i := 0; i < numOrders; i++ {
+		_, err := jsLeaf1.Publish(ctx, fmt.Sprintf("orders.region1.%d", i), []byte(fmt.Sprintf("order-r1-%d", i)))
+		require_NoError(t, err)
+		_, err = jsLeaf2.Publish(ctx, fmt.Sprintf("orders.region2.%d", i), []byte(fmt.Sprintf("order-r2-%d", i)))
+		require_NoError(t, err)
+	}
+	t.Logf("Published %d orders to each region", numOrders)
+
+	// Wait for sourcing to complete - each stream should have both local and sourced messages
+	expectedPerStream := numOrders * 2 // local + sourced
+
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		stream1, err := jsLeaf1.Stream(ctx, "ORDERS-L1")
+		if err != nil {
+			return err
+		}
+		info1, err := stream1.Info(ctx)
+		if err != nil {
+			return err
+		}
+		if info1.State.Msgs != uint64(expectedPerStream) {
+			return fmt.Errorf("ORDERS-L1: expected %d messages, got %d", expectedPerStream, info1.State.Msgs)
+		}
+		return nil
+	})
+
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		stream2, err := jsLeaf2.Stream(ctx, "ORDERS-L2")
+		if err != nil {
+			return err
+		}
+		info2, err := stream2.Info(ctx)
+		if err != nil {
+			return err
+		}
+		if info2.State.Msgs != uint64(expectedPerStream) {
+			return fmt.Errorf("ORDERS-L2: expected %d messages, got %d", expectedPerStream, info2.State.Msgs)
+		}
+		return nil
+	})
+
+	stream1, _ := jsLeaf1.Stream(ctx, "ORDERS-L1")
+	info1, _ := stream1.Info(ctx)
+	stream2, _ := jsLeaf2.Stream(ctx, "ORDERS-L2")
+	info2, _ := stream2.Info(ctx)
+
+	t.Logf("ORDERS-L1 has %d messages (local region1 + sourced region2)", info1.State.Msgs)
+	t.Logf("ORDERS-L2 has %d messages (local region2 + sourced region1)", info2.State.Msgs)
+
+	t.Log("SUCCESS: Bi-directional JetStream sourcing works across independent leafnodes!")
 }
