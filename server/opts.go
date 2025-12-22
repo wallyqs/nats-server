@@ -361,6 +361,7 @@ type Options struct {
 	AuthCallout                *AuthCallout  `json:"-"`
 	PingInterval               time.Duration `json:"ping_interval"`
 	MaxPingsOut                int           `json:"ping_max"`
+	MinClientPingInterval      time.Duration `json:"min_client_ping_interval"`
 	HTTPHost                   string        `json:"http_host"`
 	HTTPPort                   int           `json:"http_port"`
 	HTTPBasePath               string        `json:"http_base_path"`

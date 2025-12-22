@@ -119,6 +119,10 @@ const (
 	// DEFAULT_PING_INTERVAL is how often pings are sent to clients, etc...
 	DEFAULT_PING_INTERVAL = 2 * time.Minute
 
+	// MIN_PING_INTERVAL is the minimum allowed ping interval for clients.
+	// This prevents clients from setting too low values which could affect server performance.
+	MIN_PING_INTERVAL = 5 * time.Second
+
 	// DEFAULT_PING_MAX_OUT is maximum allowed pings outstanding before disconnect.
 	DEFAULT_PING_MAX_OUT = 2
 

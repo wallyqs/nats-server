@@ -679,6 +679,9 @@ type ClientOpts struct {
 	Headers      bool   `json:"headers,omitempty"`
 	NoResponders bool   `json:"no_responders,omitempty"`
 
+	// Custom ping interval requested by client
+	PingInterval time.Duration `json:"ping_interval,omitempty"`
+
 	// Routes and Leafnodes only
 	Import *SubjectPermission `json:"import,omitempty"`
 	Export *SubjectPermission `json:"export,omitempty"`
@@ -2241,6 +2244,14 @@ func (c *client) processConnect(arg []byte) error {
 
 	// For headers both client and server need to support.
 	c.headers = supportsHeaders && c.opts.Headers
+
+	// If client specified a custom ping interval, reset the ping timer.
+	// The timer was set earlier before opts were parsed, so we need to
+	// reset it now with the client's requested interval.
+	if kind == CLIENT && c.opts.PingInterval > 0 && srv != nil {
+		c.clearPingTimer()
+		c.setFirstPingTimer()
+	}
 	c.mu.Unlock()
 
 	if srv != nil {
@@ -5499,14 +5510,7 @@ func (c *client) processPingTimer() {
 	var sendPing bool
 
 	opts := c.srv.getOpts()
-	pingInterval := opts.PingInterval
-	if c.kind == ROUTER && opts.Cluster.PingInterval > 0 {
-		pingInterval = opts.Cluster.PingInterval
-	}
-	if c.isWebsocket() && opts.Websocket.PingInterval > 0 {
-		pingInterval = opts.Websocket.PingInterval
-	}
-	pingInterval = adjustPingInterval(c.kind, pingInterval)
+	pingInterval := c.pingInterval()
 	now := time.Now()
 	needRTT := c.rtt == 0 || now.Sub(c.rttStart) > DEFAULT_RTT_MEASUREMENT_INTERVAL
 
@@ -5578,10 +5582,14 @@ func (c *client) watchForStaleConnection(pingInterval time.Duration, pingMax int
 	})
 }
 
-// Lock should be held
-func (c *client) setPingTimer() {
+// Returns the effective ping interval for this client.
+// For CLIENT connections, if the client has requested a custom ping interval,
+// it will be used as long as it's within acceptable bounds (>= MIN_PING_INTERVAL
+// and <= server's configured interval).
+// Lock should be held.
+func (c *client) pingInterval() time.Duration {
 	if c.srv == nil {
-		return
+		return DEFAULT_PING_INTERVAL
 	}
 	opts := c.srv.getOpts()
 	d := opts.PingInterval
@@ -5591,7 +5599,35 @@ func (c *client) setPingTimer() {
 	if c.isWebsocket() && opts.Websocket.PingInterval > 0 {
 		d = opts.Websocket.PingInterval
 	}
+	// For CLIENT connections, allow a custom ping interval from CONNECT options.
+	// The client-requested interval must be:
+	// - At least MinClientPingInterval (defaults to MIN_PING_INTERVAL to prevent abuse)
+	// - At most the server's configured interval (clients can request shorter, not longer)
+	if c.kind == CLIENT && c.opts.PingInterval > 0 {
+		clientInterval := c.opts.PingInterval
+		// Enforce minimum - use server's configured minimum or default
+		minInterval := opts.MinClientPingInterval
+		if minInterval <= 0 {
+			minInterval = MIN_PING_INTERVAL
+		}
+		if clientInterval < minInterval {
+			clientInterval = minInterval
+		}
+		// Clients can request shorter intervals, not longer
+		if clientInterval < d {
+			d = clientInterval
+		}
+	}
 	d = adjustPingInterval(c.kind, d)
+	return d
+}
+
+// Lock should be held
+func (c *client) setPingTimer() {
+	if c.srv == nil {
+		return
+	}
+	d := c.pingInterval()
 	c.ping.tmr = time.AfterFunc(d, c.processPingTimer)
 }
 
@@ -6620,14 +6656,8 @@ func (c *client) setFirstPingTimer() {
 		return
 	}
 	opts := s.getOpts()
-	d := opts.PingInterval
+	d := c.pingInterval()
 
-	if c.kind == ROUTER && opts.Cluster.PingInterval > 0 {
-		d = opts.Cluster.PingInterval
-	}
-	if c.isWebsocket() && opts.Websocket.PingInterval > 0 {
-		d = opts.Websocket.PingInterval
-	}
 	if !opts.DisableShortFirstPing {
 		if c.kind != CLIENT {
 			if d > firstPingInterval {
