@@ -2493,9 +2493,7 @@ func TestAuthCalloutProxyRequiredInUserNotInAuthJWT(t *testing.T) {
 	require_Equal(t, 1, int(invoked.Load()))
 }
 
-// TestAuthCalloutReload tests what happens when trying to reload auth_callout configuration.
-// Currently, auth_callout changes are NOT supported on reload - the server returns an error
-// and requires a restart to apply auth_callout configuration changes.
+// TestAuthCalloutReload tests that auth_callout configuration can be reloaded.
 func TestAuthCalloutReload(t *testing.T) {
 	// Create the initial config with auth_callout
 	conf := createConfFile(t, []byte(`
@@ -2504,8 +2502,7 @@ func TestAuthCalloutReload(t *testing.T) {
 		authorization {
 			timeout: 1s
 			users: [
-				{ user: "auth", password: "pwd" },
-				{ user: "auth2", password: "pwd2" }
+				{ user: "auth", password: "pwd" }
 			]
 			auth_callout {
 				issuer: "ABJHLOVMPA4CI6R5KLNGOB4GSLNIY7IOUPAJC4YFNDLQVIOBYQGUWVLA"
@@ -2521,7 +2518,7 @@ func TestAuthCalloutReload(t *testing.T) {
 	opts := s.getOpts()
 	require_NotNil(t, opts.AuthCallout)
 	require_Equal(t, opts.AuthCallout.Issuer, authCalloutIssuer)
-	require_True(t, len(opts.AuthCallout.AuthUsers) == 1)
+	require_Equal(t, len(opts.AuthCallout.AuthUsers), 1)
 	require_Equal(t, opts.AuthCallout.AuthUsers[0], "auth")
 
 	// Connect the auth service user and set up the handler
@@ -2533,7 +2530,6 @@ func TestAuthCalloutReload(t *testing.T) {
 	_, err = authClient.Subscribe(AuthCalloutSubject, func(m *nats.Msg) {
 		calloutCount.Add(1)
 		user, si, _, opts, _ := decodeAuthRequest(t, m.Data)
-		// Allow "testuser" with password "testpass"
 		if opts.Username == "testuser" && opts.Password == "testpass" {
 			ujwt := createAuthUser(t, user, _EMPTY_, globalAccountName, "", nil, 10*time.Minute, nil)
 			m.Respond(serviceResponse(t, user, si.ID, ujwt, "", 0))
@@ -2550,7 +2546,7 @@ func TestAuthCalloutReload(t *testing.T) {
 	require_Equal(t, int32(1), calloutCount.Load())
 
 	// Now update the config to change auth_callout settings:
-	// - Change auth_users from [auth] to [auth2]
+	// - Add a new user "auth2" to auth_users
 	err = os.WriteFile(conf, []byte(`
 		listen: "127.0.0.1:-1"
 		server_name: A
@@ -2562,26 +2558,33 @@ func TestAuthCalloutReload(t *testing.T) {
 			]
 			auth_callout {
 				issuer: "ABJHLOVMPA4CI6R5KLNGOB4GSLNIY7IOUPAJC4YFNDLQVIOBYQGUWVLA"
-				auth_users: [ auth2 ]
+				auth_users: [ auth, auth2 ]
 			}
 		}
 	`), 0666)
 	require_NoError(t, err)
 
-	// Reload the configuration - should fail because auth_callout is not reloadable
+	// Reload the configuration - should succeed now that auth_callout is reloadable
 	err = s.Reload()
-	require_Error(t, err)
-	require_Contains(t, err.Error(), "config reload not supported for AuthCallout")
+	require_NoError(t, err)
 
-	// Verify the original auth_callout configuration is still in effect
+	// Verify the new auth_callout configuration is in effect
 	opts = s.getOpts()
 	require_NotNil(t, opts.AuthCallout)
-	require_Equal(t, opts.AuthCallout.AuthUsers[0], "auth")
+	require_Equal(t, len(opts.AuthCallout.AuthUsers), 2)
+	require_True(t, slices.Contains(opts.AuthCallout.AuthUsers, "auth"))
+	require_True(t, slices.Contains(opts.AuthCallout.AuthUsers, "auth2"))
 
-	// Verify that the original auth service user ("auth") still works for callouts
-	// This confirms the original auth_callout config is still in effect
+	// Verify auth callout still works after reload
 	nc, err = nats.Connect(s.ClientURL(), nats.UserInfo("testuser", "testpass"))
 	require_NoError(t, err)
 	nc.Close()
+	require_Equal(t, int32(2), calloutCount.Load())
+
+	// Verify the new auth user can now connect (bypassing callout)
+	nc, err = nats.Connect(s.ClientURL(), nats.UserInfo("auth2", "pwd2"))
+	require_NoError(t, err)
+	nc.Close()
+	// No additional callout should have occurred since auth2 is now in auth_users
 	require_Equal(t, int32(2), calloutCount.Load())
 }

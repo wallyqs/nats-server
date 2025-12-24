@@ -402,6 +402,15 @@ func (u *nkeysOption) Apply(server *Server) {
 	server.Noticef("Reloaded: authorization nkey users")
 }
 
+// authCalloutOption implements the option interface for the `auth_callout` setting.
+type authCalloutOption struct {
+	authOption
+}
+
+func (a *authCalloutOption) Apply(server *Server) {
+	server.Noticef("Reloaded: authorization callout")
+}
+
 // clusterOption implements the option interface for the `cluster` setting.
 type clusterOption struct {
 	authOption
@@ -1366,6 +1375,8 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			diffOpts = append(diffOpts, &usersOption{})
 		case "nkeys":
 			diffOpts = append(diffOpts, &nkeysOption{})
+		case "authcallout":
+			diffOpts = append(diffOpts, &authCalloutOption{})
 		case "cluster":
 			newClusterOpts := newValue.(ClusterOpts)
 			oldClusterOpts := oldValue.(ClusterOpts)
