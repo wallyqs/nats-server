@@ -3871,6 +3871,7 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 			// For idle heartbeats make sure we did not miss anything.
 			if ldseq := parseInt64(getHeader(JSLastConsumerSeq, m.hdr)); ldseq > 0 && uint64(ldseq) != si.dseq {
 				needsRetry = true
+				si.fails++
 				mset.retrySourceConsumerAtSeq(si.iname, si.sseq+1)
 			} else if fcReply := getHeader(JSConsumerStalled, m.hdr); len(fcReply) > 0 {
 				// Other side thinks we are stalled, so send flow control reply.
@@ -3897,6 +3898,7 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 			si.cname = tokenAt(m.rply, 4)
 			si.dseq, si.sseq = dseq, sseq
 		} else {
+			si.fails++
 			mset.retrySourceConsumerAtSeq(si.iname, si.sseq+1)
 			mset.mu.Unlock()
 			return false
@@ -3982,7 +3984,11 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 					iNameMap := map[string]struct{}{iName: {}}
 					mset.setStartingSequenceForSources(iNameMap)
 					mset.mu.Lock()
-					mset.retrySourceConsumerAtSeq(iName, si.sseq+1)
+					// Re-fetch si from the map and increment fails counter for proper backoff.
+					if si := mset.sources[iName]; si != nil {
+						si.fails++
+						mset.retrySourceConsumerAtSeq(iName, si.sseq+1)
+					}
 					mset.mu.Unlock()
 				}
 			}
