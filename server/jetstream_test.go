@@ -22248,3 +22248,125 @@ func TestJetStreamStreamSourceWithoutDuplicateWindow(t *testing.T) {
 		return nil
 	})
 }
+
+// TestJetStreamSourceMsgProcessingFailsIncrement tests that the si.fails counter
+// is properly incremented when message processing errors occur, enabling proper
+// backoff behavior in retries.
+func TestJetStreamSourceMsgProcessingFailsIncrement(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create source stream
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "SOURCE",
+		Subjects: []string{"src.>"},
+	})
+	require_NoError(t, err)
+
+	// Create target stream with source
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:    "TARGET",
+		Sources: []*nats.StreamSource{{Name: "SOURCE"}},
+	})
+	require_NoError(t, err)
+
+	// Publish some messages to get the source consumer established
+	for i := 0; i < 5; i++ {
+		_, err = js.Publish("src.test", []byte("test"))
+		require_NoError(t, err)
+	}
+
+	// Wait for messages to be sourced
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("TARGET")
+		require_NoError(t, err)
+		if si.State.Msgs != 5 {
+			return fmt.Errorf("expected 5 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Get internal stream
+	acc := s.GlobalAccount()
+	mset, err := acc.lookupStream("TARGET")
+	require_NoError(t, err)
+
+	// Get the source info and verify initial fails count is 0
+	mset.mu.Lock()
+	var si *sourceInfo
+	var iname string
+	for name, src := range mset.sources {
+		si = src
+		iname = name
+		break
+	}
+	require_True(t, si != nil)
+	initialFails := si.fails
+	initialDseq := si.dseq
+	cname := si.cname
+	mset.mu.Unlock()
+
+	require_Equal(t, initialFails, 0)
+	require_True(t, cname != _EMPTY_) // Consumer name should be set after receiving messages
+	require_True(t, initialDseq >= 5) // Should have processed at least 5 messages
+
+	// Test: Simulate heartbeat sequence mismatch
+	// Create a control message (heartbeat) with mismatched sequence
+	mset.mu.Lock()
+	// Save current dseq and set it to a wrong value to trigger mismatch
+	savedDseq := si.dseq
+	si.dseq = 1 // Set to wrong value
+
+	// Create a heartbeat message with the actual last sequence
+	hdr := fmt.Sprintf("NATS/1.0 100 Idle Heartbeat\r\n%s: %d\r\n\r\n", JSLastConsumerSeq, savedDseq)
+	inMsg := &inMsg{
+		hdr: []byte(hdr),
+		msg: nil, // Empty msg for control messages
+	}
+
+	// Process the heartbeat - this should detect the mismatch and increment fails
+	failsBefore := si.fails
+	mset.mu.Unlock()
+
+	// Call processInboundSourceMsg - it will detect the sequence mismatch
+	mset.processInboundSourceMsg(si, inMsg)
+
+	// Check that fails was incremented
+	mset.mu.RLock()
+	failsAfter := si.fails
+	mset.mu.RUnlock()
+
+	// The fails counter should have been incremented due to heartbeat sequence mismatch
+	require_True(t, failsAfter > failsBefore)
+
+	// Restore the stream state by letting it recover
+	mset.mu.Lock()
+	si.fails = 0 // Reset fails counter
+	si.dseq = savedDseq
+	mset.mu.Unlock()
+
+	// Publish more messages to verify stream still works
+	for i := 0; i < 3; i++ {
+		_, err = js.Publish("src.test", []byte("test"))
+		require_NoError(t, err)
+	}
+
+	// Wait for new messages to be sourced
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		info, err := js.StreamInfo("TARGET")
+		require_NoError(t, err)
+		if info.State.Msgs != 8 {
+			return fmt.Errorf("expected 8 msgs, got %d", info.State.Msgs)
+		}
+		return nil
+	})
+
+	// Verify the source is still working after the simulated errors
+	mset.mu.RLock()
+	finalSi := mset.sources[iname]
+	mset.mu.RUnlock()
+	require_True(t, finalSi != nil)
+}
