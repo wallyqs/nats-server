@@ -1878,3 +1878,178 @@ func TestJetStreamLeafNodeAndMirrorResyncAfterLeafEstablished(t *testing.T) {
 	defer sGW1.Shutdown()
 	defer sGW2.Shutdown()
 }
+
+// TestJetStreamLeafNodeHubSourcesFromLeafnode tests that a hub server can create
+// a stream that sources from a stream on a connected leafnode. When both servers
+// have JetStream domains configured, cross-domain access works automatically
+// without needing manual subject mappings or exports.
+func TestJetStreamLeafNodeHubSourcesFromLeafnode(t *testing.T) {
+	// Hub server configuration with JetStream domain "HUB".
+	// No manual mappings needed - the domain enables automatic cross-domain access.
+	hubConf := `
+		listen: 127.0.0.1:-1
+		server_name: HUB
+		jetstream {
+			store_dir: '%s'
+			domain: HUB
+		}
+		accounts {
+			A {
+				jetstream: enabled
+				users: [{user: a, password: a}]
+			}
+			$SYS { users: [{user: admin, password: admin}] }
+		}
+		leafnodes {
+			listen: 127.0.0.1:-1
+		}
+	`
+
+	// Leafnode server configuration with JetStream domain "LN".
+	// The domain setting automatically adds mappings during leafnode connection
+	// setup that allow the hub to access this server's JetStream via $JS.LN.API.>
+	leafConf := `
+		listen: 127.0.0.1:-1
+		server_name: LEAF
+		jetstream {
+			store_dir: '%s'
+			domain: LN
+		}
+		accounts {
+			A {
+				jetstream: enabled
+				users: [{user: a, password: a}]
+			}
+			$SYS { users: [{user: admin, password: admin}] }
+		}
+		leafnodes {
+			remotes [
+				{ url: "nats://a:a@127.0.0.1:%d", account: A }
+				{ url: "nats://admin:admin@127.0.0.1:%d", account: "$SYS" }
+			]
+		}
+	`
+
+	// Start the hub server.
+	hubConfFile := createConfFile(t, []byte(fmt.Sprintf(hubConf, t.TempDir())))
+	sHub, oHub := RunServerWithConfig(hubConfFile)
+	defer sHub.Shutdown()
+
+	// Start the leafnode server.
+	leafConfFile := createConfFile(t, []byte(fmt.Sprintf(leafConf, t.TempDir(), oHub.LeafNode.Port, oHub.LeafNode.Port)))
+	sLeaf, _ := RunServerWithConfig(leafConfFile)
+	defer sLeaf.Shutdown()
+
+	// Wait for leafnode connections (account A + system account = 2).
+	checkLeafNodeConnectedCount(t, sHub, 2)
+	checkLeafNodeConnectedCount(t, sLeaf, 2)
+
+	// Connect to the leafnode and create a stream.
+	ncLeaf := natsConnect(t, sLeaf.ClientURL(), nats.UserInfo("a", "a"))
+	defer ncLeaf.Close()
+
+	jsLeaf, err := ncLeaf.JetStream()
+	require_NoError(t, err)
+
+	// Create a stream on the leafnode.
+	_, err = jsLeaf.AddStream(&nats.StreamConfig{
+		Name:     "LEAF_STREAM",
+		Subjects: []string{"leaf.>"},
+	})
+	require_NoError(t, err)
+
+	// Publish some messages to the leafnode stream.
+	for i := 0; i < 5; i++ {
+		_, err = jsLeaf.Publish("leaf.data", []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Verify the leafnode stream has the messages.
+	si, err := jsLeaf.StreamInfo("LEAF_STREAM")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, uint64(5))
+
+	// Connect to the hub and create a stream that sources from the leafnode.
+	ncHub := natsConnect(t, sHub.ClientURL(), nats.UserInfo("a", "a"))
+	defer ncHub.Close()
+
+	jsHub, err := ncHub.JetStream()
+	require_NoError(t, err)
+
+	// Create a sourced stream on the hub that pulls from the leafnode's stream.
+	// The External.APIPrefix tells JetStream to use $JS.LN.API.> for API calls,
+	// which gets mapped to $JS.API.> and routed to the leafnode.
+	_, err = jsHub.AddStream(&nats.StreamConfig{
+		Name: "HUB_SOURCED",
+		Sources: []*nats.StreamSource{{
+			Name:     "LEAF_STREAM",
+			External: &nats.ExternalStream{APIPrefix: "$JS.LN.API"},
+		}},
+	})
+	require_NoError(t, err)
+
+	// Wait for the sourced stream to sync all messages from the leafnode.
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := jsHub.StreamInfo("HUB_SOURCED")
+		if err != nil {
+			return fmt.Errorf("could not get stream info: %v", err)
+		}
+		if si.State.Msgs != 5 {
+			return fmt.Errorf("expected 5 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Publish more messages to the leafnode and verify they sync to the hub.
+	for i := 5; i < 10; i++ {
+		_, err = jsLeaf.Publish("leaf.data", []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Verify all 10 messages arrive in the hub's sourced stream.
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := jsHub.StreamInfo("HUB_SOURCED")
+		if err != nil {
+			return fmt.Errorf("could not get stream info: %v", err)
+		}
+		if si.State.Msgs != 10 {
+			return fmt.Errorf("expected 10 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Also test the reverse: leafnode sources from hub.
+	_, err = jsHub.AddStream(&nats.StreamConfig{
+		Name:     "HUB_STREAM",
+		Subjects: []string{"hub.>"},
+	})
+	require_NoError(t, err)
+
+	// Publish messages to the hub stream.
+	for i := 0; i < 5; i++ {
+		_, err = jsHub.Publish("hub.data", []byte(fmt.Sprintf("hub-msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Create a sourced stream on the leafnode that pulls from the hub's stream.
+	_, err = jsLeaf.AddStream(&nats.StreamConfig{
+		Name: "LEAF_SOURCED",
+		Sources: []*nats.StreamSource{{
+			Name:     "HUB_STREAM",
+			External: &nats.ExternalStream{APIPrefix: "$JS.HUB.API"},
+		}},
+	})
+	require_NoError(t, err)
+
+	// Verify the leafnode's sourced stream syncs from the hub.
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := jsLeaf.StreamInfo("LEAF_SOURCED")
+		if err != nil {
+			return fmt.Errorf("could not get stream info: %v", err)
+		}
+		if si.State.Msgs != 5 {
+			return fmt.Errorf("expected 5 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+}
