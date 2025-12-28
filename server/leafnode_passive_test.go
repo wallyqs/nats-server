@@ -565,3 +565,314 @@ func TestJetStreamLeafNodeChainWithPassiveSourceFromBothSites(t *testing.T) {
 
 	t.Log("SUCCESS: Hub sourced from both SITE_A and SITE_B using chain + passive topology!")
 }
+
+// TestJetStreamLeafNodeChainWithPassiveSiteBSourcesFromSiteA tests a topology where:
+//
+//	        ┌─────────────────┐
+//	        │      HUB        │
+//	        │  (sources from  │
+//	        │   both sites)   │
+//	        └────▲───────▲────┘
+//	             │       │
+//	      direct │       │ passive
+//	             │       │
+//	        ┌────┴───┐   │
+//	        │ SITE_A │   │
+//	        │(SITE_A │   │
+//	        │ stream)│   │
+//	        └────▲───┘   │
+//	             │       │
+//	       chain │       │
+//	     (source)│       │
+//	             │       │
+//	        ┌────┴───────┴────┐
+//	        │     SITE_B      │
+//	        │ (sources from   │
+//	        │  SITE_A stream) │
+//	        └─────────────────┘
+//
+// This topology demonstrates:
+// - SITE_A has a stream named "SITE_A"
+// - SITE_B sources from SITE_A's stream via the leafnode chain
+// - Hub sources from both SITE_A's original stream and SITE_B's sourced stream
+// - The passive connection allows the loop without triggering loop detection
+func TestJetStreamLeafNodeChainWithPassiveSiteBSourcesFromSiteA(t *testing.T) {
+	// Hub - the central hub that sources streams from leafnodes
+	hubConf := `
+		listen: 127.0.0.1:-1
+		server_name: HUB
+		jetstream {
+			store_dir: '%s'
+			domain: HUB
+		}
+		accounts {
+			A {
+				jetstream: enabled
+				users: [{user: a, password: a}]
+			}
+			$SYS { users: [{user: admin, password: admin}] }
+		}
+		leafnodes {
+			listen: 127.0.0.1:-1
+		}
+	`
+
+	// SITE_A - connects directly to Hub, accepts chain connection from SITE_B
+	siteAConf := `
+		listen: 127.0.0.1:-1
+		server_name: SITE_A
+		jetstream {
+			store_dir: '%s'
+			domain: SITE_A
+		}
+		accounts {
+			A {
+				jetstream: enabled
+				users: [{user: a, password: a}]
+			}
+			$SYS { users: [{user: admin, password: admin}] }
+		}
+		leafnodes {
+			listen: 127.0.0.1:-1
+			remotes [
+				{ url: "nats://a:a@127.0.0.1:%d", account: A }
+			]
+		}
+	`
+
+	// SITE_B - connects to SITE_A (chain) AND directly to Hub (passive)
+	siteBConf := `
+		listen: 127.0.0.1:-1
+		server_name: SITE_B
+		jetstream {
+			store_dir: '%s'
+			domain: SITE_B
+		}
+		accounts {
+			A {
+				jetstream: enabled
+				users: [{user: a, password: a}]
+			}
+			$SYS { users: [{user: admin, password: admin}] }
+		}
+		leafnodes {
+			remotes [
+				# Chain connection through SITE_A (normal) - used for sourcing
+				{ url: "nats://a:a@127.0.0.1:%d", account: A }
+				# Direct connection to Hub (passive to avoid loop detection)
+				{ url: "nats://a:a@127.0.0.1:%d", account: A, passive: true }
+			]
+		}
+	`
+
+	// Start Hub
+	hubConfFile := createConfFile(t, []byte(fmt.Sprintf(hubConf, t.TempDir())))
+	sHub, oHub := RunServerWithConfig(hubConfFile)
+	defer sHub.Shutdown()
+
+	// Start SITE_A (connects to Hub)
+	siteAConfFile := createConfFile(t, []byte(fmt.Sprintf(siteAConf, t.TempDir(), oHub.LeafNode.Port)))
+	sSiteA, oSiteA := RunServerWithConfig(siteAConfFile)
+	defer sSiteA.Shutdown()
+
+	// Wait for SITE_A to connect to Hub
+	checkLeafNodeConnectedCount(t, sSiteA, 1)
+	checkLeafNodeConnectedCount(t, sHub, 1)
+
+	// Start SITE_B (connects to SITE_A and Hub)
+	siteBConfFile := createConfFile(t, []byte(fmt.Sprintf(siteBConf, t.TempDir(),
+		oSiteA.LeafNode.Port, oHub.LeafNode.Port)))
+	sSiteB, _ := RunServerWithConfig(siteBConfFile)
+	defer sSiteB.Shutdown()
+
+	// Verify all connections
+	checkLeafNodeConnectedCount(t, sSiteB, 2)
+	checkLeafNodeConnectedCount(t, sSiteA, 2)
+	checkLeafNodeConnectedCount(t, sHub, 2)
+
+	t.Log("Topology established: Hub ← SITE_A ← SITE_B with passive SITE_B → Hub")
+
+	// Create stream "SITE_A" on SITE_A
+	ncSiteA := natsConnect(t, sSiteA.ClientURL(), nats.UserInfo("a", "a"))
+	defer ncSiteA.Close()
+	jsSiteA, err := ncSiteA.JetStream()
+	require_NoError(t, err)
+
+	_, err = jsSiteA.AddStream(&nats.StreamConfig{
+		Name:     "SITE_A",
+		Subjects: []string{"events.>"},
+	})
+	require_NoError(t, err)
+
+	// Publish messages to SITE_A stream
+	for i := 0; i < 5; i++ {
+		_, err = jsSiteA.Publish("events.site_a", []byte(fmt.Sprintf("event-%d", i)))
+		require_NoError(t, err)
+	}
+	t.Log("Created stream SITE_A on SITE_A with 5 messages")
+
+	// Connect to SITE_B
+	ncSiteB := natsConnect(t, sSiteB.ClientURL(), nats.UserInfo("a", "a"))
+	defer ncSiteB.Close()
+	jsSiteB, err := ncSiteB.JetStream()
+	require_NoError(t, err)
+
+	// SITE_B sources from SITE_A's stream via the chain connection
+	// Using domain prefix $JS.SITE_A.API to reach SITE_A through the leafnode
+	_, err = jsSiteB.AddStream(&nats.StreamConfig{
+		Name: "SITE_B_FROM_SITE_A",
+		Sources: []*nats.StreamSource{{
+			Name:     "SITE_A",
+			External: &nats.ExternalStream{APIPrefix: "$JS.SITE_A.API"},
+		}},
+	})
+	require_NoError(t, err)
+	t.Log("Created sourced stream SITE_B_FROM_SITE_A on SITE_B")
+
+	// Wait for SITE_B to sync from SITE_A
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := jsSiteB.StreamInfo("SITE_B_FROM_SITE_A")
+		if err != nil {
+			return fmt.Errorf("could not get SITE_B_FROM_SITE_A info: %v", err)
+		}
+		if si.State.Msgs != 5 {
+			return fmt.Errorf("SITE_B_FROM_SITE_A: expected 5 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+	t.Log("SITE_B sourced 5 messages from SITE_A via chain connection")
+
+	// Connect to Hub
+	ncHub := natsConnect(t, sHub.ClientURL(), nats.UserInfo("a", "a"))
+	defer ncHub.Close()
+	jsHub, err := ncHub.JetStream()
+	require_NoError(t, err)
+
+	// Verify Hub can see SITE_A's stream
+	jsSiteAViaHub, err := ncHub.JetStream(nats.APIPrefix("$JS.SITE_A.API"))
+	require_NoError(t, err)
+
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := jsSiteAViaHub.StreamInfo("SITE_A")
+		if err != nil {
+			return fmt.Errorf("Hub cannot see SITE_A stream: %v", err)
+		}
+		if si.State.Msgs != 5 {
+			return fmt.Errorf("SITE_A expected 5 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+	t.Log("Hub can see SITE_A's stream via $JS.SITE_A.API")
+
+	// Verify Hub can see SITE_B's sourced stream
+	jsSiteBViaHub, err := ncHub.JetStream(nats.APIPrefix("$JS.SITE_B.API"))
+	require_NoError(t, err)
+
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := jsSiteBViaHub.StreamInfo("SITE_B_FROM_SITE_A")
+		if err != nil {
+			return fmt.Errorf("Hub cannot see SITE_B_FROM_SITE_A stream: %v", err)
+		}
+		if si.State.Msgs != 5 {
+			return fmt.Errorf("SITE_B_FROM_SITE_A expected 5 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+	t.Log("Hub can see SITE_B's sourced stream via $JS.SITE_B.API (through chain)")
+
+	// Hub sources from SITE_A's original stream
+	_, err = jsHub.AddStream(&nats.StreamConfig{
+		Name: "HUB_FROM_SITE_A",
+		Sources: []*nats.StreamSource{{
+			Name:     "SITE_A",
+			External: &nats.ExternalStream{APIPrefix: "$JS.SITE_A.API"},
+		}},
+	})
+	require_NoError(t, err)
+	t.Log("Created HUB_FROM_SITE_A sourced stream")
+
+	// Hub sources from SITE_B's sourced stream (which sourced from SITE_A)
+	_, err = jsHub.AddStream(&nats.StreamConfig{
+		Name: "HUB_FROM_SITE_B",
+		Sources: []*nats.StreamSource{{
+			Name:     "SITE_B_FROM_SITE_A",
+			External: &nats.ExternalStream{APIPrefix: "$JS.SITE_B.API"},
+		}},
+	})
+	require_NoError(t, err)
+	t.Log("Created HUB_FROM_SITE_B sourced stream")
+
+	// Wait for Hub streams to sync
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := jsHub.StreamInfo("HUB_FROM_SITE_A")
+		if err != nil {
+			return fmt.Errorf("could not get HUB_FROM_SITE_A info: %v", err)
+		}
+		if si.State.Msgs != 5 {
+			return fmt.Errorf("HUB_FROM_SITE_A: expected 5 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+	t.Log("HUB_FROM_SITE_A synced 5 messages")
+
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := jsHub.StreamInfo("HUB_FROM_SITE_B")
+		if err != nil {
+			return fmt.Errorf("could not get HUB_FROM_SITE_B info: %v", err)
+		}
+		if si.State.Msgs != 5 {
+			return fmt.Errorf("HUB_FROM_SITE_B: expected 5 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+	t.Log("HUB_FROM_SITE_B synced 5 messages")
+
+	// Publish more messages to SITE_A and verify they propagate through the chain
+	for i := 5; i < 10; i++ {
+		_, err = jsSiteA.Publish("events.site_a", []byte(fmt.Sprintf("event-%d", i)))
+		require_NoError(t, err)
+	}
+	t.Log("Published 5 more messages to SITE_A")
+
+	// Verify all streams have 10 messages
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		// Check SITE_A original stream
+		si, err := jsSiteA.StreamInfo("SITE_A")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != 10 {
+			return fmt.Errorf("SITE_A: expected 10 msgs, got %d", si.State.Msgs)
+		}
+
+		// Check SITE_B's sourced stream
+		si, err = jsSiteB.StreamInfo("SITE_B_FROM_SITE_A")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != 10 {
+			return fmt.Errorf("SITE_B_FROM_SITE_A: expected 10 msgs, got %d", si.State.Msgs)
+		}
+
+		// Check Hub's sourced streams
+		si, err = jsHub.StreamInfo("HUB_FROM_SITE_A")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != 10 {
+			return fmt.Errorf("HUB_FROM_SITE_A: expected 10 msgs, got %d", si.State.Msgs)
+		}
+
+		si, err = jsHub.StreamInfo("HUB_FROM_SITE_B")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != 10 {
+			return fmt.Errorf("HUB_FROM_SITE_B: expected 10 msgs, got %d", si.State.Msgs)
+		}
+
+		return nil
+	})
+
+	t.Log("SUCCESS: SITE_B sources from SITE_A via chain, Hub sources from both!")
+}
