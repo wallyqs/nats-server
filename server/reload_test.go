@@ -4141,6 +4141,196 @@ func TestConfigReloadLeafNodeWithRemotesNoChanges(t *testing.T) {
 	}
 }
 
+func TestConfigReloadLeafNodeRemotesAddRemove(t *testing.T) {
+	// Create a hub server that accepts leafnode connections.
+	hubConf := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub, hubOpts := RunServerWithConfig(hubConf)
+	defer hub.Shutdown()
+
+	hubPort := hubOpts.LeafNode.Port
+
+	// Create a second hub server for testing adding a second remote.
+	hub2Conf := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub2"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub2, hub2Opts := RunServerWithConfig(hub2Conf)
+	defer hub2.Shutdown()
+
+	hub2Port := hub2Opts.LeafNode.Port
+
+	// Spoke template - starts with one remote to hub.
+	spokeTmpl := `
+		port: -1
+		server_name: "spoke"
+		leafnodes {
+			remotes [
+				%s
+			]
+		}
+	`
+
+	remote1 := fmt.Sprintf(`{ url: "nats://127.0.0.1:%d" }`, hubPort)
+	remote2 := fmt.Sprintf(`{ url: "nats://127.0.0.1:%d" }`, hub2Port)
+
+	// Start spoke with one remote (to hub).
+	spokeConfig := fmt.Sprintf(spokeTmpl, remote1)
+	spokeConf := createConfFile(t, []byte(spokeConfig))
+	spoke, _ := RunServerWithConfig(spokeConf)
+	defer spoke.Shutdown()
+
+	// Verify initial connection.
+	checkLeafNodeConnected(t, spoke)
+	checkLeafNodeConnectedCount(t, hub, 1)
+	checkLeafNodeConnectedCount(t, hub2, 0)
+
+	// Test 1: Add a second remote (to hub2) via reload.
+	spokeConfig = fmt.Sprintf(spokeTmpl, remote1+",\n"+remote2)
+	changeCurrentConfigContentWithNewContent(t, spokeConf, []byte(spokeConfig))
+
+	if err := spoke.Reload(); err != nil {
+		t.Fatalf("Error during reload: %v", err)
+	}
+
+	// Both hubs should now have connections.
+	checkLeafNodeConnectedCount(t, spoke, 2)
+	checkLeafNodeConnectedCount(t, hub, 1)
+	checkLeafNodeConnectedCount(t, hub2, 1)
+
+	// Test 2: Remove the first remote (to hub) via reload.
+	spokeConfig = fmt.Sprintf(spokeTmpl, remote2)
+	changeCurrentConfigContentWithNewContent(t, spokeConf, []byte(spokeConfig))
+
+	if err := spoke.Reload(); err != nil {
+		t.Fatalf("Error during reload: %v", err)
+	}
+
+	// Only hub2 should have a connection now.
+	checkLeafNodeConnectedCount(t, spoke, 1)
+	checkLeafNodeConnectedCount(t, hub, 0)
+	checkLeafNodeConnectedCount(t, hub2, 1)
+
+	// Test 3: Remove all remotes.
+	spokeConfig = fmt.Sprintf(spokeTmpl, "")
+	changeCurrentConfigContentWithNewContent(t, spokeConf, []byte(spokeConfig))
+
+	if err := spoke.Reload(); err != nil {
+		t.Fatalf("Error during reload: %v", err)
+	}
+
+	// No connections should exist.
+	checkLeafNodeConnectedCount(t, spoke, 0)
+	checkLeafNodeConnectedCount(t, hub, 0)
+	checkLeafNodeConnectedCount(t, hub2, 0)
+
+	// Test 4: Add both remotes from scratch.
+	spokeConfig = fmt.Sprintf(spokeTmpl, remote1+",\n"+remote2)
+	changeCurrentConfigContentWithNewContent(t, spokeConf, []byte(spokeConfig))
+
+	if err := spoke.Reload(); err != nil {
+		t.Fatalf("Error during reload: %v", err)
+	}
+
+	// Both hubs should have connections.
+	checkLeafNodeConnectedCount(t, spoke, 2)
+	checkLeafNodeConnectedCount(t, hub, 1)
+	checkLeafNodeConnectedCount(t, hub2, 1)
+}
+
+func TestConfigReloadLeafNodeRemotesWithAccounts(t *testing.T) {
+	// Create hub servers that accepts leafnode connections.
+	hubConf := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub, hubOpts := RunServerWithConfig(hubConf)
+	defer hub.Shutdown()
+
+	hubPort := hubOpts.LeafNode.Port
+
+	hub2Conf := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub2"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub2, hub2Opts := RunServerWithConfig(hub2Conf)
+	defer hub2.Shutdown()
+
+	hub2Port := hub2Opts.LeafNode.Port
+
+	// Spoke template - can have remotes bound to different local accounts.
+	// This tests that remotes with same URL but different LocalAccount are
+	// treated as distinct remotes.
+	spokeTmpl := `
+		port: -1
+		server_name: "spoke"
+		accounts {
+			A { users: [{user: a, password: a}] }
+			B { users: [{user: b, password: b}] }
+		}
+		leafnodes {
+			remotes [
+				%s
+			]
+		}
+	`
+
+	// Two remotes to different hubs for different local accounts
+	remoteA := fmt.Sprintf(`{ url: "nats://127.0.0.1:%d", account: "A" }`, hubPort)
+	remoteB := fmt.Sprintf(`{ url: "nats://127.0.0.1:%d", account: "B" }`, hub2Port)
+
+	// Start spoke with remote bound to account A (connects to hub).
+	spokeConfig := fmt.Sprintf(spokeTmpl, remoteA)
+	spokeConf := createConfFile(t, []byte(spokeConfig))
+	spoke, _ := RunServerWithConfig(spokeConf)
+	defer spoke.Shutdown()
+
+	// Verify initial connection.
+	checkLeafNodeConnected(t, spoke)
+	checkLeafNodeConnectedCount(t, hub, 1)
+	checkLeafNodeConnectedCount(t, hub2, 0)
+
+	// Add remote for account B (connects to hub2).
+	spokeConfig = fmt.Sprintf(spokeTmpl, remoteA+",\n"+remoteB)
+	changeCurrentConfigContentWithNewContent(t, spokeConf, []byte(spokeConfig))
+
+	if err := spoke.Reload(); err != nil {
+		t.Fatalf("Error during reload: %v", err)
+	}
+
+	// Both accounts should now have leafnode connections to their respective hubs.
+	checkLeafNodeConnectedCount(t, spoke, 2)
+	checkLeafNodeConnectedCount(t, hub, 1)
+	checkLeafNodeConnectedCount(t, hub2, 1)
+
+	// Remove account A remote (to hub).
+	spokeConfig = fmt.Sprintf(spokeTmpl, remoteB)
+	changeCurrentConfigContentWithNewContent(t, spokeConf, []byte(spokeConfig))
+
+	if err := spoke.Reload(); err != nil {
+		t.Fatalf("Error during reload: %v", err)
+	}
+
+	// Only account B should have a connection (to hub2).
+	checkLeafNodeConnectedCount(t, spoke, 1)
+	checkLeafNodeConnectedCount(t, hub, 0)
+	checkLeafNodeConnectedCount(t, hub2, 1)
+}
+
 func TestConfigReloadAndVarz(t *testing.T) {
 	template := `
 		port: -1

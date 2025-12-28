@@ -893,24 +893,33 @@ func (l *leafNodeOption) Apply(s *Server) {
 		acceptSideCompOpts := &opts.LeafNode.Compression
 
 		s.mu.RLock()
-		// First, update our internal leaf remote configurations with the new
-		// compress options.
-		// Since changing the remotes (as in adding/removing) is currently not
-		// supported, we know that we should have the same number in Options
-		// than in leafRemoteCfgs, but to be sure, use the max size.
-		max := len(opts.LeafNode.Remotes)
-		if l := len(s.leafRemoteCfgs); l < max {
-			max = l
-		}
-		for i := range max {
-			lr := s.leafRemoteCfgs[i]
-			or := opts.LeafNode.Remotes[i]
+		// Update our internal leaf remote configurations with the new
+		// compress options. Match by URL/LocalAccount since remotes can
+		// now be added/removed dynamically.
+		for _, lr := range s.leafRemoteCfgs {
+			lr.RLock()
+			lrOpts := lr.RemoteLeafOpts
+			lr.RUnlock()
+
+			// Find matching remote in new options
+			var matchedOpts *RemoteLeafOpts
+			for _, or := range opts.LeafNode.Remotes {
+				if remoteLeafOptsAreEqual(lrOpts, or) {
+					matchedOpts = or
+					break
+				}
+			}
+			if matchedOpts == nil {
+				// This remote will be handled by leafNodeRemotesOption removal
+				continue
+			}
+
 			lr.Lock()
-			lr.Compression = or.Compression
-			if lr.Disabled && !or.Disabled {
+			lr.Compression = matchedOpts.Compression
+			if lr.Disabled && !matchedOpts.Disabled {
 				solicit = append(solicit, lr)
 			}
-			lr.Disabled = or.Disabled
+			lr.Disabled = matchedOpts.Disabled
 			lr.Unlock()
 		}
 
@@ -976,6 +985,93 @@ func (l *leafNodeOption) Apply(s *Server) {
 			}
 		}
 	}
+}
+
+// leafNodeRemotesOption implements the option interface for adding/removing
+// leafnode remotes on config reload.
+type leafNodeRemotesOption struct {
+	noopOption
+	add    []*RemoteLeafOpts
+	remove []*RemoteLeafOpts
+}
+
+// Apply the leafnode remotes changes by removing and adding the necessary remotes.
+func (l *leafNodeRemotesOption) Apply(s *Server) {
+	// First, handle removals by finding and closing connections for removed remotes
+	s.mu.Lock()
+	// Build a list of leafNodeCfgs to remove
+	var cfgsToRemove []*leafNodeCfg
+	var cfgsToKeep []*leafNodeCfg
+	for _, cfg := range s.leafRemoteCfgs {
+		shouldRemove := false
+		for _, rem := range l.remove {
+			if remoteLeafOptsAreEqual(cfg.RemoteLeafOpts, rem) {
+				shouldRemove = true
+				break
+			}
+		}
+		if shouldRemove {
+			cfgsToRemove = append(cfgsToRemove, cfg)
+		} else {
+			cfgsToKeep = append(cfgsToKeep, cfg)
+		}
+	}
+	s.leafRemoteCfgs = cfgsToKeep
+	s.mu.Unlock()
+
+	// Close connections for removed remotes
+	for _, cfg := range cfgsToRemove {
+		// Find and close any leaf connections using this config
+		s.mu.RLock()
+		var toClose []*client
+		for _, c := range s.leafs {
+			c.mu.Lock()
+			if c.leaf != nil && c.leaf.remote == cfg {
+				c.flags.set(noReconnect)
+				toClose = append(toClose, c)
+			}
+			c.mu.Unlock()
+		}
+		s.mu.RUnlock()
+
+		for _, c := range toClose {
+			c.closeConnection(ClientClosed)
+		}
+		s.Noticef("Removed leafnode remote %v", cfg.URLs)
+	}
+
+	// Now handle additions
+	if len(l.add) > 0 {
+		sysAccName := _EMPTY_
+		sAcc := s.SystemAccount()
+		if sAcc != nil {
+			sysAccName = sAcc.Name
+		}
+
+		for _, r := range l.add {
+			s.mu.Lock()
+			remote := newLeafNodeCfg(r)
+			s.leafRemoteCfgs = append(s.leafRemoteCfgs, remote)
+			isSysAccRemote := r.LocalAccount == sysAccName
+			if isSysAccRemote {
+				if len(remote.DenyExports) > 0 {
+					s.Noticef("Remote for System Account uses restricted export permissions")
+				}
+				if len(remote.DenyImports) > 0 {
+					s.Noticef("Remote for System Account uses restricted import permissions")
+				}
+			}
+			s.mu.Unlock()
+
+			// Start connection if not disabled
+			if !r.Disabled {
+				s.startGoRoutine(func() { s.connectToRemoteLeafNode(remote, true) })
+			}
+			s.Noticef("Added leafnode remote %v", r.URLs)
+		}
+	}
+
+	s.Noticef("Reloaded: leafnode remotes")
 }
 
 type noFastProdStallReload struct {
@@ -1466,6 +1562,11 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			tmpNew.TLSConfig = nil
 			tmpOld.tlsConfigOpts = nil
 			tmpNew.tlsConfigOpts = nil
+
+			// Calculate which remotes need to be added or removed.
+			// We now support adding and removing leafnode remotes on config reload.
+			addRemotes, removeRemotes := diffLeafNodeRemotes(tmpOld.Remotes, tmpNew.Remotes)
+
 			// We will allow TLSHandshakeFirst to be config reloaded. First,
 			// we just want to detect if there was a change in the leafnodes{}
 			// block, and if not, we will check the remotes.
@@ -1476,35 +1577,57 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			if handshakeFirstChanged {
 				tmpOld.TLSHandshakeFirst, tmpNew.TLSHandshakeFirst = false, false
 				tmpOld.TLSHandshakeFirstFallback, tmpNew.TLSHandshakeFirstFallback = 0, 0
-			} else if len(tmpOld.Remotes) == len(tmpNew.Remotes) {
-				// Since we don't support changes in the remotes, we will do a
-				// simple pass to see if there was a change of this field.
-				for i := 0; i < len(tmpOld.Remotes); i++ {
-					if tmpOld.Remotes[i].TLSHandshakeFirst != tmpNew.Remotes[i].TLSHandshakeFirst {
-						handshakeFirstChanged = true
+			} else {
+				// Check matching remotes for TLSHandshakeFirst changes
+				for _, oldRemote := range tmpOld.Remotes {
+					for _, newRemote := range tmpNew.Remotes {
+						if remoteLeafOptsAreEqual(oldRemote, newRemote) {
+							if oldRemote.TLSHandshakeFirst != newRemote.TLSHandshakeFirst {
+								handshakeFirstChanged = true
+							}
+							break
+						}
+					}
+					if handshakeFirstChanged {
 						break
 					}
 				}
 			}
+
 			// We also support config reload for compression. Check if it changed before
 			// blanking them out for the deep-equal check at the end.
 			compressionChanged := !compressOptsEqual(&tmpOld.Compression, &tmpNew.Compression)
 			if compressionChanged {
 				tmpOld.Compression, tmpNew.Compression = CompressionOpts{}, CompressionOpts{}
-			} else if len(tmpOld.Remotes) == len(tmpNew.Remotes) {
-				// Same that for tls first check, do the remotes now.
-				for i := range len(tmpOld.Remotes) {
-					if !compressOptsEqual(&tmpOld.Remotes[i].Compression, &tmpNew.Remotes[i].Compression) {
-						compressionChanged = true
+			} else {
+				// Check matching remotes for compression changes
+				for _, oldRemote := range tmpOld.Remotes {
+					for _, newRemote := range tmpNew.Remotes {
+						if remoteLeafOptsAreEqual(oldRemote, newRemote) {
+							if !compressOptsEqual(&oldRemote.Compression, &newRemote.Compression) {
+								compressionChanged = true
+							}
+							break
+						}
+					}
+					if compressionChanged {
 						break
 					}
 				}
 			}
-			// Check if the "disabled" option of each remote has changed.
+
+			// Check if the "disabled" option of each matching remote has changed.
 			var disabledChanged bool
-			for i := range len(tmpOld.Remotes) {
-				if tmpOld.Remotes[i].Disabled != tmpNew.Remotes[i].Disabled {
-					disabledChanged = true
+			for _, oldRemote := range tmpOld.Remotes {
+				for _, newRemote := range tmpNew.Remotes {
+					if remoteLeafOptsAreEqual(oldRemote, newRemote) {
+						if oldRemote.Disabled != newRemote.Disabled {
+							disabledChanged = true
+						}
+						break
+					}
+				}
+				if disabledChanged {
 					break
 				}
 			}
@@ -1515,45 +1638,10 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			tmpOld.Remotes = copyRemoteLNConfigForReloadCompare(tmpOld.Remotes)
 			tmpNew.Remotes = copyRemoteLNConfigForReloadCompare(tmpNew.Remotes)
 
-			// Special check for leafnode remotes changes which are not supported right now.
-			leafRemotesChanged := func(a, b LeafNodeOpts) bool {
-				if len(a.Remotes) != len(b.Remotes) {
-					return true
-				}
-
-				// Check whether all remotes URLs are still the same.
-				for _, oldRemote := range a.Remotes {
-					var found bool
-
-					if oldRemote.LocalAccount == _EMPTY_ {
-						oldRemote.LocalAccount = globalAccountName
-					}
-
-					for _, newRemote := range b.Remotes {
-						// Bind to global account in case not defined.
-						if newRemote.LocalAccount == _EMPTY_ {
-							newRemote.LocalAccount = globalAccountName
-						}
-
-						if reflect.DeepEqual(oldRemote, newRemote) {
-							found = true
-							break
-						}
-					}
-					if !found {
-						return true
-					}
-				}
-
-				return false
-			}
-
-			// First check whether remotes changed at all. If they did not,
-			// skip them in the complete equal check.
-			if !leafRemotesChanged(tmpOld, tmpNew) {
-				tmpOld.Remotes = nil
-				tmpNew.Remotes = nil
-			}
+			// Since we now support adding/removing remotes, nil them out for
+			// the deep equal check. Remote changes are handled by leafNodeRemotesOption.
+			tmpOld.Remotes = nil
+			tmpNew.Remotes = nil
 
 			// Special check for auth users to detect changes.
 			// If anything is off will fall through and fail below.
@@ -1602,6 +1690,14 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 				compressionChanged: compressionChanged,
 				disabledChanged:    disabledChanged,
 			})
+
+			// Add the remotes option if there are any remotes to add or remove.
+			if len(addRemotes) > 0 || len(removeRemotes) > 0 {
+				diffOpts = append(diffOpts, &leafNodeRemotesOption{
+					add:    addRemotes,
+					remove: removeRemotes,
+				})
+			}
 		case "jetstream":
 			new := newValue.(bool)
 			old := oldValue.(bool)
@@ -2650,4 +2746,64 @@ func diffProxiesTrustedKeys(old, new []*ProxyConfig) ([]string, []string) {
 		}
 	}
 	return add, del
+}
+
+// leafNodeRemotesEqualURLs checks if two leafnode remotes have the same URLs
+// by comparing the string representation of each URL.
+func leafNodeRemotesEqualURLs(a, b *RemoteLeafOpts) bool {
+	if len(a.URLs) != len(b.URLs) {
+		return false
+	}
+	for i, u := range a.URLs {
+		if !urlsAreEqual(u, b.URLs[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// remoteLeafOptsAreEqual checks if two remote leafnode configurations
+// have the same URLs and local account binding.
+func remoteLeafOptsAreEqual(a, b *RemoteLeafOpts) bool {
+	// Normalize local accounts - empty means global account
+	aLocal := a.LocalAccount
+	if aLocal == _EMPTY_ {
+		aLocal = globalAccountName
+	}
+	bLocal := b.LocalAccount
+	if bLocal == _EMPTY_ {
+		bLocal = globalAccountName
+	}
+	if aLocal != bLocal {
+		return false
+	}
+	return leafNodeRemotesEqualURLs(a, b)
+}
+
+// diffLeafNodeRemotes diffs the old leafnode remotes and the new leafnode remotes
+// and returns the ones that should be added and removed from the server.
+func diffLeafNodeRemotes(old, new []*RemoteLeafOpts) (add, remove []*RemoteLeafOpts) {
+	// Find remotes to remove.
+removeLoop:
+	for _, oldRemote := range old {
+		for _, newRemote := range new {
+			if remoteLeafOptsAreEqual(oldRemote, newRemote) {
+				continue removeLoop
+			}
+		}
+		remove = append(remove, oldRemote)
+	}
+
+	// Find remotes to add.
+addLoop:
+	for _, newRemote := range new {
+		for _, oldRemote := range old {
+			if remoteLeafOptsAreEqual(oldRemote, newRemote) {
+				continue addLoop
+			}
+		}
+		add = append(add, newRemote)
+	}
+
+	return add, remove
 }
