@@ -84,6 +84,8 @@ type leaf struct {
 	remoteAccName string
 	// Whether or not we want to propagate east-west interest from other LNs.
 	isolated bool
+	// Passive mode disables loop detection and automatic interest propagation.
+	passive bool
 	// Used to suppress sub and unsub interest. Same as routes but our audience
 	// here is tied to this leaf node. This will hold all subscriptions except this
 	// leaf nodes. This represents all the interest we want to send to the other side.
@@ -982,6 +984,7 @@ func (c *client) sendLeafConnect(clusterName string, headers bool) error {
 		RemoteAccount: c.acc.GetName(),
 		Proto:         c.srv.getServerProto(),
 		Isolate:       c.leaf.remote.RequestIsolation,
+		Passive:       c.leaf.passive,
 	}
 
 	// If a signature callback is specified, this takes precedence over anything else.
@@ -1157,6 +1160,10 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 	s.optsMu.RLock()
 	if c.leaf.isolated = s.opts.LeafNode.IsolateLeafnodeInterest; !c.leaf.isolated && remote != nil {
 		c.leaf.isolated = remote.LocalIsolation
+	}
+	// Check if this is a passive connection (no loop detection, no interest propagation).
+	if remote != nil {
+		c.leaf.passive = remote.Passive
 	}
 	s.optsMu.RUnlock()
 
@@ -2035,6 +2042,9 @@ type leafConnectInfo struct {
 	// We use `protocol` as the JSON tag, so this is automatically unmarshal'ed
 	// in the low level process CONNECT.
 	Proto int `json:"protocol,omitempty"`
+
+	// Passive mode disables loop detection and automatic interest propagation.
+	Passive bool `json:"passive,omitempty"`
 }
 
 // processLeafNodeConnect will process the inbound connect args.
@@ -2127,6 +2137,8 @@ func (c *client) processLeafNodeConnect(s *Server, arg []byte, lang string) erro
 	c.leaf.remoteAccName = proto.RemoteAccount
 	// Remember if the leafnode requested isolation.
 	c.leaf.isolated = c.leaf.isolated || proto.Isolate
+	// Remember if the leafnode requested passive mode (no loop detection, no interest propagation).
+	c.leaf.passive = c.leaf.passive || proto.Passive
 
 	// If the other side has declared itself a hub, so we will take on the spoke role.
 	if proto.Hub {
@@ -2366,6 +2378,12 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 		if sub.client.kind == LEAF && c.isIsolatedLeafNode() {
 			continue
 		}
+		// For passive connections, skip all interest propagation.
+		// Passive connections bypass loop detection but don't participate in
+		// automatic interest-based message routing. Only explicit request/reply works.
+		if c.leaf.passive {
+			continue
+		}
 		// We ignore ourselves here.
 		// Also don't add the subscription if it has a origin cluster and the
 		// cluster name matches the one of the client we are sending to.
@@ -2393,8 +2411,10 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 		c.leaf.smap[gwReplyPrefix+">"]++
 	}
 	// Detect loops by subscribing to a specific subject and checking
-	// if this sub is coming back to us.
-	c.leaf.smap[lds]++
+	// if this sub is coming back to us. Skip for passive connections.
+	if !c.leaf.passive {
+		c.leaf.smap[lds]++
+	}
 
 	// Check if we need to add an existing siReply to our map.
 	// This will be a prefix so add on the wildcard.
@@ -2502,7 +2522,12 @@ func (acc *Account) updateLeafNodesEx(sub *subscription, delta int32, hubOnly bo
 		// Check to make sure this sub does not have an origin cluster that matches the leafnode.
 		// If skipped, make sure that we still let go the "$LDS." subscription that allows
 		// the detection of loops as long as different cluster.
+		// For passive connections, skip all interest propagation.
 		clusterDifferent := cluster != ln.remoteCluster()
+		if ln.leaf.passive {
+			ln.mu.Unlock()
+			continue
+		}
 		if (isLDS && clusterDifferent) || ((cluster == _EMPTY_ || clusterDifferent) && (delta <= 0 || ln.canSubscribe(subject))) {
 			ln.updateSmap(sub, delta, isLDS)
 		}
@@ -2760,10 +2785,10 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 	}
 
 	acc := c.acc
-	// Check if we have a loop.
+	// Check if we have a loop. Skip for passive connections.
 	ldsPrefix := bytes.HasPrefix(sub.subject, []byte(leafNodeLoopDetectionSubjectPrefix))
 
-	if ldsPrefix && bytesToString(sub.subject) == acc.getLDSubject() {
+	if ldsPrefix && !c.leaf.passive && bytesToString(sub.subject) == acc.getLDSubject() {
 		c.mu.Unlock()
 		c.handleLeafNodeLoop(true)
 		return nil
@@ -2849,7 +2874,11 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 	}
 	// Now check on leafnode updates for other leaf nodes. We understand solicited
 	// and non-solicited state in this call so we will do the right thing.
-	acc.updateLeafNodes(sub, delta)
+	// For passive connections, don't propagate any subscriptions to other leafnodes
+	// to avoid message loops.
+	if !c.leaf.passive {
+		acc.updateLeafNodes(sub, delta)
+	}
 
 	return nil
 }

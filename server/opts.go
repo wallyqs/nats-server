@@ -278,6 +278,11 @@ type RemoteLeafOpts struct {
 	// RequestIsolation asks the remote side to isolate us from their east-west subject interest.
 	RequestIsolation bool `json:"request_isolation,omitempty"`
 
+	// Passive mode disables loop detection and automatic interest propagation for this remote.
+	// This allows connecting to a server that would otherwise form a loop, but only
+	// request/reply patterns (like JetStream API) will work - not pub/sub broadcasting.
+	Passive bool `json:"passive,omitempty"`
+
 	// If this is set to true, the connection to this remote will not be solicited.
 	// During a configuration reload, if this is changed from `false` to `true`, the
 	// existing connection will be closed and not solicited again (until it is changed
@@ -3068,6 +3073,8 @@ func parseRemoteLeafNodes(v any, errors *[]error, warnings *[]error) ([]*RemoteL
 				remote.FirstInfoTimeout = parseDuration(k, tk, v, errors, warnings)
 			case "disabled":
 				remote.Disabled = v.(bool)
+			case "passive":
+				remote.Passive = v.(bool)
 			case "proxy":
 				proxyMap, ok := v.(map[string]any)
 				if !ok {
