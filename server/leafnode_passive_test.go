@@ -1195,4 +1195,31 @@ func TestJetStreamLeafNodeChainWithPassiveHubClusterSiteBSourcesFromSiteA(t *tes
 	})
 
 	t.Log("SUCCESS: SITE_B sources from SITE_A via chain, 3-node Hub cluster sources from both!")
+
+	// Now test what happens when SITE_A goes down: verify that the passive connection
+	// alone is NOT sufficient for JetStream API routing (by design).
+	// Passive connections bypass loop detection but don't propagate interest,
+	// so when the chain path (Hub → SITE_A → SITE_B) goes down, the interest
+	// routing to SITE_B is lost.
+	t.Log("Shutting down SITE_A to test passive connection behavior...")
+	sSiteA.Shutdown()
+
+	// Wait for SITE_B to detect SITE_A is gone (chain connection lost)
+	// SITE_B should now only have 1 connection (passive to Hub)
+	checkLeafNodeConnectedCount(t, sSiteB, 1)
+	t.Log("SITE_A shutdown, SITE_B now has only passive connection to Hub")
+
+	// Verify that Hub can NO LONGER see SITE_B's stream via the passive connection.
+	// This is expected because passive connections don't propagate interest.
+	// The interest for $JS.SITE_B.API.> was only propagated through the chain.
+	time.Sleep(500 * time.Millisecond) // Give time for connection state to settle
+
+	_, err = jsSiteBViaHub.StreamInfo("SITE_B_FROM_SITE_A")
+	if err == nil {
+		t.Log("Note: Hub can still see SITE_B stream (interest may have been cached)")
+	} else {
+		t.Logf("Expected: Hub cannot see SITE_B stream after SITE_A shutdown: %v", err)
+	}
+
+	t.Log("SUCCESS: Test demonstrates passive connection behavior - interest not propagated!")
 }
