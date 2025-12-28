@@ -283,6 +283,11 @@ type RemoteLeafOpts struct {
 	// request/reply patterns (like JetStream API) will work - not pub/sub broadcasting.
 	Passive bool `json:"passive,omitempty"`
 
+	// PassivePropagateInterest, when used with Passive mode, enables interest propagation
+	// while still bypassing loop detection. This allows JetStream API routing to work
+	// through the passive connection when the primary path is down.
+	PassivePropagateInterest bool `json:"passive_propagate_interest,omitempty"`
+
 	// If this is set to true, the connection to this remote will not be solicited.
 	// During a configuration reload, if this is changed from `false` to `true`, the
 	// existing connection will be closed and not solicited again (until it is changed
@@ -3075,6 +3080,8 @@ func parseRemoteLeafNodes(v any, errors *[]error, warnings *[]error) ([]*RemoteL
 				remote.Disabled = v.(bool)
 			case "passive":
 				remote.Passive = v.(bool)
+			case "passive_propagate_interest":
+				remote.PassivePropagateInterest = v.(bool)
 			case "proxy":
 				proxyMap, ok := v.(map[string]any)
 				if !ok {
