@@ -1223,3 +1223,220 @@ func TestJetStreamLeafNodeChainWithPassiveHubClusterSiteBSourcesFromSiteA(t *tes
 
 	t.Log("SUCCESS: Test demonstrates passive connection behavior - interest not propagated!")
 }
+
+// TestJetStreamLeafNodePassiveWithServiceImportExport tests whether service imports/exports
+// can provide explicit routing through a passive leafnode connection when the primary
+// chain path is down.
+//
+// The idea is that service imports/exports create explicit routing that doesn't depend
+// on interest propagation, which might work around the passive mode limitation.
+//
+// Topology:
+//
+//	        ┌─────────────────────────────────┐
+//	        │              HUB                │
+//	        │  account A (main)               │
+//	        │  account SITE_B_SVC (bridge)    │
+//	        │    - imports from SITE_B_SVC    │
+//	        └────▲───────────────────▲────────┘
+//	             │                   │
+//	      direct │                   │ passive
+//	   (normal)  │                   │ (SITE_B_SVC acct)
+//	             │                   │
+//	        ┌────┴───┐               │
+//	        │ SITE_A │               │
+//	        └────▲───┘               │
+//	             │                   │
+//	       chain │                   │
+//	             │                   │
+//	        ┌────┴───────────────────┴────┐
+//	        │          SITE_B             │
+//	        │  account SITE_B_SVC         │
+//	        │    - exports $JS.API.>      │
+//	        └─────────────────────────────┘
+func TestJetStreamLeafNodePassiveWithServiceImportExport(t *testing.T) {
+	// Hub - has two accounts:
+	// - A: main account for JetStream
+	// - SITE_B_SVC: bridge account that imports from SITE_B via passive leafnode
+	hubConf := `
+		listen: 127.0.0.1:-1
+		server_name: HUB
+		jetstream {
+			store_dir: '%s'
+			domain: HUB
+		}
+		accounts {
+			A {
+				jetstream: enabled
+				users: [{user: a, password: a}]
+				imports: [
+					# Import JetStream API from SITE_B via the bridge account
+					{service: {account: SITE_B_SVC, subject: "$JS.SITE_B.API.>"}, to: "$JS.SITE_B.API.>"}
+				]
+			}
+			SITE_B_SVC {
+				users: [{user: site_b_svc, password: site_b_svc}]
+				exports: [
+					# Export JetStream API to account A
+					{service: "$JS.SITE_B.API.>", response_type: stream, accounts: [A]}
+				]
+			}
+			$SYS { users: [{user: admin, password: s3cr3t!}] }
+		}
+		leafnodes {
+			listen: 127.0.0.1:-1
+		}
+	`
+
+	// SITE_A - connects to Hub with account A (normal path)
+	siteAConf := `
+		listen: 127.0.0.1:-1
+		server_name: SITE_A
+		jetstream {
+			store_dir: '%s'
+			domain: SITE_A
+		}
+		accounts {
+			A {
+				jetstream: enabled
+				users: [{user: a, password: a}]
+			}
+			$SYS { users: [{user: admin, password: admin}] }
+		}
+		leafnodes {
+			listen: 127.0.0.1:-1
+			remotes [
+				{ url: "nats://a:a@127.0.0.1:%d", account: A }
+			]
+		}
+	`
+
+	// SITE_B - connects to SITE_A (chain) AND to Hub (passive with SITE_B_SVC account)
+	siteBConf := `
+		listen: 127.0.0.1:-1
+		server_name: SITE_B
+		jetstream {
+			store_dir: '%s'
+			domain: SITE_B
+		}
+		accounts {
+			A {
+				jetstream: enabled
+				users: [{user: a, password: a}]
+				# Export JetStream API to SITE_B_SVC so it can proxy requests
+				exports: [
+					{service: "$JS.API.>", response_type: stream, accounts: [SITE_B_SVC]}
+				]
+			}
+			SITE_B_SVC {
+				users: [{user: site_b_svc, password: site_b_svc}]
+				# Export the SITE_B domain API to Hub via leafnode
+				exports: [
+					{service: "$JS.SITE_B.API.>", response_type: stream}
+				]
+				# Import local JetStream API to handle the requests
+				imports: [
+					{service: {account: A, subject: "$JS.API.>"}, to: "$JS.API.>"}
+				]
+			}
+			$SYS { users: [{user: admin, password: admin}] }
+		}
+		leafnodes {
+			remotes [
+				# Chain connection through SITE_A (normal)
+				{ url: "nats://a:a@127.0.0.1:%d", account: A }
+				# Direct passive connection to Hub for failover
+				{ url: "nats://site_b_svc:site_b_svc@127.0.0.1:%d", account: SITE_B_SVC, passive: true }
+			]
+		}
+	`
+
+	// Start Hub
+	hubConfFile := createConfFile(t, []byte(fmt.Sprintf(hubConf, t.TempDir())))
+	sHub, oHub := RunServerWithConfig(hubConfFile)
+	defer sHub.Shutdown()
+
+	// Start SITE_A
+	siteAConfFile := createConfFile(t, []byte(fmt.Sprintf(siteAConf, t.TempDir(), oHub.LeafNode.Port)))
+	sSiteA, oSiteA := RunServerWithConfig(siteAConfFile)
+	defer sSiteA.Shutdown()
+
+	// Wait for SITE_A to connect to Hub
+	checkLeafNodeConnectedCount(t, sSiteA, 1)
+	checkLeafNodeConnectedCount(t, sHub, 1)
+	t.Log("SITE_A connected to Hub")
+
+	// Start SITE_B
+	siteBConfFile := createConfFile(t, []byte(fmt.Sprintf(siteBConf, t.TempDir(),
+		oSiteA.LeafNode.Port, oHub.LeafNode.Port)))
+	sSiteB, _ := RunServerWithConfig(siteBConfFile)
+	defer sSiteB.Shutdown()
+
+	// Verify all connections
+	checkLeafNodeConnectedCount(t, sSiteB, 2)
+	checkLeafNodeConnectedCount(t, sSiteA, 2)
+	checkLeafNodeConnectedCount(t, sHub, 2)
+	t.Log("Topology established with service import/export bridge")
+
+	// Create stream on SITE_B
+	ncSiteB := natsConnect(t, sSiteB.ClientURL(), nats.UserInfo("a", "a"))
+	defer ncSiteB.Close()
+	jsSiteB, err := ncSiteB.JetStream()
+	require_NoError(t, err)
+
+	_, err = jsSiteB.AddStream(&nats.StreamConfig{
+		Name:     "SITE_B_STREAM",
+		Subjects: []string{"site_b.>"},
+	})
+	require_NoError(t, err)
+
+	for i := 0; i < 5; i++ {
+		_, err = jsSiteB.Publish("site_b.data", []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+	t.Log("Created SITE_B_STREAM with 5 messages")
+
+	// Connect to Hub and verify we can see SITE_B's stream via domain prefix
+	ncHub := natsConnect(t, sHub.ClientURL(), nats.UserInfo("a", "a"))
+	defer ncHub.Close()
+
+	jsSiteBViaHub, err := ncHub.JetStream(nats.APIPrefix("$JS.SITE_B.API"))
+	require_NoError(t, err)
+
+	// First verify it works through the chain
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := jsSiteBViaHub.StreamInfo("SITE_B_STREAM")
+		if err != nil {
+			return fmt.Errorf("Hub cannot see SITE_B_STREAM: %v", err)
+		}
+		if si.State.Msgs != 5 {
+			return fmt.Errorf("expected 5 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+	t.Log("Hub can see SITE_B_STREAM via chain (before SITE_A shutdown)")
+
+	// Now shutdown SITE_A
+	t.Log("Shutting down SITE_A...")
+	sSiteA.Shutdown()
+
+	// Wait for SITE_B to detect SITE_A is gone
+	checkLeafNodeConnectedCount(t, sSiteB, 1)
+	t.Log("SITE_A shutdown, SITE_B has only passive connection to Hub")
+
+	// Give time for state to settle
+	time.Sleep(500 * time.Millisecond)
+
+	// Try to access SITE_B's stream through the service import/export bridge
+	t.Log("Attempting to access SITE_B stream through passive connection with service imports...")
+
+	si, err := jsSiteBViaHub.StreamInfo("SITE_B_STREAM")
+	if err != nil {
+		t.Logf("Service import/export approach did NOT work: %v", err)
+		t.Log("This confirms that even service imports cannot route through passive connections")
+		t.Log("because the underlying leafnode transport still requires interest propagation")
+	} else {
+		t.Logf("SUCCESS! Service import/export WORKS! Stream has %d messages", si.State.Msgs)
+		t.Log("Hub can access SITE_B through passive connection using service imports!")
+	}
+}
