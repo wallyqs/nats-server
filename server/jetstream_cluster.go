@@ -1415,11 +1415,12 @@ func (js *jetStream) monitorCluster() {
 
 	// Set to true to start.
 	js.setMetaRecovering()
+	recovering := true
 
 	// Snapshotting function.
 	doSnapshot := func(force bool) {
 		// Suppress during recovery.
-		if js.isMetaRecovering() {
+		if recovering {
 			return
 		}
 		// Look up what the threshold is for compaction. Re-reading from config here as it is reloadable.
@@ -1443,13 +1444,7 @@ func (js *jetStream) monitorCluster() {
 		}
 	}
 
-	ru := &recoveryUpdates{
-		removeStreams:   make(map[string]*streamAssignment),
-		removeConsumers: make(map[string]map[string]*consumerAssignment),
-		addStreams:      make(map[string]*streamAssignment),
-		updateStreams:   make(map[string]*streamAssignment),
-		updateConsumers: make(map[string]map[string]*consumerAssignment),
-	}
+	var ru *recoveryUpdates
 
 	// Make sure to cancel any pending checkForOrphans calls if the
 	// monitor goroutine exits.
@@ -1473,43 +1468,58 @@ func (js *jetStream) monitorCluster() {
 		case <-aq.ch:
 			ces := aq.pop()
 			for _, ce := range ces {
+				if recovering && ru == nil {
+					ru = &recoveryUpdates{
+						removeStreams:   make(map[string]*streamAssignment),
+						removeConsumers: make(map[string]map[string]*consumerAssignment),
+						addStreams:      make(map[string]*streamAssignment),
+						updateStreams:   make(map[string]*streamAssignment),
+						updateConsumers: make(map[string]map[string]*consumerAssignment),
+					}
+				}
 				if ce == nil {
-					// Process any removes that are still valid after recovery.
-					for _, cas := range ru.removeConsumers {
-						for _, ca := range cas {
-							js.processConsumerRemoval(ca)
+					if ru != nil {
+						// Process any removes that are still valid after recovery.
+						for _, cas := range ru.removeConsumers {
+							for _, ca := range cas {
+								js.processConsumerRemoval(ca)
+							}
 						}
-					}
-					for _, sa := range ru.removeStreams {
-						js.processStreamRemoval(sa)
-					}
-					// Process stream additions.
-					for _, sa := range ru.addStreams {
-						js.processStreamAssignment(sa)
-					}
-					// Process pending updates.
-					for _, sa := range ru.updateStreams {
-						js.processUpdateStreamAssignment(sa)
-					}
-					// Now consumers.
-					for _, cas := range ru.updateConsumers {
-						for _, ca := range cas {
-							js.processConsumerAssignment(ca)
+						for _, sa := range ru.removeStreams {
+							js.processStreamRemoval(sa)
+						}
+						// Process stream additions.
+						for _, sa := range ru.addStreams {
+							js.processStreamAssignment(sa)
+						}
+						// Process pending updates.
+						for _, sa := range ru.updateStreams {
+							js.processUpdateStreamAssignment(sa)
+						}
+						// Now consumers.
+						for _, cas := range ru.updateConsumers {
+							for _, ca := range cas {
+								js.processConsumerAssignment(ca)
+							}
 						}
 					}
 					// Signals we have replayed all of our metadata.
+					wasMetaRecovering := js.isMetaRecovering()
 					js.clearMetaRecovering()
+					recovering = false
 					// Clear.
 					ru = nil
 					s.Debugf("Recovered JetStream cluster metadata")
 					// Snapshot now so we start with freshly compacted log.
 					doSnapshot(true)
-					oc = time.AfterFunc(30*time.Second, js.checkForOrphans)
-					// Do a health check here as well.
-					go checkHealth()
+					if wasMetaRecovering {
+						oc = time.AfterFunc(30*time.Second, js.checkForOrphans)
+						// Do a health check here as well.
+						go checkHealth()
+					}
 					continue
 				}
-				if didSnap, err := js.applyMetaEntries(ce.Entries, ru); err == nil {
+				if isRecovering, didSnap, err := js.applyMetaEntries(ce.Entries, ru); err == nil {
 					var nb uint64
 					// Some entries can fail without an error when shutting down, don't move applied forward.
 					if !js.isShuttingDown() {
@@ -1520,6 +1530,7 @@ func (js *jetStream) monitorCluster() {
 					} else if nb > compactSizeMin && time.Since(lastSnapTime) > minSnapDelta {
 						doSnapshot(false)
 					}
+					recovering = isRecovering
 				} else {
 					s.Warnf("Error applying JetStream cluster entries: %v", err)
 				}
@@ -2088,11 +2099,21 @@ func (ca *consumerAssignment) recoveryKey() string {
 	return ca.Client.serviceAccount() + ksep + ca.Stream + ksep + ca.Name
 }
 
-func (js *jetStream) applyMetaEntries(entries []*Entry, ru *recoveryUpdates) (bool, error) {
+func (js *jetStream) applyMetaEntries(entries []*Entry, ru *recoveryUpdates) (bool, bool, error) {
 	var didSnap bool
-	isRecovering := js.isMetaRecovering()
+	isRecovering := ru != nil
 
 	for _, e := range entries {
+		// If we received a lower-level catchup entry, mark that we're recovering.
+		// We can optimize by staging all meta operations until we're caught up.
+		// At that point we can apply the diff in one go.
+		if e.Type == EntryCatchup {
+			isRecovering = true
+			// A catchup entry only contains this, so we can exit now and have the
+			// recoveryUpdates struct be populated for the next invocation of applyMetaEntries.
+			return isRecovering, didSnap, nil
+		}
+
 		if e.Type == EntrySnapshot {
 			js.applyMetaSnapshot(e.Data, ru, isRecovering)
 			didSnap = true
@@ -2129,7 +2150,7 @@ func (js *jetStream) applyMetaEntries(entries []*Entry, ru *recoveryUpdates) (bo
 				}
 			}
 		} else if e.Type == EntryAddPeer {
-			if !isRecovering {
+			if !js.isMetaRecovering() {
 				js.processAddPeer(string(e.Data))
 			}
 		} else {
@@ -2139,7 +2160,7 @@ func (js *jetStream) applyMetaEntries(entries []*Entry, ru *recoveryUpdates) (bo
 				sa, err := decodeStreamAssignment(js.srv, buf[1:])
 				if err != nil {
 					js.srv.Errorf("JetStream cluster failed to decode stream assignment: %q", buf[1:])
-					return didSnap, err
+					return isRecovering, didSnap, err
 				}
 				if isRecovering {
 					js.setStreamAssignmentRecovering(sa)
@@ -2151,7 +2172,7 @@ func (js *jetStream) applyMetaEntries(entries []*Entry, ru *recoveryUpdates) (bo
 				sa, err := decodeStreamAssignment(js.srv, buf[1:])
 				if err != nil {
 					js.srv.Errorf("JetStream cluster failed to decode stream assignment: %q", buf[1:])
-					return didSnap, err
+					return isRecovering, didSnap, err
 				}
 				if isRecovering {
 					js.setStreamAssignmentRecovering(sa)
@@ -2163,7 +2184,7 @@ func (js *jetStream) applyMetaEntries(entries []*Entry, ru *recoveryUpdates) (bo
 				ca, err := decodeConsumerAssignment(buf[1:])
 				if err != nil {
 					js.srv.Errorf("JetStream cluster failed to decode consumer assignment: %q", buf[1:])
-					return didSnap, err
+					return isRecovering, didSnap, err
 				}
 				if isRecovering {
 					js.setConsumerAssignmentRecovering(ca)
@@ -2175,7 +2196,7 @@ func (js *jetStream) applyMetaEntries(entries []*Entry, ru *recoveryUpdates) (bo
 				ca, err := decodeConsumerAssignmentCompressed(buf[1:])
 				if err != nil {
 					js.srv.Errorf("JetStream cluster failed to decode compressed consumer assignment: %q", buf[1:])
-					return didSnap, err
+					return isRecovering, didSnap, err
 				}
 				if isRecovering {
 					js.setConsumerAssignmentRecovering(ca)
@@ -2195,7 +2216,7 @@ func (js *jetStream) applyMetaEntries(entries []*Entry, ru *recoveryUpdates) (bo
 				ca, err := decodeConsumerAssignment(buf[1:])
 				if err != nil {
 					js.srv.Errorf("JetStream cluster failed to decode consumer assignment: %q", buf[1:])
-					return didSnap, err
+					return isRecovering, didSnap, err
 				}
 				if isRecovering {
 					js.setConsumerAssignmentRecovering(ca)
@@ -2207,7 +2228,7 @@ func (js *jetStream) applyMetaEntries(entries []*Entry, ru *recoveryUpdates) (bo
 				sa, err := decodeStreamAssignment(js.srv, buf[1:])
 				if err != nil {
 					js.srv.Errorf("JetStream cluster failed to decode stream assignment: %q", buf[1:])
-					return didSnap, err
+					return isRecovering, didSnap, err
 				}
 				if isRecovering {
 					js.setStreamAssignmentRecovering(sa)
@@ -2220,7 +2241,7 @@ func (js *jetStream) applyMetaEntries(entries []*Entry, ru *recoveryUpdates) (bo
 			}
 		}
 	}
-	return didSnap, nil
+	return isRecovering, didSnap, nil
 }
 
 func (rg *raftGroup) isMember(id string) bool {
@@ -2693,6 +2714,9 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 			for _, ce := range ces {
 				// No special processing needed for when we are caught up on restart.
 				if ce == nil {
+					if !isRecovering {
+						continue
+					}
 					isRecovering = false
 					// If we are interest based make sure to check consumers if interest retention policy.
 					// This is to make sure we process any outstanding acks from all consumers.
@@ -3195,6 +3219,12 @@ func isControlHdr(hdr []byte) bool {
 // Apply our stream entries.
 func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isRecovering bool) error {
 	for _, e := range ce.Entries {
+		// Ignore if lower-level catchup is started.
+		// We don't need to optimize during this, all entries are handled as normal.
+		if e.Type == EntryCatchup {
+			continue
+		}
+
 		if e.Type == EntryNormal {
 			buf, op := e.Data, entryOp(e.Data[0])
 			switch op {
@@ -5273,6 +5303,9 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 			for _, ce := range ces {
 				// No special processing needed for when we are caught up on restart.
 				if ce == nil {
+					if !recovering {
+						continue
+					}
 					recovering = false
 					if n.NeedSnapshot() {
 						doSnapshot(true)
@@ -5402,6 +5435,12 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 
 func (js *jetStream) applyConsumerEntries(o *consumer, ce *CommittedEntry, isLeader bool) error {
 	for _, e := range ce.Entries {
+		// Ignore if lower-level catchup is started.
+		// We don't need to optimize during this, all entries are handled as normal.
+		if e.Type == EntryCatchup {
+			continue
+		}
+
 		if e.Type == EntrySnapshot {
 			if !isLeader {
 				// No-op needed?

@@ -4161,7 +4161,7 @@ func TestJetStreamClusterMetaSnapshotReCreateConsistency(t *testing.T) {
 	mjs.mu.Lock()
 	mjs.metaRecovering = true
 	mjs.mu.Unlock()
-	_, err = mjs.applyMetaEntries([]*Entry{
+	_, _, err = mjs.applyMetaEntries([]*Entry{
 		newEntry(EntrySnapshot, snap),
 		newEntry(EntryNormal, streamDelete),
 		newEntry(EntryNormal, streamAdd),
@@ -4234,7 +4234,7 @@ func TestJetStreamClusterMetaSnapshotConsumerDeleteConsistency(t *testing.T) {
 	mjs.mu.Lock()
 	mjs.metaRecovering = true
 	mjs.mu.Unlock()
-	_, err = mjs.applyMetaEntries([]*Entry{
+	_, _, err = mjs.applyMetaEntries([]*Entry{
 		newEntry(EntrySnapshot, snap),
 		newEntry(EntryNormal, deleteConsumer),
 	}, ru)
