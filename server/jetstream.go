@@ -2793,12 +2793,18 @@ func (t *jsAPILatencyTracker) stats() *JSAPILatencyStats {
 // trackAck increments the dedicated ACK traffic counter.
 // This is separate from apiTraffic to avoid cache line contention since ACKs are the highest traffic.
 func (js *jetStream) trackAck() {
+	if js == nil {
+		return
+	}
 	atomic.AddInt64(&js.acksTotal, 1)
 }
 
 // trackHeartbeat increments the dedicated heartbeat counter.
 // This is separate from apiTraffic to avoid cache line contention since heartbeats can be high traffic.
 func (js *jetStream) trackHeartbeat() {
+	if js == nil {
+		return
+	}
 	atomic.AddInt64(&js.heartbeatsTotal, 1)
 }
 
