@@ -5013,9 +5013,9 @@ func (mset *stream) processDirectGetRequest(_ *subscription, c *client, _ *Accou
 	if len(reply) == 0 {
 		return
 	}
-	// Track the API call for traffic stats.
+	// Track the API call for traffic stats with latency.
 	if mset.js != nil {
-		mset.js.trackAPICall(JSAPIDirectGet)
+		defer mset.js.trackAPI(JSAPIDirectGet)()
 	}
 	hdr, msg := c.msgParts(rmsg)
 	if errorOnRequiredApiLevel(hdr) {

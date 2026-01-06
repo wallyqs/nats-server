@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -140,6 +141,16 @@ const (
 	JSAPITypeCount // Must be last, used to size the array
 )
 
+// JSAPILatencyStats holds latency percentile data for a single API type
+type JSAPILatencyStats struct {
+	Avg float64 `json:"avg"` // Average latency in microseconds
+	P50 int64   `json:"p50"` // 50th percentile (median) in microseconds
+	P90 int64   `json:"p90"` // 90th percentile in microseconds
+	P99 int64   `json:"p99"` // 99th percentile in microseconds
+	Min int64   `json:"min"` // Minimum latency in microseconds
+	Max int64   `json:"max"` // Maximum latency in microseconds
+}
+
 // JSAPITrafficStats holds per-subject traffic counters for JetStream API
 type JSAPITrafficStats struct {
 	Info                     uint64 `json:"info"`
@@ -175,7 +186,53 @@ type JSAPITrafficStats struct {
 	FlowControl              uint64 `json:"flow_control"`
 	Heartbeat                uint64 `json:"heartbeat"`
 	Unknown                  uint64 `json:"unknown"`
+
+	// Latency contains latency percentile statistics for each API type
+	Latency *JSAPILatencyBreakdown `json:"latency,omitempty"`
 }
+
+// JSAPILatencyBreakdown holds latency stats for each API type
+type JSAPILatencyBreakdown struct {
+	Info                     *JSAPILatencyStats `json:"info,omitempty"`
+	StreamCreate             *JSAPILatencyStats `json:"stream_create,omitempty"`
+	StreamUpdate             *JSAPILatencyStats `json:"stream_update,omitempty"`
+	StreamNames              *JSAPILatencyStats `json:"stream_names,omitempty"`
+	StreamList               *JSAPILatencyStats `json:"stream_list,omitempty"`
+	StreamInfo               *JSAPILatencyStats `json:"stream_info,omitempty"`
+	StreamDelete             *JSAPILatencyStats `json:"stream_delete,omitempty"`
+	StreamPurge              *JSAPILatencyStats `json:"stream_purge,omitempty"`
+	StreamSnapshot           *JSAPILatencyStats `json:"stream_snapshot,omitempty"`
+	StreamRestore            *JSAPILatencyStats `json:"stream_restore,omitempty"`
+	StreamRemovePeer         *JSAPILatencyStats `json:"stream_remove_peer,omitempty"`
+	StreamLeaderStepdown     *JSAPILatencyStats `json:"stream_leader_stepdown,omitempty"`
+	StreamMsgDelete          *JSAPILatencyStats `json:"stream_msg_delete,omitempty"`
+	StreamMsgGet             *JSAPILatencyStats `json:"stream_msg_get,omitempty"`
+	ConsumerCreate           *JSAPILatencyStats `json:"consumer_create,omitempty"`
+	ConsumerNames            *JSAPILatencyStats `json:"consumer_names,omitempty"`
+	ConsumerList             *JSAPILatencyStats `json:"consumer_list,omitempty"`
+	ConsumerInfo             *JSAPILatencyStats `json:"consumer_info,omitempty"`
+	ConsumerDelete           *JSAPILatencyStats `json:"consumer_delete,omitempty"`
+	ConsumerPause            *JSAPILatencyStats `json:"consumer_pause,omitempty"`
+	ConsumerLeaderStepdown   *JSAPILatencyStats `json:"consumer_leader_stepdown,omitempty"`
+	ConsumerMsgNext          *JSAPILatencyStats `json:"consumer_msg_next,omitempty"`
+	ConsumerUnpin            *JSAPILatencyStats `json:"consumer_unpin,omitempty"`
+	DirectGet                *JSAPILatencyStats `json:"direct_get,omitempty"`
+	MetaLeaderStepdown       *JSAPILatencyStats `json:"meta_leader_stepdown,omitempty"`
+	ServerRemove             *JSAPILatencyStats `json:"server_remove,omitempty"`
+	AccountPurge             *JSAPILatencyStats `json:"account_purge,omitempty"`
+	AccountStreamMove        *JSAPILatencyStats `json:"account_stream_move,omitempty"`
+	AccountStreamCancelMove  *JSAPILatencyStats `json:"account_stream_cancel_move,omitempty"`
+}
+
+// jsAPILatencyTracker tracks latencies for a single API type using a circular buffer
+type jsAPILatencyTracker struct {
+	mu      sync.Mutex
+	samples []int64 // latencies in microseconds
+	pos     int     // current position in circular buffer
+	count   int64   // total count of samples ever recorded
+}
+
+const jsAPILatencySampleSize = 1000 // Number of samples to keep per API type
 
 // This is for internal accounting for JetStream for this server.
 type jetStream struct {
@@ -194,6 +251,9 @@ type jetStream struct {
 
 	// Traffic counters for each JS API type (must be 64-bit aligned for atomics on 32-bit systems)
 	apiTraffic [JSAPITypeCount]int64
+
+	// Latency trackers for each JS API type (excluding ACK, FlowControl, Heartbeat, Unknown)
+	apiLatency [JSAPITypeCount]*jsAPILatencyTracker
 
 	mu sync.RWMutex
 	srv           *Server
@@ -497,6 +557,17 @@ func (s *Server) initJetStreamEncryption() (err error) {
 // enableJetStream will start up the JetStream subsystem.
 func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 	js := &jetStream{srv: s, config: cfg, accounts: make(map[string]*jsAccount), apiSubs: NewSublistNoCache()}
+
+	// Initialize latency trackers for all API types that support latency tracking
+	// (excluding ACK, FlowControl, Heartbeat, Unknown which are one-way or don't need tracking)
+	for i := JSAPIType(0); i < JSAPITypeCount; i++ {
+		if i != JSAPIAck && i != JSAPIFlowControl && i != JSAPIHeartbeat && i != JSAPIUnknown {
+			js.apiLatency[i] = &jsAPILatencyTracker{
+				samples: make([]int64, 0, jsAPILatencySampleSize),
+			}
+		}
+	}
+
 	s.gcbMu.Lock()
 	if s.gcbOutMax = s.getOpts().JetStreamMaxCatchup; s.gcbOutMax == 0 {
 		s.gcbOutMax = defaultMaxTotalCatchupOutBytes
@@ -2632,10 +2703,102 @@ func (js *jetStream) trackAPICall(apiType JSAPIType) {
 	}
 }
 
+// trackAPIStart increments the traffic counter and returns the start time for latency tracking.
+// The returned time should be passed to trackAPIEnd when the request completes.
+func (js *jetStream) trackAPIStart(apiType JSAPIType) time.Time {
+	if apiType >= 0 && apiType < JSAPITypeCount {
+		atomic.AddInt64(&js.apiTraffic[apiType], 1)
+	}
+	return time.Now()
+}
+
+// trackAPIEnd records the latency for the given API type.
+// Should be called with the start time returned by trackAPIStart.
+func (js *jetStream) trackAPIEnd(apiType JSAPIType, start time.Time) {
+	if apiType < 0 || apiType >= JSAPITypeCount {
+		return
+	}
+	tracker := js.apiLatency[apiType]
+	if tracker == nil {
+		return
+	}
+	latencyMicros := time.Since(start).Microseconds()
+	tracker.record(latencyMicros)
+}
+
+// trackAPI increments the traffic counter, records the start time, and returns a function
+// that should be called via defer to record the latency when the request completes.
+func (js *jetStream) trackAPI(apiType JSAPIType) func() {
+	start := js.trackAPIStart(apiType)
+	return func() {
+		js.trackAPIEnd(apiType, start)
+	}
+}
+
 // trackAPICall increments the traffic counter for the given API type via the server's JetStream instance.
 func (s *Server) trackAPICall(apiType JSAPIType) {
 	if js := s.getJetStream(); js != nil {
 		js.trackAPICall(apiType)
+	}
+}
+
+// trackAPI increments the traffic counter, records the start time, and returns a function
+// that should be called via defer to record the latency when the request completes.
+func (s *Server) trackAPI(apiType JSAPIType) func() {
+	js := s.getJetStream()
+	if js == nil {
+		return func() {}
+	}
+	start := js.trackAPIStart(apiType)
+	return func() {
+		js.trackAPIEnd(apiType, start)
+	}
+}
+
+// record adds a latency sample to the circular buffer.
+func (t *jsAPILatencyTracker) record(latencyMicros int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if len(t.samples) < jsAPILatencySampleSize {
+		// Buffer not full yet, append
+		t.samples = append(t.samples, latencyMicros)
+	} else {
+		// Buffer full, overwrite at current position
+		t.samples[t.pos] = latencyMicros
+		t.pos = (t.pos + 1) % jsAPILatencySampleSize
+	}
+	t.count++
+}
+
+// stats calculates and returns the latency statistics from the circular buffer.
+func (t *jsAPILatencyTracker) stats() *JSAPILatencyStats {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	n := len(t.samples)
+	if n == 0 {
+		return nil
+	}
+
+	// Make a copy to avoid sorting the original
+	sorted := make([]int64, n)
+	copy(sorted, t.samples)
+	slices.Sort(sorted)
+
+	// Calculate statistics
+	var sum int64
+	for _, v := range sorted {
+		sum += v
+	}
+
+	return &JSAPILatencyStats{
+		Avg: float64(sum) / float64(n),
+		P50: sorted[n*50/100],
+		P90: sorted[n*90/100],
+		P99: sorted[n*99/100],
+		Min: sorted[0],
+		Max: sorted[n-1],
 	}
 }
 
@@ -2653,7 +2816,7 @@ func (js *jetStream) trackHeartbeat() {
 
 // apiStats returns the current traffic statistics for all JS API types.
 func (js *jetStream) apiStats() *JSAPITrafficStats {
-	return &JSAPITrafficStats{
+	stats := &JSAPITrafficStats{
 		Info:                     uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIInfo])),
 		StreamCreate:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamCreate])),
 		StreamUpdate:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamUpdate])),
@@ -2688,6 +2851,70 @@ func (js *jetStream) apiStats() *JSAPITrafficStats {
 		Heartbeat:                uint64(atomic.LoadInt64(&js.heartbeatsTotal)),
 		Unknown:                  uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIUnknown])),
 	}
+
+	// Collect latency statistics for each API type
+	stats.Latency = js.apiLatencyStats()
+
+	return stats
+}
+
+// apiLatencyStats returns the latency statistics for all JS API types.
+func (js *jetStream) apiLatencyStats() *JSAPILatencyBreakdown {
+	latency := &JSAPILatencyBreakdown{}
+
+	// Helper to get stats from a tracker if it exists
+	getStats := func(apiType JSAPIType) *JSAPILatencyStats {
+		if tracker := js.apiLatency[apiType]; tracker != nil {
+			return tracker.stats()
+		}
+		return nil
+	}
+
+	latency.Info = getStats(JSAPIInfo)
+	latency.StreamCreate = getStats(JSAPIStreamCreate)
+	latency.StreamUpdate = getStats(JSAPIStreamUpdate)
+	latency.StreamNames = getStats(JSAPIStreamNames)
+	latency.StreamList = getStats(JSAPIStreamList)
+	latency.StreamInfo = getStats(JSAPIStreamInfo)
+	latency.StreamDelete = getStats(JSAPIStreamDelete)
+	latency.StreamPurge = getStats(JSAPIStreamPurge)
+	latency.StreamSnapshot = getStats(JSAPIStreamSnapshot)
+	latency.StreamRestore = getStats(JSAPIStreamRestore)
+	latency.StreamRemovePeer = getStats(JSAPIStreamRemovePeer)
+	latency.StreamLeaderStepdown = getStats(JSAPIStreamLeaderStepdown)
+	latency.StreamMsgDelete = getStats(JSAPIStreamMsgDelete)
+	latency.StreamMsgGet = getStats(JSAPIStreamMsgGet)
+	latency.ConsumerCreate = getStats(JSAPIConsumerCreate)
+	latency.ConsumerNames = getStats(JSAPIConsumerNames)
+	latency.ConsumerList = getStats(JSAPIConsumerList)
+	latency.ConsumerInfo = getStats(JSAPIConsumerInfo)
+	latency.ConsumerDelete = getStats(JSAPIConsumerDelete)
+	latency.ConsumerPause = getStats(JSAPIConsumerPause)
+	latency.ConsumerLeaderStepdown = getStats(JSAPIConsumerLeaderStepdown)
+	latency.ConsumerMsgNext = getStats(JSAPIConsumerMsgNext)
+	latency.ConsumerUnpin = getStats(JSAPIConsumerUnpin)
+	latency.DirectGet = getStats(JSAPIDirectGet)
+	latency.MetaLeaderStepdown = getStats(JSAPIMetaLeaderStepdown)
+	latency.ServerRemove = getStats(JSAPIServerRemove)
+	latency.AccountPurge = getStats(JSAPIAccountPurge)
+	latency.AccountStreamMove = getStats(JSAPIAccountStreamMove)
+	latency.AccountStreamCancelMove = getStats(JSAPIAccountStreamCancelMove)
+
+	// Check if all latency stats are nil (no data yet)
+	if latency.Info == nil && latency.StreamCreate == nil && latency.StreamUpdate == nil &&
+		latency.StreamNames == nil && latency.StreamList == nil && latency.StreamInfo == nil &&
+		latency.StreamDelete == nil && latency.StreamPurge == nil && latency.StreamSnapshot == nil &&
+		latency.StreamRestore == nil && latency.StreamRemovePeer == nil && latency.StreamLeaderStepdown == nil &&
+		latency.StreamMsgDelete == nil && latency.StreamMsgGet == nil && latency.ConsumerCreate == nil &&
+		latency.ConsumerNames == nil && latency.ConsumerList == nil && latency.ConsumerInfo == nil &&
+		latency.ConsumerDelete == nil && latency.ConsumerPause == nil && latency.ConsumerLeaderStepdown == nil &&
+		latency.ConsumerMsgNext == nil && latency.ConsumerUnpin == nil && latency.DirectGet == nil &&
+		latency.MetaLeaderStepdown == nil && latency.ServerRemove == nil && latency.AccountPurge == nil &&
+		latency.AccountStreamMove == nil && latency.AccountStreamCancelMove == nil {
+		return nil
+	}
+
+	return latency
 }
 
 // Check to see if we have enough system resources for this account.
