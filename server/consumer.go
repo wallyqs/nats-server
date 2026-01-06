@@ -4119,9 +4119,7 @@ func (o *consumer) processNextMsgReq(_ *subscription, c *client, _ *Account, _, 
 	}
 
 	// Track the API call for traffic stats.
-	if o.js != nil {
-		o.js.trackAPICall(JSAPIConsumerMsgNext)
-	}
+	o.js.trackAPICall(JSAPIConsumerMsgNext)
 
 	// Short circuit error here.
 	if o.nextMsgReqs == nil {

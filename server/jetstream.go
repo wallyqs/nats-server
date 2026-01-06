@@ -2695,6 +2695,9 @@ func (js *jetStream) usageStats() *JetStreamStats {
 
 // trackAPICall increments the traffic counter for the given API type.
 func (js *jetStream) trackAPICall(apiType JSAPIType) {
+	if js == nil {
+		return
+	}
 	if apiType >= 0 && apiType < JSAPITypeCount {
 		atomic.AddInt64(&js.apiTraffic[apiType], 1)
 	}
@@ -2703,7 +2706,7 @@ func (js *jetStream) trackAPICall(apiType JSAPIType) {
 // trackAPIStart increments the traffic counter and returns the start time for latency tracking.
 // The returned time should be passed to trackAPIEnd when the request completes.
 func (js *jetStream) trackAPIStart(apiType JSAPIType) time.Time {
-	if apiType >= 0 && apiType < JSAPITypeCount {
+	if js != nil && apiType >= 0 && apiType < JSAPITypeCount {
 		atomic.AddInt64(&js.apiTraffic[apiType], 1)
 	}
 	return time.Now()
@@ -2712,7 +2715,7 @@ func (js *jetStream) trackAPIStart(apiType JSAPIType) time.Time {
 // trackAPIEnd records the latency for the given API type.
 // Should be called with the start time returned by trackAPIStart.
 func (js *jetStream) trackAPIEnd(apiType JSAPIType, start time.Time) {
-	if apiType < 0 || apiType >= JSAPITypeCount {
+	if js == nil || apiType < 0 || apiType >= JSAPITypeCount {
 		return
 	}
 	tracker := js.apiLatency[apiType]
