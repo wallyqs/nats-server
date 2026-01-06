@@ -143,12 +143,10 @@ const (
 
 // JSAPILatencyStats holds latency percentile data for a single API type
 type JSAPILatencyStats struct {
-	Avg float64 `json:"avg"` // Average latency in microseconds
-	P50 int64   `json:"p50"` // 50th percentile (median) in microseconds
-	P90 int64   `json:"p90"` // 90th percentile in microseconds
-	P99 int64   `json:"p99"` // 99th percentile in microseconds
-	Min int64   `json:"min"` // Minimum latency in microseconds
-	Max int64   `json:"max"` // Maximum latency in microseconds
+	P50 int64 `json:"p50"` // 50th percentile (median) in microseconds
+	P90 int64 `json:"p90"` // 90th percentile in microseconds
+	P99 int64 `json:"p99"` // 99th percentile in microseconds
+	Max int64 `json:"max"` // Maximum latency in microseconds
 }
 
 // JSAPITrafficStats holds per-subject traffic counters for JetStream API
@@ -2786,18 +2784,10 @@ func (t *jsAPILatencyTracker) stats() *JSAPILatencyStats {
 	copy(sorted, t.samples)
 	slices.Sort(sorted)
 
-	// Calculate statistics
-	var sum int64
-	for _, v := range sorted {
-		sum += v
-	}
-
 	return &JSAPILatencyStats{
-		Avg: float64(sum) / float64(n),
 		P50: sorted[n*50/100],
 		P90: sorted[n*90/100],
 		P99: sorted[n*99/100],
-		Min: sorted[0],
 		Max: sorted[n-1],
 	}
 }

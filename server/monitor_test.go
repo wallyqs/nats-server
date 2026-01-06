@@ -5605,14 +5605,11 @@ func TestMonitorJszApiLatencyStats(t *testing.T) {
 	// Verify StreamCreate latency is present and has valid values
 	require_NotNil(t, jsi.ApiStats.Latency.StreamCreate)
 	streamCreateLatency := jsi.ApiStats.Latency.StreamCreate
-	if streamCreateLatency.Min <= 0 {
-		t.Fatalf("expected stream_create min latency > 0, got %d", streamCreateLatency.Min)
+	if streamCreateLatency.P50 <= 0 {
+		t.Fatalf("expected stream_create p50 latency > 0, got %d", streamCreateLatency.P50)
 	}
-	if streamCreateLatency.Max < streamCreateLatency.Min {
-		t.Fatalf("expected stream_create max latency >= min, got max=%d, min=%d", streamCreateLatency.Max, streamCreateLatency.Min)
-	}
-	if streamCreateLatency.P50 < streamCreateLatency.Min || streamCreateLatency.P50 > streamCreateLatency.Max {
-		t.Fatalf("expected stream_create p50 to be between min and max, got p50=%d, min=%d, max=%d", streamCreateLatency.P50, streamCreateLatency.Min, streamCreateLatency.Max)
+	if streamCreateLatency.Max < streamCreateLatency.P50 {
+		t.Fatalf("expected stream_create max latency >= p50, got max=%d, p50=%d", streamCreateLatency.Max, streamCreateLatency.P50)
 	}
 	if streamCreateLatency.P90 < streamCreateLatency.P50 || streamCreateLatency.P90 > streamCreateLatency.Max {
 		t.Fatalf("expected stream_create p90 to be between p50 and max, got p90=%d, p50=%d, max=%d", streamCreateLatency.P90, streamCreateLatency.P50, streamCreateLatency.Max)
@@ -5620,22 +5617,19 @@ func TestMonitorJszApiLatencyStats(t *testing.T) {
 	if streamCreateLatency.P99 < streamCreateLatency.P90 || streamCreateLatency.P99 > streamCreateLatency.Max {
 		t.Fatalf("expected stream_create p99 to be between p90 and max, got p99=%d, p90=%d, max=%d", streamCreateLatency.P99, streamCreateLatency.P90, streamCreateLatency.Max)
 	}
-	if streamCreateLatency.Avg < float64(streamCreateLatency.Min) || streamCreateLatency.Avg > float64(streamCreateLatency.Max) {
-		t.Fatalf("expected stream_create avg latency to be between min and max, got avg=%f, min=%d, max=%d", streamCreateLatency.Avg, streamCreateLatency.Min, streamCreateLatency.Max)
-	}
 
 	// Verify ConsumerCreate latency is present
 	require_NotNil(t, jsi.ApiStats.Latency.ConsumerCreate)
 	consumerCreateLatency := jsi.ApiStats.Latency.ConsumerCreate
-	if consumerCreateLatency.Min <= 0 {
-		t.Fatalf("expected consumer_create min latency > 0, got %d", consumerCreateLatency.Min)
+	if consumerCreateLatency.P50 <= 0 {
+		t.Fatalf("expected consumer_create p50 latency > 0, got %d", consumerCreateLatency.P50)
 	}
 
 	// Verify StreamInfo latency is present
 	require_NotNil(t, jsi.ApiStats.Latency.StreamInfo)
 	streamInfoLatency := jsi.ApiStats.Latency.StreamInfo
-	if streamInfoLatency.Min <= 0 {
-		t.Fatalf("expected stream_info min latency > 0, got %d", streamInfoLatency.Min)
+	if streamInfoLatency.P50 <= 0 {
+		t.Fatalf("expected stream_info p50 latency > 0, got %d", streamInfoLatency.P50)
 	}
 }
 
