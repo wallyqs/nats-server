@@ -5608,14 +5608,11 @@ func TestMonitorJszApiLatencyStats(t *testing.T) {
 	if streamCreateLatency.P50 <= 0 {
 		t.Fatalf("expected stream_create p50 latency > 0, got %d", streamCreateLatency.P50)
 	}
-	if streamCreateLatency.Max < streamCreateLatency.P50 {
-		t.Fatalf("expected stream_create max latency >= p50, got max=%d, p50=%d", streamCreateLatency.Max, streamCreateLatency.P50)
+	if streamCreateLatency.P90 < streamCreateLatency.P50 {
+		t.Fatalf("expected stream_create p90 >= p50, got p90=%d, p50=%d", streamCreateLatency.P90, streamCreateLatency.P50)
 	}
-	if streamCreateLatency.P90 < streamCreateLatency.P50 || streamCreateLatency.P90 > streamCreateLatency.Max {
-		t.Fatalf("expected stream_create p90 to be between p50 and max, got p90=%d, p50=%d, max=%d", streamCreateLatency.P90, streamCreateLatency.P50, streamCreateLatency.Max)
-	}
-	if streamCreateLatency.P99 < streamCreateLatency.P90 || streamCreateLatency.P99 > streamCreateLatency.Max {
-		t.Fatalf("expected stream_create p99 to be between p90 and max, got p99=%d, p90=%d, max=%d", streamCreateLatency.P99, streamCreateLatency.P90, streamCreateLatency.Max)
+	if streamCreateLatency.P99 < streamCreateLatency.P90 {
+		t.Fatalf("expected stream_create p99 >= p90, got p99=%d, p90=%d", streamCreateLatency.P99, streamCreateLatency.P90)
 	}
 
 	// Verify ConsumerCreate latency is present
