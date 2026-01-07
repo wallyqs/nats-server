@@ -141,84 +141,52 @@ const (
 	JSAPITypeCount // Must be last, used to size the array
 )
 
-// JSAPILatencyStats holds latency percentile data for a single API type
-type JSAPILatencyStats struct {
-	P50 int64 `json:"p50"` // 50th percentile (median) in microseconds
-	P90 int64 `json:"p90"` // 90th percentile in microseconds
-	P99 int64 `json:"p99"` // 99th percentile in microseconds
+// JSAPIOpStats holds count and latency percentiles for a single API operation
+type JSAPIOpStats struct {
+	Count uint64 `json:"count,omitempty"`
+	P50   int64  `json:"p50,omitempty"`
+	P90   int64  `json:"p90,omitempty"`
+	P99   int64  `json:"p99,omitempty"`
 }
 
-// JSAPITrafficStats holds per-subject traffic counters for JetStream API
-type JSAPITrafficStats struct {
-	Info                     uint64 `json:"info,omitempty"`
-	StreamCreate             uint64 `json:"stream_create,omitempty"`
-	StreamUpdate             uint64 `json:"stream_update,omitempty"`
-	StreamNames              uint64 `json:"stream_names,omitempty"`
-	StreamList               uint64 `json:"stream_list,omitempty"`
-	StreamInfo               uint64 `json:"stream_info,omitempty"`
-	StreamDelete             uint64 `json:"stream_delete,omitempty"`
-	StreamPurge              uint64 `json:"stream_purge,omitempty"`
-	StreamSnapshot           uint64 `json:"stream_snapshot,omitempty"`
-	StreamRestore            uint64 `json:"stream_restore,omitempty"`
-	StreamRemovePeer         uint64 `json:"stream_remove_peer,omitempty"`
-	StreamLeaderStepdown     uint64 `json:"stream_leader_stepdown,omitempty"`
-	StreamMsgDelete          uint64 `json:"stream_msg_delete,omitempty"`
-	StreamMsgGet             uint64 `json:"stream_msg_get,omitempty"`
-	ConsumerCreate           uint64 `json:"consumer_create,omitempty"`
-	ConsumerNames            uint64 `json:"consumer_names,omitempty"`
-	ConsumerList             uint64 `json:"consumer_list,omitempty"`
-	ConsumerInfo             uint64 `json:"consumer_info,omitempty"`
-	ConsumerDelete           uint64 `json:"consumer_delete,omitempty"`
-	ConsumerPause            uint64 `json:"consumer_pause,omitempty"`
-	ConsumerLeaderStepdown   uint64 `json:"consumer_leader_stepdown,omitempty"`
-	ConsumerMsgNext          uint64 `json:"consumer_msg_next,omitempty"`
-	ConsumerUnpin            uint64 `json:"consumer_unpin,omitempty"`
-	DirectGet                uint64 `json:"direct_get,omitempty"`
-	MetaLeaderStepdown       uint64 `json:"meta_leader_stepdown,omitempty"`
-	ServerRemove             uint64 `json:"server_remove,omitempty"`
-	AccountPurge             uint64 `json:"account_purge,omitempty"`
-	AccountStreamMove        uint64 `json:"account_stream_move,omitempty"`
-	AccountStreamCancelMove  uint64 `json:"account_stream_cancel_move,omitempty"`
-	Ack                      uint64 `json:"ack,omitempty"`
-	FlowControl              uint64 `json:"flow_control,omitempty"`
-	Heartbeat                uint64 `json:"heartbeat,omitempty"`
-	Unknown                  uint64 `json:"unknown,omitempty"`
+// JSAPITrafficStats is a map of API operation name to its statistics
+type JSAPITrafficStats map[string]*JSAPIOpStats
 
-	// Latency contains latency percentile statistics for each API type
-	Latency *JSAPILatencyBreakdown `json:"latency,omitempty"`
-}
-
-// JSAPILatencyBreakdown holds latency stats for each API type
-type JSAPILatencyBreakdown struct {
-	Info                     *JSAPILatencyStats `json:"info,omitempty"`
-	StreamCreate             *JSAPILatencyStats `json:"stream_create,omitempty"`
-	StreamUpdate             *JSAPILatencyStats `json:"stream_update,omitempty"`
-	StreamNames              *JSAPILatencyStats `json:"stream_names,omitempty"`
-	StreamList               *JSAPILatencyStats `json:"stream_list,omitempty"`
-	StreamInfo               *JSAPILatencyStats `json:"stream_info,omitempty"`
-	StreamDelete             *JSAPILatencyStats `json:"stream_delete,omitempty"`
-	StreamPurge              *JSAPILatencyStats `json:"stream_purge,omitempty"`
-	StreamSnapshot           *JSAPILatencyStats `json:"stream_snapshot,omitempty"`
-	StreamRestore            *JSAPILatencyStats `json:"stream_restore,omitempty"`
-	StreamRemovePeer         *JSAPILatencyStats `json:"stream_remove_peer,omitempty"`
-	StreamLeaderStepdown     *JSAPILatencyStats `json:"stream_leader_stepdown,omitempty"`
-	StreamMsgDelete          *JSAPILatencyStats `json:"stream_msg_delete,omitempty"`
-	StreamMsgGet             *JSAPILatencyStats `json:"stream_msg_get,omitempty"`
-	ConsumerCreate           *JSAPILatencyStats `json:"consumer_create,omitempty"`
-	ConsumerNames            *JSAPILatencyStats `json:"consumer_names,omitempty"`
-	ConsumerList             *JSAPILatencyStats `json:"consumer_list,omitempty"`
-	ConsumerInfo             *JSAPILatencyStats `json:"consumer_info,omitempty"`
-	ConsumerDelete           *JSAPILatencyStats `json:"consumer_delete,omitempty"`
-	ConsumerPause            *JSAPILatencyStats `json:"consumer_pause,omitempty"`
-	ConsumerLeaderStepdown   *JSAPILatencyStats `json:"consumer_leader_stepdown,omitempty"`
-	ConsumerMsgNext          *JSAPILatencyStats `json:"consumer_msg_next,omitempty"`
-	ConsumerUnpin            *JSAPILatencyStats `json:"consumer_unpin,omitempty"`
-	DirectGet                *JSAPILatencyStats `json:"direct_get,omitempty"`
-	MetaLeaderStepdown       *JSAPILatencyStats `json:"meta_leader_stepdown,omitempty"`
-	ServerRemove             *JSAPILatencyStats `json:"server_remove,omitempty"`
-	AccountPurge             *JSAPILatencyStats `json:"account_purge,omitempty"`
-	AccountStreamMove        *JSAPILatencyStats `json:"account_stream_move,omitempty"`
-	AccountStreamCancelMove  *JSAPILatencyStats `json:"account_stream_cancel_move,omitempty"`
+// jsAPITypeNames maps JSAPIType to its JSON field name
+var jsAPITypeNames = [JSAPITypeCount]string{
+	JSAPIInfo:                    "info",
+	JSAPIStreamCreate:            "stream_create",
+	JSAPIStreamUpdate:            "stream_update",
+	JSAPIStreamNames:             "stream_names",
+	JSAPIStreamList:              "stream_list",
+	JSAPIStreamInfo:              "stream_info",
+	JSAPIStreamDelete:            "stream_delete",
+	JSAPIStreamPurge:             "stream_purge",
+	JSAPIStreamSnapshot:          "stream_snapshot",
+	JSAPIStreamRestore:           "stream_restore",
+	JSAPIStreamRemovePeer:        "stream_remove_peer",
+	JSAPIStreamLeaderStepdown:    "stream_leader_stepdown",
+	JSAPIStreamMsgDelete:         "stream_msg_delete",
+	JSAPIStreamMsgGet:            "stream_msg_get",
+	JSAPIConsumerCreate:          "consumer_create",
+	JSAPIConsumerNames:           "consumer_names",
+	JSAPIConsumerList:            "consumer_list",
+	JSAPIConsumerInfo:            "consumer_info",
+	JSAPIConsumerDelete:          "consumer_delete",
+	JSAPIConsumerPause:           "consumer_pause",
+	JSAPIConsumerLeaderStepdown:  "consumer_leader_stepdown",
+	JSAPIConsumerMsgNext:         "consumer_msg_next",
+	JSAPIConsumerUnpin:           "consumer_unpin",
+	JSAPIDirectGet:               "direct_get",
+	JSAPIMetaLeaderStepdown:      "meta_leader_stepdown",
+	JSAPIServerRemove:            "server_remove",
+	JSAPIAccountPurge:            "account_purge",
+	JSAPIAccountStreamMove:       "account_stream_move",
+	JSAPIAccountStreamCancelMove: "account_stream_cancel_move",
+	JSAPIAck:                     "ack",
+	JSAPIFlowControl:             "flow_control",
+	JSAPIHeartbeat:               "heartbeat",
+	JSAPIUnknown:                 "unknown",
 }
 
 // jsAPILatencyTracker tracks latencies for a single API type using a circular buffer
@@ -2771,14 +2739,15 @@ func (t *jsAPILatencyTracker) record(latencyMicros int64) {
 	t.count++
 }
 
-// stats calculates and returns the latency statistics from the circular buffer.
-func (t *jsAPILatencyTracker) stats() *JSAPILatencyStats {
+// percentiles calculates and returns p50, p90, p99 from the circular buffer.
+// Returns (0, 0, 0) if no samples exist.
+func (t *jsAPILatencyTracker) percentiles() (p50, p90, p99 int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	n := len(t.samples)
 	if n == 0 {
-		return nil
+		return 0, 0, 0
 	}
 
 	// Make a copy to avoid sorting the original
@@ -2786,11 +2755,7 @@ func (t *jsAPILatencyTracker) stats() *JSAPILatencyStats {
 	copy(sorted, t.samples)
 	slices.Sort(sorted)
 
-	return &JSAPILatencyStats{
-		P50: sorted[n*50/100],
-		P90: sorted[n*90/100],
-		P99: sorted[n*99/100],
-	}
+	return sorted[n*50/100], sorted[n*90/100], sorted[n*99/100]
 }
 
 // trackAck increments the dedicated ACK traffic counter.
@@ -2812,92 +2777,38 @@ func (js *jetStream) trackHeartbeat() {
 }
 
 // apiStats returns the current traffic statistics for all JS API types.
-func (js *jetStream) apiStats() *JSAPITrafficStats {
-	stats := &JSAPITrafficStats{
-		Info:                     uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIInfo])),
-		StreamCreate:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamCreate])),
-		StreamUpdate:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamUpdate])),
-		StreamNames:              uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamNames])),
-		StreamList:               uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamList])),
-		StreamInfo:               uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamInfo])),
-		StreamDelete:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamDelete])),
-		StreamPurge:              uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamPurge])),
-		StreamSnapshot:           uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamSnapshot])),
-		StreamRestore:            uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamRestore])),
-		StreamRemovePeer:         uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamRemovePeer])),
-		StreamLeaderStepdown:     uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamLeaderStepdown])),
-		StreamMsgDelete:          uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamMsgDelete])),
-		StreamMsgGet:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIStreamMsgGet])),
-		ConsumerCreate:           uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerCreate])),
-		ConsumerNames:            uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerNames])),
-		ConsumerList:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerList])),
-		ConsumerInfo:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerInfo])),
-		ConsumerDelete:           uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerDelete])),
-		ConsumerPause:            uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerPause])),
-		ConsumerLeaderStepdown:   uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerLeaderStepdown])),
-		ConsumerMsgNext:          uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerMsgNext])),
-		ConsumerUnpin:            uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIConsumerUnpin])),
-		DirectGet:                uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIDirectGet])),
-		MetaLeaderStepdown:       uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIMetaLeaderStepdown])),
-		ServerRemove:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIServerRemove])),
-		AccountPurge:             uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIAccountPurge])),
-		AccountStreamMove:        uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIAccountStreamMove])),
-		AccountStreamCancelMove:  uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIAccountStreamCancelMove])),
-		Ack:                      uint64(atomic.LoadInt64(&js.acksTotal)),
-		FlowControl:              uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIFlowControl])),
-		Heartbeat:                uint64(atomic.LoadInt64(&js.heartbeatsTotal)),
-		Unknown:                  uint64(atomic.LoadInt64(&js.apiTraffic[JSAPIUnknown])),
-	}
+func (js *jetStream) apiStats() JSAPITrafficStats {
+	stats := make(JSAPITrafficStats)
 
-	// Collect latency statistics for each API type
-	stats.Latency = js.apiLatencyStats()
+	for apiType := JSAPIType(0); apiType < JSAPITypeCount; apiType++ {
+		var count uint64
+		// ACK and Heartbeat use dedicated counters
+		switch apiType {
+		case JSAPIAck:
+			count = uint64(atomic.LoadInt64(&js.acksTotal))
+		case JSAPIHeartbeat:
+			count = uint64(atomic.LoadInt64(&js.heartbeatsTotal))
+		default:
+			count = uint64(atomic.LoadInt64(&js.apiTraffic[apiType]))
+		}
+
+		// Skip if no calls recorded
+		if count == 0 {
+			continue
+		}
+
+		name := jsAPITypeNames[apiType]
+		opStats := &JSAPIOpStats{Count: count}
+
+		// Get latency percentiles if tracker exists
+		if tracker := js.apiLatency[apiType]; tracker != nil {
+			opStats.P50, opStats.P90, opStats.P99 = tracker.percentiles()
+		}
+
+		stats[name] = opStats
+	}
 
 	return stats
-}
-
-// apiLatencyStats returns the latency statistics for all JS API types.
-func (js *jetStream) apiLatencyStats() *JSAPILatencyBreakdown {
-	latency := &JSAPILatencyBreakdown{}
-
-	// Helper to get stats from a tracker if it exists
-	getStats := func(apiType JSAPIType) *JSAPILatencyStats {
-		if tracker := js.apiLatency[apiType]; tracker != nil {
-			return tracker.stats()
-		}
-		return nil
-	}
-
-	latency.Info = getStats(JSAPIInfo)
-	latency.StreamCreate = getStats(JSAPIStreamCreate)
-	latency.StreamUpdate = getStats(JSAPIStreamUpdate)
-	latency.StreamNames = getStats(JSAPIStreamNames)
-	latency.StreamList = getStats(JSAPIStreamList)
-	latency.StreamInfo = getStats(JSAPIStreamInfo)
-	latency.StreamDelete = getStats(JSAPIStreamDelete)
-	latency.StreamPurge = getStats(JSAPIStreamPurge)
-	latency.StreamSnapshot = getStats(JSAPIStreamSnapshot)
-	latency.StreamRestore = getStats(JSAPIStreamRestore)
-	latency.StreamRemovePeer = getStats(JSAPIStreamRemovePeer)
-	latency.StreamLeaderStepdown = getStats(JSAPIStreamLeaderStepdown)
-	latency.StreamMsgDelete = getStats(JSAPIStreamMsgDelete)
-	latency.StreamMsgGet = getStats(JSAPIStreamMsgGet)
-	latency.ConsumerCreate = getStats(JSAPIConsumerCreate)
-	latency.ConsumerNames = getStats(JSAPIConsumerNames)
-	latency.ConsumerList = getStats(JSAPIConsumerList)
-	latency.ConsumerInfo = getStats(JSAPIConsumerInfo)
-	latency.ConsumerDelete = getStats(JSAPIConsumerDelete)
-	latency.ConsumerPause = getStats(JSAPIConsumerPause)
-	latency.ConsumerLeaderStepdown = getStats(JSAPIConsumerLeaderStepdown)
-	latency.ConsumerMsgNext = getStats(JSAPIConsumerMsgNext)
-	latency.ConsumerUnpin = getStats(JSAPIConsumerUnpin)
-	latency.DirectGet = getStats(JSAPIDirectGet)
-	latency.MetaLeaderStepdown = getStats(JSAPIMetaLeaderStepdown)
-	latency.ServerRemove = getStats(JSAPIServerRemove)
-	latency.AccountPurge = getStats(JSAPIAccountPurge)
-	latency.AccountStreamMove = getStats(JSAPIAccountStreamMove)
-	latency.AccountStreamCancelMove = getStats(JSAPIAccountStreamCancelMove)
-
-	return latency
 }
 
 // Check to see if we have enough system resources for this account.

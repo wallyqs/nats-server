@@ -5442,11 +5442,13 @@ func TestMonitorJsz(t *testing.T) {
 			// StreamCreate was called 3 times (3 streams).
 			// ConsumerCreate was called 3 times (3 consumers).
 			// Other API calls like StreamInfo, AccountInfo may have been called.
-			if info.ApiStats.StreamCreate == 0 {
-				t.Fatalf("expected stream_create traffic to be > 0, got %d", info.ApiStats.StreamCreate)
+			streamCreate := info.ApiStats["stream_create"]
+			if streamCreate == nil || streamCreate.Count == 0 {
+				t.Fatalf("expected stream_create traffic to be > 0")
 			}
-			if info.ApiStats.ConsumerCreate == 0 {
-				t.Fatalf("expected consumer_create traffic to be > 0, got %d", info.ApiStats.ConsumerCreate)
+			consumerCreate := info.ApiStats["consumer_create"]
+			if consumerCreate == nil || consumerCreate.Count == 0 {
+				t.Fatalf("expected consumer_create traffic to be > 0")
 			}
 		}
 	})
@@ -5500,14 +5502,21 @@ func TestMonitorJszApiStats(t *testing.T) {
 	nc, js := jsClientConnect(t, s)
 	defer nc.Close()
 
+	// Helper to get count from api stats map
+	getCount := func(stats JSAPITrafficStats, key string) uint64 {
+		if s := stats[key]; s != nil {
+			return s.Count
+		}
+		return 0
+	}
+
 	// Get initial API stats
 	jsi, err := s.Jsz(nil)
 	require_NoError(t, err)
-	require_NotNil(t, jsi.ApiStats)
-	initialStreamCreate := jsi.ApiStats.StreamCreate
-	initialConsumerCreate := jsi.ApiStats.ConsumerCreate
-	initialStreamInfo := jsi.ApiStats.StreamInfo
-	initialAck := jsi.ApiStats.Ack
+	initialStreamCreate := getCount(jsi.ApiStats, "stream_create")
+	initialConsumerCreate := getCount(jsi.ApiStats, "consumer_create")
+	initialStreamInfo := getCount(jsi.ApiStats, "stream_info")
+	initialAck := getCount(jsi.ApiStats, "ack")
 
 	// Create a stream
 	_, err = js.AddStream(&nats.StreamConfig{
@@ -5552,17 +5561,17 @@ func TestMonitorJszApiStats(t *testing.T) {
 	require_NotNil(t, jsi.ApiStats)
 
 	// Verify counters have incremented
-	if jsi.ApiStats.StreamCreate <= initialStreamCreate {
-		t.Fatalf("expected stream_create to increment, got %d (was %d)", jsi.ApiStats.StreamCreate, initialStreamCreate)
+	if getCount(jsi.ApiStats, "stream_create") <= initialStreamCreate {
+		t.Fatalf("expected stream_create to increment, got %d (was %d)", getCount(jsi.ApiStats, "stream_create"), initialStreamCreate)
 	}
-	if jsi.ApiStats.ConsumerCreate <= initialConsumerCreate {
-		t.Fatalf("expected consumer_create to increment, got %d (was %d)", jsi.ApiStats.ConsumerCreate, initialConsumerCreate)
+	if getCount(jsi.ApiStats, "consumer_create") <= initialConsumerCreate {
+		t.Fatalf("expected consumer_create to increment, got %d (was %d)", getCount(jsi.ApiStats, "consumer_create"), initialConsumerCreate)
 	}
-	if jsi.ApiStats.StreamInfo <= initialStreamInfo {
-		t.Fatalf("expected stream_info to increment, got %d (was %d)", jsi.ApiStats.StreamInfo, initialStreamInfo)
+	if getCount(jsi.ApiStats, "stream_info") <= initialStreamInfo {
+		t.Fatalf("expected stream_info to increment, got %d (was %d)", getCount(jsi.ApiStats, "stream_info"), initialStreamInfo)
 	}
-	if jsi.ApiStats.Ack <= initialAck {
-		t.Fatalf("expected ack to increment, got %d (was %d)", jsi.ApiStats.Ack, initialAck)
+	if getCount(jsi.ApiStats, "ack") <= initialAck {
+		t.Fatalf("expected ack to increment, got %d (was %d)", getCount(jsi.ApiStats, "ack"), initialAck)
 	}
 }
 
@@ -5599,34 +5608,40 @@ func TestMonitorJszApiLatencyStats(t *testing.T) {
 	require_NoError(t, err)
 	require_NotNil(t, jsi.ApiStats)
 
-	// Verify latency data exists and is valid
-	require_NotNil(t, jsi.ApiStats.Latency)
-
-	// Verify StreamCreate latency is present and has valid values
-	require_NotNil(t, jsi.ApiStats.Latency.StreamCreate)
-	streamCreateLatency := jsi.ApiStats.Latency.StreamCreate
-	if streamCreateLatency.P50 <= 0 {
-		t.Fatalf("expected stream_create p50 latency > 0, got %d", streamCreateLatency.P50)
+	// Verify StreamCreate stats are present and have valid values
+	streamCreate := jsi.ApiStats["stream_create"]
+	require_NotNil(t, streamCreate)
+	if streamCreate.Count != 10 {
+		t.Fatalf("expected stream_create count = 10, got %d", streamCreate.Count)
 	}
-	if streamCreateLatency.P90 < streamCreateLatency.P50 {
-		t.Fatalf("expected stream_create p90 >= p50, got p90=%d, p50=%d", streamCreateLatency.P90, streamCreateLatency.P50)
+	if streamCreate.P50 <= 0 {
+		t.Fatalf("expected stream_create p50 latency > 0, got %d", streamCreate.P50)
 	}
-	if streamCreateLatency.P99 < streamCreateLatency.P90 {
-		t.Fatalf("expected stream_create p99 >= p90, got p99=%d, p90=%d", streamCreateLatency.P99, streamCreateLatency.P90)
+	if streamCreate.P90 < streamCreate.P50 {
+		t.Fatalf("expected stream_create p90 >= p50, got p90=%d, p50=%d", streamCreate.P90, streamCreate.P50)
 	}
-
-	// Verify ConsumerCreate latency is present
-	require_NotNil(t, jsi.ApiStats.Latency.ConsumerCreate)
-	consumerCreateLatency := jsi.ApiStats.Latency.ConsumerCreate
-	if consumerCreateLatency.P50 <= 0 {
-		t.Fatalf("expected consumer_create p50 latency > 0, got %d", consumerCreateLatency.P50)
+	if streamCreate.P99 < streamCreate.P90 {
+		t.Fatalf("expected stream_create p99 >= p90, got p99=%d, p90=%d", streamCreate.P99, streamCreate.P90)
 	}
 
-	// Verify StreamInfo latency is present
-	require_NotNil(t, jsi.ApiStats.Latency.StreamInfo)
-	streamInfoLatency := jsi.ApiStats.Latency.StreamInfo
-	if streamInfoLatency.P50 <= 0 {
-		t.Fatalf("expected stream_info p50 latency > 0, got %d", streamInfoLatency.P50)
+	// Verify ConsumerCreate stats are present
+	consumerCreate := jsi.ApiStats["consumer_create"]
+	require_NotNil(t, consumerCreate)
+	if consumerCreate.Count != 10 {
+		t.Fatalf("expected consumer_create count = 10, got %d", consumerCreate.Count)
+	}
+	if consumerCreate.P50 <= 0 {
+		t.Fatalf("expected consumer_create p50 latency > 0, got %d", consumerCreate.P50)
+	}
+
+	// Verify StreamInfo stats are present
+	streamInfo := jsi.ApiStats["stream_info"]
+	require_NotNil(t, streamInfo)
+	if streamInfo.Count != 10 {
+		t.Fatalf("expected stream_info count = 10, got %d", streamInfo.Count)
+	}
+	if streamInfo.P50 <= 0 {
+		t.Fatalf("expected stream_info p50 latency > 0, got %d", streamInfo.P50)
 	}
 }
 

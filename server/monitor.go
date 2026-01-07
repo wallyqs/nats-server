@@ -3005,7 +3005,7 @@ type JSInfo struct {
 	Messages        uint64              `json:"messages"`
 	Bytes           uint64              `json:"bytes"`
 	Meta            *MetaClusterInfo    `json:"meta_cluster,omitempty"`
-	ApiStats        *JSAPITrafficStats  `json:"api_stats,omitempty"`
+	ApiStats        JSAPITrafficStats   `json:"api_stats,omitempty"`
 	AccountDetails  []*AccountDetail    `json:"account_details,omitempty"`
 	Total           int                 `json:"total"`
 }
