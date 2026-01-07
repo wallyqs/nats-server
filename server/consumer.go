@@ -5310,9 +5310,7 @@ func (o *consumer) needFlowControl(sz int) bool {
 
 func (o *consumer) processFlowControl(_ *subscription, c *client, _ *Account, subj, _ string, _ []byte) {
 	// Track flow control for traffic stats.
-	if o.js != nil {
-		o.js.trackAPICall(JSAPIFlowControl)
-	}
+	o.js.trackAPICall(JSAPIFlowControl)
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
