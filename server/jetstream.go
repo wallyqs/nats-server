@@ -2897,20 +2897,6 @@ func (js *jetStream) apiLatencyStats() *JSAPILatencyBreakdown {
 	latency.AccountStreamMove = getStats(JSAPIAccountStreamMove)
 	latency.AccountStreamCancelMove = getStats(JSAPIAccountStreamCancelMove)
 
-	// Check if all latency stats are nil (no data yet)
-	if latency.Info == nil && latency.StreamCreate == nil && latency.StreamUpdate == nil &&
-		latency.StreamNames == nil && latency.StreamList == nil && latency.StreamInfo == nil &&
-		latency.StreamDelete == nil && latency.StreamPurge == nil && latency.StreamSnapshot == nil &&
-		latency.StreamRestore == nil && latency.StreamRemovePeer == nil && latency.StreamLeaderStepdown == nil &&
-		latency.StreamMsgDelete == nil && latency.StreamMsgGet == nil && latency.ConsumerCreate == nil &&
-		latency.ConsumerNames == nil && latency.ConsumerList == nil && latency.ConsumerInfo == nil &&
-		latency.ConsumerDelete == nil && latency.ConsumerPause == nil && latency.ConsumerLeaderStepdown == nil &&
-		latency.ConsumerMsgNext == nil && latency.ConsumerUnpin == nil && latency.DirectGet == nil &&
-		latency.MetaLeaderStepdown == nil && latency.ServerRemove == nil && latency.AccountPurge == nil &&
-		latency.AccountStreamMove == nil && latency.AccountStreamCancelMove == nil {
-		return nil
-	}
-
 	return latency
 }
 
