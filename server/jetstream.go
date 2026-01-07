@@ -2806,6 +2806,9 @@ func (js *jetStream) apiStats() JSAPITrafficStats {
 		stats[name] = opStats
 	}
 
+	if len(stats) == 0 {
+		return nil
+	}
 	return stats
 }
 
