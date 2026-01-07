@@ -194,7 +194,6 @@ type jsAPILatencyTracker struct {
 	mu      sync.Mutex
 	samples []int64 // latencies in microseconds
 	pos     int     // current position in circular buffer
-	count   int64   // total count of samples ever recorded
 }
 
 const jsAPILatencySampleSize = 1000 // Number of samples to keep per API type
@@ -2736,7 +2735,6 @@ func (t *jsAPILatencyTracker) record(latencyMicros int64) {
 		t.samples[t.pos] = latencyMicros
 		t.pos = (t.pos + 1) % jsAPILatencySampleSize
 	}
-	t.count++
 }
 
 // percentiles calculates and returns p50, p90, p99 from the circular buffer.
