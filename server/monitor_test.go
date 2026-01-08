@@ -5436,7 +5436,7 @@ func TestMonitorJsz(t *testing.T) {
 	})
 	t.Run("api-stats", func(t *testing.T) {
 		for _, url := range []string{monUrl1, monUrl2} {
-			info := readJsInfo(url)
+			info := readJsInfo(url + "?api-stats=1")
 			require_NotNil(t, info.ApiStats)
 			// At this point we've created streams and consumers, so we should have some traffic.
 			// StreamCreate was called 3 times (3 streams).
@@ -5511,7 +5511,7 @@ func TestMonitorJszApiStats(t *testing.T) {
 	}
 
 	// Get initial API stats
-	jsi, err := s.Jsz(nil)
+	jsi, err := s.Jsz(&JSzOptions{ApiStats: true})
 	require_NoError(t, err)
 	initialStreamCreate := getCount(jsi.ApiStats, "stream_create")
 	initialConsumerCreate := getCount(jsi.ApiStats, "consumer_create")
@@ -5556,7 +5556,7 @@ func TestMonitorJszApiStats(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Get updated API stats
-	jsi, err = s.Jsz(nil)
+	jsi, err = s.Jsz(&JSzOptions{ApiStats: true})
 	require_NoError(t, err)
 	require_NotNil(t, jsi.ApiStats)
 
@@ -5604,7 +5604,7 @@ func TestMonitorJszApiLatencyStats(t *testing.T) {
 	}
 
 	// Get API stats with latency data
-	jsi, err := s.Jsz(nil)
+	jsi, err := s.Jsz(&JSzOptions{ApiStats: true})
 	require_NoError(t, err)
 	require_NotNil(t, jsi.ApiStats)
 
