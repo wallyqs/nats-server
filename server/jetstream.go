@@ -2670,49 +2670,25 @@ func (js *jetStream) trackAPICall(apiType JSAPIType) {
 	}
 }
 
-// trackAPIStart increments the traffic counter and returns the start time for latency tracking.
-// The returned time should be passed to trackAPIEnd when the request completes.
-func (js *jetStream) trackAPIStart(apiType JSAPIType) time.Time {
-	if js != nil && apiType >= 0 && apiType < JSAPITypeCount {
-		atomic.AddInt64(&js.apiTraffic[apiType], 1)
-	}
-	return time.Now()
-}
-
-// trackAPIEnd records the latency for the given API type.
-// Should be called with the start time returned by trackAPIStart.
-func (js *jetStream) trackAPIEnd(apiType JSAPIType, start time.Time) {
-	if js == nil || apiType < 0 || apiType >= JSAPITypeCount {
-		return
-	}
-	tracker := js.apiLatency[apiType]
-	if tracker == nil {
-		return
-	}
-	latencyMicros := time.Since(start).Microseconds()
-	tracker.record(latencyMicros)
-}
-
 // trackAPI increments the traffic counter, records the start time, and returns a function
 // that should be called via defer to record the latency when the request completes.
 func (js *jetStream) trackAPI(apiType JSAPIType) func() {
-	start := js.trackAPIStart(apiType)
+	if js == nil {
+		return func() {}
+	}
+	atomic.AddInt64(&js.apiTraffic[apiType], 1)
+	start := time.Now()
 	return func() {
-		js.trackAPIEnd(apiType, start)
+		if tracker := js.apiLatency[apiType]; tracker != nil {
+			tracker.record(time.Since(start).Microseconds())
+		}
 	}
 }
 
 // trackAPI increments the traffic counter, records the start time, and returns a function
 // that should be called via defer to record the latency when the request completes.
 func (s *Server) trackAPI(apiType JSAPIType) func() {
-	js := s.getJetStream()
-	if js == nil {
-		return func() {}
-	}
-	start := js.trackAPIStart(apiType)
-	return func() {
-		js.trackAPIEnd(apiType, start)
-	}
+	return s.getJetStream().trackAPI(apiType)
 }
 
 // record adds a latency sample to the circular buffer.
