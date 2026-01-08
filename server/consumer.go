@@ -1041,7 +1041,10 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 			// Check for overlapping subjects if we are a workqueue
 			if cfg.Retention == WorkQueuePolicy {
 				subjects := gatherSubjectFilters(config.FilterSubject, config.FilterSubjects)
-				if !mset.partitionUnique(cName, subjects) {
+				mset.mu.RLock()
+				unique := mset.partitionUnique(cName, subjects)
+				mset.mu.RUnlock()
+				if !unique {
 					return nil, NewJSConsumerWQConsumerNotUniqueError()
 				}
 			}
