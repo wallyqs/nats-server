@@ -110,6 +110,8 @@ type jetStream struct {
 	memUsed       int64
 	storeUsed     int64
 	queueLimit    int64
+	// Rolling average of pending API requests (scaled by 1000 for precision).
+	apiPendingAvg int64
 	clustered     int32
 	mu            sync.RWMutex
 	srv           *Server
@@ -882,6 +884,31 @@ func (js *jetStream) isEnabled() bool {
 		return false
 	}
 	return !js.disabled.Load()
+}
+
+// updatePendingAvg updates the rolling average of pending API requests using
+// an Exponential Moving Average (EMA). The formula is:
+//
+//	EMA_new = α × current + (1-α) × EMA_old
+//
+// With α=0.1, each new sample contributes 10% to the average while the
+// historical average contributes 90%. This creates a smooth average that
+// adapts to changing request patterns while filtering out short-term spikes.
+//
+// The average is stored scaled by 1000 for precision in atomic integer operations.
+func (js *jetStream) updatePendingAvg(pending int) {
+	const emaScale int64 = 1000
+	const emaAlpha int64 = 100 // α=0.1 scaled by 1000
+	pendingScaled := int64(pending) * emaScale
+
+	oldAvg := atomic.LoadInt64(&js.apiPendingAvg)
+	var newAvg int64
+	if oldAvg == 0 {
+		newAvg = pendingScaled
+	} else {
+		newAvg = (emaAlpha*pendingScaled + (emaScale-emaAlpha)*oldAvg) / emaScale
+	}
+	atomic.StoreInt64(&js.apiPendingAvg, newAvg)
 }
 
 // Mark that we will be in standlone mode.

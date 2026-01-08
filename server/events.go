@@ -1055,6 +1055,10 @@ func (s *Server) sendStatsz(subj string) {
 			if ipq := s.jsAPIRoutedReqs; ipq != nil && jStat.Meta != nil {
 				jStat.Meta.Pending = ipq.len()
 			}
+			// Get rolling average of pending requests (stored scaled by 1000)
+			if jStat.Meta != nil {
+				jStat.Meta.PendingAvg = float64(atomic.LoadInt64(&js.apiPendingAvg)) / 1000.0
+			}
 		}
 		jStat.Limits = &s.getOpts().JetStreamLimits
 		m.Stats.JetStream = jStat

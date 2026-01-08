@@ -837,6 +837,10 @@ func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, sub
 	// header from the msg body. No other references are needed.
 	// Check pending and warn if getting backed up.
 	pending, _ := s.jsAPIRoutedReqs.push(&jsAPIRoutedReq{jsub, sub, acc, subject, reply, copyBytes(rmsg), c.pa})
+
+	// Update rolling average of pending requests.
+	js.updatePendingAvg(pending)
+
 	limit := atomic.LoadInt64(&js.queueLimit)
 	if pending >= int(limit) {
 		s.rateLimitFormatWarnf("JetStream API queue limit reached, dropping %d requests", pending)
