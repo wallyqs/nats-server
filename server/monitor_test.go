@@ -5645,6 +5645,90 @@ func TestMonitorJszApiLatencyStats(t *testing.T) {
 	}
 }
 
+func TestMonitorJszInOutMsgsStats(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Get initial stats
+	jsi, err := s.Jsz(&JSzOptions{ApiStats: true})
+	require_NoError(t, err)
+	initialInMsgs := jsi.InMsgs
+	initialInBytes := jsi.InBytes
+	initialOutMsgs := jsi.OutMsgs
+	initialOutBytes := jsi.OutBytes
+
+	// Create a stream
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"test.>"},
+	})
+	require_NoError(t, err)
+
+	// Create a consumer
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "TEST-CONSUMER",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Publish multiple messages
+	msgData := []byte("hello world")
+	numMsgs := 10
+	for i := 0; i < numMsgs; i++ {
+		_, err = js.Publish("test.subject", msgData)
+		require_NoError(t, err)
+	}
+
+	// Get updated stats after publish
+	jsi, err = s.Jsz(&JSzOptions{ApiStats: true})
+	require_NoError(t, err)
+
+	// Verify InMsgs counter incremented by at least numMsgs
+	expectedMsgs := initialInMsgs + uint64(numMsgs)
+	if jsi.InMsgs < expectedMsgs {
+		t.Fatalf("expected InMsgs >= %d, got %d", expectedMsgs, jsi.InMsgs)
+	}
+
+	// Verify InBytes counter incremented
+	if jsi.InBytes <= initialInBytes {
+		t.Fatalf("expected InBytes to increment, got %d (was %d)", jsi.InBytes, initialInBytes)
+	}
+
+	// Subscribe and consume messages to trigger OutMsgs/OutBytes
+	sub, err := js.PullSubscribe("test.>", "TEST-CONSUMER")
+	require_NoError(t, err)
+
+	msgs, err := sub.Fetch(numMsgs, nats.MaxWait(5*time.Second))
+	require_NoError(t, err)
+	require_True(t, len(msgs) == numMsgs)
+
+	// Get updated stats after consume
+	jsi, err = s.Jsz(&JSzOptions{ApiStats: true})
+	require_NoError(t, err)
+
+	// Verify OutMsgs counter incremented by at least numMsgs
+	expectedOutMsgs := initialOutMsgs + uint64(numMsgs)
+	if jsi.OutMsgs < expectedOutMsgs {
+		t.Fatalf("expected OutMsgs >= %d, got %d", expectedOutMsgs, jsi.OutMsgs)
+	}
+
+	// Verify OutBytes counter incremented
+	if jsi.OutBytes <= initialOutBytes {
+		t.Fatalf("expected OutBytes to increment, got %d (was %d)", jsi.OutBytes, initialOutBytes)
+	}
+
+	// Verify counters are only present when api-stats=true
+	jsiNoStats, err := s.Jsz(&JSzOptions{ApiStats: false})
+	require_NoError(t, err)
+	if jsiNoStats.InMsgs != 0 || jsiNoStats.InBytes != 0 || jsiNoStats.OutMsgs != 0 || jsiNoStats.OutBytes != 0 {
+		t.Fatalf("expected all traffic counters to be 0 when api-stats=false, got in=%d/%d out=%d/%d",
+			jsiNoStats.InMsgs, jsiNoStats.InBytes, jsiNoStats.OutMsgs, jsiNoStats.OutBytes)
+	}
+}
+
 func TestMonitorReloadTLSConfig(t *testing.T) {
 	template := `
 		listen: "127.0.0.1:-1"

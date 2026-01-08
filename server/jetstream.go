@@ -189,11 +189,12 @@ var jsAPITypeNames = [JSAPITypeCount]string{
 	JSAPIUnknown:                 "unknown",
 }
 
-// jsAPILatencyTracker tracks latencies for a single API type using a circular buffer
+// jsAPILatencyTracker tracks latencies using a lock-free circular buffer.
+// Writers use atomic operations to avoid mutex contention on hot paths.
 type jsAPILatencyTracker struct {
-	mu      sync.Mutex
-	samples []int64 // latencies in microseconds
-	pos     int     // current position in circular buffer
+	samples [jsAPILatencySampleSize]int64 // Fixed-size array, atomically accessed
+	pos     int64                         // Current write position (atomic)
+	count   int64                         // Total samples written (atomic)
 }
 
 const jsAPILatencySampleSize = 1000 // Number of samples to keep per API type
@@ -211,6 +212,10 @@ type jetStream struct {
 	queueLimit      int64
 	acksTotal       int64
 	heartbeatsTotal int64
+	inMsgsTotal     int64
+	inBytesTotal    int64
+	outMsgsTotal    int64
+	outBytesTotal   int64
 	clustered       int32
 
 	mu       sync.RWMutex
@@ -2657,9 +2662,7 @@ func (js *jetStream) usageStats() *JetStreamStats {
 func (js *jetStream) initAPILatencyTracking() {
 	for i := JSAPIType(0); i < JSAPITypeCount; i++ {
 		if i != JSAPIAck && i != JSAPIFlowControl && i != JSAPIHeartbeat && i != JSAPIUnknown {
-			js.apiLatency[i] = &jsAPILatencyTracker{
-				samples: make([]int64, 0, jsAPILatencySampleSize),
-			}
+			js.apiLatency[i] = &jsAPILatencyTracker{}
 		}
 	}
 }
@@ -2694,35 +2697,36 @@ func (s *Server) trackAPI(apiType JSAPIType) func() {
 	return s.getJetStream().trackAPI(apiType)
 }
 
-// record adds a latency sample to the circular buffer.
+// record adds a latency sample to the circular buffer using lock-free atomics.
 func (t *jsAPILatencyTracker) record(latencyMicros int64) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if len(t.samples) < jsAPILatencySampleSize {
-		// Buffer not full yet, append
-		t.samples = append(t.samples, latencyMicros)
-	} else {
-		// Buffer full, overwrite at current position
-		t.samples[t.pos] = latencyMicros
-		t.pos = (t.pos + 1) % jsAPILatencySampleSize
-	}
+	// Atomically increment position and get the slot to write to.
+	idx := atomic.AddInt64(&t.pos, 1) - 1
+	slot := idx % jsAPILatencySampleSize
+	atomic.StoreInt64(&t.samples[slot], latencyMicros)
+	atomic.AddInt64(&t.count, 1)
 }
 
 // percentiles calculates and returns p50, p90, p99 from the circular buffer.
 // Returns (0, 0, 0) if no samples exist.
+// Note: This takes a snapshot of samples which may have slight inconsistency
+// during concurrent writes, but this is acceptable for approximate percentiles.
 func (t *jsAPILatencyTracker) percentiles() (p50, p90, p99 int64) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	n := len(t.samples)
-	if n == 0 {
+	count := atomic.LoadInt64(&t.count)
+	if count == 0 {
 		return 0, 0, 0
 	}
 
-	// Make a copy to avoid sorting the original
+	// Determine how many samples we have (up to buffer size).
+	n := int(count)
+	if n > jsAPILatencySampleSize {
+		n = jsAPILatencySampleSize
+	}
+
+	// Snapshot samples atomically.
 	sorted := make([]int64, n)
-	copy(sorted, t.samples)
+	for i := 0; i < n; i++ {
+		sorted[i] = atomic.LoadInt64(&t.samples[i])
+	}
 	slices.Sort(sorted)
 
 	return sorted[n*50/100], sorted[n*90/100], sorted[n*99/100]
@@ -2744,6 +2748,24 @@ func (js *jetStream) trackHeartbeat() {
 		return
 	}
 	atomic.AddInt64(&js.heartbeatsTotal, 1)
+}
+
+// trackInMsg increments counters for messages stored to streams.
+func (js *jetStream) trackInMsg(msgSize int) {
+	if js == nil {
+		return
+	}
+	atomic.AddInt64(&js.inMsgsTotal, 1)
+	atomic.AddInt64(&js.inBytesTotal, int64(msgSize))
+}
+
+// trackOutMsg increments counters for messages delivered to consumers.
+func (js *jetStream) trackOutMsg(msgSize int) {
+	if js == nil {
+		return
+	}
+	atomic.AddInt64(&js.outMsgsTotal, 1)
+	atomic.AddInt64(&js.outBytesTotal, int64(msgSize))
 }
 
 // apiStats returns the current traffic statistics for all JS API types.

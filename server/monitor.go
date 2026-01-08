@@ -3005,9 +3005,13 @@ type JSInfo struct {
 	ConsumersLeader int               `json:"consumers_leader,omitempty"`
 	Messages        uint64            `json:"messages"`
 	Bytes           uint64            `json:"bytes"`
-	Meta            *MetaClusterInfo  `json:"meta_cluster,omitempty"`
-	ApiStats        JSAPITrafficStats `json:"api_stats,omitempty"`
-	AccountDetails  []*AccountDetail  `json:"account_details,omitempty"`
+	Meta             *MetaClusterInfo  `json:"meta_cluster,omitempty"`
+	ApiStats         JSAPITrafficStats `json:"api_stats,omitempty"`
+	InMsgs           uint64            `json:"in_msgs,omitempty"`
+	InBytes          uint64            `json:"in_bytes,omitempty"`
+	OutMsgs          uint64            `json:"out_msgs,omitempty"`
+	OutBytes         uint64            `json:"out_bytes,omitempty"`
+	AccountDetails   []*AccountDetail  `json:"account_details,omitempty"`
 	Total           int               `json:"total"`
 }
 
@@ -3238,6 +3242,10 @@ func (s *Server) Jsz(opts *JSzOptions) (*JSInfo, error) {
 	jsi.JetStreamStats = *js.usageStats()
 	if opts.ApiStats {
 		jsi.ApiStats = js.apiStats()
+		jsi.InMsgs = uint64(atomic.LoadInt64(&js.inMsgsTotal))
+		jsi.InBytes = uint64(atomic.LoadInt64(&js.inBytesTotal))
+		jsi.OutMsgs = uint64(atomic.LoadInt64(&js.outMsgsTotal))
+		jsi.OutBytes = uint64(atomic.LoadInt64(&js.outBytesTotal))
 	}
 
 	// If a specific account is requested, track the index.

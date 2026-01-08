@@ -5260,6 +5260,9 @@ func (o *consumer) deliverMsg(dsubj, ackReply string, pmsg *jsPubMsg, dc uint64,
 		o.outq.send(pmsg)
 	}
 
+	// Track message delivery for traffic stats.
+	o.js.trackOutMsg(psz)
+
 	// Flow control.
 	if o.maxpb > 0 && o.needFlowControl(psz) {
 		o.sendFlowControl()

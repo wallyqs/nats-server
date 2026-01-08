@@ -6146,6 +6146,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	}
 
 	// If here we succeeded in storing the message.
+	js.trackInMsg(len(hdr) + len(msg))
 	mset.lmsgId = msgId
 	mset.lseq = seq
 
