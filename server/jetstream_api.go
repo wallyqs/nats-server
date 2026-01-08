@@ -1228,6 +1228,7 @@ func (s *Server) jsAccountInfoRequest(sub *subscription, c *client, _ *Account, 
 	if errorOnRequiredApiLevel(hdr) {
 		resp.Error = NewJSRequiredApiLevelError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIInfo)
 		return
 	}
 
@@ -1240,6 +1241,7 @@ func (s *Server) jsAccountInfoRequest(sub *subscription, c *client, _ *Account, 
 		if js.isLeaderless() {
 			resp.Error = NewJSClusterNotAvailError()
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			s.trackAPIError(JSAPIInfo)
 			return
 		}
 		// Make sure we are meta leader.
@@ -1324,6 +1326,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 	if errorOnRequiredApiLevel(hdr) {
 		resp.Error = NewJSRequiredApiLevelError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamCreate)
 		return
 	}
 
@@ -1336,6 +1339,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 		if js.isLeaderless() {
 			resp.Error = NewJSClusterNotAvailError()
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			s.trackAPIError(JSAPIStreamCreate)
 			return
 		}
 		// Make sure we are meta leader.
@@ -1348,6 +1352,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 		if doErr {
 			resp.Error = NewJSNotEnabledForAccountError()
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			s.trackAPIError(JSAPIStreamCreate)
 		}
 		return
 	}
@@ -1356,6 +1361,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 	if err := s.unmarshalRequest(c, acc, subject, msg, &cfg); err != nil {
 		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamCreate)
 		return
 	}
 
@@ -1366,6 +1372,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 	if streamName != cfg.Name {
 		resp.Error = NewJSStreamMismatchError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamCreate)
 		return
 	}
 
@@ -1373,6 +1380,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 	if strings.ContainsAny(streamName, `\/`) {
 		resp.Error = NewJSStreamNameContainsPathSeparatorsError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamCreate)
 		return
 	}
 
@@ -1380,6 +1388,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 	if cfg.Sealed {
 		resp.Error = NewJSStreamInvalidConfigError(fmt.Errorf("stream configuration for create can not be sealed"))
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamCreate)
 		return
 	}
 
@@ -1387,6 +1396,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 	if cfg.MirrorDirect && cfg.Mirror == nil {
 		resp.Error = NewJSStreamInvalidConfigError(fmt.Errorf("stream has no mirror but does have mirror direct"))
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamCreate)
 		return
 	}
 
@@ -1399,6 +1409,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 	if err := acc.jsNonClusteredStreamLimitsCheck(&cfg.StreamConfig); err != nil {
 		resp.Error = err
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamCreate)
 		return
 	}
 
@@ -1410,6 +1421,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 		}
 		resp.Error = NewJSStreamCreateError(err, Unless(err))
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamCreate)
 		return
 	}
 	msetCfg := mset.config()
@@ -1442,6 +1454,7 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 	if errorOnRequiredApiLevel(hdr) {
 		resp.Error = NewJSRequiredApiLevelError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamUpdate)
 		return
 	}
 
@@ -1454,6 +1467,7 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 		if js.isLeaderless() {
 			resp.Error = NewJSClusterNotAvailError()
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			s.trackAPIError(JSAPIStreamUpdate)
 			return
 		}
 		// Make sure we are meta leader.
@@ -1466,6 +1480,7 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 		if doErr {
 			resp.Error = NewJSNotEnabledForAccountError()
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			s.trackAPIError(JSAPIStreamUpdate)
 		}
 		return
 	}
@@ -1473,6 +1488,7 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 	if err := s.unmarshalRequest(c, acc, subject, msg, &ncfg); err != nil {
 		resp.Error = NewJSInvalidJSONError(err)
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamUpdate)
 		return
 	}
 
@@ -1480,6 +1496,7 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 	if apiErr != nil {
 		resp.Error = apiErr
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamUpdate)
 		return
 	}
 
@@ -1487,6 +1504,7 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 	if streamName != cfg.Name {
 		resp.Error = NewJSStreamMismatchError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamUpdate)
 		return
 	}
 
@@ -1500,11 +1518,13 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 	if err != nil {
 		resp.Error = NewJSStreamNotFoundError(Unless(err))
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamUpdate)
 		return
 	}
 	if mset.offlineReason != _EMPTY_ {
 		resp.Error = NewJSStreamOfflineReasonError(errors.New(mset.offlineReason))
 		s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil, errRespDelay)
+		s.trackAPIError(JSAPIStreamUpdate)
 		return
 	}
 
@@ -1514,6 +1534,7 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 	if err := mset.updatePedantic(&cfg, ncfg.Pedantic); err != nil {
 		resp.Error = NewJSStreamUpdateError(err, Unless(err))
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIStreamUpdate)
 		return
 	}
 
@@ -4708,12 +4729,14 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 	if errorOnRequiredApiLevel(hdr) {
 		resp.Error = NewJSRequiredApiLevelError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIConsumerInfo)
 		return
 	}
 
 	if !isEmptyRequest(msg) {
 		resp.Error = NewJSNotEmptyRequestError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		s.trackAPIError(JSAPIConsumerInfo)
 		return
 	}
 
@@ -4770,17 +4793,20 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 				if doErr {
 					resp.Error = NewJSNotEnabledForAccountError()
 					s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+					s.trackAPIError(JSAPIConsumerInfo)
 				}
 				return
 			}
 			if sa == nil {
 				resp.Error = NewJSStreamNotFoundError()
 				s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+				s.trackAPIError(JSAPIConsumerInfo)
 				return
 			}
 			// If we are here the consumer is not present.
 			resp.Error = NewJSConsumerNotFoundError()
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			s.trackAPIError(JSAPIConsumerInfo)
 			return
 		} else if ca == nil {
 			if isLeaderLess {
