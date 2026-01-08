@@ -8066,9 +8066,13 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 		}
 	}
 
+	// Calculate and track pending replication.
+	pending := mset.clseq - (lseq + mset.clfs)
+	mset.updatePendingAvg(pending)
+
 	// Check to see if we are being overrun.
 	// TODO(dlc) - Make this a limit where we drop messages to protect ourselves, but allow to be configured.
-	if mset.clseq-(lseq+mset.clfs) > streamLagWarnThreshold {
+	if pending > streamLagWarnThreshold {
 		lerr := fmt.Errorf("JetStream stream '%s > %s' has high message lag", jsa.acc().Name, name)
 		s.RateLimitWarnf("%s", lerr.Error())
 	}
@@ -8712,6 +8716,8 @@ func (mset *stream) checkClusterInfo(ci *ClusterInfo) {
 			r.Lag = lag
 		}
 	}
+	// Add rolling average of pending replication.
+	ci.PendingAvg = mset.getPendingAvg()
 }
 
 // Return a list of alternates, ranked by preference order to the request, of stream mirrors.
