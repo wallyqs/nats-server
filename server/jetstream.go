@@ -2702,13 +2702,6 @@ func (js *jetStream) trackAPI(apiType JSAPIType) func() {
 	}
 }
 
-// trackAPICall increments the traffic counter for the given API type via the server's JetStream instance.
-func (s *Server) trackAPICall(apiType JSAPIType) {
-	if js := s.getJetStream(); js != nil {
-		js.trackAPICall(apiType)
-	}
-}
-
 // trackAPI increments the traffic counter, records the start time, and returns a function
 // that should be called via defer to record the latency when the request completes.
 func (s *Server) trackAPI(apiType JSAPIType) func() {
