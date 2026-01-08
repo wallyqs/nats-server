@@ -521,16 +521,7 @@ func (s *Server) initJetStreamEncryption() (err error) {
 // enableJetStream will start up the JetStream subsystem.
 func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 	js := &jetStream{srv: s, config: cfg, accounts: make(map[string]*jsAccount), apiSubs: NewSublistNoCache()}
-
-	// Initialize latency trackers for all API types that support latency tracking
-	// (excluding ACK, FlowControl, Heartbeat, Unknown which are one-way or don't need tracking)
-	for i := JSAPIType(0); i < JSAPITypeCount; i++ {
-		if i != JSAPIAck && i != JSAPIFlowControl && i != JSAPIHeartbeat && i != JSAPIUnknown {
-			js.apiLatency[i] = &jsAPILatencyTracker{
-				samples: make([]int64, 0, jsAPILatencySampleSize),
-			}
-		}
-	}
+	js.initAPILatencyTracking()
 
 	s.gcbMu.Lock()
 	if s.gcbOutMax = s.getOpts().JetStreamMaxCatchup; s.gcbOutMax == 0 {
@@ -2660,7 +2651,18 @@ func (js *jetStream) usageStats() *JetStreamStats {
 	return &stats
 }
 
-// trackAPICall increments the traffic counter for the given API type.
+// initAPILatencyTracking initializes latency trackers for all API types that support latency tracking.
+// ACK, FlowControl, Heartbeat, and Unknown are excluded as they are one-way or don't need tracking.
+func (js *jetStream) initAPILatencyTracking() {
+	for i := JSAPIType(0); i < JSAPITypeCount; i++ {
+		if i != JSAPIAck && i != JSAPIFlowControl && i != JSAPIHeartbeat && i != JSAPIUnknown {
+			js.apiLatency[i] = &jsAPILatencyTracker{
+				samples: make([]int64, 0, jsAPILatencySampleSize),
+			}
+		}
+	}
+}
+
 func (js *jetStream) trackAPICall(apiType JSAPIType) {
 	if js == nil {
 		return
