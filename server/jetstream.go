@@ -143,10 +143,11 @@ const (
 
 // JSAPIOpStats holds count and latency percentiles for a single API operation
 type JSAPIOpStats struct {
-	Count uint64 `json:"count,omitempty"`
-	P50   int64  `json:"p50,omitempty"`
-	P90   int64  `json:"p90,omitempty"`
-	P99   int64  `json:"p99,omitempty"`
+	Count  uint64 `json:"count,omitempty"`
+	Errors uint64 `json:"errors,omitempty"`
+	P50    int64  `json:"p50,omitempty"`
+	P90    int64  `json:"p90,omitempty"`
+	P99    int64  `json:"p99,omitempty"`
 }
 
 // JSAPITrafficStats is a map of API operation name to its statistics
@@ -218,6 +219,9 @@ type jetStream struct {
 
 	// Latency trackers for each JS API type (excluding ACK, FlowControl, Heartbeat, Unknown)
 	apiLatency [JSAPITypeCount]*jsAPILatencyTracker
+
+	// Error counters for each JS API type (must be 64-bit aligned for atomics on 32-bit systems)
+	apiErrorCounts [JSAPITypeCount]int64
 
 	mu       sync.RWMutex
 	srv      *Server
@@ -2693,6 +2697,23 @@ func (s *Server) trackAPI(apiType JSAPIType) func() {
 	return s.getJetStream().trackAPI(apiType)
 }
 
+// trackAPIError increments the error counter for the specified API type.
+func (js *jetStream) trackAPIError(apiType JSAPIType) {
+	if js == nil {
+		return
+	}
+	if apiType >= 0 && apiType < JSAPITypeCount {
+		atomic.AddInt64(&js.apiErrorCounts[apiType], 1)
+	}
+}
+
+// trackAPIError increments the error counter for the specified API type.
+func (s *Server) trackAPIError(apiType JSAPIType) {
+	if js := s.getJetStream(); js != nil {
+		js.trackAPIError(apiType)
+	}
+}
+
 // record adds a latency sample to the circular buffer.
 func (t *jsAPILatencyTracker) record(latencyMicros int64) {
 	t.mu.Lock()
@@ -2767,7 +2788,8 @@ func (js *jetStream) apiStats() JSAPITrafficStats {
 		}
 
 		name := jsAPITypeNames[apiType]
-		opStats := &JSAPIOpStats{Count: count}
+		errors := uint64(atomic.LoadInt64(&js.apiErrorCounts[apiType]))
+		opStats := &JSAPIOpStats{Count: count, Errors: errors}
 
 		// Get latency percentiles if tracker exists
 		if tracker := js.apiLatency[apiType]; tracker != nil {

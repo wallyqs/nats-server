@@ -18266,13 +18266,13 @@ func TestJetStreamDelayedAPIResponses(t *testing.T) {
 	acc := s.GlobalAccount()
 
 	// Send B, A, D, C and expected to receive A, B, C, D
-	s.sendDelayedAPIErrResponse(nil, acc, "B", _EMPTY_, "request2", "response2", nil, 500*time.Millisecond)
+	s.sendDelayedAPIErrResponse(nil, acc, "B", _EMPTY_, "request2", "response2", nil, 500*time.Millisecond, JSAPIUnknown)
 	time.Sleep(50 * time.Millisecond)
-	s.sendDelayedAPIErrResponse(nil, acc, "A", _EMPTY_, "request1", "response1", nil, 200*time.Millisecond)
+	s.sendDelayedAPIErrResponse(nil, acc, "A", _EMPTY_, "request1", "response1", nil, 200*time.Millisecond, JSAPIUnknown)
 	time.Sleep(50 * time.Millisecond)
-	s.sendDelayedAPIErrResponse(nil, acc, "D", _EMPTY_, "request4", "response4", nil, 800*time.Millisecond)
+	s.sendDelayedAPIErrResponse(nil, acc, "D", _EMPTY_, "request4", "response4", nil, 800*time.Millisecond, JSAPIUnknown)
 	time.Sleep(50 * time.Millisecond)
-	s.sendDelayedAPIErrResponse(nil, acc, "C", _EMPTY_, "request3", "response3", nil, 650*time.Millisecond)
+	s.sendDelayedAPIErrResponse(nil, acc, "C", _EMPTY_, "request3", "response3", nil, 650*time.Millisecond, JSAPIUnknown)
 
 	check := func(req, resp string) {
 		t.Helper()
@@ -18292,21 +18292,21 @@ func TestJetStreamDelayedAPIResponses(t *testing.T) {
 	node := &raft{quit: make(chan struct{})}
 	g := &raftGroup{node: node}
 	// Send delayed API response with this raft group
-	s.sendDelayedAPIErrResponse(nil, acc, "E", _EMPTY_, "request5", "response5", g, 250*time.Millisecond)
+	s.sendDelayedAPIErrResponse(nil, acc, "E", _EMPTY_, "request5", "response5", g, 250*time.Millisecond, JSAPIUnknown)
 	time.Sleep(50 * time.Millisecond)
 	// Send that one without a group
-	s.sendDelayedAPIErrResponse(nil, acc, "F", _EMPTY_, "request6", "response6", nil, 400*time.Millisecond)
+	s.sendDelayedAPIErrResponse(nil, acc, "F", _EMPTY_, "request6", "response6", nil, 400*time.Millisecond, JSAPIUnknown)
 	// Close the "request5"'s channel.
 	close(node.quit)
 	// So we should receive request6, not 5.
 	check("request6", "response6")
 
 	// Check config reload.
-	s.sendDelayedAPIErrResponse(nil, acc, "G", _EMPTY_, "request7", "response7", nil, 400*time.Millisecond)
+	s.sendDelayedAPIErrResponse(nil, acc, "G", _EMPTY_, "request7", "response7", nil, 400*time.Millisecond, JSAPIUnknown)
 	time.Sleep(50 * time.Millisecond)
 	// Send a bunch more
 	for i := 0; i < 10; i++ {
-		s.sendDelayedAPIErrResponse(nil, acc, "H", _EMPTY_, "request8", "response8", nil, 500*time.Millisecond)
+		s.sendDelayedAPIErrResponse(nil, acc, "H", _EMPTY_, "request8", "response8", nil, 500*time.Millisecond, JSAPIUnknown)
 	}
 	// Config reload to disable JS.
 	reloadUpdateConfig(t, s, conf, fmt.Sprintf(tmpl, "#", tdir))
@@ -18330,7 +18330,7 @@ func TestJetStreamDelayedAPIResponses(t *testing.T) {
 		}
 		return nil
 	})
-	s.sendDelayedAPIErrResponse(nil, acc, "I", _EMPTY_, "request9", "response9", nil, 100*time.Millisecond)
+	s.sendDelayedAPIErrResponse(nil, acc, "I", _EMPTY_, "request9", "response9", nil, 100*time.Millisecond, JSAPIUnknown)
 	check("request9", "response9")
 }
 

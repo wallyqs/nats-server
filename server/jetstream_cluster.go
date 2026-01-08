@@ -3480,7 +3480,7 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 					if isLeader && !isRecovering {
 						var resp = JSApiMsgDeleteResponse{ApiResponse: ApiResponse{Type: JSApiMsgDeleteResponseType}}
 						resp.Error = NewJSStreamMsgDeleteFailedError(err, Unless(err))
-						s.sendAPIErrResponse(md.Client, mset.account(), md.Subject, md.Reply, _EMPTY_, s.jsonResponse(resp))
+						s.sendAPIErrResponse(md.Client, mset.account(), md.Subject, md.Reply, _EMPTY_, s.jsonResponse(resp), JSAPIStreamMsgDelete)
 					}
 					continue
 				}
@@ -3494,10 +3494,10 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 					var resp = JSApiMsgDeleteResponse{ApiResponse: ApiResponse{Type: JSApiMsgDeleteResponseType}}
 					if err != nil {
 						resp.Error = NewJSStreamMsgDeleteFailedError(err, Unless(err))
-						s.sendAPIErrResponse(md.Client, mset.account(), md.Subject, md.Reply, _EMPTY_, s.jsonResponse(resp))
+						s.sendAPIErrResponse(md.Client, mset.account(), md.Subject, md.Reply, _EMPTY_, s.jsonResponse(resp), JSAPIStreamMsgDelete)
 					} else if !removed {
 						resp.Error = NewJSSequenceNotFoundError(md.Seq)
-						s.sendAPIErrResponse(md.Client, mset.account(), md.Subject, md.Reply, _EMPTY_, s.jsonResponse(resp))
+						s.sendAPIErrResponse(md.Client, mset.account(), md.Subject, md.Reply, _EMPTY_, s.jsonResponse(resp), JSAPIStreamMsgDelete)
 					} else {
 						resp.Success = true
 						s.sendAPIResponse(md.Client, mset.account(), md.Subject, md.Reply, _EMPTY_, s.jsonResponse(resp))
@@ -3539,7 +3539,7 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 					var resp = JSApiStreamPurgeResponse{ApiResponse: ApiResponse{Type: JSApiStreamPurgeResponseType}}
 					if err != nil {
 						resp.Error = NewJSStreamGeneralError(err, Unless(err))
-						s.sendAPIErrResponse(sp.Client, mset.account(), sp.Subject, sp.Reply, _EMPTY_, s.jsonResponse(resp))
+						s.sendAPIErrResponse(sp.Client, mset.account(), sp.Subject, sp.Reply, _EMPTY_, s.jsonResponse(resp), JSAPIStreamPurge)
 					} else {
 						resp.Purged = purged
 						resp.Success = true
@@ -3949,7 +3949,7 @@ func (js *jetStream) processStreamLeaderChange(mset *stream, isLeader bool) {
 	var resp = JSApiStreamCreateResponse{ApiResponse: ApiResponse{Type: JSApiStreamCreateResponseType}}
 	if err != nil {
 		resp.Error = NewJSStreamCreateError(err, Unless(err))
-		s.sendAPIErrResponse(client, acc, subject, reply, _EMPTY_, s.jsonResponse(&resp))
+		s.sendAPIErrResponse(client, acc, subject, reply, _EMPTY_, s.jsonResponse(&resp), JSAPIStreamCreate)
 	} else {
 		msetCfg := mset.config()
 		resp.StreamInfo = &StreamInfo{
@@ -4868,7 +4868,7 @@ func (js *jetStream) processClusterDeleteStream(sa *streamAssignment, isMember, 
 
 	if err != nil {
 		resp.Error = NewJSStreamGeneralError(err, Unless(err))
-		s.sendAPIErrResponse(sa.Client, acc, sa.Subject, sa.Reply, _EMPTY_, s.jsonResponse(resp))
+		s.sendAPIErrResponse(sa.Client, acc, sa.Subject, sa.Reply, _EMPTY_, s.jsonResponse(resp), JSAPIStreamDelete)
 	} else {
 		resp.Success = true
 		s.sendAPIResponse(sa.Client, acc, sa.Subject, sa.Reply, _EMPTY_, s.jsonResponse(resp))
@@ -5430,7 +5430,7 @@ func (js *jetStream) processClusterDeleteConsumer(ca *consumerAssignment, wasLea
 
 	if err != nil {
 		resp.Error = NewJSConsumerNotFoundError(Unless(err))
-		s.sendAPIErrResponse(ca.Client, acc, ca.Subject, ca.Reply, _EMPTY_, s.jsonResponse(resp))
+		s.sendAPIErrResponse(ca.Client, acc, ca.Subject, ca.Reply, _EMPTY_, s.jsonResponse(resp), JSAPIConsumerDelete)
 	} else {
 		resp.Success = true
 		s.sendAPIResponse(ca.Client, acc, ca.Subject, ca.Reply, _EMPTY_, s.jsonResponse(resp))
@@ -6085,7 +6085,7 @@ func (js *jetStream) processConsumerLeaderChange(o *consumer, isLeader bool) err
 	var resp = JSApiConsumerCreateResponse{ApiResponse: ApiResponse{Type: JSApiConsumerCreateResponseType}}
 	if err != nil {
 		resp.Error = NewJSConsumerCreateError(err, Unless(err))
-		s.sendAPIErrResponse(client, acc, subject, reply, _EMPTY_, s.jsonResponse(&resp))
+		s.sendAPIErrResponse(client, acc, subject, reply, _EMPTY_, s.jsonResponse(&resp), JSAPIConsumerCreate)
 	} else {
 		resp.ConsumerInfo = setDynamicConsumerInfoMetadata(o.initialInfo())
 		s.sendAPIResponse(client, acc, subject, reply, _EMPTY_, s.jsonResponse(&resp))
@@ -6268,7 +6268,7 @@ func (js *jetStream) processStreamAssignmentResults(sub *subscription, c *client
 		}
 		if !sa.responded || result.Update {
 			sa.responded = true
-			js.srv.sendAPIErrResponse(sa.Client, acc, sa.Subject, sa.Reply, _EMPTY_, resp)
+			js.srv.sendAPIErrResponse(sa.Client, acc, sa.Subject, sa.Reply, _EMPTY_, resp, JSAPIStreamCreate)
 		}
 		// Remove this assignment if possible.
 		if canDelete {
@@ -6300,7 +6300,7 @@ func (js *jetStream) processConsumerAssignmentResults(sub *subscription, c *clie
 
 	if sa := js.streamAssignment(result.Account, result.Stream); sa != nil && sa.consumers != nil {
 		if ca := sa.consumers[result.Consumer]; ca != nil && !ca.responded {
-			js.srv.sendAPIErrResponse(ca.Client, acc, ca.Subject, ca.Reply, _EMPTY_, s.jsonResponse(result.Response))
+			js.srv.sendAPIErrResponse(ca.Client, acc, ca.Subject, ca.Reply, _EMPTY_, s.jsonResponse(result.Response), JSAPIConsumerCreate)
 			ca.responded = true
 
 			// Check if this failed.
@@ -7046,7 +7046,7 @@ func (s *Server) jsClusteredStreamRequest(ci *ClientInfo, acc *Account, subject,
 	ccfg, apiErr := s.checkStreamCfg(&config.StreamConfig, acc, config.Pedantic)
 	if apiErr != nil {
 		resp.Error = apiErr
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamCreate)
 		return
 	}
 	cfg := &ccfg
@@ -7064,7 +7064,7 @@ func (s *Server) jsClusteredStreamRequest(ci *ClientInfo, acc *Account, subject,
 		copyStreamMetadata(cfg, osa.Config)
 		if !reflect.DeepEqual(osa.Config, cfg) {
 			resp.Error = NewJSStreamNameExistError()
-			s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamCreate)
 			return
 		}
 		// This is an equal assignment.
@@ -7073,14 +7073,14 @@ func (s *Server) jsClusteredStreamRequest(ci *ClientInfo, acc *Account, subject,
 
 	if cfg.Sealed {
 		resp.Error = NewJSStreamInvalidConfigError(fmt.Errorf("stream configuration for create can not be sealed"))
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamCreate)
 		return
 	}
 
 	// Check for subject collisions here.
 	if cc.subjectsOverlap(acc.Name, cfg.Subjects, self) {
 		resp.Error = NewJSStreamSubjectOverlapError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamCreate)
 		return
 	}
 
@@ -7088,7 +7088,7 @@ func (s *Server) jsClusteredStreamRequest(ci *ClientInfo, acc *Account, subject,
 	// Check for stream limits here before proposing. These need to be tracked from meta layer, not jsa.
 	if apiErr != nil {
 		resp.Error = apiErr
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamCreate)
 		return
 	}
 
@@ -7108,7 +7108,7 @@ func (s *Server) jsClusteredStreamRequest(ci *ClientInfo, acc *Account, subject,
 		if existing, ok := streams[cfg.Name]; ok {
 			if !reflect.DeepEqual(existing.cfg, cfg) {
 				resp.Error = NewJSStreamNameExistError()
-				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamCreate)
 				return
 			}
 			// We have existing for same stream. Re-use same group and syncSubject.
@@ -7120,7 +7120,7 @@ func (s *Server) jsClusteredStreamRequest(ci *ClientInfo, acc *Account, subject,
 		nrg, err := js.createGroupForStream(ci, cfg)
 		if err != nil {
 			resp.Error = NewJSClusterNoPeersError(err)
-			s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamCreate)
 			return
 		}
 		rg = nrg
@@ -7216,14 +7216,14 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 	osa := js.streamAssignment(acc.Name, cfg.Name)
 	if osa == nil {
 		resp.Error = NewJSStreamNotFoundError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamUpdate)
 		return
 	}
 
 	// Don't allow updating if all peers are offline.
 	if s.allPeersOffline(osa.Group) {
 		resp.Error = NewJSStreamOfflineError()
-		s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), nil, errRespDelay)
+		s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), nil, errRespDelay, JSAPIStreamUpdate)
 		return
 	}
 
@@ -7237,28 +7237,28 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 		js.mu.Lock()
 		if err != nil {
 			resp.Error = NewJSStreamUpdateError(err, Unless(err))
-			s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamUpdate)
 			return
 		} else {
 			newCfg = ncfg
 		}
 	} else {
 		resp.Error = NewJSNotEnabledForAccountError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamUpdate)
 		return
 	}
 	// Check for mirror changes which are not allowed.
 	// We will allow removing the mirror config to "promote" the mirror to a normal stream.
 	if newCfg.Mirror != nil && !reflect.DeepEqual(newCfg.Mirror, osa.Config.Mirror) {
 		resp.Error = NewJSStreamMirrorNotUpdatableError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamUpdate)
 		return
 	}
 
 	// Check for subject collisions here.
 	if cc.subjectsOverlap(acc.Name, cfg.Subjects, osa) {
 		resp.Error = NewJSStreamSubjectOverlapError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamUpdate)
 		return
 	}
 
@@ -7320,14 +7320,14 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 			js.mu.Lock()
 		}
 		resp.Error = NewJSStreamMoveInProgressError(msg)
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamUpdate)
 		return
 	}
 
 	// Can not move and scale at same time.
 	if isMoveRequest && isReplicaChange {
 		resp.Error = NewJSStreamMoveAndScaleError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamUpdate)
 		return
 	}
 
@@ -7340,7 +7340,7 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 			// Check that we have the allocation available.
 			if err := js.jsClusteredStreamLimitsCheck(acc, newCfg); err != nil {
 				resp.Error = err
-				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamUpdate)
 				return
 			}
 			// Check if we do not have a cluster assigned, and if we do not make sure we
@@ -7358,7 +7358,7 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 			peers, err := cc.selectPeerGroup(newCfg.Replicas, rg.Cluster, newCfg, rg.Peers, 0, nil)
 			if err != nil {
 				resp.Error = NewJSClusterNoPeersError(err)
-				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamUpdate)
 				return
 			}
 			// Single nodes are not recorded by the NRG layer so we can rename.
@@ -7494,7 +7494,7 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 			nrg, err := js.createGroupForStream(ci, newCfg)
 			if err != nil {
 				resp.Error = NewJSClusterNoPeersError(err)
-				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamUpdate)
 				return
 			}
 			// filter peers present in both sets
@@ -7579,7 +7579,7 @@ func (s *Server) jsClusteredStreamDeleteRequest(ci *ClientInfo, acc *Account, st
 	if osa == nil {
 		var resp = JSApiStreamDeleteResponse{ApiResponse: ApiResponse{Type: JSApiStreamDeleteResponseType}}
 		resp.Error = NewJSStreamNotFoundError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamDelete)
 		return
 	}
 
@@ -7606,7 +7606,7 @@ func (s *Server) jsClusteredStreamPurgeRequest(
 	if sa == nil {
 		resp := JSApiStreamPurgeResponse{ApiResponse: ApiResponse{Type: JSApiStreamPurgeResponseType}}
 		resp.Error = NewJSStreamNotFoundError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamPurge)
 		js.mu.Unlock()
 		return
 	}
@@ -7657,13 +7657,13 @@ func (s *Server) jsClusteredStreamRestoreRequest(
 
 	if err := js.jsClusteredStreamLimitsCheck(acc, cfg); err != nil {
 		resp.Error = err
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamRestore)
 		return
 	}
 
 	if sa := js.streamAssignment(ci.serviceAccount(), cfg.Name); sa != nil {
 		resp.Error = NewJSStreamNameExistRestoreFailedError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamRestore)
 		return
 	}
 
@@ -7671,7 +7671,7 @@ func (s *Server) jsClusteredStreamRestoreRequest(
 	rg, err := js.createGroupForStream(ci, cfg)
 	if err != nil {
 		resp.Error = NewJSClusterNoPeersError(err)
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIStreamRestore)
 		return
 	}
 	// Pick a preferred leader.
@@ -8042,19 +8042,19 @@ func (s *Server) jsClusteredConsumerDeleteRequest(ci *ClientInfo, acc *Account, 
 	sa := js.streamAssignment(acc.Name, stream)
 	if sa == nil {
 		resp.Error = NewJSStreamNotFoundError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerDelete)
 		return
 
 	}
 	if sa.consumers == nil {
 		resp.Error = NewJSConsumerNotFoundError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerDelete)
 		return
 	}
 	oca := sa.consumers[consumer]
 	if oca == nil {
 		resp.Error = NewJSConsumerNotFoundError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerDelete)
 		return
 	}
 	oca.deleted = true
@@ -8252,26 +8252,26 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 	streamCfg, ok := js.clusterStreamConfig(acc.Name, stream)
 	if !ok {
 		resp.Error = NewJSStreamNotFoundError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 		return
 	}
 	selectedLimits, _, _, apiErr := acc.selectLimits(cfg.replicas(&streamCfg))
 	if apiErr != nil {
 		resp.Error = apiErr
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 		return
 	}
 	srvLim := &s.getOpts().JetStreamLimits
 	// Make sure we have sane defaults
 	if err := setConsumerConfigDefaults(cfg, &streamCfg, srvLim, selectedLimits, pedantic); err != nil {
 		resp.Error = err
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 		return
 	}
 
 	if err := checkConsumerCfg(cfg, srvLim, &streamCfg, acc, selectedLimits, false); err != nil {
 		resp.Error = err
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 		return
 	}
 
@@ -8286,7 +8286,7 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 	sa := js.streamAssignment(acc.Name, stream)
 	if sa == nil {
 		resp.Error = NewJSStreamNotFoundError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 		return
 	}
 
@@ -8327,7 +8327,7 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 			}
 			if total >= maxc {
 				resp.Error = NewJSMaximumConsumersLimitError()
-				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 				return
 			}
 		}
@@ -8337,7 +8337,7 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 	if cfg.DeliverPolicy == DeliverLastPerSubject {
 		if cfg.FilterSubject == _EMPTY_ && len(cfg.FilterSubjects) == 0 {
 			resp.Error = NewJSConsumerInvalidPolicyError(fmt.Errorf("consumer delivery policy is deliver last per subject, but FilterSubject is not set"))
-			s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 			return
 		}
 	}
@@ -8370,19 +8370,19 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 
 			if action == ActionCreate && !reflect.DeepEqual(cfg, ca.Config) {
 				resp.Error = NewJSConsumerAlreadyExistsError()
-				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 				return
 			}
 			// Do quick sanity check on new cfg to prevent here if possible.
 			if err := acc.checkNewConsumerConfig(ca.Config, cfg); err != nil {
 				resp.Error = NewJSConsumerCreateError(err, Unless(err))
-				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 				return
 			}
 			// Don't allow updating if all peers are offline.
 			if s.allPeersOffline(ca.Group) {
 				resp.Error = NewJSConsumerOfflineError()
-				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), nil, errRespDelay)
+				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), nil, errRespDelay, JSAPIConsumerCreate)
 				return
 			}
 		} else {
@@ -8403,13 +8403,13 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 	if ca == nil {
 		if action == ActionUpdate {
 			resp.Error = NewJSConsumerDoesNotExistError()
-			s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 			return
 		}
 		rg := cc.createGroupForConsumer(cfg, sa)
 		if rg == nil {
 			resp.Error = NewJSInsufficientResourcesError()
-			s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 			return
 		}
 		// Pick a preferred leader.
@@ -8442,7 +8442,7 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 						ni := ni.(nodeInfo)
 						if stats := ni.stats; stats != nil && stats.HAAssets > maxHaAssets {
 							resp.Error = NewJSInsufficientResourcesError()
-							s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+							s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 							s.Warnf("%s@%s (HA Asset Count: %d) exceeds max ha asset limit of %d"+
 								" for (durable) consumer %s placement on stream %s",
 								ni.name, ni.cluster, ni.stats.HAAssets, maxHaAssets, oname, stream)
@@ -8458,13 +8458,13 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 		if sa.Config.Retention == WorkQueuePolicy && !cfg.Direct {
 			if cfg.AckPolicy != AckExplicit {
 				resp.Error = NewJSConsumerWQRequiresExplicitAckError()
-				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 				return
 			}
 			subjects := gatherSubjectFilters(cfg.FilterSubject, cfg.FilterSubjects)
 			if len(subjects) == 0 && len(sa.consumers) > 0 {
 				resp.Error = NewJSConsumerWQMultipleUnfilteredError()
-				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 				return
 			}
 			// Check here to make sure we have not collided with another.
@@ -8477,7 +8477,7 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 						for _, subj := range subjects {
 							if SubjectsCollide(subj, psubj) {
 								resp.Error = NewJSConsumerWQConsumerNotUniqueError()
-								s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+								s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 								return
 							}
 						}
@@ -8537,7 +8537,7 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 			// Respond with error when there is a config mismatch between the intended config and expected peer size.
 			if len(streamPeerSet) < rAfter {
 				resp.Error = NewJSConsumerReplicasExceedsStreamError()
-				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp), JSAPIConsumerCreate)
 				return
 			}
 			rand.Shuffle(rAfter, func(i, j int) { streamPeerSet[i], streamPeerSet[j] = streamPeerSet[j], streamPeerSet[i] })
