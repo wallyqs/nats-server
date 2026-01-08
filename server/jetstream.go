@@ -192,7 +192,7 @@ var jsAPITypeNames = [JSAPITypeCount]string{
 // jsAPILatencyTracker tracks latencies for a single API type using a circular buffer
 type jsAPILatencyTracker struct {
 	mu      sync.Mutex
-	samples []int64 // latencies in nanoseconds
+	samples []int64 // latencies in microseconds
 	pos     int     // current position in circular buffer
 }
 
@@ -2682,7 +2682,7 @@ func (js *jetStream) trackAPI(apiType JSAPIType) func() {
 	start := time.Now()
 	return func() {
 		if tracker := js.apiLatency[apiType]; tracker != nil {
-			tracker.record(time.Since(start).Nanoseconds())
+			tracker.record(time.Since(start).Microseconds())
 		}
 	}
 }
