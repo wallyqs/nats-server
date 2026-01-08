@@ -214,10 +214,11 @@ type StreamAlternate struct {
 // ClusterInfo shows information about the underlying set of servers
 // that make up the stream or consumer.
 type ClusterInfo struct {
-	Name      string      `json:"name,omitempty"`
-	RaftGroup string      `json:"raft_group,omitempty"`
-	Leader    string      `json:"leader,omitempty"`
-	Replicas  []*PeerInfo `json:"replicas,omitempty"`
+	Name       string      `json:"name,omitempty"`
+	RaftGroup  string      `json:"raft_group,omitempty"`
+	Leader     string      `json:"leader,omitempty"`
+	Replicas   []*PeerInfo `json:"replicas,omitempty"`
+	PendingAvg float64     `json:"pending_avg,omitempty"` // Rolling average of pending replication
 }
 
 // PeerInfo shows information about all the peers in the cluster that
@@ -358,13 +359,14 @@ type stream struct {
 	catchup   atomic.Bool       // Used to signal we are in catchup mode.
 	catchups  map[string]uint64 // The number of messages that need to be caught per peer.
 	syncSub   *subscription     // Internal subscription for sync messages (on "$JSC.SYNC").
-	infoSub   *subscription     // Internal subscription for stream info requests.
-	clMu      sync.Mutex        // The mutex for clseq and clfs.
-	clseq     uint64            // The current last seq being proposed to the NRG layer.
-	clfs      uint64            // The count (offset) of the number of failed NRG sequences used to compute clseq.
-	inflight  map[uint64]uint64 // Inflight message sizes per clseq.
-	lqsent    time.Time         // The time at which the last lost quorum advisory was sent. Used to rate limit.
-	uch       chan struct{}     // The channel to signal updates to the monitor routine.
+	infoSub    *subscription     // Internal subscription for stream info requests.
+	clMu       sync.Mutex        // The mutex for clseq and clfs.
+	clseq      uint64            // The current last seq being proposed to the NRG layer.
+	clfs       uint64            // The count (offset) of the number of failed NRG sequences used to compute clseq.
+	inflight   map[uint64]uint64 // Inflight message sizes per clseq.
+	pendingAvg int64             // Rolling average of pending replication (scaled by 1000 for precision).
+	lqsent     time.Time         // The time at which the last lost quorum advisory was sent. Used to rate limit.
+	uch        chan struct{}     // The channel to signal updates to the monitor routine.
 	inMonitor bool              // True if the monitor routine has been started.
 
 	expectedPerSubjectSequence  map[uint64]string   // Inflight 'expected per subject' subjects per clseq.
@@ -1170,6 +1172,39 @@ func (mset *stream) setCLFS(clfs uint64) {
 	mset.clMu.Lock()
 	mset.clfs = clfs
 	mset.clMu.Unlock()
+}
+
+// updatePendingAvg updates the rolling average of pending replication using
+// an Exponential Moving Average (EMA). The formula is:
+//
+//	EMA_new = α × current + (1-α) × EMA_old
+//
+// With α=0.1, each new sample contributes 10% to the average while the
+// historical average contributes 90%. This creates a smooth average that
+// adapts to changing patterns while filtering out short-term spikes.
+//
+// The average is stored scaled by 1000 for precision in atomic integer operations.
+// clMu must be held when calling this function.
+func (mset *stream) updatePendingAvg(pending uint64) {
+	const emaScale int64 = 1000
+	const emaAlpha int64 = 100 // α=0.1 scaled by 1000
+	pendingScaled := int64(pending) * emaScale
+
+	oldAvg := mset.pendingAvg
+	var newAvg int64
+	if oldAvg == 0 {
+		newAvg = pendingScaled
+	} else {
+		newAvg = (emaAlpha*pendingScaled + (emaScale-emaAlpha)*oldAvg) / emaScale
+	}
+	mset.pendingAvg = newAvg
+}
+
+// getPendingAvg returns the rolling average of pending replication.
+func (mset *stream) getPendingAvg() float64 {
+	mset.clMu.Lock()
+	defer mset.clMu.Unlock()
+	return float64(mset.pendingAvg) / 1000.0
 }
 
 func (mset *stream) lastSeq() uint64 {
