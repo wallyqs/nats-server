@@ -2993,21 +2993,21 @@ type MetaClusterInfo struct {
 // JSInfo has detailed information on JetStream.
 type JSInfo struct {
 	JetStreamStats
-	ID              string              `json:"server_id"`
-	Now             time.Time           `json:"now"`
-	Disabled        bool                `json:"disabled,omitempty"`
-	Config          JetStreamConfig     `json:"config,omitempty"`
-	Limits          *JSLimitOpts        `json:"limits,omitempty"`
-	Streams         int                 `json:"streams"`
-	StreamsLeader   int                 `json:"streams_leader,omitempty"`
-	Consumers       int                 `json:"consumers"`
-	ConsumersLeader int                 `json:"consumers_leader,omitempty"`
-	Messages        uint64              `json:"messages"`
-	Bytes           uint64              `json:"bytes"`
-	Meta            *MetaClusterInfo    `json:"meta_cluster,omitempty"`
-	ApiStats        JSAPITrafficStats   `json:"api_stats,omitempty"`
-	AccountDetails  []*AccountDetail    `json:"account_details,omitempty"`
-	Total           int                 `json:"total"`
+	ID              string            `json:"server_id"`
+	Now             time.Time         `json:"now"`
+	Disabled        bool              `json:"disabled,omitempty"`
+	Config          JetStreamConfig   `json:"config,omitempty"`
+	Limits          *JSLimitOpts      `json:"limits,omitempty"`
+	Streams         int               `json:"streams"`
+	StreamsLeader   int               `json:"streams_leader,omitempty"`
+	Consumers       int               `json:"consumers"`
+	ConsumersLeader int               `json:"consumers_leader,omitempty"`
+	Messages        uint64            `json:"messages"`
+	Bytes           uint64            `json:"bytes"`
+	Meta            *MetaClusterInfo  `json:"meta_cluster,omitempty"`
+	ApiStats        JSAPITrafficStats `json:"api_stats,omitempty"`
+	AccountDetails  []*AccountDetail  `json:"account_details,omitempty"`
+	Total           int               `json:"total"`
 }
 
 func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optDirectConsumers, optCfg, optRaft, optStreamLeader bool) *AccountDetail {

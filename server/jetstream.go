@@ -201,13 +201,13 @@ const jsAPILatencySampleSize = 1000 // Number of samples to keep per API type
 // This is for internal accounting for JetStream for this server.
 type jetStream struct {
 	// These are here first because of atomics on 32bit systems.
-	apiInflight   int64
-	apiTotal      int64
-	apiErrors     int64
-	memReserved   int64
-	storeReserved int64
-	memUsed       int64
-	storeUsed     int64
+	apiInflight     int64
+	apiTotal        int64
+	apiErrors       int64
+	memReserved     int64
+	storeReserved   int64
+	memUsed         int64
+	storeUsed       int64
 	queueLimit      int64
 	acksTotal       int64 // Dedicated counter for ACKs (highest traffic)
 	heartbeatsTotal int64 // Dedicated counter for outgoing idle heartbeats
@@ -219,13 +219,13 @@ type jetStream struct {
 	// Latency trackers for each JS API type (excluding ACK, FlowControl, Heartbeat, Unknown)
 	apiLatency [JSAPITypeCount]*jsAPILatencyTracker
 
-	mu sync.RWMutex
-	srv           *Server
-	config        JetStreamConfig
-	cluster       *jetStreamCluster
-	accounts      map[string]*jsAccount
-	apiSubs       *Sublist
-	started       time.Time
+	mu       sync.RWMutex
+	srv      *Server
+	config   JetStreamConfig
+	cluster  *jetStreamCluster
+	accounts map[string]*jsAccount
+	apiSubs  *Sublist
+	started  time.Time
 
 	// System level request to purge a stream move
 	accountPurge *subscription
