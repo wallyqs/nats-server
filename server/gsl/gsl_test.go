@@ -470,6 +470,235 @@ func TestGenericSublistInterestBasedIntersection(t *testing.T) {
 		require_Len(t, len(got), 0)
 		require_NoDuplicates(t, got)
 	})
+
+	// Regression test for issue where mixed wildcard and literal filters
+	// with different leaf nodes would skip the literal path incorrectly.
+	t.Run("MixedWildcardLiteralDifferentLeaves", func(t *testing.T) {
+		// Create a stree with a subject that only matches via the literal path
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("events.literal.other"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// Wildcard pattern: events.*.something
+		require_NoError(t, sl.Insert("events.*.something", 11))
+		// Literal pattern: events.literal.other
+		require_NoError(t, sl.Insert("events.literal.other", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// The literal path should NOT be skipped because it leads to "other"
+		// while the wildcard path leads to "something" (different leaves)
+		require_Len(t, len(got), 1)
+		require_Equal(t, got["events.literal.other"], 1)
+		require_NoDuplicates(t, got)
+	})
+
+	// Regression test for deep path divergence where paths share intermediate
+	// nodes but diverge at deeper levels.
+	t.Run("DeepPathDivergence", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("a.x.b.other"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// Wildcard pattern: a.*.b.something
+		require_NoError(t, sl.Insert("a.*.b.something", 11))
+		// Literal pattern: a.x.b.other
+		require_NoError(t, sl.Insert("a.x.b.other", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// Both paths share "b" at level 2, but diverge at level 3:
+		// wildcard leads to "something", literal leads to "other"
+		// The literal path should NOT be skipped.
+		require_Len(t, len(got), 1)
+		require_Equal(t, got["a.x.b.other"], 1)
+		require_NoDuplicates(t, got)
+	})
+
+	// Regression test for multiple PWCs with different leaves.
+	t.Run("MultiplePWCDifferentLeaves", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("a.x.b.y.d"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// Wildcard pattern with two PWCs: a.*.b.*.c
+		require_NoError(t, sl.Insert("a.*.b.*.c", 11))
+		// Literal pattern with PWC: a.x.b.*.d (different leaf!)
+		require_NoError(t, sl.Insert("a.x.b.*.d", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// a.*.b.*.c does NOT match a.x.b.y.d (c != d)
+		// a.x.b.*.d DOES match a.x.b.y.d
+		require_Len(t, len(got), 1)
+		require_Equal(t, got["a.x.b.y.d"], 1)
+		require_NoDuplicates(t, got)
+	})
+
+	// Test FWC (>) with literal at same level.
+	// FWC should find subjects that also match the literal.
+	t.Run("FWCWithLiteralSameLevel", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("events.foo.bar"), struct{}{})
+		localSt.Insert([]byte("events.foo.baz"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// FWC pattern: events.>
+		require_NoError(t, sl.Insert("events.>", 11))
+		// Literal pattern: events.foo.bar
+		require_NoError(t, sl.Insert("events.foo.bar", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// events.> matches both subjects
+		// events.foo.bar only matches one
+		// Should find both subjects exactly once (no duplicates)
+		require_Len(t, len(got), 2)
+		require_Equal(t, got["events.foo.bar"], 1)
+		require_Equal(t, got["events.foo.baz"], 1)
+		require_NoDuplicates(t, got)
+	})
+
+	// Test FWC with PWC at same level - both should contribute.
+	t.Run("FWCWithPWCSameLevel", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("events.foo.bar"), struct{}{})
+		localSt.Insert([]byte("events.foo.baz.qux"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// FWC pattern: events.>
+		require_NoError(t, sl.Insert("events.>", 11))
+		// PWC pattern: events.*.bar
+		require_NoError(t, sl.Insert("events.*.bar", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// events.> matches both
+		// events.*.bar only matches events.foo.bar
+		// Should find both subjects exactly once
+		require_Len(t, len(got), 2)
+		require_Equal(t, got["events.foo.bar"], 1)
+		require_Equal(t, got["events.foo.baz.qux"], 1)
+		require_NoDuplicates(t, got)
+	})
+
+	// Test FWC at deeper level with literal at same level.
+	// This tests the case where FWC returns early - does it miss the literal?
+	t.Run("FWCDeeperLevelWithLiteral", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("events.foo.bar"), struct{}{})
+		localSt.Insert([]byte("events.foo.baz"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// FWC at events.foo level: events.foo.>
+		require_NoError(t, sl.Insert("events.foo.>", 11))
+		// Literal at events.foo level: events.foo.bar
+		require_NoError(t, sl.Insert("events.foo.bar", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// events.foo.> matches both
+		// events.foo.bar only matches one
+		// Should find both subjects exactly once
+		require_Len(t, len(got), 2)
+		require_Equal(t, got["events.foo.bar"], 1)
+		require_Equal(t, got["events.foo.baz"], 1)
+		require_NoDuplicates(t, got)
+	})
+
+	// Test mixed FWC, PWC, and literal - complex scenario.
+	t.Run("MixedFWCPWCLiteral", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("a.b.c.d"), struct{}{})
+		localSt.Insert([]byte("a.b.c.e"), struct{}{})
+		localSt.Insert([]byte("a.x.y.z"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// FWC: a.b.>
+		require_NoError(t, sl.Insert("a.b.>", 11))
+		// PWC: a.*.c.d
+		require_NoError(t, sl.Insert("a.*.c.d", 22))
+		// Literal: a.x.y.z
+		require_NoError(t, sl.Insert("a.x.y.z", 33))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// a.b.> matches a.b.c.d and a.b.c.e
+		// a.*.c.d matches a.b.c.d
+		// a.x.y.z matches a.x.y.z
+		// Should find all 3 subjects exactly once
+		require_Len(t, len(got), 3)
+		require_Equal(t, got["a.b.c.d"], 1)
+		require_Equal(t, got["a.b.c.e"], 1)
+		require_Equal(t, got["a.x.y.z"], 1)
+		require_NoDuplicates(t, got)
+	})
+
+	// Test FWC with literal where only literal matches (FWC path doesn't exist).
+	t.Run("FWCAndLiteralDifferentPaths", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("other.path.here"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// FWC: events.> (won't match anything in stree)
+		require_NoError(t, sl.Insert("events.>", 11))
+		// Literal: other.path.here (will match)
+		require_NoError(t, sl.Insert("other.path.here", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// Only the literal should match
+		require_Len(t, len(got), 1)
+		require_Equal(t, got["other.path.here"], 1)
+		require_NoDuplicates(t, got)
+	})
+
+	// Test PWC + FWC with different leaves (similar to PWC bug).
+	t.Run("PWCAndFWCDifferentBranches", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("events.literal.other.deep"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// PWC path leading to FWC: events.*.something.>
+		require_NoError(t, sl.Insert("events.*.something.>", 11))
+		// Literal path leading to FWC: events.literal.other.>
+		require_NoError(t, sl.Insert("events.literal.other.>", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// events.*.something.> does NOT match events.literal.other.deep
+		// events.literal.other.> DOES match events.literal.other.deep
+		require_Len(t, len(got), 1)
+		require_Equal(t, got["events.literal.other.deep"], 1)
+		require_NoDuplicates(t, got)
+	})
 }
 
 // --- TEST HELPERS ---
