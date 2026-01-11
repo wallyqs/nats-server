@@ -2627,7 +2627,9 @@ func (mb *msgBlock) firstMatchingMulti(sl *gsl.SimpleSublist, start uint64, sm *
 		if updateLLTS {
 			mb.llts = ats.AccessTime()
 		}
-		mb.finishedWithCache()
+		if didLoad {
+			mb.finishedWithCache()
+		}
 		mb.mu.Unlock()
 	}()
 
@@ -2735,18 +2737,20 @@ func (mb *msgBlock) firstMatchingMulti(sl *gsl.SimpleSublist, start uint64, sm *
 // fs lock should be held.
 func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *StoreMsg) (*StoreMsg, bool, error) {
 	mb.mu.Lock()
+	var didLoad bool
 	var updateLLTS bool
 	defer func() {
 		if updateLLTS {
 			mb.llts = ats.AccessTime()
 		}
-		mb.finishedWithCache()
+		if didLoad {
+			mb.finishedWithCache()
+		}
 		mb.mu.Unlock()
 	}()
 
 	fseq, isAll := start, filter == _EMPTY_ || filter == fwcs
 
-	var didLoad bool
 	if mb.fssNotLoaded() {
 		// Make sure we have fss loaded.
 		if err := mb.loadMsgsWithLock(); err != nil {
