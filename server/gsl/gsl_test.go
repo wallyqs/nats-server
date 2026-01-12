@@ -797,6 +797,23 @@ func BenchmarkIntersectStreeBroadPattern(b *testing.B) {
 	}
 }
 
+// BenchmarkNextMatchGenContention benchmarks just the NextMatchGen() call
+// to isolate lock/atomic contention at high concurrency.
+func BenchmarkNextMatchGenContention(b *testing.B) {
+	st := stree.NewSubjectTree[int]()
+
+	for _, numGoroutines := range []int{1, 4, 16, 64, 256} {
+		b.Run(fmt.Sprintf("goroutines=%d", numGoroutines), func(b *testing.B) {
+			b.SetParallelism(numGoroutines)
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					st.NextMatchGen()
+				}
+			})
+		})
+	}
+}
+
 // BenchmarkIntersectStreeConcurrent benchmarks concurrent IntersectStree calls
 // to measure lock contention (or lack thereof with atomics).
 func BenchmarkIntersectStreeConcurrent(b *testing.B) {
