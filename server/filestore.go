@@ -11747,15 +11747,9 @@ func diosAcquire() {
 	}
 	diosHistogram[bucket].Add(1)
 
-	// Update max wait (lock-free)
-	for {
-		old := diosMaxWait.Load()
-		if waitNs <= old {
-			break
-		}
-		if diosMaxWait.CompareAndSwap(old, waitNs) {
-			break
-		}
+	// Update max wait
+	if waitNs > diosMaxWait.Load() {
+		diosMaxWait.Store(waitNs)
 	}
 }
 
