@@ -14,6 +14,7 @@
 package gsl
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -682,6 +683,118 @@ func TestGenericSublistInterestBasedIntersection(t *testing.T) {
 		require_Equal(t, got["a.y.other.stuff"], 1)
 		require_NoDuplicates(t, got)
 	})
+}
+
+// --- BENCHMARKS ---
+
+// BenchmarkIntersectStreeNonOverlapping benchmarks the common case where
+// filter patterns don't overlap (uses optimized tree walk).
+func BenchmarkIntersectStreeNonOverlapping(b *testing.B) {
+	for _, numSubjects := range []int{100, 1000, 10000} {
+		b.Run(fmt.Sprintf("subjects=%d", numSubjects), func(b *testing.B) {
+			// Create stree with many subjects
+			st := stree.NewSubjectTree[int]()
+			for i := 0; i < numSubjects; i++ {
+				subj := fmt.Sprintf("orders.region%d.user%d.created", i%10, i)
+				st.Insert([]byte(subj), i)
+			}
+
+			// Non-overlapping patterns (different prefixes)
+			sl := NewSublist[int]()
+			sl.Insert("orders.region0.>", 1)
+			sl.Insert("orders.region5.>", 2)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				count := 0
+				IntersectStree(st, sl, func(subj []byte, entry *int) {
+					count++
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkIntersectStreeOverlapping benchmarks the case where filter patterns
+// overlap (falls back to linear scan in hybrid approach).
+func BenchmarkIntersectStreeOverlapping(b *testing.B) {
+	for _, numSubjects := range []int{100, 1000, 10000} {
+		b.Run(fmt.Sprintf("subjects=%d", numSubjects), func(b *testing.B) {
+			// Create stree with many subjects
+			st := stree.NewSubjectTree[int]()
+			for i := 0; i < numSubjects; i++ {
+				subj := fmt.Sprintf("events.user%d.action%d", i%100, i%10)
+				st.Insert([]byte(subj), i)
+			}
+
+			// Overlapping patterns (PWC and literal at same level)
+			sl := NewSublist[int]()
+			sl.Insert("events.*.action0", 1)
+			sl.Insert("events.user0.action5", 2)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				count := 0
+				IntersectStree(st, sl, func(subj []byte, entry *int) {
+					count++
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkIntersectStreeSelectivePattern benchmarks selective patterns
+// where tree walk can prune many branches.
+func BenchmarkIntersectStreeSelectivePattern(b *testing.B) {
+	for _, numSubjects := range []int{1000, 10000, 100000} {
+		b.Run(fmt.Sprintf("subjects=%d", numSubjects), func(b *testing.B) {
+			// Create stree with subjects across many branches
+			st := stree.NewSubjectTree[int]()
+			for i := 0; i < numSubjects; i++ {
+				// Spread across 100 different first-level prefixes
+				subj := fmt.Sprintf("prefix%d.sub%d.data", i%100, i)
+				st.Insert([]byte(subj), i)
+			}
+
+			// Very selective pattern - only matches 1% of subjects
+			sl := NewSublist[int]()
+			sl.Insert("prefix0.>", 1)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				count := 0
+				IntersectStree(st, sl, func(subj []byte, entry *int) {
+					count++
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkIntersectStreeBroadPattern benchmarks broad patterns
+// that match most subjects.
+func BenchmarkIntersectStreeBroadPattern(b *testing.B) {
+	for _, numSubjects := range []int{100, 1000, 10000} {
+		b.Run(fmt.Sprintf("subjects=%d", numSubjects), func(b *testing.B) {
+			st := stree.NewSubjectTree[int]()
+			for i := 0; i < numSubjects; i++ {
+				subj := fmt.Sprintf("events.user%d.action", i)
+				st.Insert([]byte(subj), i)
+			}
+
+			// Broad pattern - matches everything
+			sl := NewSublist[int]()
+			sl.Insert(">", 1)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				count := 0
+				IntersectStree(st, sl, func(subj []byte, entry *int) {
+					count++
+				})
+			}
+		})
+	}
 }
 
 // --- TEST HELPERS ---
