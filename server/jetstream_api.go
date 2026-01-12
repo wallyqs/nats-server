@@ -880,7 +880,9 @@ func (s *Server) processJSAPIRoutedRequests() {
 				client.pa = r.pa
 				start := time.Now()
 				r.jsub.icb(r.sub, client, r.acc, r.subject, r.reply, r.msg)
-				if dur := time.Since(start); dur >= readLoopReportThreshold {
+				dur := time.Since(start)
+				trackICBDuration(dur)
+				if dur >= readLoopReportThreshold {
 					s.Warnf("Internal subscription on %q took too long: %v", r.subject, dur)
 				}
 				atomic.AddInt64(&js.apiInflight, -1)
