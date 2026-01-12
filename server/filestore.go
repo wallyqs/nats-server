@@ -11670,9 +11670,12 @@ var dios chan struct{}
 // DIO tracking state for statistics.
 var (
 	diosAcquires  atomic.Uint64    // Total number of dios channel acquisitions
-	diosHistogram [6]atomic.Uint64 // Wait time histogram buckets
-	diosMaxWait   atomic.Int64     // Maximum wait time in nanoseconds
+	diosHistogram [6]atomic.Uint64 // Wait time histogram buckets (sampled)
+	diosMaxWait   atomic.Int64     // Maximum wait time in nanoseconds (sampled)
 )
+
+// Sample 1 in N acquires for timing to reduce time.Now() overhead.
+const diosSampleRate = 10
 
 // Histogram bucket boundaries in nanoseconds.
 // Buckets: <1µs, 1-10µs, 10-100µs, 100µs-1ms, 1-10ms, >10ms
@@ -11714,12 +11717,24 @@ func init() {
 }
 
 // diosAcquire acquires the disk I/O semaphore and tracks wait time statistics.
+// Only 1 in diosSampleRate acquires are timed to reduce time.Now() overhead.
 func diosAcquire() {
-	start := time.Now()
+	// Increment counter first to determine if we should sample this acquire.
+	n := diosAcquires.Add(1)
+	sample := n%diosSampleRate == 0
+
+	var start time.Time
+	if sample {
+		start = time.Now()
+	}
+
 	<-dios
 
-	// Track statistics
-	diosAcquires.Add(1)
+	if !sample {
+		return
+	}
+
+	// Track wait time statistics for sampled acquires.
 	waitNs := time.Since(start).Nanoseconds()
 
 	// Update histogram bucket
