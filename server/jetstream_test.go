@@ -21006,3 +21006,139 @@ func TestJetStreamServerEncryptionRecoveryWithoutStreamStateFile(t *testing.T) {
 		})
 	}
 }
+
+func TestJetStreamInternalStats(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create a stream and publish messages to generate disk I/O and internal callback activity.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"test.>"},
+		Storage:  nats.FileStorage,
+	})
+	require_NoError(t, err)
+
+	// Publish enough messages to ensure we have some stats.
+	// We need at least 10 to ensure sampling kicks in (sample rate is 1 in 10).
+	for i := 0; i < 100; i++ {
+		_, err = js.Publish("test.foo", []byte("hello"))
+		require_NoError(t, err)
+	}
+
+	// Create a consumer to generate more internal callback activity.
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "consumer",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Fetch some messages to exercise internal callbacks.
+	sub, err := js.PullSubscribe("test.>", "consumer")
+	require_NoError(t, err)
+	msgs, err := sub.Fetch(50)
+	require_NoError(t, err)
+	for _, msg := range msgs {
+		msg.Ack()
+	}
+
+	// Now check the Jsz stats.
+	jsz, err := s.Jsz(nil)
+	require_NoError(t, err)
+
+	// Verify InternalStats is populated.
+	if jsz.InternalStats == nil {
+		t.Fatalf("Expected InternalStats to be populated")
+	}
+
+	// Check DiskIO stats - should have some activity from file storage.
+	if jsz.InternalStats.DiskIO == nil {
+		t.Fatalf("Expected DiskIO stats to be populated")
+	}
+	if jsz.InternalStats.DiskIO.Total == 0 {
+		t.Fatalf("Expected DiskIO.Total to be > 0, got %d", jsz.InternalStats.DiskIO.Total)
+	}
+
+	// Check Callbacks stats - should have some activity from internal subscriptions.
+	if jsz.InternalStats.Callbacks == nil {
+		t.Fatalf("Expected Callbacks stats to be populated")
+	}
+	if jsz.InternalStats.Callbacks.Total == 0 {
+		t.Fatalf("Expected Callbacks.Total to be > 0, got %d", jsz.InternalStats.Callbacks.Total)
+	}
+
+	// Verify PendingRequestsAvg is a valid number (can be 0 if no pending).
+	if jsz.InternalStats.PendingRequestsAvg < 0 {
+		t.Fatalf("Expected PendingRequestsAvg to be >= 0, got %f", jsz.InternalStats.PendingRequestsAvg)
+	}
+}
+
+func TestJetStreamInternalStatsHTTP(t *testing.T) {
+	opts := DefaultTestOptions
+	opts.Port = -1
+	opts.HTTPPort = -1
+	opts.JetStream = true
+	opts.StoreDir = t.TempDir()
+	s := RunServer(&opts)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create a stream and publish messages.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"test.>"},
+		Storage:  nats.FileStorage,
+	})
+	require_NoError(t, err)
+
+	for i := 0; i < 50; i++ {
+		_, err = js.Publish("test.foo", []byte("hello"))
+		require_NoError(t, err)
+	}
+
+	// Fetch the jsz endpoint via HTTP.
+	url := fmt.Sprintf("http://127.0.0.1:%d/jsz", s.MonitorAddr().Port)
+	resp, err := http.Get(url)
+	require_NoError(t, err)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	require_NoError(t, err)
+
+	var jsz JSInfo
+	err = json.Unmarshal(body, &jsz)
+	require_NoError(t, err)
+
+	// Verify InternalStats is in the JSON response.
+	if jsz.InternalStats == nil {
+		t.Fatalf("Expected InternalStats in HTTP response")
+	}
+	if jsz.InternalStats.DiskIO == nil {
+		t.Fatalf("Expected DiskIO in HTTP response")
+	}
+	if jsz.InternalStats.Callbacks == nil {
+		t.Fatalf("Expected Callbacks in HTTP response")
+	}
+
+	// Verify the JSON field names are correct by checking raw JSON.
+	if !bytes.Contains(body, []byte(`"internal_stats"`)) {
+		t.Fatalf("Expected 'internal_stats' in JSON response")
+	}
+	if !bytes.Contains(body, []byte(`"disk_io"`)) {
+		t.Fatalf("Expected 'disk_io' in JSON response")
+	}
+	if !bytes.Contains(body, []byte(`"callbacks"`)) {
+		t.Fatalf("Expected 'callbacks' in JSON response")
+	}
+	if !bytes.Contains(body, []byte(`"total"`)) {
+		t.Fatalf("Expected 'total' field in JSON response")
+	}
+	if !bytes.Contains(body, []byte(`"pending_requests_avg"`)) {
+		t.Fatalf("Expected 'pending_requests_avg' in JSON response")
+	}
+}
