@@ -2993,7 +2993,7 @@ type MetaClusterInfo struct {
 // InternalStats holds JetStream internal statistics.
 type InternalStats struct {
 	PendingRequestsAvg float64    `json:"pending_requests_avg"` // Rolling average of pending API requests
-	DIOS               *DIOSStats `json:"dios"`                 // Disk I/O semaphore stats
+	DiskIO             *DiskIOStats `json:"disk_io"`              // Disk I/O semaphore stats
 }
 
 // JSInfo has detailed information on JetStream.
@@ -3309,7 +3309,7 @@ func (s *Server) Jsz(opts *JSzOptions) (*JSInfo, error) {
 	// Add internal stats.
 	jsi.InternalStats = &InternalStats{
 		PendingRequestsAvg: float64(atomic.LoadInt64(&js.apiPendingAvg)) / 1000.0,
-		DIOS:               diosStats(),
+		DiskIO:             diosStats(),
 	}
 
 	return jsi, nil

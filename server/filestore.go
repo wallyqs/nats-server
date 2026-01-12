@@ -11758,8 +11758,8 @@ func diosRelease() {
 	dios <- struct{}{}
 }
 
-// DIOSStats holds disk I/O semaphore statistics.
-type DIOSStats struct {
+// DiskIOStats holds disk I/O semaphore statistics.
+type DiskIOStats struct {
 	Acquires uint64  `json:"acquires"`      // Total acquisitions
 	P50      float64 `json:"p50,omitempty"` // 50th percentile wait time (µs)
 	P75      float64 `json:"p75,omitempty"` // 75th percentile wait time (µs)
@@ -11769,7 +11769,7 @@ type DIOSStats struct {
 }
 
 // diosStats returns current disk I/O semaphore statistics.
-func diosStats() *DIOSStats {
+func diosStats() *DiskIOStats {
 	// Gather histogram counts
 	var counts [6]uint64
 	var total uint64
@@ -11778,7 +11778,7 @@ func diosStats() *DIOSStats {
 		total += counts[i]
 	}
 
-	stats := &DIOSStats{
+	stats := &DiskIOStats{
 		Acquires: diosAcquires.Load(),
 		Max:      float64(diosMaxWait.Load()) / 1000, // ns to µs
 	}
