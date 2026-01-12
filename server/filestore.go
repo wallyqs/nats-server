@@ -11760,12 +11760,12 @@ func diosRelease() {
 
 // DiskIOStats holds disk I/O semaphore statistics.
 type DiskIOStats struct {
-	Acquires uint64  `json:"acquires"`      // Total acquisitions
-	P50      float64 `json:"p50,omitempty"` // 50th percentile wait time (µs)
-	P75      float64 `json:"p75,omitempty"` // 75th percentile wait time (µs)
-	P95      float64 `json:"p95,omitempty"` // 95th percentile wait time (µs)
-	P99      float64 `json:"p99,omitempty"` // 99th percentile wait time (µs)
-	Max      float64 `json:"max,omitempty"` // Maximum wait time (µs)
+	Total uint64  `json:"total"`         // Total acquisitions
+	P50   float64 `json:"p50,omitempty"` // 50th percentile wait time (µs)
+	P75   float64 `json:"p75,omitempty"` // 75th percentile wait time (µs)
+	P95   float64 `json:"p95,omitempty"` // 95th percentile wait time (µs)
+	P99   float64 `json:"p99,omitempty"` // 99th percentile wait time (µs)
+	Max   float64 `json:"max,omitempty"` // Maximum wait time (µs)
 }
 
 // diosStats returns current disk I/O semaphore statistics.
@@ -11779,8 +11779,8 @@ func diosStats() *DiskIOStats {
 	}
 
 	stats := &DiskIOStats{
-		Acquires: diosAcquires.Load(),
-		Max:      float64(diosMaxWait.Load()) / 1000, // ns to µs
+		Total: diosAcquires.Load(),
+		Max:   float64(diosMaxWait.Load()) / 1000, // ns to µs
 	}
 
 	if total == 0 {
