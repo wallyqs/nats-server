@@ -16,6 +16,7 @@ package stree
 import (
 	"bytes"
 	"slices"
+	"sync"
 )
 
 // SubjectTree is an adaptive radix trie (ART) for storing subject information on literal subjects.
@@ -25,6 +26,8 @@ import (
 type SubjectTree[T any] struct {
 	root node
 	size int
+	mu   sync.Mutex
+	mgen uint32 // Match generation counter for deduplication
 }
 
 // NewSubjectTree creates a new SubjectTree with values T.
@@ -121,7 +124,68 @@ func (t *SubjectTree[T]) Match(filter []byte, cb func(subject []byte, val *T)) {
 	var raw [16][]byte
 	parts := genParts(filter, raw[:0])
 	var _pre [256]byte
-	t.match(t.root, parts, _pre[:0], cb)
+	t.match(t.root, parts, _pre[:0], cb, 0)
+}
+
+// NextMatchGen returns the next match generation number for use with MatchGeneration
+// and FindGeneration. This provides reliable deduplication of callbacks across
+// multiple match operations within the same logical operation.
+func (t *SubjectTree[T]) NextMatchGen() uint32 {
+	t.mu.Lock()
+	t.mgen++
+	mgen := t.mgen
+	t.mu.Unlock()
+	return mgen
+}
+
+// MatchGeneration is like Match but uses a generation number to deduplicate callbacks.
+// If a leaf has already been matched with this generation, the callback is skipped.
+func (t *SubjectTree[T]) MatchGeneration(filter []byte, cb func(subject []byte, val *T), mgen uint32) {
+	if t == nil || t.root == nil || len(filter) == 0 || cb == nil {
+		return
+	}
+	var raw [16][]byte
+	parts := genParts(filter, raw[:0])
+	var _pre [256]byte
+	t.match(t.root, parts, _pre[:0], cb, mgen)
+}
+
+// FindGeneration is like Find but uses a generation number to deduplicate.
+// Returns the value and true if found and not already seen in this generation.
+func (t *SubjectTree[T]) FindGeneration(subject []byte, mgen uint32) (*T, bool) {
+	if t == nil {
+		return nil, false
+	}
+
+	var si int
+	for n := t.root; n != nil; {
+		if n.isLeaf() {
+			ln := n.(*leaf[T])
+			if ln.match(subject[si:]) {
+				// Check generation for deduplication.
+				// Using signed comparison of unsigned difference handles wraparound correctly.
+				if mgen > 0 && int32(ln.mgen-mgen) >= 0 {
+					return nil, false // Already seen in this generation
+				}
+				ln.mgen = mgen
+				return &ln.value, true
+			}
+			return nil, false
+		}
+		if bn := n.base(); len(bn.prefix) > 0 {
+			end := min(si+len(bn.prefix), len(subject))
+			if !bytes.Equal(subject[si:end], bn.prefix) {
+				return nil, false
+			}
+			si += len(bn.prefix)
+		}
+		if an := n.findChild(pivot(subject, si)); an != nil {
+			n = *an
+		} else {
+			return nil, false
+		}
+	}
+	return nil, false
 }
 
 // IterOrdered will walk all entries in the SubjectTree lexicographically. The callback can return false to terminate the walk.
@@ -293,7 +357,8 @@ func (t *SubjectTree[T]) delete(np *node, subject []byte, si int) (*T, bool) {
 
 // Internal function which can be called recursively to match all leaf nodes to a given filter subject which
 // once here has been decomposed to parts. These parts only care about wildcards, both pwc and fwc.
-func (t *SubjectTree[T]) match(n node, parts [][]byte, pre []byte, cb func(subject []byte, val *T)) {
+// The mgen parameter is used for deduplication - if non-zero, leaves already matched in this generation are skipped.
+func (t *SubjectTree[T]) match(n node, parts [][]byte, pre []byte, cb func(subject []byte, val *T), mgen uint32) {
 	// Capture if we are sitting on a terminal fwc.
 	var hasFWC bool
 	if lp := len(parts); lp > 0 && len(parts[lp-1]) > 0 && parts[lp-1][0] == fwc {
@@ -310,6 +375,12 @@ func (t *SubjectTree[T]) match(n node, parts [][]byte, pre []byte, cb func(subje
 		if n.isLeaf() {
 			if len(nparts) == 0 || (hasFWC && len(nparts) == 1) {
 				ln := n.(*leaf[T])
+				// Check generation for deduplication.
+				// Using signed comparison of unsigned difference handles wraparound correctly.
+				if mgen > 0 && int32(ln.mgen-mgen) >= 0 {
+					return // Already seen in this generation
+				}
+				ln.mgen = mgen
 				cb(append(pre, ln.suffix...), &ln.value)
 			}
 			return
@@ -340,13 +411,23 @@ func (t *SubjectTree[T]) match(n node, parts [][]byte, pre []byte, cb func(subje
 				if cn.isLeaf() {
 					ln := cn.(*leaf[T])
 					if len(ln.suffix) == 0 {
+						// Check generation for deduplication.
+						if mgen > 0 && int32(ln.mgen-mgen) >= 0 {
+							continue
+						}
+						ln.mgen = mgen
 						cb(append(pre, ln.suffix...), &ln.value)
 					} else if hasTermPWC && bytes.IndexByte(ln.suffix, tsep) < 0 {
+						// Check generation for deduplication.
+						if mgen > 0 && int32(ln.mgen-mgen) >= 0 {
+							continue
+						}
+						ln.mgen = mgen
 						cb(append(pre, ln.suffix...), &ln.value)
 					}
 				} else if hasTermPWC {
 					// We have terminal pwc so call into match again with the child node.
-					t.match(cn, nparts, pre, cb)
+					t.match(cn, nparts, pre, cb, mgen)
 				}
 			}
 			// Return regardless.
@@ -367,7 +448,7 @@ func (t *SubjectTree[T]) match(n node, parts [][]byte, pre []byte, cb func(subje
 			// to see if we match further down.
 			for _, cn := range n.children() {
 				if cn != nil {
-					t.match(cn, nparts, pre, cb)
+					t.match(cn, nparts, pre, cb, mgen)
 				}
 			}
 			return

@@ -466,12 +466,16 @@ func visitLevel[T comparable](l *level[T], depth int) int {
 // IntersectStree will match all items in the given subject tree that
 // have interest expressed in the given sublist. The callback will only be called
 // once for each subject, regardless of overlapping subscriptions in the sublist.
+// Uses generation-based deduplication to ensure each leaf is only called back once.
 func IntersectStree[T1 any, T2 comparable](st *stree.SubjectTree[T1], sl *GenericSublist[T2], cb func(subj []byte, entry *T1)) {
 	var _subj [255]byte
-	intersectStree(st, sl.root, _subj[:0], cb)
+	// Get a unique generation number for this intersection operation.
+	// This ensures deduplication across all match operations within this call.
+	mgen := st.NextMatchGen()
+	intersectStree(st, sl.root, _subj[:0], cb, mgen)
 }
 
-func intersectStree[T1 any, T2 comparable](st *stree.SubjectTree[T1], r *level[T2], subj []byte, cb func(subj []byte, entry *T1)) {
+func intersectStree[T1 any, T2 comparable](st *stree.SubjectTree[T1], r *level[T2], subj []byte, cb func(subj []byte, entry *T1), mgen uint32) {
 	nsubj := subj
 	if len(nsubj) > 0 {
 		nsubj = append(subj, '.')
@@ -480,45 +484,38 @@ func intersectStree[T1 any, T2 comparable](st *stree.SubjectTree[T1], r *level[T
 		// We've reached a full wildcard, do a FWC match on the stree at this point
 		// and don't keep iterating downward.
 		nsubj := append(nsubj, '>')
-		st.Match(nsubj, cb)
+		st.MatchGeneration(nsubj, cb, mgen)
 		return
 	}
 	if r.pwc != nil {
 		// We've found a partial wildcard. We'll keep iterating downwards, but first
-		// check whether there's interest at this level (without triggering dupes) and
-		// match if so.
-		var done bool
+		// check whether there's interest at this level and match if so.
+		// Generation-based deduplication handles any overlaps automatically.
 		nsubj := append(nsubj, '*')
 		if len(r.pwc.subs) > 0 {
-			st.Match(nsubj, cb)
-			done = true
+			st.MatchGeneration(nsubj, cb, mgen)
 		}
 		if r.pwc.next.numNodes() > 0 {
-			intersectStree(st, r.pwc.next, nsubj, cb)
+			intersectStree(st, r.pwc.next, nsubj, cb, mgen)
 		}
-		if done {
-			return
-		}
+		// Don't return early - continue to process literal nodes.
+		// Generation-based deduplication handles any duplicates.
 	}
 	// Normal node with subject literals, keep iterating.
+	// No skip logic needed - generation deduplication handles overlaps.
 	for t, n := range r.nodes {
-		if r.pwc != nil && r.pwc.next.numNodes() > 0 && n.next.numNodes() > 0 {
-			// A wildcard at the next level will already visit these descendents
-			// so skip so we don't callback the same subject more than once.
-			continue
-		}
 		nsubj := append(nsubj, t...)
 		if len(n.subs) > 0 {
 			if subjectHasWildcard(bytesToString(nsubj)) {
-				st.Match(nsubj, cb)
+				st.MatchGeneration(nsubj, cb, mgen)
 			} else {
-				if e, ok := st.Find(nsubj); ok {
+				if e, ok := st.FindGeneration(nsubj, mgen); ok {
 					cb(nsubj, e)
 				}
 			}
 		}
 		if n.next.numNodes() > 0 {
-			intersectStree(st, n.next, nsubj, cb)
+			intersectStree(st, n.next, nsubj, cb, mgen)
 		}
 	}
 }

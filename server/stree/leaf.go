@@ -25,10 +25,12 @@ type leaf[T any] struct {
 	// We will only store the suffix here and assume all prior prefix paths have
 	// been checked once we arrive at this leafnode.
 	suffix []byte
+	// Match generation for deduplication during intersection operations.
+	mgen uint32
 }
 
 func newLeaf[T any](suffix []byte, value T) *leaf[T] {
-	return &leaf[T]{value, copyBytes(suffix)}
+	return &leaf[T]{value: value, suffix: copyBytes(suffix)}
 }
 
 func (n *leaf[T]) isLeaf() bool                               { return true }

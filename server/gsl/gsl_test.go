@@ -14,6 +14,7 @@
 package gsl
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -470,6 +471,330 @@ func TestGenericSublistInterestBasedIntersection(t *testing.T) {
 		require_Len(t, len(got), 0)
 		require_NoDuplicates(t, got)
 	})
+
+	// Regression test for issue where mixed wildcard and literal filters
+	// with different leaf nodes would skip the literal path incorrectly.
+	t.Run("MixedWildcardLiteralDifferentLeaves", func(t *testing.T) {
+		// Create a stree with a subject that only matches via the literal path
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("events.literal.other"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// Wildcard pattern: events.*.something
+		require_NoError(t, sl.Insert("events.*.something", 11))
+		// Literal pattern: events.literal.other
+		require_NoError(t, sl.Insert("events.literal.other", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// The literal path should NOT be skipped because it leads to "other"
+		// while the wildcard path leads to "something" (different leaves)
+		require_Len(t, len(got), 1)
+		require_Equal(t, got["events.literal.other"], 1)
+		require_NoDuplicates(t, got)
+	})
+
+	// Regression test for deep path divergence where paths share intermediate
+	// nodes but diverge at deeper levels.
+	t.Run("DeepPathDivergence", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("a.x.b.other"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// Wildcard pattern: a.*.b.something
+		require_NoError(t, sl.Insert("a.*.b.something", 11))
+		// Literal pattern: a.x.b.other
+		require_NoError(t, sl.Insert("a.x.b.other", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// Both paths share "b" at level 2, but diverge at level 3:
+		// wildcard leads to "something", literal leads to "other"
+		// The literal path should NOT be skipped.
+		require_Len(t, len(got), 1)
+		require_Equal(t, got["a.x.b.other"], 1)
+		require_NoDuplicates(t, got)
+	})
+
+	// Regression test for multiple PWCs with different leaves.
+	t.Run("MultiplePWCDifferentLeaves", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("a.x.b.y.d"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// Wildcard pattern with two PWCs: a.*.b.*.c
+		require_NoError(t, sl.Insert("a.*.b.*.c", 11))
+		// Literal pattern with PWC: a.x.b.*.d (different leaf!)
+		require_NoError(t, sl.Insert("a.x.b.*.d", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// a.*.b.*.c does NOT match a.x.b.y.d (c != d)
+		// a.x.b.*.d DOES match a.x.b.y.d
+		require_Len(t, len(got), 1)
+		require_Equal(t, got["a.x.b.y.d"], 1)
+		require_NoDuplicates(t, got)
+	})
+
+	// FWC regression tests - ensure full wildcard works correctly with
+	// mixed patterns.
+
+	// Test FWC at same level as a literal
+	t.Run("FWCWithLiteralSameLevel", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("events.foo.bar"), struct{}{})
+		localSt.Insert([]byte("events.foo.baz"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// FWC pattern
+		require_NoError(t, sl.Insert("events.>", 11))
+		// Literal pattern
+		require_NoError(t, sl.Insert("events.foo.bar", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// Both subjects should be found (events.> matches both)
+		require_Len(t, len(got), 2)
+		require_NoDuplicates(t, got)
+	})
+
+	// Test FWC at same level as PWC
+	t.Run("FWCWithPWCSameLevel", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("events.foo.bar"), struct{}{})
+		localSt.Insert([]byte("events.foo.baz.qux"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// FWC pattern
+		require_NoError(t, sl.Insert("events.>", 11))
+		// PWC pattern
+		require_NoError(t, sl.Insert("events.*.bar", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// Both subjects should be found
+		require_Len(t, len(got), 2)
+		require_NoDuplicates(t, got)
+	})
+
+	// Test FWC deeper in tree with literal sibling
+	t.Run("FWCDeeperLevelWithLiteral", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("a.b.c.d.e"), struct{}{})
+		localSt.Insert([]byte("a.b.x.y.z"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// FWC pattern starting at level 2
+		require_NoError(t, sl.Insert("a.b.>", 11))
+		// Literal pattern
+		require_NoError(t, sl.Insert("a.b.c.d.e", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// Both subjects should be found
+		require_Len(t, len(got), 2)
+		require_NoDuplicates(t, got)
+	})
+
+	// Test mixed FWC, PWC and literal - complex case
+	t.Run("MixedFWCPWCLiteral", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("events.foo.bar.specific"), struct{}{})
+		localSt.Insert([]byte("events.foo.other.data"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// PWC pattern
+		require_NoError(t, sl.Insert("events.*.bar.something", 11))
+		// Literal with FWC at end
+		require_NoError(t, sl.Insert("events.foo.>", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// events.foo.> should match both subjects
+		require_Len(t, len(got), 2)
+		require_NoDuplicates(t, got)
+	})
+
+	// Test FWC and literal in completely different paths
+	t.Run("FWCAndLiteralDifferentPaths", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("events.foo.bar"), struct{}{})
+		localSt.Insert([]byte("metrics.cpu.usage"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// FWC pattern on events
+		require_NoError(t, sl.Insert("events.>", 11))
+		// Literal pattern on metrics
+		require_NoError(t, sl.Insert("metrics.cpu.usage", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// Both subjects should be found via different paths
+		require_Len(t, len(got), 2)
+		require_Equal(t, got["events.foo.bar"], 1)
+		require_Equal(t, got["metrics.cpu.usage"], 1)
+		require_NoDuplicates(t, got)
+	})
+
+	// Test PWC and FWC in different branches of the tree
+	t.Run("PWCAndFWCDifferentBranches", func(t *testing.T) {
+		localSt := stree.NewSubjectTree[struct{}]()
+		localSt.Insert([]byte("a.x.specific.data"), struct{}{})
+		localSt.Insert([]byte("a.y.other.stuff"), struct{}{})
+
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		// PWC pattern: a.*.specific.something (doesn't match "data")
+		require_NoError(t, sl.Insert("a.*.specific.something", 11))
+		// FWC pattern on different branch: a.y.>
+		require_NoError(t, sl.Insert("a.y.>", 22))
+
+		IntersectStree(localSt, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+
+		// a.*.specific.something does NOT match a.x.specific.data (something != data)
+		// a.y.> DOES match a.y.other.stuff
+		require_Len(t, len(got), 1)
+		require_Equal(t, got["a.y.other.stuff"], 1)
+		require_NoDuplicates(t, got)
+	})
+}
+
+// --- BENCHMARKS ---
+
+// BenchmarkIntersectStreeNonOverlapping benchmarks the common case where
+// filter patterns don't overlap (uses optimized tree walk).
+func BenchmarkIntersectStreeNonOverlapping(b *testing.B) {
+	for _, numSubjects := range []int{100, 1000, 10000} {
+		b.Run(fmt.Sprintf("subjects=%d", numSubjects), func(b *testing.B) {
+			// Create stree with many subjects
+			st := stree.NewSubjectTree[int]()
+			for i := 0; i < numSubjects; i++ {
+				subj := fmt.Sprintf("orders.region%d.user%d.created", i%10, i)
+				st.Insert([]byte(subj), i)
+			}
+
+			// Non-overlapping patterns (different prefixes)
+			sl := NewSublist[int]()
+			sl.Insert("orders.region0.>", 1)
+			sl.Insert("orders.region5.>", 2)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				count := 0
+				IntersectStree(st, sl, func(subj []byte, entry *int) {
+					count++
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkIntersectStreeOverlapping benchmarks the case where filter patterns
+// overlap (falls back to linear scan in hybrid approach).
+func BenchmarkIntersectStreeOverlapping(b *testing.B) {
+	for _, numSubjects := range []int{100, 1000, 10000} {
+		b.Run(fmt.Sprintf("subjects=%d", numSubjects), func(b *testing.B) {
+			// Create stree with many subjects
+			st := stree.NewSubjectTree[int]()
+			for i := 0; i < numSubjects; i++ {
+				subj := fmt.Sprintf("events.user%d.action%d", i%100, i%10)
+				st.Insert([]byte(subj), i)
+			}
+
+			// Overlapping patterns (PWC and literal at same level)
+			sl := NewSublist[int]()
+			sl.Insert("events.*.action0", 1)
+			sl.Insert("events.user0.action5", 2)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				count := 0
+				IntersectStree(st, sl, func(subj []byte, entry *int) {
+					count++
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkIntersectStreeSelectivePattern benchmarks selective patterns
+// where tree walk can prune many branches.
+func BenchmarkIntersectStreeSelectivePattern(b *testing.B) {
+	for _, numSubjects := range []int{1000, 10000, 100000} {
+		b.Run(fmt.Sprintf("subjects=%d", numSubjects), func(b *testing.B) {
+			// Create stree with subjects across many branches
+			st := stree.NewSubjectTree[int]()
+			for i := 0; i < numSubjects; i++ {
+				// Spread across 100 different first-level prefixes
+				subj := fmt.Sprintf("prefix%d.sub%d.data", i%100, i)
+				st.Insert([]byte(subj), i)
+			}
+
+			// Very selective pattern - only matches 1% of subjects
+			sl := NewSublist[int]()
+			sl.Insert("prefix0.>", 1)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				count := 0
+				IntersectStree(st, sl, func(subj []byte, entry *int) {
+					count++
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkIntersectStreeBroadPattern benchmarks broad patterns
+// that match most subjects.
+func BenchmarkIntersectStreeBroadPattern(b *testing.B) {
+	for _, numSubjects := range []int{100, 1000, 10000} {
+		b.Run(fmt.Sprintf("subjects=%d", numSubjects), func(b *testing.B) {
+			st := stree.NewSubjectTree[int]()
+			for i := 0; i < numSubjects; i++ {
+				subj := fmt.Sprintf("events.user%d.action", i)
+				st.Insert([]byte(subj), i)
+			}
+
+			// Broad pattern - matches everything
+			sl := NewSublist[int]()
+			sl.Insert(">", 1)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				count := 0
+				IntersectStree(st, sl, func(subj []byte, entry *int) {
+					count++
+				})
+			}
+		})
+	}
 }
 
 // --- TEST HELPERS ---
