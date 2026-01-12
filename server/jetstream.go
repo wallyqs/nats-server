@@ -110,6 +110,8 @@ type jetStream struct {
 	memUsed       int64
 	storeUsed     int64
 	queueLimit    int64
+	// Rolling average of pending API requests (scaled by 1000 for precision).
+	apiPendingAvg int64
 	clustered     int32
 	mu            sync.RWMutex
 	srv           *Server
@@ -882,6 +884,31 @@ func (js *jetStream) isEnabled() bool {
 		return false
 	}
 	return !js.disabled.Load()
+}
+
+// updatePendingAvg updates the rolling average of pending API requests using
+// an Exponential Moving Average (EMA). The formula is:
+//
+//	EMA_new = α × current + (1-α) × EMA_old
+//
+// With α=0.1, each new sample contributes 10% to the average while the
+// historical average contributes 90%. This creates a smooth average that
+// adapts to changing request patterns while filtering out short-term spikes.
+//
+// The average is stored scaled by 1000 for precision in atomic integer operations.
+func (js *jetStream) updatePendingAvg(pending int) {
+	const emaScale int64 = 1000
+	const emaAlpha int64 = 100 // α=0.1 scaled by 1000
+	pendingScaled := int64(pending) * emaScale
+
+	oldAvg := atomic.LoadInt64(&js.apiPendingAvg)
+	var newAvg int64
+	if oldAvg == 0 {
+		newAvg = pendingScaled
+	} else {
+		newAvg = (emaAlpha*pendingScaled + (emaScale-emaAlpha)*oldAvg) / emaScale
+	}
+	atomic.StoreInt64(&js.apiPendingAvg, newAvg)
 }
 
 // Mark that we will be in standlone mode.
@@ -2863,4 +2890,111 @@ func (s *Server) handleWritePermissionError() {
 
 		//TODO Send respective advisory if needed, same as in handleOutOfSpace
 	}
+}
+
+// Internal callback tracking state for statistics.
+var (
+	icbCalls     atomic.Uint64    // Total number of internal callback invocations
+	icbHistogram [6]atomic.Uint64 // Duration histogram buckets (sampled)
+	icbMaxDur    atomic.Int64     // Maximum duration in nanoseconds (sampled)
+)
+
+// Sample 1 in N callbacks for timing to reduce time.Now() overhead.
+const icbSampleRate = 10
+
+// Histogram bucket boundaries in nanoseconds for internal callbacks.
+// Buckets: <100µs, 100µs-1ms, 1-10ms, 10-100ms, 100ms-1s, >1s
+var icbBuckets = [5]int64{
+	100_000,       // 100µs
+	1_000_000,     // 1ms
+	10_000_000,    // 10ms
+	100_000_000,   // 100ms
+	1_000_000_000, // 1s
+}
+
+// Bucket midpoints in milliseconds for percentile estimation.
+var icbBucketMidpoints = [6]float64{
+	0.05, // <100µs -> 50µs = 0.05ms
+	0.5,  // 100µs-1ms -> 500µs = 0.5ms
+	5,    // 1-10ms -> 5ms
+	50,   // 10-100ms -> 50ms
+	500,  // 100ms-1s -> 500ms
+	2000, // >1s -> 2s estimate
+}
+
+// trackICBDuration records the duration of an internal callback for statistics.
+// Only sampled calls have their duration tracked.
+func trackICBDuration(dur time.Duration) {
+	n := icbCalls.Add(1)
+	if n%icbSampleRate != 0 {
+		return
+	}
+
+	durNs := dur.Nanoseconds()
+
+	// Update histogram bucket
+	bucket := len(icbBuckets) // Default to last bucket
+	for i, limit := range icbBuckets {
+		if durNs < limit {
+			bucket = i
+			break
+		}
+	}
+	icbHistogram[bucket].Add(1)
+
+	// Update max duration
+	if durNs > icbMaxDur.Load() {
+		icbMaxDur.Store(durNs)
+	}
+}
+
+// InternalCallbackStats holds internal subscription callback statistics.
+type InternalCallbackStats struct {
+	Total uint64  `json:"total"`         // Total callback invocations
+	P50   float64 `json:"p50,omitempty"` // 50th percentile duration (ms)
+	P75   float64 `json:"p75,omitempty"` // 75th percentile duration (ms)
+	P95   float64 `json:"p95,omitempty"` // 95th percentile duration (ms)
+	P99   float64 `json:"p99,omitempty"` // 99th percentile duration (ms)
+	Max   float64 `json:"max,omitempty"` // Maximum duration (ms)
+}
+
+// icbStats returns current internal callback statistics.
+func icbStats() *InternalCallbackStats {
+	// Gather histogram counts
+	var counts [6]uint64
+	var total uint64
+	for i := range icbHistogram {
+		counts[i] = icbHistogram[i].Load()
+		total += counts[i]
+	}
+
+	stats := &InternalCallbackStats{
+		Total: icbCalls.Load(),
+		Max:   float64(icbMaxDur.Load()) / 1_000_000, // ns to ms
+	}
+
+	if total == 0 {
+		return stats
+	}
+
+	// Calculate percentiles from histogram
+	stats.P50 = icbPercentile(counts[:], total, 0.50)
+	stats.P75 = icbPercentile(counts[:], total, 0.75)
+	stats.P95 = icbPercentile(counts[:], total, 0.95)
+	stats.P99 = icbPercentile(counts[:], total, 0.99)
+
+	return stats
+}
+
+// icbPercentile calculates approximate percentile from histogram.
+func icbPercentile(counts []uint64, total uint64, p float64) float64 {
+	target := uint64(float64(total) * p)
+	var cumulative uint64
+	for i, count := range counts {
+		cumulative += count
+		if cumulative >= target {
+			return icbBucketMidpoints[i]
+		}
+	}
+	return icbBucketMidpoints[len(icbBucketMidpoints)-1]
 }
