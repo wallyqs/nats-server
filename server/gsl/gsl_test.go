@@ -797,6 +797,55 @@ func BenchmarkIntersectStreeBroadPattern(b *testing.B) {
 	}
 }
 
+// BenchmarkIntersectStreeConcurrent benchmarks concurrent IntersectStree calls
+// to measure lock contention (or lack thereof with atomics).
+func BenchmarkIntersectStreeConcurrent(b *testing.B) {
+	// Create shared stree
+	st := stree.NewSubjectTree[int]()
+	for i := 0; i < 1000; i++ {
+		subj := fmt.Sprintf("events.user%d.action%d", i%100, i%10)
+		st.Insert([]byte(subj), i)
+	}
+
+	// Create shared sublist
+	sl := NewSublist[int]()
+	sl.Insert("events.*.action0", 1)
+	sl.Insert("events.user0.>", 2)
+
+	b.Run("goroutines=1", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			count := 0
+			IntersectStree(st, sl, func(subj []byte, entry *int) {
+				count++
+			})
+		}
+	})
+
+	b.Run("goroutines=4", func(b *testing.B) {
+		b.SetParallelism(4)
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				count := 0
+				IntersectStree(st, sl, func(subj []byte, entry *int) {
+					count++
+				})
+			}
+		})
+	})
+
+	b.Run("goroutines=16", func(b *testing.B) {
+		b.SetParallelism(16)
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				count := 0
+				IntersectStree(st, sl, func(subj []byte, entry *int) {
+					count++
+				})
+			}
+		})
+	})
+}
+
 // --- TEST HELPERS ---
 
 func require_Matches[T comparable](t *testing.T, s *GenericSublist[T], sub string, c int) {

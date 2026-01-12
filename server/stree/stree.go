@@ -16,7 +16,7 @@ package stree
 import (
 	"bytes"
 	"slices"
-	"sync"
+	"sync/atomic"
 )
 
 // SubjectTree is an adaptive radix trie (ART) for storing subject information on literal subjects.
@@ -26,8 +26,7 @@ import (
 type SubjectTree[T any] struct {
 	root node
 	size int
-	mu   sync.Mutex
-	mgen uint32 // Match generation counter for deduplication
+	mgen uint32 // Match generation counter for deduplication (accessed atomically)
 }
 
 // NewSubjectTree creates a new SubjectTree with values T.
@@ -130,12 +129,9 @@ func (t *SubjectTree[T]) Match(filter []byte, cb func(subject []byte, val *T)) {
 // NextMatchGen returns the next match generation number for use with MatchGeneration
 // and FindGeneration. This provides reliable deduplication of callbacks across
 // multiple match operations within the same logical operation.
+// Uses atomic operations for lock-free thread safety.
 func (t *SubjectTree[T]) NextMatchGen() uint32 {
-	t.mu.Lock()
-	t.mgen++
-	mgen := t.mgen
-	t.mu.Unlock()
-	return mgen
+	return atomic.AddUint32(&t.mgen, 1)
 }
 
 // MatchGeneration is like Match but uses a generation number to deduplicate callbacks.
@@ -162,12 +158,12 @@ func (t *SubjectTree[T]) FindGeneration(subject []byte, mgen uint32) (*T, bool) 
 		if n.isLeaf() {
 			ln := n.(*leaf[T])
 			if ln.match(subject[si:]) {
-				// Check generation for deduplication.
+				// Check generation for deduplication using atomic operations.
 				// Using signed comparison of unsigned difference handles wraparound correctly.
-				if mgen > 0 && int32(ln.mgen-mgen) >= 0 {
+				if mgen > 0 && int32(atomic.LoadUint32(&ln.mgen)-mgen) >= 0 {
 					return nil, false // Already seen in this generation
 				}
-				ln.mgen = mgen
+				atomic.StoreUint32(&ln.mgen, mgen)
 				return &ln.value, true
 			}
 			return nil, false
@@ -375,12 +371,12 @@ func (t *SubjectTree[T]) match(n node, parts [][]byte, pre []byte, cb func(subje
 		if n.isLeaf() {
 			if len(nparts) == 0 || (hasFWC && len(nparts) == 1) {
 				ln := n.(*leaf[T])
-				// Check generation for deduplication.
+				// Check generation for deduplication using atomic operations.
 				// Using signed comparison of unsigned difference handles wraparound correctly.
-				if mgen > 0 && int32(ln.mgen-mgen) >= 0 {
+				if mgen > 0 && int32(atomic.LoadUint32(&ln.mgen)-mgen) >= 0 {
 					return // Already seen in this generation
 				}
-				ln.mgen = mgen
+				atomic.StoreUint32(&ln.mgen, mgen)
 				cb(append(pre, ln.suffix...), &ln.value)
 			}
 			return
@@ -411,18 +407,18 @@ func (t *SubjectTree[T]) match(n node, parts [][]byte, pre []byte, cb func(subje
 				if cn.isLeaf() {
 					ln := cn.(*leaf[T])
 					if len(ln.suffix) == 0 {
-						// Check generation for deduplication.
-						if mgen > 0 && int32(ln.mgen-mgen) >= 0 {
+						// Check generation for deduplication using atomic operations.
+						if mgen > 0 && int32(atomic.LoadUint32(&ln.mgen)-mgen) >= 0 {
 							continue
 						}
-						ln.mgen = mgen
+						atomic.StoreUint32(&ln.mgen, mgen)
 						cb(append(pre, ln.suffix...), &ln.value)
 					} else if hasTermPWC && bytes.IndexByte(ln.suffix, tsep) < 0 {
-						// Check generation for deduplication.
-						if mgen > 0 && int32(ln.mgen-mgen) >= 0 {
+						// Check generation for deduplication using atomic operations.
+						if mgen > 0 && int32(atomic.LoadUint32(&ln.mgen)-mgen) >= 0 {
 							continue
 						}
-						ln.mgen = mgen
+						atomic.StoreUint32(&ln.mgen, mgen)
 						cb(append(pre, ln.suffix...), &ln.value)
 					}
 				} else if hasTermPWC {
