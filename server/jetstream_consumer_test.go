@@ -7125,6 +7125,232 @@ func TestJetStreamConsumerThreeFilters(t *testing.T) {
 	require_True(t, info.AckFloor.Stream == 8)
 }
 
+// TestJetStreamConsumerMixedWildcardAndLiteralFilters tests that consumers
+// with mixed filter types (wildcard patterns and literal subjects) correctly
+// deliver messages to literal subjects when pre-existing messages exist that
+// match the stream but not the consumer filters.
+//
+// This test creates TWO consumers as per the issue reproduction:
+// 1. Consumer with mixed filters (wildcard + literal) - the buggy case
+// 2. Consumer with only literal filter - works correctly
+//
+// Both consumers should receive messages to the literal subject.
+// See: https://github.com/nats-io/nats-server/issues/7713
+func TestJetStreamConsumerMixedWildcardAndLiteralFilters(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create a stream with a wildcard subject pattern.
+	mset, err := s.GlobalAccount().addStream(&StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"events.>"},
+	})
+	require_NoError(t, err)
+
+	// CRITICAL: Pre-existing messages that match the stream wildcard pattern
+	// but do NOT match any of the consumer filters. This is required to
+	// trigger the bug - without these messages the bug does not manifest.
+	// Using the exact subject from the issue: "events.any.somethingwedontlistento"
+	for i := 0; i < 10; i++ {
+		sendStreamMsg(t, nc, "events.any.somethingwedontlistento", fmt.Sprintf("unrelated%d", i))
+	}
+
+	// Consumer #1: Mixed filters (wildcard + literal) - this is the buggy case.
+	// The wildcard filter MUST precede the literal filter as per the issue.
+	_, err = mset.addConsumer(&ConsumerConfig{
+		FilterSubjects: []string{"events.*.something", "events.literal.other"},
+		Durable:        "bug-consumer",
+		AckPolicy:      AckExplicit,
+	})
+	require_NoError(t, err)
+
+	// Consumer #2: Only literal filter - this works correctly.
+	_, err = mset.addConsumer(&ConsumerConfig{
+		FilterSubjects: []string{"events.literal.other"},
+		Durable:        "bug-consumer2",
+		AckPolicy:      AckExplicit,
+	})
+	require_NoError(t, err)
+
+	// Publish a message to the literal subject.
+	sendStreamMsg(t, nc, "events.literal.other", "literal-test-message")
+
+	// Consumer #2 (literal only) should receive the message.
+	consumer2, err := js.PullSubscribe("", "bug-consumer2", nats.Bind("TEST", "bug-consumer2"))
+	require_NoError(t, err)
+
+	msgs2, err := consumer2.Fetch(1, nats.MaxWait(2*time.Second))
+	require_NoError(t, err)
+	require_Equal(t, len(msgs2), 1)
+	require_Equal(t, string(msgs2[0].Data), "literal-test-message")
+	require_NoError(t, msgs2[0].AckSync())
+
+	// Consumer #1 (mixed filters) should ALSO receive the message.
+	// BUG: In affected versions, this consumer does NOT receive the message.
+	consumer1, err := js.PullSubscribe("", "bug-consumer", nats.Bind("TEST", "bug-consumer"))
+	require_NoError(t, err)
+
+	msgs1, err := consumer1.Fetch(1, nats.MaxWait(2*time.Second))
+	require_NoError(t, err)
+	require_Equal(t, len(msgs1), 1)
+	require_Equal(t, string(msgs1[0].Data), "literal-test-message")
+	require_NoError(t, msgs1[0].AckSync())
+
+	// Verify both consumers have no pending messages.
+	info1, err := js.ConsumerInfo("TEST", "bug-consumer")
+	require_NoError(t, err)
+	require_Equal(t, info1.NumPending, uint64(0))
+
+	info2, err := js.ConsumerInfo("TEST", "bug-consumer2")
+	require_NoError(t, err)
+	require_Equal(t, info2.NumPending, uint64(0))
+}
+
+// TestJetStreamConsumerMixedWildcardAndLiteralFiltersPush is similar to
+// TestJetStreamConsumerMixedWildcardAndLiteralFilters but uses a push consumer.
+// See: https://github.com/nats-io/nats-server/issues/7713
+func TestJetStreamConsumerMixedWildcardAndLiteralFiltersPush(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create a stream with a wildcard subject pattern.
+	mset, err := s.GlobalAccount().addStream(&StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"events.>"},
+	})
+	require_NoError(t, err)
+
+	// Pre-existing messages that match the stream but NOT consumer filters.
+	// Using the exact subject from the issue.
+	for i := 0; i < 10; i++ {
+		sendStreamMsg(t, nc, "events.any.somethingwedontlistento", fmt.Sprintf("unrelated%d", i))
+	}
+
+	// Create a push consumer with mixed filter types.
+	_, err = mset.addConsumer(&ConsumerConfig{
+		FilterSubjects: []string{"events.*.something", "events.literal.other"},
+		Durable:        "mixed-push",
+		DeliverSubject: "deliver.mixed",
+		AckPolicy:      AckExplicit,
+	})
+	require_NoError(t, err)
+
+	sub, err := js.SubscribeSync("", nats.Bind("TEST", "mixed-push"))
+	require_NoError(t, err)
+
+	// Publish messages after consumer creation.
+	sendStreamMsg(t, nc, "events.foo.something", "wildcard1")
+	sendStreamMsg(t, nc, "events.literal.other", "literal1")
+	sendStreamMsg(t, nc, "events.bar.something", "wildcard2")
+	sendStreamMsg(t, nc, "events.literal.other", "literal2")
+
+	// Should receive all 4 messages.
+	received := make(map[string]bool)
+	for i := 0; i < 4; i++ {
+		msg, err := sub.NextMsg(2 * time.Second)
+		require_NoError(t, err)
+		received[string(msg.Data)] = true
+		require_NoError(t, msg.AckSync())
+	}
+
+	require_True(t, received["wildcard1"])
+	require_True(t, received["wildcard2"])
+	require_True(t, received["literal1"])
+	require_True(t, received["literal2"])
+
+	info, err := js.ConsumerInfo("TEST", "mixed-push")
+	require_NoError(t, err)
+	require_Equal(t, info.NumPending, uint64(0))
+	require_Equal(t, info.Delivered.Consumer, uint64(4))
+}
+
+// TestJetStreamConsumerMixedWildcardAndLiteralFiltersWithExisting tests that
+// consumers with mixed filter types correctly deliver messages that exist
+// BEFORE the consumer is created.
+// See: https://github.com/nats-io/nats-server/issues/7713
+func TestJetStreamConsumerMixedWildcardAndLiteralFiltersWithExisting(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create a stream with a wildcard subject pattern.
+	mset, err := s.GlobalAccount().addStream(&StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"events.>"},
+	})
+	require_NoError(t, err)
+
+	// Pre-existing messages that match the stream but NOT consumer filters.
+	for i := 0; i < 10; i++ {
+		sendStreamMsg(t, nc, "events.any.somethingwedontlistento", fmt.Sprintf("unrelated%d", i))
+	}
+
+	// Pre-existing messages that DO match the consumer filters.
+	// Published BEFORE consumer creation.
+	sendStreamMsg(t, nc, "events.foo.something", "wildcard_existing1")
+	sendStreamMsg(t, nc, "events.literal.other", "literal_existing1")
+	sendStreamMsg(t, nc, "events.bar.something", "wildcard_existing2")
+	sendStreamMsg(t, nc, "events.literal.other", "literal_existing2")
+
+	// Create a consumer with mixed filter types.
+	_, err = mset.addConsumer(&ConsumerConfig{
+		FilterSubjects: []string{"events.*.something", "events.literal.other"},
+		Durable:        "mixed-existing",
+		AckPolicy:      AckExplicit,
+		DeliverPolicy:  DeliverAll,
+	})
+	require_NoError(t, err)
+
+	consumer, err := js.PullSubscribe("", "mixed-existing", nats.Bind("TEST", "mixed-existing"))
+	require_NoError(t, err)
+
+	// Should receive all 4 pre-existing messages that match filters.
+	msgs, err := consumer.Fetch(4, nats.MaxWait(2*time.Second))
+	require_NoError(t, err)
+	require_Equal(t, len(msgs), 4)
+
+	received := make(map[string]bool)
+	for _, msg := range msgs {
+		received[string(msg.Data)] = true
+		require_NoError(t, msg.AckSync())
+	}
+
+	require_True(t, received["wildcard_existing1"])
+	require_True(t, received["wildcard_existing2"])
+	require_True(t, received["literal_existing1"])
+	require_True(t, received["literal_existing2"])
+
+	// Now publish new messages and verify they're also delivered.
+	sendStreamMsg(t, nc, "events.baz.something", "wildcard_new")
+	sendStreamMsg(t, nc, "events.literal.other", "literal_new")
+
+	msgs, err = consumer.Fetch(2, nats.MaxWait(2*time.Second))
+	require_NoError(t, err)
+	require_Equal(t, len(msgs), 2)
+
+	received = make(map[string]bool)
+	for _, msg := range msgs {
+		received[string(msg.Data)] = true
+		require_NoError(t, msg.AckSync())
+	}
+
+	require_True(t, received["wildcard_new"])
+	require_True(t, received["literal_new"])
+
+	info, err := js.ConsumerInfo("TEST", "mixed-existing")
+	require_NoError(t, err)
+	require_Equal(t, info.NumPending, uint64(0))
+	require_Equal(t, info.Delivered.Consumer, uint64(6))
+}
+
 func TestJetStreamConsumerUpdateFilterSubjects(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()

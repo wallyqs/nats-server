@@ -463,10 +463,52 @@ func visitLevel[T comparable](l *level[T], depth int) int {
 	return maxDepth
 }
 
+// hasOverlappingPatterns checks if the sublist has patterns that could produce
+// duplicate matches during tree intersection (e.g., PWC or FWC with literal siblings).
+func hasOverlappingPatterns[T comparable](l *level[T]) bool {
+	if l == nil {
+		return false
+	}
+	// Overlap possible if we have PWC and literal siblings at same level
+	if l.pwc != nil && len(l.nodes) > 0 {
+		return true
+	}
+	// Overlap possible if we have FWC and literal siblings at same level
+	if l.fwc != nil && len(l.nodes) > 0 {
+		return true
+	}
+	// Overlap possible if we have FWC and PWC at same level
+	if l.fwc != nil && l.pwc != nil {
+		return true
+	}
+	// Check children recursively
+	for _, n := range l.nodes {
+		if hasOverlappingPatterns(n.next) {
+			return true
+		}
+	}
+	if l.pwc != nil && hasOverlappingPatterns(l.pwc.next) {
+		return true
+	}
+	// No need to check fwc children since fwc is terminal
+	return false
+}
+
 // IntersectStree will match all items in the given subject tree that
 // have interest expressed in the given sublist. The callback will only be called
 // once for each subject, regardless of overlapping subscriptions in the sublist.
 func IntersectStree[T1 any, T2 comparable](st *stree.SubjectTree[T1], sl *GenericSublist[T2], cb func(subj []byte, entry *T1)) {
+	if hasOverlappingPatterns(sl.root) {
+		// Fall back to simple linear scan - always correct, no allocations for dedup
+		st.IterFast(func(subj []byte, entry *T1) bool {
+			if sl.HasInterest(bytesToString(subj)) {
+				cb(subj, entry)
+			}
+			return true
+		})
+		return
+	}
+	// No overlapping patterns - use optimized tree walk
 	var _subj [255]byte
 	intersectStree(st, sl.root, _subj[:0], cb)
 }
