@@ -408,9 +408,9 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 	}
 
 	tmpfile.Close()
-	<-dios
+	diosAcquire()
 	os.Remove(tmpfile.Name())
-	dios <- struct{}{}
+	diosRelease()
 
 	fs = &fileStore{
 		fcfg:   fcfg,
@@ -1304,9 +1304,9 @@ func (mb *msgBlock) convertCipher() error {
 			return err
 		}
 		mb.bek.XORKeyStream(buf, buf)
-		<-dios
+		diosAcquire()
 		err = os.WriteFile(mb.mfn, buf, defaultFilePerms)
-		dios <- struct{}{}
+		diosRelease()
 		if err != nil {
 			return err
 		}
@@ -1337,9 +1337,9 @@ func (mb *msgBlock) convertToEncrypted() error {
 	// Undo cache from above for later.
 	mb.cache = nil
 	mb.bek.XORKeyStream(buf, buf)
-	<-dios
+	diosAcquire()
 	err = os.WriteFile(mb.mfn, buf, defaultFilePerms)
-	dios <- struct{}{}
+	diosRelease()
 	if err != nil {
 		return err
 	}
@@ -1434,9 +1434,9 @@ func (mb *msgBlock) rebuildStateFromBufLocked(buf []byte, allowTruncate bool) (*
 		if mb.mfd != nil {
 			fd = mb.mfd
 		} else {
-			<-dios
+			diosAcquire()
 			fd, err = os.OpenFile(mb.mfn, os.O_RDWR, defaultFilePerms)
-			dios <- struct{}{}
+			diosRelease()
 			if err == nil {
 				defer fd.Close()
 			}
@@ -1670,15 +1670,12 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 	defer fs.mu.Unlock()
 
 	// Check for any left over purged messages.
-	<-dios
-	pdir := filepath.Join(fs.fcfg.StoreDir, purgeDir)
-	if _, err := os.Stat(pdir); err == nil {
-		os.RemoveAll(pdir)
-	}
+	diosAcquire()
+	fs.recoverPartialPurge()
 	// Grab our stream state file and load it in.
 	fn := filepath.Join(fs.fcfg.StoreDir, msgDir, streamStreamStateFile)
 	buf, err := os.ReadFile(fn)
-	dios <- struct{}{}
+	diosRelease()
 
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -1902,12 +1899,12 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 	mdir := filepath.Join(fs.fcfg.StoreDir, msgDir)
 	var dirs []os.DirEntry
 
-	<-dios
+	diosAcquire()
 	if f, err := os.Open(mdir); err == nil {
 		dirs, _ = f.ReadDir(-1)
 		f.Close()
 	}
-	dios <- struct{}{}
+	diosRelease()
 
 	var index uint32
 	for _, fi := range dirs {
@@ -1953,10 +1950,10 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 // Lock should be held.
 func (fs *fileStore) recoverTTLState() error {
 	// See if we have a timed hash wheel for TTLs.
-	<-dios
+	diosAcquire()
 	fn := filepath.Join(fs.fcfg.StoreDir, msgDir, ttlStreamStateFile)
 	buf, err := os.ReadFile(fn)
-	dios <- struct{}{}
+	diosRelease()
 
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -2070,9 +2067,9 @@ func (fs *fileStore) cleanupOldMeta() {
 	mdir := filepath.Join(fs.fcfg.StoreDir, msgDir)
 	fs.mu.RUnlock()
 
-	<-dios
+	diosAcquire()
 	f, err := os.Open(mdir)
-	dios <- struct{}{}
+	diosRelease()
 	if err != nil {
 		return
 	}
@@ -2097,20 +2094,17 @@ func (fs *fileStore) recoverMsgs() error {
 	defer fs.mu.Unlock()
 
 	// Check for any left over purged messages.
-	<-dios
-	pdir := filepath.Join(fs.fcfg.StoreDir, purgeDir)
-	if _, err := os.Stat(pdir); err == nil {
-		os.RemoveAll(pdir)
-	}
+	diosAcquire()
+	fs.recoverPartialPurge()
 	mdir := filepath.Join(fs.fcfg.StoreDir, msgDir)
 	f, err := os.Open(mdir)
 	if err != nil {
-		dios <- struct{}{}
+		diosRelease()
 		return errNotReadable
 	}
 	dirs, err := f.ReadDir(-1)
 	f.Close()
-	dios <- struct{}{}
+	diosRelease()
 
 	if err != nil {
 		return errNotReadable
@@ -4170,9 +4164,9 @@ func (fs *fileStore) newMsgBlockForWrite() (*msgBlock, error) {
 	}
 	mb.hh = hh
 
-	<-dios
+	diosAcquire()
 	mfd, err := os.OpenFile(mb.mfn, os.O_CREATE|os.O_RDWR, defaultFilePerms)
-	dios <- struct{}{}
+	diosRelease()
 
 	if err != nil {
 		if isPermissionError(err) {
@@ -5213,9 +5207,9 @@ func (mb *msgBlock) compactWithFloor(floor uint64) {
 
 	// We will write to a new file and mv/rename it in case of failure.
 	mfn := filepath.Join(mb.fs.fcfg.StoreDir, msgDir, fmt.Sprintf(newScan, mb.index))
-	<-dios
+	diosAcquire()
 	err := os.WriteFile(mfn, nbuf, defaultFilePerms)
-	dios <- struct{}{}
+	diosRelease()
 	if err != nil {
 		os.Remove(mfn)
 		return
@@ -6087,9 +6081,9 @@ func (mb *msgBlock) enableForWriting(fip bool) error {
 	if mb.mfd != nil {
 		return nil
 	}
-	<-dios
+	diosAcquire()
 	mfd, err := os.OpenFile(mb.mfn, os.O_CREATE|os.O_RDWR, defaultFilePerms)
-	dios <- struct{}{}
+	diosRelease()
 	if err != nil {
 		return fmt.Errorf("error opening msg block file [%q]: %v", mb.mfn, err)
 	}
@@ -6425,9 +6419,9 @@ func (mb *msgBlock) recompressOnDiskIfNeeded() error {
 	//    header, in which case we do nothing.
 	// 2. The block will be uncompressed, in which case we will compress it
 	//    and then write it back out to disk, re-encrypting if necessary.
-	<-dios
+	diosAcquire()
 	origBuf, err := os.ReadFile(mb.mfn)
-	dios <- struct{}{}
+	diosRelease()
 
 	if err != nil {
 		return fmt.Errorf("failed to read original block from disk: %w", err)
@@ -6481,9 +6475,9 @@ func (mb *msgBlock) atomicOverwriteFile(buf []byte, allowCompress bool) error {
 	// operation if something goes wrong), create a new temporary file. We will
 	// write out the new block here and then swap the files around afterwards
 	// once everything else has succeeded correctly.
-	<-dios
+	diosAcquire()
 	tmpFD, err := os.OpenFile(tmpFN, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, defaultFilePerms)
-	dios <- struct{}{}
+	diosRelease()
 
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %w", err)
@@ -6676,9 +6670,9 @@ func (fs *fileStore) syncBlocks() {
 			if mb.mfd != nil {
 				fd = mb.mfd
 			} else {
-				<-dios
+				diosAcquire()
 				fd, _ = os.OpenFile(mb.mfn, os.O_RDWR, defaultFilePerms)
-				dios <- struct{}{}
+				diosRelease()
 				didOpen = true
 			}
 			// If we have an fd.
@@ -6709,9 +6703,9 @@ func (fs *fileStore) syncBlocks() {
 	// Sync state file if we are not running with sync always.
 	if !fs.fcfg.SyncAlways {
 		fn := filepath.Join(fs.fcfg.StoreDir, msgDir, streamStreamStateFile)
-		<-dios
+		diosAcquire()
 		fd, _ := os.OpenFile(fn, os.O_RDWR, defaultFilePerms)
-		dios <- struct{}{}
+		diosRelease()
 		if fd != nil {
 			fd.Sync()
 			fd.Close()
@@ -7008,9 +7002,9 @@ func (mb *msgBlock) writeAt(buf []byte, woff int64) (int, error) {
 		mb.mockWriteErr = false
 		return 0, errors.New("mock write error")
 	}
-	<-dios
+	diosAcquire()
 	n, err := mb.mfd.WriteAt(buf, woff)
-	dios <- struct{}{}
+	diosRelease()
 	return n, err
 }
 
@@ -7164,9 +7158,9 @@ func (mb *msgBlock) fssNotLoaded() bool {
 // Lock should be held
 func (mb *msgBlock) openBlock() (*os.File, error) {
 	// Gate with concurrent IO semaphore.
-	<-dios
+	diosAcquire()
 	f, err := os.Open(mb.mfn)
-	dios <- struct{}{}
+	diosRelease()
 	return f, err
 }
 
@@ -7219,9 +7213,9 @@ func (mb *msgBlock) loadBlock(buf []byte) ([]byte, error) {
 		buf = buf[:sz]
 	}
 
-	<-dios
-	n, err := io.ReadFull(f, buf)
-	dios <- struct{}{}
+	diosAcquire()
+	n, err := io.ReadFull(f, buf[:sz])
+	diosRelease()
 	// On success capture raw bytes size.
 	if err == nil {
 		mb.rbytes = uint64(n)
@@ -8626,6 +8620,13 @@ func (fs *fileStore) purge(fseq uint64) (uint64, error) {
 	return purged, nil
 }
 
+func (fs *fileStore) recoverPartialPurge() {
+	pdir := filepath.Join(fs.fcfg.StoreDir, purgeDir)
+	if _, err := os.Stat(pdir); err == nil {
+		os.RemoveAll(pdir)
+	}
+}
+
 // Compact will remove all messages from this store up to
 // but not including the seq parameter.
 // Will return the number of purged messages.
@@ -8780,9 +8781,9 @@ func (fs *fileStore) compact(seq uint64) (uint64, error) {
 
 			// We will write to a new file and mv/rename it in case of failure.
 			mfn := filepath.Join(smb.fs.fcfg.StoreDir, msgDir, fmt.Sprintf(newScan, smb.index))
-			<-dios
+			diosAcquire()
 			err := os.WriteFile(mfn, nbuf, defaultFilePerms)
-			dios <- struct{}{}
+			diosRelease()
 			if err != nil {
 				os.Remove(mfn)
 				goto SKIP
@@ -9676,24 +9677,25 @@ func (fs *fileStore) Delete() error {
 	}
 	// Do this in separate Go routine in case lots of blocks.
 	// Purge above protects us as does the removal of meta artifacts above.
-	go func() {
-		<-dios
+	removeDir := func() {
+		diosAcquire()
 		err := os.RemoveAll(ndir)
-		dios <- struct{}{}
+		diosRelease()
 		if err == nil {
 			return
 		}
 		ttl := time.Now().Add(time.Second)
 		for time.Now().Before(ttl) {
 			time.Sleep(10 * time.Millisecond)
-			<-dios
+			diosAcquire()
 			err = os.RemoveAll(ndir)
-			dios <- struct{}{}
+			diosRelease()
 			if err == nil {
 				return
 			}
 		}
-	}()
+	}
+	go removeDir()
 
 	return nil
 }
@@ -9984,10 +9986,10 @@ func (fs *fileStore) _writeFullState(force, needLock bool) error {
 
 	// Write our update index.db
 	// Protect with dios.
-	<-dios
+	diosAcquire()
 	err := os.WriteFile(fn, buf, defaultFilePerms)
 	// if file system is not writable isPermissionError is set to true
-	dios <- struct{}{}
+	diosRelease()
 	if isPermissionError(err) {
 		return err
 	}
@@ -11053,6 +11055,36 @@ func (o *consumerFileStore) encryptState(buf []byte) ([]byte, error) {
 // https://github.com/nats-io/nats-server/issues/2742
 var dios chan struct{}
 
+// DIO tracking state for statistics.
+var (
+	diosAcquires  atomic.Uint64    // Total number of dios channel acquisitions
+	diosHistogram [6]atomic.Uint64 // Wait time histogram buckets (sampled)
+	diosMaxWait   atomic.Int64     // Maximum wait time in nanoseconds (sampled)
+)
+
+// Sample 1 in N acquires for timing to reduce time.Now() overhead.
+const diosSampleRate = 10
+
+// Histogram bucket boundaries in nanoseconds.
+// Buckets: <1µs, 1-10µs, 10-100µs, 100µs-1ms, 1-10ms, >10ms
+var diosBuckets = [5]int64{
+	1_000,      // 1µs
+	10_000,     // 10µs
+	100_000,    // 100µs
+	1_000_000,  // 1ms
+	10_000_000, // 10ms
+}
+
+// Bucket midpoints in microseconds for percentile estimation.
+var diosBucketMidpoints = [6]float64{
+	0.5,   // <1µs -> 0.5µs
+	5,     // 1-10µs -> 5µs
+	50,    // 10-100µs -> 50µs
+	500,   // 100µs-1ms -> 500µs
+	5000,  // 1-10ms -> 5ms
+	20000, // >10ms -> 20ms (estimate)
+}
+
 // Used to setup our simplistic counting semaphore using buffered channels.
 // golang.org's semaphore seemed a bit heavy.
 func init() {
@@ -11068,8 +11100,101 @@ func init() {
 	dios = make(chan struct{}, nIO)
 	// Fill it up to start.
 	for i := 0; i < nIO; i++ {
-		dios <- struct{}{}
+		diosRelease()
 	}
+}
+
+// diosAcquire acquires the disk I/O semaphore and tracks wait time statistics.
+// Only 1 in diosSampleRate acquires are timed to reduce time.Now() overhead.
+func diosAcquire() {
+	// Increment counter first to determine if we should sample this acquire.
+	n := diosAcquires.Add(1)
+	sample := n%diosSampleRate == 0
+
+	var start time.Time
+	if sample {
+		start = time.Now()
+	}
+
+	<-dios
+
+	if !sample {
+		return
+	}
+
+	// Track wait time statistics for sampled acquires.
+	waitNs := time.Since(start).Nanoseconds()
+
+	// Update histogram bucket
+	bucket := len(diosBuckets) // Default to last bucket (>10ms)
+	for i, limit := range diosBuckets {
+		if waitNs < limit {
+			bucket = i
+			break
+		}
+	}
+	diosHistogram[bucket].Add(1)
+
+	// Update max wait
+	if waitNs > diosMaxWait.Load() {
+		diosMaxWait.Store(waitNs)
+	}
+}
+
+// diosRelease releases the disk I/O semaphore.
+func diosRelease() {
+	dios <- struct{}{}
+}
+
+// DiskIOStats holds disk I/O semaphore statistics.
+type DiskIOStats struct {
+	Total uint64  `json:"total"`         // Total acquisitions
+	P50   float64 `json:"p50,omitempty"` // 50th percentile wait time (µs)
+	P75   float64 `json:"p75,omitempty"` // 75th percentile wait time (µs)
+	P95   float64 `json:"p95,omitempty"` // 95th percentile wait time (µs)
+	P99   float64 `json:"p99,omitempty"` // 99th percentile wait time (µs)
+	Max   float64 `json:"max,omitempty"` // Maximum wait time (µs)
+}
+
+// diosStats returns current disk I/O semaphore statistics.
+func diosStats() *DiskIOStats {
+	// Gather histogram counts
+	var counts [6]uint64
+	var total uint64
+	for i := range diosHistogram {
+		counts[i] = diosHistogram[i].Load()
+		total += counts[i]
+	}
+
+	stats := &DiskIOStats{
+		Total: diosAcquires.Load(),
+		Max:   float64(diosMaxWait.Load()) / 1000, // ns to µs
+	}
+
+	if total == 0 {
+		return stats
+	}
+
+	// Calculate percentiles from histogram using linear interpolation
+	stats.P50 = diosPercentile(counts[:], total, 0.50)
+	stats.P75 = diosPercentile(counts[:], total, 0.75)
+	stats.P95 = diosPercentile(counts[:], total, 0.95)
+	stats.P99 = diosPercentile(counts[:], total, 0.99)
+
+	return stats
+}
+
+// diosPercentile calculates approximate percentile from histogram.
+func diosPercentile(counts []uint64, total uint64, p float64) float64 {
+	target := uint64(float64(total) * p)
+	var cumulative uint64
+	for i, count := range counts {
+		cumulative += count
+		if cumulative >= target {
+			return diosBucketMidpoints[i]
+		}
+	}
+	return diosBucketMidpoints[len(diosBucketMidpoints)-1]
 }
 
 func (o *consumerFileStore) writeState(buf []byte) error {
@@ -11251,9 +11376,9 @@ func (o *consumerFileStore) stateWithCopyLocked(doCopy bool) (*ConsumerState, er
 	}
 
 	// Read the state in here from disk..
-	<-dios
+	diosAcquire()
 	buf, err := os.ReadFile(o.ifn)
-	dios <- struct{}{}
+	diosRelease()
 
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
@@ -11512,9 +11637,9 @@ func (o *consumerFileStore) delete(streamDeleted bool) error {
 
 	// If our stream was not deleted this will remove the directories.
 	if odir != _EMPTY_ && !streamDeleted {
-		<-dios
+		diosAcquire()
 		err = os.RemoveAll(odir)
-		dios <- struct{}{}
+		diosRelease()
 	}
 
 	if !streamDeleted {
@@ -11717,9 +11842,9 @@ func writeAtomically(name string, data []byte, perm fs.FileMode, sync bool) erro
 	if sync {
 		flags = flags | os.O_SYNC
 	}
-	<-dios
+	diosAcquire()
 	defer func() {
-		dios <- struct{}{}
+		diosRelease()
 	}()
 	f, err := os.OpenFile(tmp, flags, perm)
 	if err != nil {
