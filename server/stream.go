@@ -4616,6 +4616,8 @@ func (mset *stream) processDirectGetRequest(_ *subscription, c *client, _ *Accou
 	if len(reply) == 0 {
 		return
 	}
+	// Track the API call for traffic stats with latency.
+	defer mset.js.trackAPI(JSAPIDirectGet)()
 	_, msg := c.msgParts(rmsg)
 	if len(msg) == 0 {
 		hdr := []byte("NATS/1.0 408 Empty Request\r\n\r\n")
@@ -5447,6 +5449,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	}
 
 	// If here we succeeded in storing the message.
+	js.trackInMsg(len(hdr) + len(msg))
 	mset.lmsgId = msgId
 	mset.lseq = seq
 
