@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -99,6 +100,105 @@ type JetStreamAPIStats struct {
 	Inflight uint64 `json:"inflight,omitempty"` // Inflight are the number of API requests currently being served
 }
 
+// JSAPIType identifies the type of JetStream API call for traffic tracking
+type JSAPIType int
+
+// JetStream API types for traffic tracking
+const (
+	JSAPIInfo JSAPIType = iota
+	JSAPIStreamCreate
+	JSAPIStreamUpdate
+	JSAPIStreamNames
+	JSAPIStreamList
+	JSAPIStreamInfo
+	JSAPIStreamDelete
+	JSAPIStreamPurge
+	JSAPIStreamSnapshot
+	JSAPIStreamRestore
+	JSAPIStreamRemovePeer
+	JSAPIStreamLeaderStepdown
+	JSAPIStreamMsgDelete
+	JSAPIStreamMsgGet
+	JSAPIConsumerCreate
+	JSAPIConsumerNames
+	JSAPIConsumerList
+	JSAPIConsumerInfo
+	JSAPIConsumerDelete
+	JSAPIConsumerPause
+	JSAPIConsumerLeaderStepdown
+	JSAPIConsumerMsgNext
+	JSAPIConsumerUnpin
+	JSAPIDirectGet
+	JSAPIMetaLeaderStepdown
+	JSAPIServerRemove
+	JSAPIAccountPurge
+	JSAPIAccountStreamMove
+	JSAPIAccountStreamCancelMove
+	JSAPIAck
+	JSAPIFlowControl
+	JSAPIHeartbeat
+	JSAPIUnknown
+	JSAPITypeCount // Must be last, used to size the array
+)
+
+// JSAPIOpStats holds count and latency percentiles for a single API operation
+type JSAPIOpStats struct {
+	Count uint64 `json:"count,omitempty"`
+	P50   int64  `json:"p50,omitempty"`
+	P90   int64  `json:"p90,omitempty"`
+	P99   int64  `json:"p99,omitempty"`
+}
+
+// JSAPITrafficStats is a map of API operation name to its statistics
+type JSAPITrafficStats map[string]*JSAPIOpStats
+
+// jsAPITypeNames maps JSAPIType to its JSON field name
+var jsAPITypeNames = [JSAPITypeCount]string{
+	JSAPIInfo:                    "info",
+	JSAPIStreamCreate:            "stream_create",
+	JSAPIStreamUpdate:            "stream_update",
+	JSAPIStreamNames:             "stream_names",
+	JSAPIStreamList:              "stream_list",
+	JSAPIStreamInfo:              "stream_info",
+	JSAPIStreamDelete:            "stream_delete",
+	JSAPIStreamPurge:             "stream_purge",
+	JSAPIStreamSnapshot:          "stream_snapshot",
+	JSAPIStreamRestore:           "stream_restore",
+	JSAPIStreamRemovePeer:        "stream_remove_peer",
+	JSAPIStreamLeaderStepdown:    "stream_leader_stepdown",
+	JSAPIStreamMsgDelete:         "stream_msg_delete",
+	JSAPIStreamMsgGet:            "stream_msg_get",
+	JSAPIConsumerCreate:          "consumer_create",
+	JSAPIConsumerNames:           "consumer_names",
+	JSAPIConsumerList:            "consumer_list",
+	JSAPIConsumerInfo:            "consumer_info",
+	JSAPIConsumerDelete:          "consumer_delete",
+	JSAPIConsumerPause:           "consumer_pause",
+	JSAPIConsumerLeaderStepdown:  "consumer_leader_stepdown",
+	JSAPIConsumerMsgNext:         "consumer_msg_next",
+	JSAPIConsumerUnpin:           "consumer_unpin",
+	JSAPIDirectGet:               "direct_get",
+	JSAPIMetaLeaderStepdown:      "meta_leader_stepdown",
+	JSAPIServerRemove:            "server_remove",
+	JSAPIAccountPurge:            "account_purge",
+	JSAPIAccountStreamMove:       "account_stream_move",
+	JSAPIAccountStreamCancelMove: "account_stream_cancel_move",
+	JSAPIAck:                     "ack",
+	JSAPIFlowControl:             "flow_control",
+	JSAPIHeartbeat:               "heartbeat",
+	JSAPIUnknown:                 "unknown",
+}
+
+// jsAPILatencyTracker tracks latencies using a lock-free circular buffer.
+// Writers use atomic operations to avoid mutex contention on hot paths.
+type jsAPILatencyTracker struct {
+	samples [jsAPILatencySampleSize]int64 // Fixed-size array, atomically accessed
+	pos     int64                         // Current write position (atomic)
+	count   int64                         // Total samples written (atomic)
+}
+
+const jsAPILatencySampleSize = 1000 // Number of samples to keep per API type
+
 // This is for internal accounting for JetStream for this server.
 type jetStream struct {
 	// These are here first because of atomics on 32bit systems.
@@ -110,14 +210,27 @@ type jetStream struct {
 	memUsed       int64
 	storeUsed     int64
 	queueLimit    int64
-	clustered     int32
-	mu            sync.RWMutex
-	srv           *Server
-	config        JetStreamConfig
-	cluster       *jetStreamCluster
-	accounts      map[string]*jsAccount
-	apiSubs       *Sublist
-	started       time.Time
+	// Rolling average of pending API requests (scaled by 1000 for precision).
+	apiPendingAvg   int64
+	acksTotal       int64
+	heartbeatsTotal int64
+	inMsgsTotal     int64
+	inBytesTotal    int64
+	outMsgsTotal    int64
+	outBytesTotal   int64
+	clustered       int32
+
+	mu       sync.RWMutex
+	srv      *Server
+	config   JetStreamConfig
+	cluster  *jetStreamCluster
+	accounts map[string]*jsAccount
+	apiSubs  *Sublist
+	started  time.Time
+
+	// Traffic counters and latency trackers for each JS API type.
+	apiTraffic [JSAPITypeCount]int64
+	apiLatency [JSAPITypeCount]*jsAPILatencyTracker
 
 	// System level request to purge a stream move
 	accountPurge *subscription
@@ -410,6 +523,8 @@ func (s *Server) initJetStreamEncryption() (err error) {
 // enableJetStream will start up the JetStream subsystem.
 func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 	js := &jetStream{srv: s, config: cfg, accounts: make(map[string]*jsAccount), apiSubs: NewSublistNoCache()}
+	js.initAPILatencyTracking()
+
 	s.gcbMu.Lock()
 	if s.gcbOutMax = s.getOpts().JetStreamMaxCatchup; s.gcbOutMax == 0 {
 		s.gcbOutMax = defaultMaxTotalCatchupOutBytes
@@ -874,6 +989,31 @@ func (js *jetStream) isEnabled() bool {
 		return false
 	}
 	return !js.disabled.Load()
+}
+
+// updatePendingAvg updates the rolling average of pending API requests using
+// an Exponential Moving Average (EMA). The formula is:
+//
+//	EMA_new = α × current + (1-α) × EMA_old
+//
+// With α=0.1, each new sample contributes 10% to the average while the
+// historical average contributes 90%. This creates a smooth average that
+// adapts to changing request patterns while filtering out short-term spikes.
+//
+// The average is stored scaled by 1000 for precision in atomic integer operations.
+func (js *jetStream) updatePendingAvg(pending int) {
+	const emaScale int64 = 1000
+	const emaAlpha int64 = 100 // α=0.1 scaled by 1000
+	pendingScaled := int64(pending) * emaScale
+
+	oldAvg := atomic.LoadInt64(&js.apiPendingAvg)
+	var newAvg int64
+	if oldAvg == 0 {
+		newAvg = pendingScaled
+	} else {
+		newAvg = (emaAlpha*pendingScaled + (emaScale-emaAlpha)*oldAvg) / emaScale
+	}
+	atomic.StoreInt64(&js.apiPendingAvg, newAvg)
 }
 
 // Mark that we will be in standlone mode.
@@ -2415,6 +2555,155 @@ func (js *jetStream) usageStats() *JetStreamStats {
 	return &stats
 }
 
+// initAPILatencyTracking initializes latency trackers for all API types that support latency tracking.
+// ACK, FlowControl, Heartbeat, and Unknown are excluded as they are one-way or don't need tracking.
+func (js *jetStream) initAPILatencyTracking() {
+	for i := JSAPIType(0); i < JSAPITypeCount; i++ {
+		if i != JSAPIAck && i != JSAPIFlowControl && i != JSAPIHeartbeat && i != JSAPIUnknown {
+			js.apiLatency[i] = &jsAPILatencyTracker{}
+		}
+	}
+}
+
+func (js *jetStream) trackAPICall(apiType JSAPIType) {
+	if js == nil {
+		return
+	}
+	if apiType >= 0 && apiType < JSAPITypeCount {
+		atomic.AddInt64(&js.apiTraffic[apiType], 1)
+	}
+}
+
+// trackAPI increments the traffic counter, records the start time, and returns a function
+// that should be called via defer to record the latency when the request completes.
+func (js *jetStream) trackAPI(apiType JSAPIType) func() {
+	if js == nil {
+		return func() {}
+	}
+	atomic.AddInt64(&js.apiTraffic[apiType], 1)
+	start := time.Now()
+	return func() {
+		if tracker := js.apiLatency[apiType]; tracker != nil {
+			tracker.record(time.Since(start).Microseconds())
+		}
+	}
+}
+
+// trackAPI increments the traffic counter, records the start time, and returns a function
+// that should be called via defer to record the latency when the request completes.
+func (s *Server) trackAPI(apiType JSAPIType) func() {
+	return s.getJetStream().trackAPI(apiType)
+}
+
+// record adds a latency sample to the circular buffer using lock-free atomics.
+func (t *jsAPILatencyTracker) record(latencyMicros int64) {
+	// Atomically increment position and get the slot to write to.
+	idx := atomic.AddInt64(&t.pos, 1) - 1
+	slot := idx % jsAPILatencySampleSize
+	atomic.StoreInt64(&t.samples[slot], latencyMicros)
+	atomic.AddInt64(&t.count, 1)
+}
+
+// percentiles calculates and returns p50, p90, p99 from the circular buffer.
+// Returns (0, 0, 0) if no samples exist.
+// Note: This takes a snapshot of samples which may have slight inconsistency
+// during concurrent writes, but this is acceptable for approximate percentiles.
+func (t *jsAPILatencyTracker) percentiles() (p50, p90, p99 int64) {
+	count := atomic.LoadInt64(&t.count)
+	if count == 0 {
+		return 0, 0, 0
+	}
+
+	// Determine how many samples we have (up to buffer size).
+	n := int(count)
+	if n > jsAPILatencySampleSize {
+		n = jsAPILatencySampleSize
+	}
+
+	// Snapshot samples atomically.
+	sorted := make([]int64, n)
+	for i := 0; i < n; i++ {
+		sorted[i] = atomic.LoadInt64(&t.samples[i])
+	}
+	slices.Sort(sorted)
+
+	return sorted[n*50/100], sorted[n*90/100], sorted[n*99/100]
+}
+
+// trackAck increments the dedicated ACK traffic counter.
+// This is separate from apiTraffic to avoid cache line contention since ACKs are the highest traffic.
+func (js *jetStream) trackAck() {
+	if js == nil {
+		return
+	}
+	atomic.AddInt64(&js.acksTotal, 1)
+}
+
+// trackHeartbeat increments the dedicated heartbeat counter.
+// This is separate from apiTraffic to avoid cache line contention since heartbeats can be high traffic.
+func (js *jetStream) trackHeartbeat() {
+	if js == nil {
+		return
+	}
+	atomic.AddInt64(&js.heartbeatsTotal, 1)
+}
+
+// trackInMsg increments counters for messages stored to streams.
+func (js *jetStream) trackInMsg(msgSize int) {
+	if js == nil {
+		return
+	}
+	atomic.AddInt64(&js.inMsgsTotal, 1)
+	atomic.AddInt64(&js.inBytesTotal, int64(msgSize))
+}
+
+// trackOutMsg increments counters for messages delivered to consumers.
+func (js *jetStream) trackOutMsg(msgSize int) {
+	if js == nil {
+		return
+	}
+	atomic.AddInt64(&js.outMsgsTotal, 1)
+	atomic.AddInt64(&js.outBytesTotal, int64(msgSize))
+}
+
+// apiStats returns the current traffic statistics for all JS API types.
+func (js *jetStream) apiStats() JSAPITrafficStats {
+	stats := make(JSAPITrafficStats)
+
+	for apiType := JSAPIType(0); apiType < JSAPITypeCount; apiType++ {
+		var count uint64
+		// ACK and Heartbeat use dedicated counters
+		switch apiType {
+		case JSAPIAck:
+			count = uint64(atomic.LoadInt64(&js.acksTotal))
+		case JSAPIHeartbeat:
+			count = uint64(atomic.LoadInt64(&js.heartbeatsTotal))
+		default:
+			count = uint64(atomic.LoadInt64(&js.apiTraffic[apiType]))
+		}
+
+		// Skip if no calls recorded
+		if count == 0 {
+			continue
+		}
+
+		name := jsAPITypeNames[apiType]
+		opStats := &JSAPIOpStats{Count: count}
+
+		// Get latency percentiles if tracker exists
+		if tracker := js.apiLatency[apiType]; tracker != nil {
+			opStats.P50, opStats.P90, opStats.P99 = tracker.percentiles()
+		}
+
+		stats[name] = opStats
+	}
+
+	if len(stats) == 0 {
+		return nil
+	}
+	return stats
+}
+
 // Check to see if we have enough system resources for this account.
 // Lock should be held.
 func (js *jetStream) sufficientResources(limits map[string]JetStreamAccountLimits) error {
@@ -3045,4 +3334,106 @@ func (s *Server) handleWritePermissionError() {
 
 		//TODO Send respective advisory if needed, same as in handleOutOfSpace
 	}
+}
+
+// Internal callback tracking state for statistics.
+var (
+	icbCalls     atomic.Uint64    // Total number of internal callback invocations
+	icbHistogram [6]atomic.Uint64 // Duration histogram buckets (sampled)
+	icbMaxDur    atomic.Int64     // Maximum duration in nanoseconds (sampled)
+)
+
+// Sample 1 in N callbacks for timing to reduce time.Now() overhead.
+const icbSampleRate = 10
+
+// Histogram bucket boundaries in nanoseconds for internal callbacks.
+// Buckets: <100µs, 100µs-1ms, 1-10ms, 10-100ms, 100ms-1s, >1s
+var icbBuckets = [5]int64{
+	100_000,       // 100µs
+	1_000_000,     // 1ms
+	10_000_000,    // 10ms
+	100_000_000,   // 100ms
+	1_000_000_000, // 1s
+}
+
+// Bucket midpoints in microseconds for percentile estimation.
+var icbBucketMidpoints = [6]float64{
+	50,      // <100µs -> 50µs
+	500,     // 100µs-1ms -> 500µs
+	5000,    // 1-10ms -> 5ms = 5000µs
+	50000,   // 10-100ms -> 50ms = 50000µs
+	500000,  // 100ms-1s -> 500ms = 500000µs
+	2000000, // >1s -> 2s estimate = 2000000µs
+}
+
+// trackICBDuration records the duration of an internal callback for statistics.
+func trackICBDuration(dur time.Duration) {
+	icbCalls.Add(1)
+	durNs := dur.Nanoseconds()
+
+	// Update max duration
+	if durNs > icbMaxDur.Load() {
+		icbMaxDur.Store(durNs)
+	}
+
+	// Update histogram bucket
+	bucket := len(icbBuckets) // Default to last bucket
+	for i, limit := range icbBuckets {
+		if durNs < limit {
+			bucket = i
+			break
+		}
+	}
+	icbHistogram[bucket].Add(1)
+}
+
+// InternalCallbackStats holds internal subscription callback statistics.
+type InternalCallbackStats struct {
+	Total uint64  `json:"total"`         // Total callback invocations
+	P50   float64 `json:"p50,omitempty"` // 50th percentile duration (µs)
+	P75   float64 `json:"p75,omitempty"` // 75th percentile duration (µs)
+	P95   float64 `json:"p95,omitempty"` // 95th percentile duration (µs)
+	P99   float64 `json:"p99,omitempty"` // 99th percentile duration (µs)
+	Max   float64 `json:"max,omitempty"` // Maximum duration (µs)
+}
+
+// icbStats returns current internal callback statistics.
+func icbStats() *InternalCallbackStats {
+	// Gather histogram counts
+	var counts [6]uint64
+	var total uint64
+	for i := range icbHistogram {
+		counts[i] = icbHistogram[i].Load()
+		total += counts[i]
+	}
+
+	stats := &InternalCallbackStats{
+		Total: icbCalls.Load(),
+		Max:   float64(icbMaxDur.Load()) / 1_000, // ns to µs
+	}
+
+	if total == 0 {
+		return stats
+	}
+
+	// Calculate percentiles from histogram
+	stats.P50 = icbPercentile(counts[:], total, 0.50)
+	stats.P75 = icbPercentile(counts[:], total, 0.75)
+	stats.P95 = icbPercentile(counts[:], total, 0.95)
+	stats.P99 = icbPercentile(counts[:], total, 0.99)
+
+	return stats
+}
+
+// icbPercentile calculates approximate percentile from histogram.
+func icbPercentile(counts []uint64, total uint64, p float64) float64 {
+	target := uint64(float64(total) * p)
+	var cumulative uint64
+	for i, count := range counts {
+		cumulative += count
+		if cumulative >= target {
+			return icbBucketMidpoints[i]
+		}
+	}
+	return icbBucketMidpoints[len(icbBucketMidpoints)-1]
 }

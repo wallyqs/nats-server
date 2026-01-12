@@ -5361,6 +5361,24 @@ func TestMonitorJsz(t *testing.T) {
 			require_Equal(t, info.API.Level, JSApiLevel)
 		}
 	})
+	t.Run("api-stats", func(t *testing.T) {
+		for _, url := range []string{monUrl1, monUrl2} {
+			info := readJsInfo(url + "?api-stats=1")
+			require_NotNil(t, info.ApiStats)
+			// At this point we've created streams and consumers, so we should have some traffic.
+			// StreamCreate was called 3 times (3 streams).
+			// ConsumerCreate was called 3 times (3 consumers).
+			// Other API calls like StreamInfo, AccountInfo may have been called.
+			streamCreate := info.ApiStats["stream_create"]
+			if streamCreate == nil || streamCreate.Count == 0 {
+				t.Fatalf("expected stream_create traffic to be > 0")
+			}
+			consumerCreate := info.ApiStats["consumer_create"]
+			if consumerCreate == nil || consumerCreate.Count == 0 {
+				t.Fatalf("expected consumer_create traffic to be > 0")
+			}
+		}
+	})
 }
 
 func TestMonitorJszOperatorMode(t *testing.T) {
@@ -5401,6 +5419,240 @@ func TestMonitorJszOperatorMode(t *testing.T) {
 		d := a.AccountDetails[0]
 		require_Equal(t, d.Id, accPub)
 		require_Equal(t, d.Name, accName)
+	}
+}
+
+func TestMonitorJszApiStats(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Helper to get count from api stats map
+	getCount := func(stats JSAPITrafficStats, key string) uint64 {
+		if s := stats[key]; s != nil {
+			return s.Count
+		}
+		return 0
+	}
+
+	// Get initial API stats
+	jsi, err := s.Jsz(&JSzOptions{ApiStats: true})
+	require_NoError(t, err)
+	initialStreamCreate := getCount(jsi.ApiStats, "stream_create")
+	initialConsumerCreate := getCount(jsi.ApiStats, "consumer_create")
+	initialStreamInfo := getCount(jsi.ApiStats, "stream_info")
+	initialAck := getCount(jsi.ApiStats, "ack")
+
+	// Create a stream
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"test.>"},
+	})
+	require_NoError(t, err)
+
+	// Create a consumer with explicit ACK policy
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "TEST-CONSUMER",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Get stream info
+	_, err = js.StreamInfo("TEST")
+	require_NoError(t, err)
+
+	// Publish a message
+	_, err = js.Publish("test.subject", []byte("hello"))
+	require_NoError(t, err)
+
+	// Subscribe and consume the message
+	sub, err := js.PullSubscribe("test.>", "TEST-CONSUMER")
+	require_NoError(t, err)
+
+	msgs, err := sub.Fetch(1, nats.MaxWait(5*time.Second))
+	require_NoError(t, err)
+	require_True(t, len(msgs) == 1)
+
+	// ACK the message
+	err = msgs[0].Ack()
+	require_NoError(t, err)
+
+	// Wait for ACK to be processed
+	time.Sleep(100 * time.Millisecond)
+
+	// Get updated API stats
+	jsi, err = s.Jsz(&JSzOptions{ApiStats: true})
+	require_NoError(t, err)
+	require_NotNil(t, jsi.ApiStats)
+
+	// Verify counters have incremented
+	if getCount(jsi.ApiStats, "stream_create") <= initialStreamCreate {
+		t.Fatalf("expected stream_create to increment, got %d (was %d)", getCount(jsi.ApiStats, "stream_create"), initialStreamCreate)
+	}
+	if getCount(jsi.ApiStats, "consumer_create") <= initialConsumerCreate {
+		t.Fatalf("expected consumer_create to increment, got %d (was %d)", getCount(jsi.ApiStats, "consumer_create"), initialConsumerCreate)
+	}
+	if getCount(jsi.ApiStats, "stream_info") <= initialStreamInfo {
+		t.Fatalf("expected stream_info to increment, got %d (was %d)", getCount(jsi.ApiStats, "stream_info"), initialStreamInfo)
+	}
+	if getCount(jsi.ApiStats, "ack") <= initialAck {
+		t.Fatalf("expected ack to increment, got %d (was %d)", getCount(jsi.ApiStats, "ack"), initialAck)
+	}
+}
+
+func TestMonitorJszApiLatencyStats(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Perform multiple API calls to generate latency data
+	for i := 0; i < 10; i++ {
+		streamName := fmt.Sprintf("TEST_%d", i)
+		_, err := js.AddStream(&nats.StreamConfig{
+			Name:     streamName,
+			Subjects: []string{fmt.Sprintf("test.%d.>", i)},
+		})
+		require_NoError(t, err)
+
+		// Create a consumer
+		_, err = js.AddConsumer(streamName, &nats.ConsumerConfig{
+			Durable:   fmt.Sprintf("TEST-CONSUMER-%d", i),
+			AckPolicy: nats.AckExplicitPolicy,
+		})
+		require_NoError(t, err)
+
+		// Get stream info
+		_, err = js.StreamInfo(streamName)
+		require_NoError(t, err)
+	}
+
+	// Get API stats with latency data
+	jsi, err := s.Jsz(&JSzOptions{ApiStats: true})
+	require_NoError(t, err)
+	require_NotNil(t, jsi.ApiStats)
+
+	// Verify StreamCreate stats are present and have valid values
+	streamCreate := jsi.ApiStats["stream_create"]
+	require_NotNil(t, streamCreate)
+	if streamCreate.Count != 10 {
+		t.Fatalf("expected stream_create count = 10, got %d", streamCreate.Count)
+	}
+	if streamCreate.P50 <= 0 {
+		t.Fatalf("expected stream_create p50 latency > 0, got %d", streamCreate.P50)
+	}
+	if streamCreate.P90 < streamCreate.P50 {
+		t.Fatalf("expected stream_create p90 >= p50, got p90=%d, p50=%d", streamCreate.P90, streamCreate.P50)
+	}
+	if streamCreate.P99 < streamCreate.P90 {
+		t.Fatalf("expected stream_create p99 >= p90, got p99=%d, p90=%d", streamCreate.P99, streamCreate.P90)
+	}
+
+	// Verify ConsumerCreate stats are present
+	consumerCreate := jsi.ApiStats["consumer_create"]
+	require_NotNil(t, consumerCreate)
+	if consumerCreate.Count != 10 {
+		t.Fatalf("expected consumer_create count = 10, got %d", consumerCreate.Count)
+	}
+	if consumerCreate.P50 <= 0 {
+		t.Fatalf("expected consumer_create p50 latency > 0, got %d", consumerCreate.P50)
+	}
+
+	// Verify StreamInfo stats are present
+	streamInfo := jsi.ApiStats["stream_info"]
+	require_NotNil(t, streamInfo)
+	if streamInfo.Count != 10 {
+		t.Fatalf("expected stream_info count = 10, got %d", streamInfo.Count)
+	}
+	if streamInfo.P50 <= 0 {
+		t.Fatalf("expected stream_info p50 latency > 0, got %d", streamInfo.P50)
+	}
+}
+
+func TestMonitorJszInOutMsgsStats(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Get initial stats
+	jsi, err := s.Jsz(&JSzOptions{ApiStats: true})
+	require_NoError(t, err)
+	initialInMsgs := jsi.InMsgs
+	initialInBytes := jsi.InBytes
+	initialOutMsgs := jsi.OutMsgs
+	initialOutBytes := jsi.OutBytes
+
+	// Create a stream
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"test.>"},
+	})
+	require_NoError(t, err)
+
+	// Create a consumer
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "TEST-CONSUMER",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Publish multiple messages
+	msgData := []byte("hello world")
+	numMsgs := 10
+	for i := 0; i < numMsgs; i++ {
+		_, err = js.Publish("test.subject", msgData)
+		require_NoError(t, err)
+	}
+
+	// Get updated stats after publish
+	jsi, err = s.Jsz(&JSzOptions{ApiStats: true})
+	require_NoError(t, err)
+
+	// Verify InMsgs counter incremented by at least numMsgs
+	expectedMsgs := initialInMsgs + uint64(numMsgs)
+	if jsi.InMsgs < expectedMsgs {
+		t.Fatalf("expected InMsgs >= %d, got %d", expectedMsgs, jsi.InMsgs)
+	}
+
+	// Verify InBytes counter incremented
+	if jsi.InBytes <= initialInBytes {
+		t.Fatalf("expected InBytes to increment, got %d (was %d)", jsi.InBytes, initialInBytes)
+	}
+
+	// Subscribe and consume messages to trigger OutMsgs/OutBytes
+	sub, err := js.PullSubscribe("test.>", "TEST-CONSUMER")
+	require_NoError(t, err)
+
+	msgs, err := sub.Fetch(numMsgs, nats.MaxWait(5*time.Second))
+	require_NoError(t, err)
+	require_True(t, len(msgs) == numMsgs)
+
+	// Get updated stats after consume
+	jsi, err = s.Jsz(&JSzOptions{ApiStats: true})
+	require_NoError(t, err)
+
+	// Verify OutMsgs counter incremented by at least numMsgs
+	expectedOutMsgs := initialOutMsgs + uint64(numMsgs)
+	if jsi.OutMsgs < expectedOutMsgs {
+		t.Fatalf("expected OutMsgs >= %d, got %d", expectedOutMsgs, jsi.OutMsgs)
+	}
+
+	// Verify OutBytes counter incremented
+	if jsi.OutBytes <= initialOutBytes {
+		t.Fatalf("expected OutBytes to increment, got %d (was %d)", jsi.OutBytes, initialOutBytes)
+	}
+
+	// Verify counters are only present when api-stats=true
+	jsiNoStats, err := s.Jsz(&JSzOptions{ApiStats: false})
+	require_NoError(t, err)
+	if jsiNoStats.InMsgs != 0 || jsiNoStats.InBytes != 0 || jsiNoStats.OutMsgs != 0 || jsiNoStats.OutBytes != 0 {
+		t.Fatalf("expected all traffic counters to be 0 when api-stats=false, got in=%d/%d out=%d/%d",
+			jsiNoStats.InMsgs, jsiNoStats.InBytes, jsiNoStats.OutMsgs, jsiNoStats.OutBytes)
 	}
 }
 

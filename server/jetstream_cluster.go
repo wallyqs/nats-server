@@ -1406,6 +1406,7 @@ func (js *jetStream) clusterStreamConfig(accName, streamName string) (StreamConf
 func (js *jetStream) metaSnapshot() ([]byte, error) {
 	start := time.Now()
 	js.mu.RLock()
+	lockEnd := time.Since(start)
 	s := js.srv
 	cc := js.cluster
 	nsa := 0
@@ -1413,6 +1414,7 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 	for _, asa := range cc.streams {
 		nsa += len(asa)
 	}
+	buildStart := time.Now()
 	streams := make([]writeableStreamAssignment, 0, nsa)
 	for _, asa := range cc.streams {
 		for _, sa := range asa {
@@ -1440,6 +1442,7 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 			streams = append(streams, wsa)
 		}
 	}
+	buildEnd := time.Since(buildStart)
 
 	if len(streams) == 0 {
 		js.mu.RUnlock()
@@ -1451,7 +1454,9 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 	b, err := json.Marshal(streams)
 	mend := time.Since(mstart)
 
+	unlockStart := time.Now()
 	js.mu.RUnlock()
+	unlockEnd := time.Since(unlockStart)
 
 	// Must not be possible for a JSON marshaling error to result
 	// in an empty snapshot.
@@ -1464,9 +1469,10 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 	snap := s2.Encode(nil, b)
 	cend := time.Since(cstart)
 
-	if took := time.Since(start); took > time.Second {
-		s.rateLimitFormatWarnf("Metalayer snapshot took %.3fs (streams: %d, consumers: %d, marshal: %.3fs, s2: %.3fs, uncompressed: %d, compressed: %d)",
-			took.Seconds(), nsa, nca, mend.Seconds(), cend.Seconds(), len(b), len(snap))
+	took := time.Since(start)
+	if took > time.Second {
+		s.rateLimitFormatWarnf("Metalayer snapshot took %.3fs (streams: %d, consumers: %d, lock: %.6fs, build: %.3fs, marshal: %.3fs, unlock: %.6fs, s2: %.3fs, uncompressed: %d, compressed: %d)",
+			took.Seconds(), nsa, nca, lockEnd.Seconds(), buildEnd.Seconds(), mend.Seconds(), unlockEnd.Seconds(), cend.Seconds(), len(b), len(snap))
 	}
 	return snap, nil
 }
