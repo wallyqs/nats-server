@@ -10611,6 +10611,36 @@ func (o *consumerFileStore) encryptState(buf []byte) ([]byte, error) {
 // https://github.com/nats-io/nats-server/issues/2742
 var dios chan struct{}
 
+// DIO tracking state for statistics.
+var (
+	diosAcquires  atomic.Uint64    // Total number of dios channel acquisitions
+	diosHistogram [6]atomic.Uint64 // Wait time histogram buckets (sampled)
+	diosMaxWait   atomic.Int64     // Maximum wait time in nanoseconds (sampled)
+)
+
+// Sample 1 in N acquires for timing to reduce time.Now() overhead.
+const diosSampleRate = 10
+
+// Histogram bucket boundaries in nanoseconds.
+// Buckets: <1µs, 1-10µs, 10-100µs, 100µs-1ms, 1-10ms, >10ms
+var diosBuckets = [5]int64{
+	1_000,      // 1µs
+	10_000,     // 10µs
+	100_000,    // 100µs
+	1_000_000,  // 1ms
+	10_000_000, // 10ms
+}
+
+// Bucket midpoints in microseconds for percentile estimation.
+var diosBucketMidpoints = [6]float64{
+	0.5,   // <1µs -> 0.5µs
+	5,     // 1-10µs -> 5µs
+	50,    // 10-100µs -> 50µs
+	500,   // 100µs-1ms -> 500µs
+	5000,  // 1-10ms -> 5ms
+	20000, // >10ms -> 20ms (estimate)
+}
+
 // Used to setup our simplistic counting semaphore using buffered channels.
 // golang.org's semaphore seemed a bit heavy.
 func init() {
@@ -10626,8 +10656,101 @@ func init() {
 	dios = make(chan struct{}, nIO)
 	// Fill it up to start.
 	for i := 0; i < nIO; i++ {
-		dios <- struct{}{}
+		diosRelease()
 	}
+}
+
+// diosAcquire acquires the disk I/O semaphore and tracks wait time statistics.
+// Only 1 in diosSampleRate acquires are timed to reduce time.Now() overhead.
+func diosAcquire() {
+	// Increment counter first to determine if we should sample this acquire.
+	n := diosAcquires.Add(1)
+	sample := n%diosSampleRate == 0
+
+	var start time.Time
+	if sample {
+		start = time.Now()
+	}
+
+	<-dios
+
+	if !sample {
+		return
+	}
+
+	// Track wait time statistics for sampled acquires.
+	waitNs := time.Since(start).Nanoseconds()
+
+	// Update histogram bucket
+	bucket := len(diosBuckets) // Default to last bucket (>10ms)
+	for i, limit := range diosBuckets {
+		if waitNs < limit {
+			bucket = i
+			break
+		}
+	}
+	diosHistogram[bucket].Add(1)
+
+	// Update max wait
+	if waitNs > diosMaxWait.Load() {
+		diosMaxWait.Store(waitNs)
+	}
+}
+
+// diosRelease releases the disk I/O semaphore.
+func diosRelease() {
+	dios <- struct{}{}
+}
+
+// DiskIOStats holds disk I/O semaphore statistics.
+type DiskIOStats struct {
+	Total uint64  `json:"total"`         // Total acquisitions
+	P50   float64 `json:"p50,omitempty"` // 50th percentile wait time (µs)
+	P75   float64 `json:"p75,omitempty"` // 75th percentile wait time (µs)
+	P95   float64 `json:"p95,omitempty"` // 95th percentile wait time (µs)
+	P99   float64 `json:"p99,omitempty"` // 99th percentile wait time (µs)
+	Max   float64 `json:"max,omitempty"` // Maximum wait time (µs)
+}
+
+// diosStats returns current disk I/O semaphore statistics.
+func diosStats() *DiskIOStats {
+	// Gather histogram counts
+	var counts [6]uint64
+	var total uint64
+	for i := range diosHistogram {
+		counts[i] = diosHistogram[i].Load()
+		total += counts[i]
+	}
+
+	stats := &DiskIOStats{
+		Total: diosAcquires.Load(),
+		Max:   float64(diosMaxWait.Load()) / 1000, // ns to µs
+	}
+
+	if total == 0 {
+		return stats
+	}
+
+	// Calculate percentiles from histogram using linear interpolation
+	stats.P50 = diosPercentile(counts[:], total, 0.50)
+	stats.P75 = diosPercentile(counts[:], total, 0.75)
+	stats.P95 = diosPercentile(counts[:], total, 0.95)
+	stats.P99 = diosPercentile(counts[:], total, 0.99)
+
+	return stats
+}
+
+// diosPercentile calculates approximate percentile from histogram.
+func diosPercentile(counts []uint64, total uint64, p float64) float64 {
+	target := uint64(float64(total) * p)
+	var cumulative uint64
+	for i, count := range counts {
+		cumulative += count
+		if cumulative >= target {
+			return diosBucketMidpoints[i]
+		}
+	}
+	return diosBucketMidpoints[len(diosBucketMidpoints)-1]
 }
 
 func (o *consumerFileStore) writeState(buf []byte) error {
