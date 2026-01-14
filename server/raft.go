@@ -2986,7 +2986,12 @@ func (n *raft) runCatchup(ar *appendEntryResponse, indexUpdatesQ *ipQueue[uint64
 			if ae.lterm != term {
 				ae.lterm = term
 				if ae.buf, err = ae.encode(ae.buf[:0]); err != nil {
-					n.warn("Got an error re-encoding append entry: %v", err)
+					var entrySizes []int
+					for _, e := range ae.entries {
+						entrySizes = append(entrySizes, len(e.Data))
+					}
+					n.warn("Got an error re-encoding append entry at index %d: %v (num_entries=%d, entry_sizes=%v)",
+						next, err, len(ae.entries), entrySizes)
 					return true
 				}
 			}
@@ -3062,6 +3067,8 @@ func (n *raft) sendSnapshotToFollower(subject string) (uint64, error) {
 
 	encoding, err := ae.encode(nil)
 	if err != nil {
+		n.warn("Failed to encode snapshot for follower: %v (snapshot data=%d bytes, peerstate=%d bytes, lastTerm=%d, lastIndex=%d)",
+			err, len(snap.data), len(snap.peerstate), snap.lastTerm, snap.lastIndex)
 		return 0, err
 	}
 	n.sendRPC(subject, n.areply, encoding)
@@ -3148,7 +3155,11 @@ func (n *raft) loadEntry(index uint64) (*appendEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return decodeAppendEntry(sm.msg, nil, _EMPTY_)
+	ae, err := decodeAppendEntry(sm.msg, nil, _EMPTY_)
+	if err != nil {
+		n.warn("Failed to decode append entry at index %d: %v (msg_len=%d bytes)", index, err, len(sm.msg))
+	}
+	return ae, err
 }
 
 // applyCommit will update our commit index and apply the entry to the apply queue.
