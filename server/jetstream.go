@@ -203,14 +203,14 @@ const jsAPILatencySampleSize = 1000 // Number of samples to keep per API type
 // This is for internal accounting for JetStream for this server.
 type jetStream struct {
 	// These are here first because of atomics on 32bit systems.
-	apiInflight     int64
-	apiTotal        int64
-	apiErrors       int64
-	memReserved     int64
-	storeReserved   int64
-	memUsed         int64
-	storeUsed       int64
-	queueLimit      int64
+	apiInflight   int64
+	apiTotal      int64
+	apiErrors     int64
+	memReserved   int64
+	storeReserved int64
+	memUsed       int64
+	storeUsed     int64
+	queueLimit    int64
 	// Rolling average of pending API requests (scaled by 1000 for precision).
 	apiPendingAvg   int64
 	acksTotal       int64
@@ -3483,14 +3483,14 @@ var icbBuckets = [5]int64{
 	1_000_000_000, // 1s
 }
 
-// Bucket midpoints in milliseconds for percentile estimation.
+// Bucket midpoints in microseconds for percentile estimation.
 var icbBucketMidpoints = [6]float64{
-	0.05, // <100µs -> 50µs = 0.05ms
-	0.5,  // 100µs-1ms -> 500µs = 0.5ms
-	5,    // 1-10ms -> 5ms
-	50,   // 10-100ms -> 50ms
-	500,  // 100ms-1s -> 500ms
-	2000, // >1s -> 2s estimate
+	50,      // <100µs -> 50µs
+	500,     // 100µs-1ms -> 500µs
+	5000,    // 1-10ms -> 5ms = 5000µs
+	50000,   // 10-100ms -> 50ms = 50000µs
+	500000,  // 100ms-1s -> 500ms = 500000µs
+	2000000, // >1s -> 2s estimate = 2000000µs
 }
 
 // trackICBDuration records the duration of an internal callback for statistics.
@@ -3522,11 +3522,11 @@ func trackICBDuration(dur time.Duration) {
 // InternalCallbackStats holds internal subscription callback statistics.
 type InternalCallbackStats struct {
 	Total uint64  `json:"total"`         // Total callback invocations
-	P50   float64 `json:"p50,omitempty"` // 50th percentile duration (ms)
-	P75   float64 `json:"p75,omitempty"` // 75th percentile duration (ms)
-	P95   float64 `json:"p95,omitempty"` // 95th percentile duration (ms)
-	P99   float64 `json:"p99,omitempty"` // 99th percentile duration (ms)
-	Max   float64 `json:"max,omitempty"` // Maximum duration (ms)
+	P50   float64 `json:"p50,omitempty"` // 50th percentile duration (µs)
+	P75   float64 `json:"p75,omitempty"` // 75th percentile duration (µs)
+	P95   float64 `json:"p95,omitempty"` // 95th percentile duration (µs)
+	P99   float64 `json:"p99,omitempty"` // 99th percentile duration (µs)
+	Max   float64 `json:"max,omitempty"` // Maximum duration (µs)
 }
 
 // icbStats returns current internal callback statistics.
@@ -3541,7 +3541,7 @@ func icbStats() *InternalCallbackStats {
 
 	stats := &InternalCallbackStats{
 		Total: icbCalls.Load(),
-		Max:   float64(icbMaxDur.Load()) / 1_000_000, // ns to ms
+		Max:   float64(icbMaxDur.Load()) / 1_000, // ns to µs
 	}
 
 	if total == 0 {
