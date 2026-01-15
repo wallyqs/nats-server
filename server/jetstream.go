@@ -3494,14 +3494,14 @@ var icbBucketMidpoints = [6]float64{
 }
 
 // trackICBDuration records the duration of an internal callback for statistics.
-// Only sampled calls have their duration tracked.
 func trackICBDuration(dur time.Duration) {
-	n := icbCalls.Add(1)
-	if n%icbSampleRate != 0 {
-		return
-	}
-
+	icbCalls.Add(1)
 	durNs := dur.Nanoseconds()
+
+	// Update max duration
+	if durNs > icbMaxDur.Load() {
+		icbMaxDur.Store(durNs)
+	}
 
 	// Update histogram bucket
 	bucket := len(icbBuckets) // Default to last bucket
@@ -3512,11 +3512,6 @@ func trackICBDuration(dur time.Duration) {
 		}
 	}
 	icbHistogram[bucket].Add(1)
-
-	// Update max duration
-	if durNs > icbMaxDur.Load() {
-		icbMaxDur.Store(durNs)
-	}
 }
 
 // InternalCallbackStats holds internal subscription callback statistics.
