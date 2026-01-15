@@ -10618,32 +10618,44 @@ var dios chan struct{}
 
 // DIO tracking state for statistics.
 var (
-	diosAcquires  atomic.Uint64    // Total number of dios channel acquisitions
-	diosHistogram [6]atomic.Uint64 // Wait time histogram buckets (sampled)
-	diosMaxWait   atomic.Int64     // Maximum wait time in nanoseconds (sampled)
+	diosAcquires  atomic.Uint64     // Total number of dios channel acquisitions
+	diosHistogram [12]atomic.Uint64 // Wait time histogram buckets (sampled)
+	diosMaxWait   atomic.Int64      // Maximum wait time in nanoseconds (sampled)
 )
 
 // Sample 1 in N acquires for timing to reduce time.Now() overhead.
 const diosSampleRate = 10
 
 // Histogram bucket boundaries in nanoseconds.
-// Buckets: <1µs, 1-10µs, 10-100µs, 100µs-1ms, 1-10ms, >10ms
-var diosBuckets = [5]int64{
-	1_000,      // 1µs
-	10_000,     // 10µs
-	100_000,    // 100µs
-	1_000_000,  // 1ms
-	10_000_000, // 10ms
+// Buckets: <1µs, 1-10µs, 10-100µs, 100µs-1ms, 1-10ms, 10-50ms, 50-100ms, 100-500ms, 500ms-1s, 1-5s, 5-10s, >10s
+var diosBuckets = [11]int64{
+	1_000,          // 1µs
+	10_000,         // 10µs
+	100_000,        // 100µs
+	1_000_000,      // 1ms
+	10_000_000,     // 10ms
+	50_000_000,     // 50ms
+	100_000_000,    // 100ms
+	500_000_000,    // 500ms
+	1_000_000_000,  // 1s
+	5_000_000_000,  // 5s
+	10_000_000_000, // 10s
 }
 
 // Bucket midpoints in microseconds for percentile estimation.
-var diosBucketMidpoints = [6]float64{
-	0.5,   // <1µs -> 0.5µs
-	5,     // 1-10µs -> 5µs
-	50,    // 10-100µs -> 50µs
-	500,   // 100µs-1ms -> 500µs
-	5000,  // 1-10ms -> 5ms
-	20000, // >10ms -> 20ms (estimate)
+var diosBucketMidpoints = [12]float64{
+	0.5,     // <1µs -> 0.5µs
+	5,       // 1-10µs -> 5µs
+	50,      // 10-100µs -> 50µs
+	500,     // 100µs-1ms -> 500µs
+	5000,    // 1-10ms -> 5ms = 5000µs
+	30000,   // 10-50ms -> 30ms = 30000µs
+	75000,   // 50-100ms -> 75ms = 75000µs
+	300000,  // 100-500ms -> 300ms = 300000µs
+	750000,  // 500ms-1s -> 750ms = 750000µs
+	3000000, // 1-5s -> 3s = 3000000µs
+	7500000, // 5-10s -> 7.5s = 7500000µs
+	15000000, // >10s -> 15s estimate = 15000000µs
 }
 
 // Used to setup our simplistic counting semaphore using buffered channels.
@@ -10709,18 +10721,20 @@ func diosRelease() {
 
 // DiskIOStats holds disk I/O semaphore statistics.
 type DiskIOStats struct {
-	Total uint64  `json:"total"`         // Total acquisitions
-	P50   float64 `json:"p50,omitempty"` // 50th percentile wait time (µs)
-	P75   float64 `json:"p75,omitempty"` // 75th percentile wait time (µs)
-	P95   float64 `json:"p95,omitempty"` // 95th percentile wait time (µs)
-	P99   float64 `json:"p99,omitempty"` // 99th percentile wait time (µs)
-	Max   float64 `json:"max,omitempty"` // Maximum wait time (µs)
+	Total uint64  `json:"total"`           // Total acquisitions
+	P50   float64 `json:"p50,omitempty"`   // 50th percentile wait time (µs)
+	P75   float64 `json:"p75,omitempty"`   // 75th percentile wait time (µs)
+	P95   float64 `json:"p95,omitempty"`   // 95th percentile wait time (µs)
+	P99   float64 `json:"p99,omitempty"`   // 99th percentile wait time (µs)
+	P999  float64 `json:"p999,omitempty"`  // 99.9th percentile wait time (µs)
+	P9999 float64 `json:"p9999,omitempty"` // 99.99th percentile wait time (µs)
+	Max   float64 `json:"max,omitempty"`   // Maximum wait time since server start (µs)
 }
 
 // diosStats returns current disk I/O semaphore statistics.
 func diosStats() *DiskIOStats {
 	// Gather histogram counts
-	var counts [6]uint64
+	var counts [12]uint64
 	var total uint64
 	for i := range diosHistogram {
 		counts[i] = diosHistogram[i].Load()
@@ -10741,6 +10755,8 @@ func diosStats() *DiskIOStats {
 	stats.P75 = diosPercentile(counts[:], total, 0.75)
 	stats.P95 = diosPercentile(counts[:], total, 0.95)
 	stats.P99 = diosPercentile(counts[:], total, 0.99)
+	stats.P999 = diosPercentile(counts[:], total, 0.999)
+	stats.P9999 = diosPercentile(counts[:], total, 0.9999)
 
 	return stats
 }

@@ -3338,32 +3338,48 @@ func (s *Server) handleWritePermissionError() {
 
 // Internal callback tracking state for statistics.
 var (
-	icbCalls     atomic.Uint64    // Total number of internal callback invocations
-	icbHistogram [6]atomic.Uint64 // Duration histogram buckets (sampled)
-	icbMaxDur    atomic.Int64     // Maximum duration in nanoseconds (sampled)
+	icbCalls     atomic.Uint64     // Total number of internal callback invocations
+	icbHistogram [14]atomic.Uint64 // Duration histogram buckets (sampled)
+	icbMaxDur    atomic.Int64      // Maximum duration in nanoseconds (sampled)
 )
 
 // Sample 1 in N callbacks for timing to reduce time.Now() overhead.
 const icbSampleRate = 10
 
 // Histogram bucket boundaries in nanoseconds for internal callbacks.
-// Buckets: <100µs, 100µs-1ms, 1-10ms, 10-100ms, 100ms-1s, >1s
-var icbBuckets = [5]int64{
-	100_000,       // 100µs
-	1_000_000,     // 1ms
-	10_000_000,    // 10ms
-	100_000_000,   // 100ms
-	1_000_000_000, // 1s
+// Buckets: <100µs, 100µs-1ms, 1-10ms, 10-50ms, 50-100ms, 100-500ms, 500ms-1s, 1-2s, 2-5s, 5-10s, 10-30s, 30s-1min, 1-5min, >5min
+var icbBuckets = [13]int64{
+	100_000,        // 100µs
+	1_000_000,      // 1ms
+	10_000_000,     // 10ms
+	50_000_000,     // 50ms
+	100_000_000,    // 100ms
+	500_000_000,    // 500ms
+	1_000_000_000,  // 1s
+	2_000_000_000,  // 2s
+	5_000_000_000,  // 5s
+	10_000_000_000, // 10s
+	30_000_000_000, // 30s
+	60_000_000_000, // 1min
+	300_000_000_000, // 5min
 }
 
 // Bucket midpoints in microseconds for percentile estimation.
-var icbBucketMidpoints = [6]float64{
-	50,      // <100µs -> 50µs
-	500,     // 100µs-1ms -> 500µs
-	5000,    // 1-10ms -> 5ms = 5000µs
-	50000,   // 10-100ms -> 50ms = 50000µs
-	500000,  // 100ms-1s -> 500ms = 500000µs
-	2000000, // >1s -> 2s estimate = 2000000µs
+var icbBucketMidpoints = [14]float64{
+	50,        // <100µs -> 50µs
+	500,       // 100µs-1ms -> 500µs
+	5000,      // 1-10ms -> 5ms = 5000µs
+	30000,     // 10-50ms -> 30ms = 30000µs
+	75000,     // 50-100ms -> 75ms = 75000µs
+	300000,    // 100-500ms -> 300ms = 300000µs
+	750000,    // 500ms-1s -> 750ms = 750000µs
+	1500000,   // 1-2s -> 1.5s = 1500000µs
+	3500000,   // 2-5s -> 3.5s = 3500000µs
+	7500000,   // 5-10s -> 7.5s = 7500000µs
+	20000000,  // 10-30s -> 20s = 20000000µs
+	45000000,  // 30s-1min -> 45s = 45000000µs
+	180000000, // 1-5min -> 3min = 180000000µs
+	450000000, // >5min -> 7.5min estimate = 450000000µs
 }
 
 // trackICBDuration records the duration of an internal callback for statistics.
@@ -3389,18 +3405,20 @@ func trackICBDuration(dur time.Duration) {
 
 // InternalCallbackStats holds internal subscription callback statistics.
 type InternalCallbackStats struct {
-	Total uint64  `json:"total"`         // Total callback invocations
-	P50   float64 `json:"p50,omitempty"` // 50th percentile duration (µs)
-	P75   float64 `json:"p75,omitempty"` // 75th percentile duration (µs)
-	P95   float64 `json:"p95,omitempty"` // 95th percentile duration (µs)
-	P99   float64 `json:"p99,omitempty"` // 99th percentile duration (µs)
-	Max   float64 `json:"max,omitempty"` // Maximum duration (µs)
+	Total uint64  `json:"total"`           // Total callback invocations
+	P50   float64 `json:"p50,omitempty"`   // 50th percentile duration (µs)
+	P75   float64 `json:"p75,omitempty"`   // 75th percentile duration (µs)
+	P95   float64 `json:"p95,omitempty"`   // 95th percentile duration (µs)
+	P99   float64 `json:"p99,omitempty"`   // 99th percentile duration (µs)
+	P999  float64 `json:"p999,omitempty"`  // 99.9th percentile duration (µs)
+	P9999 float64 `json:"p9999,omitempty"` // 99.99th percentile duration (µs)
+	Max   float64 `json:"max,omitempty"`   // Maximum duration since server start (µs)
 }
 
 // icbStats returns current internal callback statistics.
 func icbStats() *InternalCallbackStats {
 	// Gather histogram counts
-	var counts [6]uint64
+	var counts [14]uint64
 	var total uint64
 	for i := range icbHistogram {
 		counts[i] = icbHistogram[i].Load()
@@ -3421,6 +3439,8 @@ func icbStats() *InternalCallbackStats {
 	stats.P75 = icbPercentile(counts[:], total, 0.75)
 	stats.P95 = icbPercentile(counts[:], total, 0.95)
 	stats.P99 = icbPercentile(counts[:], total, 0.99)
+	stats.P999 = icbPercentile(counts[:], total, 0.999)
+	stats.P9999 = icbPercentile(counts[:], total, 0.9999)
 
 	return stats
 }
