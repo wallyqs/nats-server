@@ -60,13 +60,17 @@ type parser struct {
 
 	// pedantic reports error when configuration is not correct.
 	pedantic bool
+
+	// resolvingEnvVars tracks environment variables currently being resolved
+	// to detect circular references.
+	resolvingEnvVars map[string]struct{}
 }
 
 // Parse will return a map of keys to any, although concrete types
 // underly them. The values supported are string, bool, int64, float64, DateTime.
 // Arrays and nested Maps are also supported.
 func Parse(data string) (map[string]any, error) {
-	p, err := parse(data, "", false)
+	p, err := parse(data, "", false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +79,7 @@ func Parse(data string) (map[string]any, error) {
 
 // ParseWithChecks is equivalent to Parse but runs in pedantic mode.
 func ParseWithChecks(data string) (map[string]any, error) {
-	p, err := parse(data, "", true)
+	p, err := parse(data, "", true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +93,7 @@ func ParseFile(fp string) (map[string]any, error) {
 		return nil, fmt.Errorf("error opening config file: %v", err)
 	}
 
-	p, err := parse(string(data), fp, false)
+	p, err := parse(string(data), fp, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +107,7 @@ func ParseFileWithChecks(fp string) (map[string]any, error) {
 		return nil, err
 	}
 
-	p, err := parse(string(data), fp, true)
+	p, err := parse(string(data), fp, true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +138,7 @@ func ParseFileWithChecksDigest(fp string) (map[string]any, string, error) {
 	if err != nil {
 		return nil, _EMPTY_, err
 	}
-	p, err := parse(string(data), fp, true)
+	p, err := parse(string(data), fp, true, nil)
 	if err != nil {
 		return nil, _EMPTY_, err
 	}
@@ -180,15 +184,20 @@ func (t *token) Position() int {
 	return t.item.pos
 }
 
-func parse(data, fp string, pedantic bool) (p *parser, err error) {
+func parse(data, fp string, pedantic bool, resolvingEnvVars map[string]struct{}) (p *parser, err error) {
 	p = &parser{
-		mapping:  make(map[string]any),
-		lx:       lex(data),
-		ctxs:     make([]any, 0, 4),
-		keys:     make([]string, 0, 4),
-		ikeys:    make([]item, 0, 4),
-		fp:       filepath.Dir(fp),
-		pedantic: pedantic,
+		mapping:          make(map[string]any),
+		lx:               lex(data),
+		ctxs:             make([]any, 0, 4),
+		keys:             make([]string, 0, 4),
+		ikeys:            make([]item, 0, 4),
+		fp:               filepath.Dir(fp),
+		pedantic:         pedantic,
+		resolvingEnvVars: resolvingEnvVars,
+	}
+	// Initialize resolvingEnvVars if nil (top-level parse call)
+	if p.resolvingEnvVars == nil {
+		p.resolvingEnvVars = make(map[string]struct{})
 	}
 	p.pushContext(p.mapping)
 
@@ -455,15 +464,40 @@ func (p *parser) lookupVariable(varReference string) (any, bool, error) {
 	// If we are here, we have exhausted our context maps and still not found anything.
 	// Parse from the environment.
 	if vStr, ok := os.LookupEnv(varReference); ok {
+		// Check for circular reference: if we're already resolving this variable,
+		// it means the env var value references itself (directly or indirectly).
+		if _, resolving := p.resolvingEnvVars[varReference]; resolving {
+			return nil, false, fmt.Errorf("circular reference detected for environment variable '%s'", varReference)
+		}
+
+		// Mark this variable as being resolved to detect circular references.
+		p.resolvingEnvVars[varReference] = struct{}{}
+
 		// Everything we get here will be a string value, so we need to process as a parser would.
-		if vmap, err := Parse(fmt.Sprintf("%s=%s", pkey, vStr)); err == nil {
-			v, ok := vmap[pkey]
-			return v, ok, nil
-		} else {
+		// Pass the resolvingEnvVars map to propagate the circular reference tracking.
+		vmap, err := p.parseEnvValue(fmt.Sprintf("%s=%s", pkey, vStr))
+		if err != nil {
+			delete(p.resolvingEnvVars, varReference)
 			return nil, false, err
 		}
+
+		// Done resolving this variable.
+		delete(p.resolvingEnvVars, varReference)
+
+		v, ok := vmap[pkey]
+		return v, ok, nil
 	}
 	return nil, false, nil
+}
+
+// parseEnvValue parses an environment variable value, propagating the
+// resolvingEnvVars map to detect circular references.
+func (p *parser) parseEnvValue(data string) (map[string]any, error) {
+	envParser, err := parse(data, "", false, p.resolvingEnvVars)
+	if err != nil {
+		return nil, err
+	}
+	return envParser.mapping, nil
 }
 
 func (p *parser) setValue(val any) {

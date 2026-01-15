@@ -173,6 +173,39 @@ func TestBcryptVariable(t *testing.T) {
 	test(t, "password: $2a$11$ooo", ex)
 }
 
+func TestEnvVariableCircularReference(t *testing.T) {
+	// Test direct self-reference: EXAMPLE_VAR='$EXAMPLE_VAR'
+	evar := "__CIRCULAR_REF_TEST__"
+	os.Setenv(evar, fmt.Sprintf("$%s", evar))
+	defer os.Unsetenv(evar)
+
+	_, err := Parse(fmt.Sprintf("foo = $%s", evar))
+	if err == nil {
+		t.Fatal("Expected error for circular reference, but got nil")
+	}
+	if !strings.Contains(err.Error(), "circular reference") {
+		t.Fatalf("Expected circular reference error, got: %v", err)
+	}
+}
+
+func TestEnvVariableIndirectCircularReference(t *testing.T) {
+	// Test indirect circular reference: A='$B', B='$A'
+	evarA := "__CIRCULAR_A__"
+	evarB := "__CIRCULAR_B__"
+	os.Setenv(evarA, fmt.Sprintf("$%s", evarB))
+	os.Setenv(evarB, fmt.Sprintf("$%s", evarA))
+	defer os.Unsetenv(evarA)
+	defer os.Unsetenv(evarB)
+
+	_, err := Parse(fmt.Sprintf("foo = $%s", evarA))
+	if err == nil {
+		t.Fatal("Expected error for indirect circular reference, but got nil")
+	}
+	if !strings.Contains(err.Error(), "circular reference") {
+		t.Fatalf("Expected circular reference error, got: %v", err)
+	}
+}
+
 var easynum = `
 k = 8k
 kb = 4kb
@@ -380,7 +413,7 @@ authorization {
 `
 
 func TestIncludeVariablesWithChecks(t *testing.T) {
-	p, err := parse(varIncludedVariablesSample, "", true)
+	p, err := parse(varIncludedVariablesSample, "", true, nil)
 	if err != nil {
 		t.Fatalf("Received err: %v\n", err)
 	}
@@ -467,7 +500,7 @@ func TestParseWithNoValuesAreInvalid(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := parse(test.conf, "", true); err == nil {
+			if _, err := parse(test.conf, "", true, nil); err == nil {
 				t.Error("expected an error")
 			} else if !strings.Contains(err.Error(), test.err) {
 				t.Errorf("expected invalid conf error, got: %v", err)
@@ -501,7 +534,7 @@ func TestParseWithNoValuesEmptyConfigsAreValid(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := parse(test.conf, "", true); err != nil {
+			if _, err := parse(test.conf, "", true, nil); err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
 		})
@@ -543,7 +576,7 @@ func TestParseWithTrailingBracketsAreValid(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := parse(test.conf, "", true); err != nil {
+			if _, err := parse(test.conf, "", true, nil); err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
 		})
@@ -612,7 +645,7 @@ func TestParseWithNoValuesIncludes(t *testing.T) {
 					}
 				}
 			}
-			if _, err := parse(test.input, f.Name(), true); err == nil {
+			if _, err := parse(test.input, f.Name(), true, nil); err == nil {
 				t.Error("expected an error")
 			} else if !strings.Contains(err.Error(), test.err) || !strings.Contains(err.Error(), test.linepos) {
 				t.Errorf("expected invalid conf error, got: %v", err)
