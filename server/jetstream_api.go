@@ -890,6 +890,7 @@ func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, sub
 		s.rateLimitFormatWarnf("JetStream API queue limit reached, dropping %d requests", pending)
 		drained := int64(s.jsAPIRoutedReqs.drain())
 		atomic.AddInt64(&js.apiInflight, -drained)
+		atomic.AddInt64(&js.requestQueueDropped, drained)
 
 		s.publishAdvisory(nil, JSAdvisoryAPILimitReached, JSAPILimitReachedAdvisory{
 			TypedEvent: TypedEvent{

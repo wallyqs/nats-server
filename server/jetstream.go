@@ -212,14 +212,15 @@ type jetStream struct {
 	storeUsed     int64
 	queueLimit    int64
 	// Rolling average of pending API requests (scaled by 1000 for precision).
-	apiPendingAvg   int64
-	acksTotal       int64
-	heartbeatsTotal int64
-	inMsgsTotal     int64
-	inBytesTotal    int64
-	outMsgsTotal    int64
-	outBytesTotal   int64
-	clustered       int32
+	apiPendingAvg       int64
+	acksTotal           int64
+	heartbeatsTotal     int64
+	inMsgsTotal         int64
+	inBytesTotal        int64
+	outMsgsTotal        int64
+	outBytesTotal       int64
+	requestQueueDropped int64
+	clustered           int32
 
 	mu       sync.RWMutex
 	srv      *Server

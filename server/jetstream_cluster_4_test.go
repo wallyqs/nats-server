@@ -3042,6 +3042,11 @@ func TestJetStreamClusterAPILimitAdvisory(t *testing.T) {
 		require_NoError(t, json.Unmarshal(msg.Data, &advisory))
 		require_Equal(t, advisory.Domain, _EMPTY_) // No JetStream domain was set.
 		if advisory.Dropped >= 1 {
+			// Verify the request_queue_dropped counter was incremented.
+			jsz, err := s.Jsz(nil)
+			require_NoError(t, err)
+			require_True(t, jsz.InternalStats != nil)
+			require_True(t, jsz.InternalStats.RequestQueueDropped > 0)
 			// We are done!
 			return
 		}

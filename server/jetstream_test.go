@@ -21123,6 +21123,12 @@ func TestJetStreamInternalStats(t *testing.T) {
 	if jsz.InternalStats.PendingRequestsAvg < 0 {
 		t.Fatalf("Expected PendingRequestsAvg to be >= 0, got %f", jsz.InternalStats.PendingRequestsAvg)
 	}
+
+	// RequestQueueDropped should be 0 under normal operation (no queue limit hit).
+	// This at least verifies the field is properly exposed.
+	if jsz.InternalStats.RequestQueueDropped != 0 {
+		t.Fatalf("Expected RequestQueueDropped to be 0 under normal operation, got %d", jsz.InternalStats.RequestQueueDropped)
+	}
 }
 
 func TestJetStreamInternalStatsHTTP(t *testing.T) {
