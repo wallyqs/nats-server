@@ -2209,6 +2209,8 @@ func (o *consumerMemStore) Update(state *ConsumerState) error {
 	o.state.AckFloor = state.AckFloor
 	o.state.Pending = pending
 	o.state.Redelivered = redelivered
+	// Mark pending index as dirty since we replaced the pending map.
+	o.pendingDirty = true
 
 	return nil
 }
@@ -2286,7 +2288,7 @@ func (o *consumerMemStore) UpdateDelivered(dseq, sseq, dc uint64, ts int64) erro
 			if maxdc := uint64(o.cfg.MaxDeliver); maxdc > 0 && dc > maxdc {
 				// Make sure to remove from pending.
 				delete(o.state.Pending, sseq)
-			o.pendingDirty = true
+				o.pendingDirty = true
 			}
 			if o.state.Redelivered == nil {
 				o.state.Redelivered = make(map[uint64]uint64)
@@ -2345,7 +2347,7 @@ func (o *consumerMemStore) UpdateAcks(dseq, sseq uint64) error {
 		} else {
 			for seq := sseq; seq > sseq-sgap && len(o.state.Pending) > 0; seq-- {
 				delete(o.state.Pending, seq)
-					o.pendingDirty = true
+				o.pendingDirty = true
 				delete(o.state.Redelivered, seq)
 			}
 		}
@@ -2387,11 +2389,13 @@ func (o *consumerMemStore) UpdateAcks(dseq, sseq uint64) error {
 			// Find first pending > sseq in O(log n)
 			foundSeq := uint64(0)
 			o.pendingIdx.Range(func(seq uint64) bool {
-				if seq > sseq && seq <= o.state.Delivered.Stream {
-					foundSeq = seq
-					return false
+				if seq > sseq {
+					if seq <= o.state.Delivered.Stream {
+						foundSeq = seq
+					}
+					return false // stop - first seq > sseq found
 				}
-				return seq <= sseq
+				return true // continue searching
 			})
 
 			if foundSeq > 0 {

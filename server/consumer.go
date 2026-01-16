@@ -3260,11 +3260,13 @@ func (o *consumer) processAckMsg(sseq, dseq, dc uint64, reply string, doSample b
 				// Use AVL tree to find first pending > sseq in O(log n)
 				foundSeq := uint64(0)
 				o.pndi.Range(func(seq uint64) bool {
-					if seq > sseq && seq < o.sseq {
-						foundSeq = seq
-						return false // found it, stop
+					if seq > sseq {
+						if seq < o.sseq {
+							foundSeq = seq
+						}
+						return false // stop - first seq > sseq found
 					}
-					return seq <= sseq // continue while <= sseq
+					return true // continue searching
 				})
 				if foundSeq > 0 {
 					if p := o.pending[foundSeq]; p != nil && p.Sequence > 0 {
