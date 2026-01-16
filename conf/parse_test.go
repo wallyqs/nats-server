@@ -206,6 +206,38 @@ func TestEnvVariableIndirectCircularReference(t *testing.T) {
 	}
 }
 
+func TestEnvVariableCircularReferenceInInclude(t *testing.T) {
+	// Test circular reference in an included file
+	evar := "__CIRCULAR_INCLUDE_TEST__"
+	os.Setenv(evar, fmt.Sprintf("$%s", evar))
+	defer os.Unsetenv(evar)
+
+	// Create temp directory and files
+	sdir := t.TempDir()
+
+	// Create included config file that uses the circular env var
+	includeContent := fmt.Sprintf("value = $%s", evar)
+	includePath := filepath.Join(sdir, "include.conf")
+	if err := os.WriteFile(includePath, []byte(includeContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create main config file that includes the other file (use relative path)
+	mainContent := "include 'include.conf'"
+	mainPath := filepath.Join(sdir, "main.conf")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseFile(mainPath)
+	if err == nil {
+		t.Fatal("Expected error for circular reference in include file, but got nil")
+	}
+	if !strings.Contains(err.Error(), "circular reference") {
+		t.Fatalf("Expected circular reference error, got: %v", err)
+	}
+}
+
 var easynum = `
 k = 8k
 kb = 4kb
