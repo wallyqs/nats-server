@@ -468,19 +468,28 @@ func visitLevel[T comparable](l *level[T], depth int) int {
 // once for each subject, regardless of overlapping subscriptions in the sublist.
 func IntersectStree[T1 any, T2 comparable](st *stree.SubjectTree[T1], sl *GenericSublist[T2], cb func(subj []byte, entry *T1)) {
 	var _subj [255]byte
-	intersectStree(st, sl.root, sl.root, _subj[:0], cb)
+	seen := make(map[string]struct{})
+	intersectStree(st, sl.root, sl.root, _subj[:0], cb, seen)
 }
 
-func intersectStree[T1 any, T2 comparable](st *stree.SubjectTree[T1], r, root *level[T2], subj []byte, cb func(subj []byte, entry *T1)) {
+func intersectStree[T1 any, T2 comparable](st *stree.SubjectTree[T1], r, root *level[T2], subj []byte, cb func(subj []byte, entry *T1), seen map[string]struct{}) {
 	nsubj := subj
 	if len(nsubj) > 0 {
 		nsubj = append(subj, '.')
+	}
+	// Wrap callback to dedupe at subject level
+	dedupeCb := func(subj []byte, entry *T1) {
+		key := string(subj)
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			cb(subj, entry)
+		}
 	}
 	if r.fwc != nil {
 		// We've reached a full wildcard, do a FWC match on the stree at this point
 		// and don't keep iterating downward.
 		nsubj := append(nsubj, '>')
-		st.Match(nsubj, cb)
+		st.Match(nsubj, dedupeCb)
 		return
 	}
 	if r.pwc != nil {
@@ -489,10 +498,10 @@ func intersectStree[T1 any, T2 comparable](st *stree.SubjectTree[T1], r, root *l
 		// match if so.
 		nsubj := append(nsubj, '*')
 		if len(r.pwc.subs) > 0 && !intersectStreeDownwardOverlap(root, nsubj) {
-			st.Match(nsubj, cb)
+			st.Match(nsubj, dedupeCb)
 		}
 		if r.pwc.next.numNodes() > 0 {
-			intersectStree(st, r.pwc.next, root, nsubj, cb)
+			intersectStree(st, r.pwc.next, root, nsubj, cb, seen)
 		}
 	}
 	// Normal node with subject literals, keep iterating.
@@ -500,15 +509,15 @@ func intersectStree[T1 any, T2 comparable](st *stree.SubjectTree[T1], r, root *l
 		nsubj := append(nsubj, t...)
 		if len(n.subs) > 0 && !intersectStreeDownwardOverlap(root, nsubj) {
 			if subjectHasWildcard(bytesToString(nsubj)) {
-				st.Match(nsubj, cb)
+				st.Match(nsubj, dedupeCb)
 			} else {
 				if e, ok := st.Find(nsubj); ok {
-					cb(nsubj, e)
+					dedupeCb(nsubj, e)
 				}
 			}
 		}
 		if n.next.numNodes() > 0 {
-			intersectStree(st, n.next, root, nsubj, cb)
+			intersectStree(st, n.next, root, nsubj, cb, seen)
 		}
 	}
 }
@@ -603,12 +612,27 @@ func (m _intersectStreeMask) includingWildcardAt(depth, total int) _intersectStr
 }
 
 func _intersectStreeMaskIsLessSpecific(pathMask, filterMask _intersectStreeMask) bool {
+	// pathMask is "less specific" (matches more subjects) only if:
+	// 1. It has wildcards at ALL positions where filterMask has wildcards
+	// 2. It has at least one ADDITIONAL wildcard position
+	//
+	// This ensures pathMask matches a strict superset of subjects.
+	// Example: *.two.*.* is less specific than one.two.*.four
+	//          but *.two.three.four is NOT less specific than one.two.*.*
+	//          (they match different, non-subset subject sets)
+	hasExtra := false
 	for i := range len(pathMask) {
-		if pathMask[i] != filterMask[i] {
-			return pathMask[i] > filterMask[i]
+		// Check if pathMask covers all filterMask wildcards at this slot
+		if (pathMask[i] & filterMask[i]) != filterMask[i] {
+			// pathMask is missing a wildcard that filterMask has
+			return false
+		}
+		// Check if pathMask has extra wildcards beyond filterMask
+		if pathMask[i] & ^filterMask[i] != 0 {
+			hasExtra = true
 		}
 	}
-	return false
+	return hasExtra
 }
 
 // Determine if a subject has any wildcard tokens.

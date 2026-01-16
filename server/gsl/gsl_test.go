@@ -672,11 +672,10 @@ func TestGenericSublistInterestBasedIntersection(t *testing.T) {
 	})
 
 	t.Run("DisjointWildcardPositions", func(t *testing.T) {
-		// Test case documenting bitmask approach limitation:
-		// When patterns have wildcards at different positions (not strict subsets),
-		// the bitmask considers earlier-position wildcards as "less specific"
-		// which can cause some matches to be skipped.
-		// e.g., *.two.three.four (wildcard at pos 0) vs one.two.*.* (wildcards at pos 2,3)
+		// Test patterns with wildcards at different positions (not strict subsets).
+		// one.two.*.* matches: one.two.three.four, one.two.three.five
+		// *.two.three.four matches: one.two.three.four
+		// Neither pattern is a superset of the other, so both should contribute matches.
 		got := map[string]int{}
 		sl := NewSublist[int]()
 		require_NoError(t, sl.Insert("one.two.*.*", 33))
@@ -684,9 +683,8 @@ func TestGenericSublistInterestBasedIntersection(t *testing.T) {
 		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
 			got[string(subj)]++
 		})
-		// Due to bitmask comparison, one.two.*.* may be skipped in favor of *.two.three.four
-		// This results in only one.two.three.four being matched, missing one.two.three.five
-		require_Len(t, len(got), 1)
+		// Both subjects should be matched
+		require_Len(t, len(got), 2)
 		require_NoDuplicates(t, got)
 	})
 
