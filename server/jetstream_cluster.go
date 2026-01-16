@@ -8432,6 +8432,7 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 	s, js, jsa, st, r, tierName, outq, node := mset.srv, mset.js, mset.jsa, mset.cfg.Storage, mset.cfg.Replicas, mset.tier, mset.outq, mset.node
 	maxMsgSize, lseq := int(mset.cfg.MaxMsgSize), mset.lseq
 	interestPolicy, discard, maxMsgs, maxBytes := mset.cfg.Retention != LimitsPolicy, mset.cfg.Discard, mset.cfg.MaxMsgs, mset.cfg.MaxBytes
+	discardNewPer, maxMsgsPer := mset.cfg.DiscardNewPer, mset.cfg.MaxMsgsPer
 	isLeader, isSealed, allowTTL := mset.isLeader(), mset.cfg.Sealed, mset.cfg.AllowMsgTTL
 	mset.mu.RUnlock()
 
@@ -8640,6 +8641,22 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 				outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, nil, response, nil, 0))
 			}
 			return err
+		}
+	}
+
+	// Check DiscardNew per subject at the leader level to prevent replicas from diverging.
+	// Followers should not individually decide to block based on this policy.
+	if discard == DiscardNew && discardNewPer && maxMsgsPer > 0 {
+		subjectCount := store.SubjectsTotals(subject)[subject]
+		if subjectCount >= uint64(maxMsgsPer) {
+			mset.clMu.Unlock()
+			if canRespond {
+				var resp = &JSPubAckResponse{PubAck: &PubAck{Stream: name}}
+				resp.Error = NewJSStreamStoreFailedError(ErrMaxMsgsPerSubject, Unless(ErrMaxMsgsPerSubject))
+				response, _ = json.Marshal(resp)
+				outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, nil, response, nil, 0))
+			}
+			return ErrMaxMsgsPerSubject
 		}
 	}
 

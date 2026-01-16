@@ -6604,3 +6604,46 @@ func TestJetStreamClusterDeletedNodeDoesNotReviveStreamAfterCatchup(t *testing.T
 		return nil
 	})
 }
+
+func TestJetStreamClusterDiscardNewPerSubjectRejectsWithoutCLFSBump(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:                 "TEST",
+		Subjects:             []string{"foo"},
+		Replicas:             3,
+		Discard:              nats.DiscardNew,
+		DiscardNewPerSubject: true,
+		MaxMsgsPerSubject:    1,
+	})
+	require_NoError(t, err)
+
+	// First publish should succeed.
+	pubAck, err := js.Publish("foo", nil)
+	require_NoError(t, err)
+	require_Equal(t, pubAck.Sequence, 1)
+
+	// The second should fail, since the limit is hit.
+	_, err = js.Publish("foo", nil)
+	require_Error(t, err, ErrMaxMsgsPerSubject)
+
+	// Retry after deleting, it should succeed afterward.
+	require_NoError(t, js.DeleteMsg("TEST", 1))
+	pubAck, err = js.Publish("foo", nil)
+	require_NoError(t, err)
+	require_Equal(t, pubAck.Sequence, 2)
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		return checkState(t, c, globalAccountName, "TEST")
+	})
+
+	// CLFS should NOT be bumped.
+	for _, s := range c.servers {
+		mset, err := s.globalAccount().lookupStream("TEST")
+		require_NoError(t, err)
+		require_Equal(t, mset.getCLFS(), 0)
+	}
+}
