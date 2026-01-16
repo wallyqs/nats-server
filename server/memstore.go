@@ -2063,11 +2063,13 @@ func (ms *memStore) isClosed() bool {
 }
 
 type consumerMemStore struct {
-	mu     sync.Mutex
-	ms     StreamStore
-	cfg    ConsumerConfig
-	state  ConsumerState
-	closed bool
+	mu           sync.Mutex
+	ms           StreamStore
+	cfg          ConsumerConfig
+	state        ConsumerState
+	closed       bool
+	pendingIdx   *avl.SequenceSet // Cached index for O(log n) gap finding
+	pendingDirty bool             // Index needs rebuild flag
 }
 
 func (ms *memStore) ConsumerStore(name string, cfg *ConsumerConfig) (ConsumerStore, error) {
@@ -2270,6 +2272,7 @@ func (o *consumerMemStore) UpdateDelivered(dseq, sseq, dc uint64, ts int64) erro
 		} else {
 			// Add to pending.
 			o.state.Pending[sseq] = &Pending{dseq, ts}
+			o.pendingDirty = true
 		}
 		// Update delivered as needed.
 		if dseq > o.state.Delivered.Consumer {
@@ -2283,6 +2286,7 @@ func (o *consumerMemStore) UpdateDelivered(dseq, sseq, dc uint64, ts int64) erro
 			if maxdc := uint64(o.cfg.MaxDeliver); maxdc > 0 && dc > maxdc {
 				// Make sure to remove from pending.
 				delete(o.state.Pending, sseq)
+			o.pendingDirty = true
 			}
 			if o.state.Redelivered == nil {
 				o.state.Redelivered = make(map[uint64]uint64)
@@ -2334,12 +2338,14 @@ func (o *consumerMemStore) UpdateAcks(dseq, sseq uint64) error {
 			for seq := range o.state.Pending {
 				if seq <= sseq {
 					delete(o.state.Pending, seq)
+					o.pendingDirty = true
 					delete(o.state.Redelivered, seq)
 				}
 			}
 		} else {
 			for seq := sseq; seq > sseq-sgap && len(o.state.Pending) > 0; seq-- {
 				delete(o.state.Pending, seq)
+					o.pendingDirty = true
 				delete(o.state.Redelivered, seq)
 			}
 		}
@@ -2351,6 +2357,7 @@ func (o *consumerMemStore) UpdateAcks(dseq, sseq uint64) error {
 	// First delete from our pending state.
 	if p, ok := o.state.Pending[sseq]; ok {
 		delete(o.state.Pending, sseq)
+		o.pendingDirty = true
 		if dseq > p.Sequence && p.Sequence > 0 {
 			dseq = p.Sequence // Use the original.
 		}
@@ -2364,13 +2371,33 @@ func (o *consumerMemStore) UpdateAcks(dseq, sseq uint64) error {
 		o.state.AckFloor.Stream = sseq
 
 		if o.state.Delivered.Consumer > dseq {
-			for ss := sseq + 1; ss <= o.state.Delivered.Stream; ss++ {
-				if p, ok := o.state.Pending[ss]; ok {
-					if p.Sequence > 0 {
-						o.state.AckFloor.Consumer = p.Sequence - 1
-						o.state.AckFloor.Stream = ss - 1
-					}
-					break
+			// Build index on-demand if dirty or nil
+			if o.pendingIdx == nil || o.pendingDirty {
+				if o.pendingIdx == nil {
+					o.pendingIdx = &avl.SequenceSet{}
+				} else {
+					o.pendingIdx.Empty()
+				}
+				for seq := range o.state.Pending {
+					o.pendingIdx.Insert(seq)
+				}
+				o.pendingDirty = false
+			}
+
+			// Find first pending > sseq in O(log n)
+			foundSeq := uint64(0)
+			o.pendingIdx.Range(func(seq uint64) bool {
+				if seq > sseq && seq <= o.state.Delivered.Stream {
+					foundSeq = seq
+					return false
+				}
+				return seq <= sseq
+			})
+
+			if foundSeq > 0 {
+				if p := o.state.Pending[foundSeq]; p != nil && p.Sequence > 0 {
+					o.state.AckFloor.Consumer = p.Sequence - 1
+					o.state.AckFloor.Stream = foundSeq - 1
 				}
 			}
 		}

@@ -444,6 +444,7 @@ type consumer struct {
 	ptmrEnd           time.Time
 	rdq               []uint64
 	rdqi              avl.SequenceSet
+	pndi              avl.SequenceSet // Pending index for O(log n) gap finding
 	rdc               map[uint64]uint64
 	replies           map[uint64]string
 	pendingDeliveries map[uint64]*jsPubMsg        // Messages that can be delivered after achieving quorum.
@@ -1573,6 +1574,7 @@ func (o *consumer) setLeader(isLeader bool) {
 		o.rdq = nil
 		o.rdqi.Empty()
 		o.pending = nil
+		o.pndi.Empty()
 		o.resetPendingDeliveries()
 		// ok if they are nil, we protect inside unsubscribe()
 		o.unsubscribe(o.ackSub)
@@ -2931,6 +2933,12 @@ func (o *consumer) applyState(state *ConsumerState) {
 	o.pending = state.Pending
 	o.rdc = state.Redelivered
 
+	// Rebuild pending index from restored state
+	o.pndi.Empty()
+	for seq := range o.pending {
+		o.pndi.Insert(seq)
+	}
+
 	// Setup tracking timer if we have restored pending.
 	if o.isLeader() && len(o.pending) > 0 {
 		// This is on startup or leader change. We want to check pending
@@ -3239,6 +3247,7 @@ func (o *consumer) processAckMsg(sseq, dseq, dc uint64, reply string, doSample b
 				needSignal = true
 			}
 			delete(o.pending, sseq)
+			o.pndi.Delete(sseq)
 			// Use the original deliver sequence from our pending record.
 			dseq = p.Sequence
 
@@ -3248,12 +3257,18 @@ func (o *consumer) processAckMsg(sseq, dseq, dc uint64, reply string, doSample b
 				o.asflr = o.sseq - 1
 			} else if dseq == o.adflr+1 {
 				o.adflr, o.asflr = dseq, sseq
-				for ss := sseq + 1; ss < o.sseq; ss++ {
-					if p, ok := o.pending[ss]; ok {
-						if p.Sequence > 0 {
-							o.adflr, o.asflr = p.Sequence-1, ss-1
-						}
-						break
+				// Use AVL tree to find first pending > sseq in O(log n)
+				foundSeq := uint64(0)
+				o.pndi.Range(func(seq uint64) bool {
+					if seq > sseq && seq < o.sseq {
+						foundSeq = seq
+						return false // found it, stop
+					}
+					return seq <= sseq // continue while <= sseq
+				})
+				if foundSeq > 0 {
+					if p := o.pending[foundSeq]; p != nil && p.Sequence > 0 {
+						o.adflr, o.asflr = p.Sequence-1, foundSeq-1
 					}
 				}
 			}
@@ -3278,6 +3293,7 @@ func (o *consumer) processAckMsg(sseq, dseq, dc uint64, reply string, doSample b
 			delete(o.pending, seq)
 			delete(o.rdc, seq)
 			o.removeFromRedeliverQueue(seq)
+			o.pndi.Delete(seq)
 			if seq < floor {
 				floor = seq
 			}
@@ -5156,6 +5172,7 @@ func (o *consumer) trackPending(sseq, dseq uint64) {
 		p.Timestamp = now.UnixNano()
 	} else {
 		o.pending[sseq] = &Pending{dseq, now.UnixNano()}
+		o.pndi.Insert(sseq)
 	}
 
 	// We could have a backoff that set a timer higher than what we need for this message.
@@ -5393,6 +5410,7 @@ func (o *consumer) checkPending() {
 		o.rdq = nil
 		o.rdqi.Empty()
 		o.pending = nil
+		o.pndi.Empty()
 		// Mimic behavior in processAckMsg when pending is empty.
 		o.adflr, o.asflr = o.dseq-1, o.sseq-1
 	}
