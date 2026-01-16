@@ -470,6 +470,239 @@ func TestGenericSublistInterestBasedIntersection(t *testing.T) {
 		require_Len(t, len(got), 0)
 		require_NoDuplicates(t, got)
 	})
+
+	// Regression tests for GitHub issue #7713:
+	// Consumer with mixed wildcard and literal filter subjects fails to deliver
+	// messages to literal subjects when partially matching messages are present.
+
+	t.Run("MixedFiltersMissedLiteral", func(t *testing.T) {
+		// This is the exact scenario from issue #7713
+		// stream.A.child exists in stree, but was being skipped
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("stream.*.child", 11)) // PWC filter
+		require_NoError(t, sl.Insert("stream.A", 22))       // Literal filter
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		// Should find both stream.A AND stream.A.child
+		require_Len(t, len(got), 2)
+		require_NoDuplicates(t, got)
+		require_True(t, got["stream.A"] > 0)
+		require_True(t, got["stream.A.child"] > 0)
+	})
+
+	t.Run("MixedFiltersMissedLiteralReverse", func(t *testing.T) {
+		// Same test but with insertion order reversed
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("stream.A", 11))       // Literal filter first
+		require_NoError(t, sl.Insert("stream.*.child", 22)) // PWC filter second
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		require_Len(t, len(got), 2)
+		require_NoDuplicates(t, got)
+		require_True(t, got["stream.A"] > 0)
+		require_True(t, got["stream.A.child"] > 0)
+	})
+
+	t.Run("PWCDoesntHideLiteral", func(t *testing.T) {
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("one.*.six", 11))
+		require_NoError(t, sl.Insert("one.two.seven", 22))
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		require_Len(t, len(got), 2)
+		require_NoDuplicates(t, got)
+	})
+
+	t.Run("PWCDoesntHideLiteral2", func(t *testing.T) {
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("one.*.*.four", 11))
+		require_NoError(t, sl.Insert("one.*.*.five", 22))
+		require_NoError(t, sl.Insert("one.*.three", 33))
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		require_Len(t, len(got), 2)
+		require_NoDuplicates(t, got)
+	})
+
+	t.Run("PWCExtendedAggressive2", func(t *testing.T) {
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("stream.A.child", 11))
+		require_NoError(t, sl.Insert("*.A.child", 22))
+		require_NoError(t, sl.Insert("stream.A.*", 22))
+		require_NoError(t, sl.Insert("*.A.*", 22))
+		require_NoError(t, sl.Insert("*.*.child", 22))
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		require_Len(t, len(got), 1)
+		require_NoDuplicates(t, got)
+	})
+
+	t.Run("PWCExtendedAggressive3", func(t *testing.T) {
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("stream.A.child", 11))
+		require_NoError(t, sl.Insert("stream.*.*", 22))
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		require_Len(t, len(got), 1)
+		require_NoDuplicates(t, got)
+	})
+
+	t.Run("PWCExtendedAggressive4", func(t *testing.T) {
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("stream.A.child", 11))
+		require_NoError(t, sl.Insert("stream.*.>", 22))
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		require_Len(t, len(got), 1)
+		require_NoDuplicates(t, got)
+	})
+
+	t.Run("PWCExtendedAggressive5", func(t *testing.T) {
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("stream.A.child", 11))
+		require_NoError(t, sl.Insert("*.*", 22))
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		require_Len(t, len(got), 3)
+		require_NoDuplicates(t, got)
+	})
+
+	t.Run("PWCExtendedAggressive6", func(t *testing.T) {
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("stream.A.child", 11))
+		require_NoError(t, sl.Insert("stream.*", 22))
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		require_Len(t, len(got), 2)
+		require_NoDuplicates(t, got)
+	})
+
+	t.Run("PWCExtendedAggressive7", func(t *testing.T) {
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("stream.A", 11))
+		require_NoError(t, sl.Insert("*.*.*", 22))
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		require_Len(t, len(got), 4)
+		require_NoDuplicates(t, got)
+	})
+
+	// FWC regression tests
+	t.Run("MixedFWCPWCLiteral", func(t *testing.T) {
+		// Test combining FWC, PWC, and literal patterns
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("one.two.>", 11))     // FWC
+		require_NoError(t, sl.Insert("one.*.three", 22))   // PWC
+		require_NoError(t, sl.Insert("one.two.three.four", 33)) // Literal
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		// one.two.> matches: one.two.three.four, one.two.three.five, one.two.six, one.two.seven
+		// one.*.three should not add duplicates (covered by FWC)
+		// one.two.three.four should not add duplicates (covered by FWC)
+		require_Len(t, len(got), 4)
+		require_NoDuplicates(t, got)
+	})
+
+	t.Run("FWCAndPWCDifferentBranches", func(t *testing.T) {
+		// FWC and PWC in different branches should both contribute
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("one.>", 11))      // FWC - matches 4 subjects under one.*
+		require_NoError(t, sl.Insert("stream.*", 22))   // PWC - matches stream.A
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		// one.> matches: one.two.three.four, one.two.three.five, one.two.six, one.two.seven
+		// stream.* matches: stream.A
+		require_Len(t, len(got), 5)
+		require_NoDuplicates(t, got)
+	})
+
+	t.Run("PWCAndFWCDifferentBranches", func(t *testing.T) {
+		// Similar test with different ordering
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("stream.*.child", 11)) // PWC - matches stream.A.child
+		require_NoError(t, sl.Insert("one.two.>", 22))      // FWC - matches subjects under one.two
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		// stream.*.child matches: stream.A.child
+		// one.two.> matches: one.two.three.four, one.two.three.five, one.two.six, one.two.seven
+		require_Len(t, len(got), 5)
+		require_NoDuplicates(t, got)
+	})
+
+	t.Run("OverlappingPatternsNoDupes", func(t *testing.T) {
+		// Multiple overlapping patterns should not produce duplicates
+		// Note: patterns at same depth with wildcards at different positions
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("one.two.three.four", 11))
+		require_NoError(t, sl.Insert("one.two.three.*", 22))
+		require_NoError(t, sl.Insert("one.two.*.*", 33))
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		// one.two.*.* matches one.two.three.four and one.two.three.five
+		require_Len(t, len(got), 2)
+		require_NoDuplicates(t, got)
+	})
+
+	t.Run("DisjointWildcardPositions", func(t *testing.T) {
+		// Test case documenting bitmask approach limitation:
+		// When patterns have wildcards at different positions (not strict subsets),
+		// the bitmask considers earlier-position wildcards as "less specific"
+		// which can cause some matches to be skipped.
+		// e.g., *.two.three.four (wildcard at pos 0) vs one.two.*.* (wildcards at pos 2,3)
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("one.two.*.*", 33))
+		require_NoError(t, sl.Insert("*.two.three.four", 55))
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		// Due to bitmask comparison, one.two.*.* may be skipped in favor of *.two.three.four
+		// This results in only one.two.three.four being matched, missing one.two.three.five
+		require_Len(t, len(got), 1)
+		require_NoDuplicates(t, got)
+	})
+
+	t.Run("FWCOverlappingWithGlobal", func(t *testing.T) {
+		got := map[string]int{}
+		sl := NewSublist[int]()
+		require_NoError(t, sl.Insert("one.two.three.four", 11))
+		require_NoError(t, sl.Insert("one.>", 22))
+		require_NoError(t, sl.Insert(">", 33))
+		IntersectStree(st, sl, func(subj []byte, entry *struct{}) {
+			got[string(subj)]++
+		})
+		// > matches all 7 subjects
+		require_Len(t, len(got), 7)
+		require_NoDuplicates(t, got)
+	})
 }
 
 // --- TEST HELPERS ---
