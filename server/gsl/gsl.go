@@ -17,9 +17,6 @@ import (
 	"errors"
 	"strings"
 	"sync"
-	"unsafe"
-
-	"github.com/nats-io/nats-server/v2/server/stree"
 )
 
 // Sublist is a routing mechanism to handle subject distribution and
@@ -370,6 +367,52 @@ func (s *GenericSublist[T]) Remove(subject string, value T) error {
 	return s.remove(subject, value, true)
 }
 
+// HasInterestStartingIn is a helper for subject tree intersection.
+// It checks if any subscription pattern could potentially match subjects
+// starting with the given prefix.
+func (s *GenericSublist[T]) HasInterestStartingIn(subj string) bool {
+	s.RLock()
+	defer s.RUnlock()
+	var _tokens [64]string
+	tokens := tokenizeSubjectIntoSlice(_tokens[:0], subj)
+	return hasInterestStartingIn(s.root, tokens)
+}
+
+func hasInterestStartingIn[T comparable](l *level[T], tokens []string) bool {
+	if l == nil {
+		return false
+	}
+	if len(tokens) == 0 {
+		return true
+	}
+	token := tokens[0]
+	if l.fwc != nil {
+		return true
+	}
+	if pwc := l.pwc; pwc != nil {
+		if hasInterestStartingIn(pwc.next, tokens[1:]) {
+			return true
+		}
+	}
+	if n := l.nodes[token]; n != nil {
+		return hasInterestStartingIn(n.next, tokens[1:])
+	}
+	return false
+}
+
+// tokenizeSubjectIntoSlice splits subject by '.' into the provided slice.
+func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tts = append(tts, subject[start:i])
+			start = i + 1
+		}
+	}
+	tts = append(tts, subject[start:])
+	return tts
+}
+
 // pruneNode is used to prune an empty node from the tree.
 func (l *level[T]) pruneNode(n *node[T], t string) {
 	if n == nil {
@@ -461,200 +504,4 @@ func visitLevel[T comparable](l *level[T], depth int) int {
 		}
 	}
 	return maxDepth
-}
-
-// IntersectStree will match all items in the given subject tree that
-// have interest expressed in the given sublist. The callback will only be called
-// once for each subject, regardless of overlapping subscriptions in the sublist.
-func IntersectStree[T1 any, T2 comparable](st *stree.SubjectTree[T1], sl *GenericSublist[T2], cb func(subj []byte, entry *T1)) {
-	var _subj [255]byte
-	seen := make(map[string]struct{})
-	intersectStree(st, sl.root, sl.root, _subj[:0], cb, seen)
-}
-
-func intersectStree[T1 any, T2 comparable](st *stree.SubjectTree[T1], r, root *level[T2], subj []byte, cb func(subj []byte, entry *T1), seen map[string]struct{}) {
-	nsubj := subj
-	if len(nsubj) > 0 {
-		nsubj = append(subj, '.')
-	}
-	// Wrap callback to dedupe at subject level
-	dedupeCb := func(subj []byte, entry *T1) {
-		key := string(subj)
-		if _, ok := seen[key]; !ok {
-			seen[key] = struct{}{}
-			cb(subj, entry)
-		}
-	}
-	if r.fwc != nil {
-		// We've reached a full wildcard, do a FWC match on the stree at this point
-		// and don't keep iterating downward.
-		nsubj := append(nsubj, '>')
-		st.Match(nsubj, dedupeCb)
-		return
-	}
-	if r.pwc != nil {
-		// We've found a partial wildcard. We'll keep iterating downwards, but first
-		// check whether there's interest at this level (without triggering dupes) and
-		// match if so.
-		nsubj := append(nsubj, '*')
-		if len(r.pwc.subs) > 0 && !intersectStreeDownwardOverlap(root, nsubj) {
-			st.Match(nsubj, dedupeCb)
-		}
-		if r.pwc.next.numNodes() > 0 {
-			intersectStree(st, r.pwc.next, root, nsubj, cb, seen)
-		}
-	}
-	// Normal node with subject literals, keep iterating.
-	for t, n := range r.nodes {
-		nsubj := append(nsubj, t...)
-		if len(n.subs) > 0 && !intersectStreeDownwardOverlap(root, nsubj) {
-			if subjectHasWildcard(bytesToString(nsubj)) {
-				st.Match(nsubj, dedupeCb)
-			} else {
-				if e, ok := st.Find(nsubj); ok {
-					dedupeCb(nsubj, e)
-				}
-			}
-		}
-		if n.next.numNodes() > 0 {
-			intersectStree(st, n.next, root, nsubj, cb, seen)
-		}
-	}
-}
-
-// intersectStreeDownwardOverlap takes a subject filter and walks down
-// from the root of the GSL, looking specifically for a less specific
-// match (i.e. more wildcards) that also covers the same subject filter.
-// If an overlapping and less-specific path is found, true is returned.
-func intersectStreeDownwardOverlap[T comparable](r *level[T], subj []byte) bool {
-	var _tokens [64]string
-	tokens := _tokens[:0]
-	for token := range strings.SplitSeq(bytesToString(subj), tsep) {
-		if tokens = append(tokens, token); len(tokens) >= 512 {
-			// Enforcing the limit to number of slots in _intersectStreeMask.
-			return true
-		}
-	}
-	filterMask := _intersectStreeWildcardMask(tokens)
-	pathMask := _intersectStreeMask{}
-	return _intersectStreeDownwardOverlap(r, tokens, 0, pathMask, filterMask)
-}
-
-func _intersectStreeDownwardOverlap[T comparable](r *level[T], tokens []string, depth int, pathMask, filterMask _intersectStreeMask) bool {
-	if r == nil {
-		return false
-	}
-	if depth >= len(tokens) {
-		return false
-	}
-	last := depth == len(tokens)-1
-	token := tokens[depth]
-	if r.fwc != nil {
-		newPathMask := pathMask.includingWildcardAt(depth, len(tokens))
-		if last && len(r.fwc.subs) > 0 && _intersectStreeMaskIsLessSpecific(newPathMask, filterMask) {
-			return true
-		}
-	}
-	if r.pwc != nil {
-		newPathMask := pathMask.includingWildcardAt(depth, len(tokens))
-		if last && len(r.pwc.subs) > 0 && _intersectStreeMaskIsLessSpecific(newPathMask, filterMask) {
-			return true
-		}
-		if _intersectStreeDownwardOverlap(r.pwc.next, tokens, depth+1, newPathMask, filterMask) {
-			return true
-		}
-	}
-	if token == pwcs || token == fwcs {
-		for _, n := range r.nodes {
-			if n.next == nil {
-				continue
-			}
-			if last && len(n.subs) > 0 && _intersectStreeMaskIsLessSpecific(pathMask, filterMask) {
-				return true
-			}
-			if _intersectStreeDownwardOverlap(n.next, tokens, depth+1, pathMask, filterMask) {
-				return true
-			}
-		}
-	} else if n := r.nodes[token]; n != nil {
-		if last && len(n.subs) > 0 && _intersectStreeMaskIsLessSpecific(pathMask, filterMask) {
-			return true
-		}
-		if _intersectStreeDownwardOverlap(n.next, tokens, depth+1, pathMask, filterMask) {
-			return true
-		}
-	}
-	return false
-}
-
-// _intersectStreeMask is a bitmask to track wildcard positions in subjects.
-// Supports up to 512 tokens.
-type _intersectStreeMask [8]uint64
-
-func _intersectStreeWildcardMask(tokens []string) _intersectStreeMask {
-	var mask _intersectStreeMask
-	total := len(tokens)
-	for i, token := range tokens {
-		if token == pwcs || token == fwcs {
-			mask = mask.includingWildcardAt(i, total)
-		}
-	}
-	return mask
-}
-
-func (m _intersectStreeMask) includingWildcardAt(depth, total int) _intersectStreeMask {
-	if total == 0 || depth >= total {
-		return m
-	}
-	slot := depth / 64
-	m[slot] |= uint64(1) << (63 - (depth % 64))
-	return m
-}
-
-func _intersectStreeMaskIsLessSpecific(pathMask, filterMask _intersectStreeMask) bool {
-	// pathMask is "less specific" (matches more subjects) only if:
-	// 1. It has wildcards at ALL positions where filterMask has wildcards
-	// 2. It has at least one ADDITIONAL wildcard position
-	//
-	// This ensures pathMask matches a strict superset of subjects.
-	// Example: *.two.*.* is less specific than one.two.*.four
-	//          but *.two.three.four is NOT less specific than one.two.*.*
-	//          (they match different, non-subset subject sets)
-	hasExtra := false
-	for i := range len(pathMask) {
-		// Check if pathMask covers all filterMask wildcards at this slot
-		if (pathMask[i] & filterMask[i]) != filterMask[i] {
-			// pathMask is missing a wildcard that filterMask has
-			return false
-		}
-		// Check if pathMask has extra wildcards beyond filterMask
-		if pathMask[i] & ^filterMask[i] != 0 {
-			hasExtra = true
-		}
-	}
-	return hasExtra
-}
-
-// Determine if a subject has any wildcard tokens.
-func subjectHasWildcard(subject string) bool {
-	// This one exits earlier then !subjectIsLiteral(subject)
-	for i, c := range subject {
-		if c == pwc || c == fwc {
-			if (i == 0 || subject[i-1] == btsep) &&
-				(i+1 == len(subject) || subject[i+1] == btsep) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// Note this will avoid a copy of the data used for the string, but it will also reference the existing slice's data pointer.
-// So this should be used sparingly when we know the encompassing byte slice's lifetime is the same.
-func bytesToString(b []byte) string {
-	if len(b) == 0 {
-		return _EMPTY_
-	}
-	p := unsafe.SliceData(b)
-	return unsafe.String(p, len(b))
 }

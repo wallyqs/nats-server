@@ -35,3 +35,17 @@ func require_Equal[T comparable](t *testing.T, a, b T) {
 		t.Fatalf("require %T equal, but got: %v != %v", a, a, b)
 	}
 }
+
+func require_NoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("require no error, but got: %v", err)
+	}
+}
+
+func require_Len(t *testing.T, actual, expected int) {
+	t.Helper()
+	if actual != expected {
+		t.Fatalf("require length %d, but got: %d", expected, actual)
+	}
+}
