@@ -370,7 +370,11 @@ func (s *GenericSublist[T]) Remove(subject string, value T) error {
 }
 
 // HasInterestStartingIn is a helper for subject tree intersection.
+// It checks if any subscription pattern could potentially match subjects
+// that start with the given prefix.
 func (s *GenericSublist[T]) HasInterestStartingIn(subj string) bool {
+	s.RLock()
+	defer s.RUnlock()
 	var _tokens [64]string
 	tokens := tokenizeSubjectIntoSlice(_tokens[:0], subj)
 	return hasInterestStartingIn(s.root, tokens)
