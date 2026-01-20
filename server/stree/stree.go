@@ -459,6 +459,10 @@ func IntersectGSL[T any, SL comparable](t *SubjectTree[T], sl *gsl.GenericSublis
 	if t == nil || t.root == nil || sl == nil {
 		return
 	}
+	// Acquire the read lock once for the entire traversal to avoid
+	// lock contention when checking interest for many subjects.
+	sl.RLock()
+	defer sl.RUnlock()
 	var _pre [256]byte
 	_intersectGSL(t.root, _pre[:0], sl, cb)
 }
@@ -467,7 +471,8 @@ func _intersectGSL[T any, SL comparable](n node, pre []byte, sl *gsl.GenericSubl
 	if n.isLeaf() {
 		ln := n.(*leaf[T])
 		subj := append(pre, ln.suffix...)
-		if sl.HasInterest(bytesToString(subj)) {
+		// Use no-lock version since we already hold the lock.
+		if sl.HasInterestNoLock(bytesToString(subj)) {
 			cb(subj, &ln.value)
 		}
 		return
@@ -479,7 +484,7 @@ func _intersectGSL[T any, SL comparable](n node, pre []byte, sl *gsl.GenericSubl
 			continue
 		}
 		subj := append(pre, cn.path()...)
-		if !hasInterestForTokens(sl, subj, len(pre)) {
+		if !hasInterestForTokensNoLock(sl, subj, len(pre)) {
 			continue
 		}
 		_intersectGSL(cn, pre, sl, cb)
@@ -488,10 +493,11 @@ func _intersectGSL[T any, SL comparable](n node, pre []byte, sl *gsl.GenericSubl
 
 // The subject tree can return partial tokens so we need to check starting interest
 // only from whole tokens when we encounter a tsep.
-func hasInterestForTokens[SL comparable](sl *gsl.GenericSublist[SL], subj []byte, since int) bool {
+// This version assumes the caller already holds the read lock on sl.
+func hasInterestForTokensNoLock[SL comparable](sl *gsl.GenericSublist[SL], subj []byte, since int) bool {
 	for i := since; i < len(subj); i++ {
 		if subj[i] == tsep {
-			if !sl.HasInterestStartingIn(bytesToString(subj[:i])) {
+			if !sl.HasInterestStartingInNoLock(bytesToString(subj[:i])) {
 				return false
 			}
 		}

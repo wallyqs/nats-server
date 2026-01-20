@@ -163,6 +163,12 @@ func (s *GenericSublist[T]) HasInterest(subject string) bool {
 	return s.hasInterest(subject, true, nil)
 }
 
+// HasInterestNoLock is like HasInterest but assumes the caller already holds the read lock.
+// This is useful for batch operations where locking once is more efficient.
+func (s *GenericSublist[T]) HasInterestNoLock(subject string) bool {
+	return s.hasInterest(subject, false, nil)
+}
+
 // NumInterest will return the number of subs interested in the subject.
 // In cases where more detail is not required, this may be faster than Match.
 func (s *GenericSublist[T]) NumInterest(subject string) (np int) {
@@ -370,7 +376,21 @@ func (s *GenericSublist[T]) Remove(subject string, value T) error {
 }
 
 // HasInterestStartingIn is a helper for subject tree intersection.
+// It checks if any subscription pattern could potentially match subjects
+// that start with the given prefix.
 func (s *GenericSublist[T]) HasInterestStartingIn(subj string) bool {
+	s.RLock()
+	defer s.RUnlock()
+	return s.hasInterestStartingInNoLock(subj)
+}
+
+// HasInterestStartingInNoLock is like HasInterestStartingIn but assumes
+// the caller already holds the read lock.
+func (s *GenericSublist[T]) HasInterestStartingInNoLock(subj string) bool {
+	return s.hasInterestStartingInNoLock(subj)
+}
+
+func (s *GenericSublist[T]) hasInterestStartingInNoLock(subj string) bool {
 	var _tokens [64]string
 	tokens := tokenizeSubjectIntoSlice(_tokens[:0], subj)
 	return hasInterestStartingIn(s.root, tokens)
