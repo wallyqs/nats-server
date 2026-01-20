@@ -452,9 +452,14 @@ func LazyIntersect[TL, TR any](tl *SubjectTree[TL], tr *SubjectTree[TR], cb func
 	}
 }
 
-// IntersectGSL will match all items in the given subject tree that
-// have interest expressed in the given sublist. The callback will only be called
-// once for each subject, regardless of overlapping subscriptions in the sublist.
+// IntersectGSL will match all items in the given subject tree that have interest
+// expressed in the given sublist. The callback will only be called once for each
+// subject, regardless of overlapping subscriptions in the sublist.
+//
+// IMPORTANT: The subject slice passed to the callback shares a backing array that
+// is reused across callbacks. Callers must copy the slice if they need to store it
+// beyond the callback. For example, use string(subject) to convert to a string, or
+// use slices.Clone(subject) to make a copy of the byte slice.
 func IntersectGSL[T any, SL comparable](t *SubjectTree[T], sl *gsl.GenericSublist[SL], cb func(subject []byte, val *T)) {
 	if t == nil || t.root == nil || sl == nil {
 		return
