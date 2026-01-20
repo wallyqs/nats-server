@@ -391,9 +391,13 @@ func hasInterestStartingIn[T comparable](l *level[T], tokens []string) bool {
 	if l.fwc != nil {
 		return true
 	}
+	// Check PWC path - but don't short-circuit on false, also check literal path
 	if pwc := l.pwc; pwc != nil {
-		return hasInterestStartingIn(pwc.next, tokens[1:])
+		if hasInterestStartingIn(pwc.next, tokens[1:]) {
+			return true
+		}
 	}
+	// Check literal path
 	if n := l.nodes[token]; n != nil {
 		return hasInterestStartingIn(n.next, tokens[1:])
 	}

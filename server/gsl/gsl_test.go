@@ -296,6 +296,132 @@ func TestGenericSublistHasInterestStartingInRace(t *testing.T) {
 	<-done
 }
 
+// TestHasInterestStartingInPWCShortCircuit tests that PWC path doesn't
+// incorrectly short-circuit and skip checking the literal path.
+// This was a bug where hasInterestStartingIn would return false if PWC
+// path failed, even though the literal path would succeed.
+func TestHasInterestStartingInPWCShortCircuit(t *testing.T) {
+	s := NewSublist[int]()
+
+	// Insert patterns: "foo.bar" and "*.baz.qux"
+	require_NoError(t, s.Insert("foo.bar", 1))
+	require_NoError(t, s.Insert("*.baz.qux", 2))
+
+	// HasInterestStartingIn("foo") should return true because "foo.bar" exists
+	require_True(t, s.HasInterestStartingIn("foo"))
+
+	// HasInterestStartingIn("foo.bar") should return true
+	// Previously: PWC path (*.baz.qux) was checked first, went to "baz" level,
+	// didn't find "bar", returned false without checking literal "foo.bar" path
+	require_True(t, s.HasInterestStartingIn("foo.bar"))
+
+	// Also verify HasInterest works correctly
+	require_True(t, s.HasInterest("foo.bar"))
+	require_True(t, s.HasInterest("x.baz.qux"))
+}
+
+// TestHasInterestStartingInPWCAndLiteral tests when both PWC and literal exist at same level
+func TestHasInterestStartingInPWCAndLiteral(t *testing.T) {
+	s := NewSublist[int]()
+
+	// Pattern 1: literal path "one.two.three"
+	// Pattern 2: PWC path "*.x.y" (PWC at first position)
+	require_NoError(t, s.Insert("one.two.three", 1))
+	require_NoError(t, s.Insert("*.x.y", 2))
+
+	// Check "one" - should be true (one.two.three starts with "one")
+	require_True(t, s.HasInterestStartingIn("one"))
+
+	// Check "one.two" - PWC path goes *.next which has "x", not "two"
+	// Should still be true because literal path has "one.two.three"
+	require_True(t, s.HasInterestStartingIn("one.two"))
+
+	// Check "one.two.three" - full match
+	require_True(t, s.HasInterestStartingIn("one.two.three"))
+}
+
+// TestHasInterestStartingInEdgeCases tests various edge cases
+func TestHasInterestStartingInEdgeCases(t *testing.T) {
+	t.Run("EmptySublist", func(t *testing.T) {
+		s := NewSublist[int]()
+		// Empty sublist should have no interest
+		require_False(t, s.HasInterestStartingIn("foo"))
+		require_False(t, s.HasInterestStartingIn("foo.bar"))
+	})
+
+	t.Run("SingleToken", func(t *testing.T) {
+		s := NewSublist[int]()
+		require_NoError(t, s.Insert("foo", 1))
+		require_True(t, s.HasInterestStartingIn("foo"))
+		require_False(t, s.HasInterestStartingIn("bar"))
+	})
+
+	t.Run("FWCAtRoot", func(t *testing.T) {
+		s := NewSublist[int]()
+		require_NoError(t, s.Insert(">", 1))
+		// FWC at root means interest in everything
+		require_True(t, s.HasInterestStartingIn("foo"))
+		require_True(t, s.HasInterestStartingIn("foo.bar"))
+		require_True(t, s.HasInterestStartingIn("anything.at.all"))
+	})
+
+	t.Run("FWCNested", func(t *testing.T) {
+		s := NewSublist[int]()
+		require_NoError(t, s.Insert("foo.>", 1))
+		// Interest starts at "foo"
+		require_True(t, s.HasInterestStartingIn("foo"))
+		require_True(t, s.HasInterestStartingIn("foo.bar"))
+		require_True(t, s.HasInterestStartingIn("foo.bar.baz"))
+		// No interest in other prefixes
+		require_False(t, s.HasInterestStartingIn("bar"))
+	})
+
+	t.Run("PWCAtRoot", func(t *testing.T) {
+		s := NewSublist[int]()
+		require_NoError(t, s.Insert("*", 1))
+		// PWC at root matches single token
+		require_True(t, s.HasInterestStartingIn("foo"))
+		require_True(t, s.HasInterestStartingIn("bar"))
+	})
+
+	t.Run("MultiplePWC", func(t *testing.T) {
+		s := NewSublist[int]()
+		require_NoError(t, s.Insert("*.*.foo", 1))
+		require_True(t, s.HasInterestStartingIn("a"))
+		require_True(t, s.HasInterestStartingIn("a.b"))
+		require_True(t, s.HasInterestStartingIn("a.b.foo"))
+		require_False(t, s.HasInterestStartingIn("a.b.bar"))
+	})
+
+	t.Run("MixedPWCFWCLiteral", func(t *testing.T) {
+		s := NewSublist[int]()
+		require_NoError(t, s.Insert("foo.*.bar", 1))
+		require_NoError(t, s.Insert("foo.x.>", 2))
+		require_NoError(t, s.Insert("foo.y.z", 3))
+
+		require_True(t, s.HasInterestStartingIn("foo"))
+		require_True(t, s.HasInterestStartingIn("foo.a"))
+		require_True(t, s.HasInterestStartingIn("foo.x"))
+		require_True(t, s.HasInterestStartingIn("foo.y"))
+		require_True(t, s.HasInterestStartingIn("foo.y.z"))
+		require_False(t, s.HasInterestStartingIn("bar"))
+	})
+
+	t.Run("DeepNesting", func(t *testing.T) {
+		s := NewSublist[int]()
+		require_NoError(t, s.Insert("a.b.c.d.e.f.g", 1))
+		require_True(t, s.HasInterestStartingIn("a"))
+		require_True(t, s.HasInterestStartingIn("a.b"))
+		require_True(t, s.HasInterestStartingIn("a.b.c"))
+		require_True(t, s.HasInterestStartingIn("a.b.c.d"))
+		require_True(t, s.HasInterestStartingIn("a.b.c.d.e"))
+		require_True(t, s.HasInterestStartingIn("a.b.c.d.e.f"))
+		require_True(t, s.HasInterestStartingIn("a.b.c.d.e.f.g"))
+		require_False(t, s.HasInterestStartingIn("a.b.c.d.e.f.g.h"))
+		require_False(t, s.HasInterestStartingIn("a.b.x"))
+	})
+}
+
 func TestGenericSublistNumInterest(t *testing.T) {
 	s := NewSublist[int]()
 	require_NoError(t, s.Insert("foo", 11))
