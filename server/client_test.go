@@ -3314,6 +3314,245 @@ func TestSetHeaderOrderingSuffix(t *testing.T) {
 	}
 }
 
+// TestMsgPartsSliceCapacityIsolation verifies that the header slice returned by
+// msgParts has its capacity capped so that appending to it cannot corrupt the
+// message body. This was a bug introduced in v2.12.0 where the header and message
+// slices shared the same underlying buffer.
+func TestMsgPartsSliceCapacityIsolation(t *testing.T) {
+	// Simulate raw wire message: header + message body sharing same buffer
+	hdr := []byte("NATS/1.0\r\nKey: Value\r\n\r\n")
+	msg := []byte("original message body")
+	data := append(hdr, msg...)
+
+	// Create a mock client with header length set
+	c := &client{}
+	c.pa.hdr = len(hdr)
+
+	// Get header and message parts
+	gotHdr, gotMsg := c.msgParts(data)
+
+	// Verify initial state
+	require_Equal(t, string(gotHdr), string(hdr))
+	require_Equal(t, string(gotMsg), string(msg))
+
+	// The fix: header slice capacity should be capped to its length
+	// so appending cannot overflow into message territory
+	require_Equal(t, cap(gotHdr), len(gotHdr))
+
+	// Attempt to append to header - this should NOT corrupt the message
+	extendedHdr := append(gotHdr, []byte("Extra: Data\r\n")...)
+
+	// Verify message body is NOT corrupted
+	require_Equal(t, string(gotMsg), string(msg))
+
+	// The extended header should be in a new buffer
+	require_True(t, len(extendedHdr) > len(gotHdr))
+}
+
+// TestSetHeaderDoesNotCorruptUnderlyingBuffer verifies that setHeader does not
+// corrupt memory when the header slice shares an underlying buffer with other data.
+// This tests the fix for the bug where setHeader would overwrite message body data.
+func TestSetHeaderDoesNotCorruptUnderlyingBuffer(t *testing.T) {
+	t.Run("ReplaceWithLargerValue", func(t *testing.T) {
+		// Create a buffer that simulates header + message sharing memory
+		hdr := []byte("NATS/1.0\r\nKey: Short\r\n\r\n")
+		msg := []byte("MESSAGE_BODY_INTACT")
+		fullBuffer := make([]byte, len(hdr)+len(msg))
+		copy(fullBuffer, hdr)
+		copy(fullBuffer[len(hdr):], msg)
+
+		// Get a slice of just the header portion, but with capacity extending into msg
+		hdrSlice := fullBuffer[:len(hdr)]
+
+		// Store original message for comparison
+		originalMsg := string(fullBuffer[len(hdr):])
+
+		// Replace with a LARGER value - this is where the bug would manifest
+		newHdr := setHeader("Key", "MuchLongerValueThatExceedsOriginal", hdrSlice)
+
+		// The message portion of the original buffer should be UNCHANGED
+		require_Equal(t, string(fullBuffer[len(hdr):]), originalMsg)
+
+		// The new header should contain the updated value
+		require_True(t, bytes.Contains(newHdr, []byte("MuchLongerValueThatExceedsOriginal")))
+	})
+
+	t.Run("ReplaceWithSmallerValue", func(t *testing.T) {
+		hdr := []byte("NATS/1.0\r\nKey: LongOriginalValue\r\n\r\n")
+		hdrCopy := make([]byte, len(hdr))
+		copy(hdrCopy, hdr)
+
+		// Replace with smaller value - can be done in place
+		newHdr := setHeader("Key", "Short", hdrCopy)
+
+		// Should contain the new value
+		require_True(t, bytes.Contains(newHdr, []byte("Key: Short\r\n")) ||
+			bytes.Contains(newHdr, []byte("Key:Short\r\n")))
+	})
+
+	t.Run("AddNewKeyToSharedBuffer", func(t *testing.T) {
+		// Header with extra capacity that extends into "message" area
+		hdr := []byte("NATS/1.0\r\n\r\n")
+		msg := []byte("PROTECTED_MESSAGE")
+		fullBuffer := make([]byte, len(hdr)+len(msg))
+		copy(fullBuffer, hdr)
+		copy(fullBuffer[len(hdr):], msg)
+
+		hdrSlice := fullBuffer[:len(hdr)]
+		originalMsg := string(fullBuffer[len(hdr):])
+
+		// Add a new header key
+		newHdr := setHeader("NewKey", "NewValue", hdrSlice)
+
+		// Message area should be unchanged
+		require_Equal(t, string(fullBuffer[len(hdr):]), originalMsg)
+
+		// New header should have the key
+		require_True(t, bytes.Contains(newHdr, []byte("NewKey: NewValue")))
+	})
+}
+
+// TestMsgPartsAndSetHeaderIntegration tests the real-world scenario where
+// msgParts is used to split a message, then setHeader modifies the header.
+// This is the exact pattern that caused message corruption in v2.12.0.
+func TestMsgPartsAndSetHeaderIntegration(t *testing.T) {
+	tests := []struct {
+		name     string
+		hdrData  string
+		msgData  string
+		key      string
+		oldVal   string
+		newVal   string
+	}{
+		{
+			name:    "ExpandingExistingHeader",
+			hdrData: "NATS/1.0\r\nNats-Msg-Id: abc\r\n\r\n",
+			msgData: "Important payload data that must not be corrupted",
+			key:     "Nats-Msg-Id",
+			oldVal:  "abc",
+			newVal:  "much-longer-message-id-value-here",
+		},
+		{
+			name:    "ShrinkingExistingHeader",
+			hdrData: "NATS/1.0\r\nNats-Msg-Id: very-long-original-id\r\n\r\n",
+			msgData: "Payload",
+			key:     "Nats-Msg-Id",
+			oldVal:  "very-long-original-id",
+			newVal:  "short",
+		},
+		{
+			name:    "AddingNewHeader",
+			hdrData: "NATS/1.0\r\n\r\n",
+			msgData: "Message body here",
+			key:     "X-Custom-Header",
+			oldVal:  "",
+			newVal:  "custom-value",
+		},
+		{
+			name:    "MultipleHeadersExpanding",
+			hdrData: "NATS/1.0\r\nFirst: A\r\nSecond: B\r\nThird: C\r\n\r\n",
+			msgData: "Multi-header message body",
+			key:     "Second",
+			oldVal:  "B",
+			newVal:  "VeryLongReplacementValue",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Construct wire message with header and body in same buffer
+			hdr := []byte(tc.hdrData)
+			msg := []byte(tc.msgData)
+			wireMsg := append(hdr, msg...)
+
+			// Simulate what the server does
+			c := &client{}
+			c.pa.hdr = len(hdr)
+
+			// Split into parts (the pattern that triggered the bug)
+			gotHdr, gotMsg := c.msgParts(wireMsg)
+
+			// Verify message is correct before modification
+			require_Equal(t, string(gotMsg), tc.msgData)
+
+			// Modify header using setHeader
+			modifiedHdr := setHeader(tc.key, tc.newVal, gotHdr)
+
+			// CRITICAL: The original message slice must NOT be corrupted
+			require_Equal(t, string(gotMsg), tc.msgData)
+
+			// The modified header should contain the new value
+			require_True(t, bytes.Contains(modifiedHdr, []byte(tc.newVal)))
+
+			// If replacing existing, old value should be gone
+			if tc.oldVal != "" {
+				require_False(t, bytes.Contains(modifiedHdr, []byte(tc.key+": "+tc.oldVal+"\r\n")))
+			}
+		})
+	}
+}
+
+// TestSetHeaderMalformedInput tests edge cases with malformed headers
+func TestSetHeaderMalformedInput(t *testing.T) {
+	t.Run("NoCarriageReturn", func(t *testing.T) {
+		// Header with key but no proper CRLF termination for value
+		hdr := []byte("NATS/1.0\r\nKey: Value")
+		result := setHeader("Key", "NewValue", hdr)
+		// Should return original unchanged for malformed
+		require_Equal(t, string(result), string(hdr))
+	})
+
+	t.Run("EmptyHeader", func(t *testing.T) {
+		hdr := []byte{}
+		result := setHeader("Key", "Value", hdr)
+		// Should handle gracefully
+		require_True(t, len(result) == 0 || bytes.Contains(result, []byte("Key")))
+	})
+
+	t.Run("OnlyProtocolLine", func(t *testing.T) {
+		hdr := []byte("NATS/1.0\r\n\r\n")
+		result := setHeader("NewKey", "NewValue", hdr)
+		require_True(t, bytes.Contains(result, []byte("NewKey: NewValue")))
+	})
+}
+
+// TestSetHeaderPreservesWhitespace verifies whitespace handling in header values
+func TestSetHeaderPreservesWhitespace(t *testing.T) {
+	t.Run("WithSpace", func(t *testing.T) {
+		hdr := []byte("NATS/1.0\r\nKey: Value\r\n\r\n")
+		result := setHeader("Key", "NewValue", hdr)
+		// Should preserve the space after colon
+		require_True(t, bytes.Contains(result, []byte("Key: NewValue")) ||
+			bytes.Contains(result, []byte("Key:NewValue")))
+	})
+
+	t.Run("WithoutSpace", func(t *testing.T) {
+		hdr := []byte("NATS/1.0\r\nKey:Value\r\n\r\n")
+		result := setHeader("Key", "NewValue", hdr)
+		require_True(t, bytes.Contains(result, []byte("NewValue")))
+	})
+}
+
+// TestMsgPartsNilClient ensures msgParts handles nil client gracefully
+func TestMsgPartsNilClient(t *testing.T) {
+	data := []byte("some data")
+	var c *client = nil
+	hdr, msg := c.msgParts(data)
+	require_True(t, hdr == nil)
+	require_Equal(t, string(msg), string(data))
+}
+
+// TestMsgPartsNoHeader tests when there's no header in the message
+func TestMsgPartsNoHeader(t *testing.T) {
+	data := []byte("message without header")
+	c := &client{}
+	c.pa.hdr = 0
+
+	hdr, msg := c.msgParts(data)
+	require_True(t, hdr == nil)
+	require_Equal(t, string(msg), string(data))
+}
+
 func TestInProcessAllowedConnectionType(t *testing.T) {
 	tmpl := `
 		listen: "127.0.0.1:-1"

@@ -35,8 +35,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"slices"
-
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/internal/fastrand"
@@ -2732,9 +2730,12 @@ func (c *client) updateS2AutoCompressionLevel(co *CompressionOpts, compression *
 }
 
 // Will return the parts from the raw wire msg.
+// The returned header slice has its capacity capped to its length,
+// so if the caller later tries to append to the returned header slice
+// it does not affect the message content.
 func (c *client) msgParts(data []byte) (hdr []byte, msg []byte) {
 	if c != nil && c.pa.hdr > 0 {
-		return data[:c.pa.hdr], data[c.pa.hdr:]
+		return data[:c.pa.hdr:c.pa.hdr], data[c.pa.hdr:]
 	}
 	return nil, data
 }
@@ -4565,6 +4566,12 @@ func getHeaderKeyIndex(key string, hdr []byte) int {
 	}
 }
 
+// setHeader sets a header key to a value in the given header byte slice.
+// If the key does not exist, or if it exists but the new value would make
+// the resulting byte slice larger than the original one, a new byte slice
+// is returned and the original is left untouched. If the key exists and
+// the new value would result in a same size or smaller byte slice, then
+// the original byte slice is modified in place and returned.
 func setHeader(key, val string, hdr []byte) []byte {
 	start := getHeaderKeyIndex(key, hdr)
 	if start >= 0 {
@@ -4579,13 +4586,37 @@ func setHeader(key, val string, hdr []byte) []byte {
 			return hdr // malformed headers
 		}
 		valEnd += valStart
-		suffix := slices.Clone(hdr[valEnd:])
-		newHdr := append(hdr[:valStart], val...)
-		return append(newHdr, suffix...)
+
+		// Calculate size difference
+		oldValLen := valEnd - valStart
+		newValLen := len(val)
+		suffix := hdr[valEnd:]
+
+		// If new value is larger, allocate a new buffer to avoid
+		// corrupting memory beyond the original slice.
+		if newValLen > oldValLen {
+			newLen := valStart + newValLen + len(suffix)
+			newHdr := make([]byte, newLen)
+			copy(newHdr, hdr[:valStart])
+			copy(newHdr[valStart:], val)
+			copy(newHdr[valStart+newValLen:], suffix)
+			return newHdr
+		}
+
+		// New value is same size or smaller, safe to modify in place
+		copy(hdr[valStart:], val)
+		copy(hdr[valStart+newValLen:], suffix)
+		return hdr[:valStart+newValLen+len(suffix)]
 	}
+	// Key doesn't exist, need to add it. Allocate new buffer.
 	if len(hdr) > 0 && bytes.HasSuffix(hdr, []byte("\r\n")) {
-		hdr = hdr[:len(hdr)-2]
-		val += "\r\n"
+		newEntry := fmt.Sprintf("%s: %s\r\n", key, val)
+		newLen := len(hdr) - 2 + len(newEntry) + 2 // -2 for removed \r\n, +2 for final \r\n
+		newHdr := make([]byte, newLen)
+		copy(newHdr, hdr[:len(hdr)-2])
+		copy(newHdr[len(hdr)-2:], newEntry)
+		copy(newHdr[len(hdr)-2+len(newEntry):], "\r\n")
+		return newHdr
 	}
 	return fmt.Appendf(hdr, "%s: %s\r\n", key, val)
 }
