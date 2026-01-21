@@ -841,3 +841,32 @@ func TestStoreDiscardNew(t *testing.T) {
 		}, ErrMaxMsgsPerSubject)
 	})
 }
+
+func TestStoreGetSeqFromTime(t *testing.T) {
+	testAllStoreAllPermutations(
+		t, false,
+		StreamConfig{Name: "zzz", Subjects: []string{"foo"}},
+		func(t *testing.T, fs StreamStore) {
+			var start int64
+			for i := range 6 {
+				_, ts, err := fs.StoreMsg("foo", nil, nil, 0)
+				require_NoError(t, err)
+				if i == 1 {
+					start = ts
+				}
+			}
+			// Create a delete gap to prove a simple binary search between sequences
+			// does not work, and deletes need to be accounted for. A simple binary search
+			// will hit the deleted sequences twice and then return the last sequence.
+			_, err := fs.RemoveMsg(3)
+			require_NoError(t, err)
+			_, err = fs.RemoveMsg(4)
+			require_NoError(t, err)
+			_, err = fs.RemoveMsg(6)
+			require_NoError(t, err)
+
+			ts := time.Unix(0, start-1).UTC()
+			require_Equal(t, fs.GetSeqFromTime(ts), 2)
+		},
+	)
+}
