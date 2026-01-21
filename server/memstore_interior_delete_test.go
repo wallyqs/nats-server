@@ -63,10 +63,8 @@ func TestMemStoreGetSeqFromTimeWithInteriorDeletes(t *testing.T) {
 // The bug: sort.Search is used with a function that returns false for deleted
 // messages, violating the monotonicity requirement of binary search.
 //
-// This test FAILS with current memstore implementation, proving it needs
-// the same fix applied to filestore.
+// This test verifies the fix for the memstore binary search bug.
 func TestMemStoreGetSeqFromTimeBinarySearchBug(t *testing.T) {
-	t.Skip("Known bug: memstore has same issue as filestore, needs fix similar to PR #7751")
 	ms, err := newMemStore(&StreamConfig{Name: "zzz", Subjects: []string{"foo"}, Storage: MemoryStorage})
 	require_NoError(t, err)
 	defer ms.Stop()
