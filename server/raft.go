@@ -3817,11 +3817,25 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 		if catchingUp {
 			// This means we already entered into a catchup state but what the leader sent us did not match what we expected.
 			// Snapshots and peerstate will always be together when a leader is catching us up in this fashion.
-			if len(ae.entries) != 2 || ae.entries[0].Type != EntrySnapshot || ae.entries[1].Type != EntryPeerState {
-				n.warn("Expected first catchup entry to be a snapshot and peerstate, will retry")
+			// However, if the leader still has the entries we need in its WAL, it may send regular append entries instead.
+			// In that case, we should accept them if they're sequential (pindex matches what we expect).
+			isSnapshot := len(ae.entries) == 2 && ae.entries[0].Type == EntrySnapshot && ae.entries[1].Type == EntryPeerState
+			isSequentialEntry := ae.pindex == n.pindex && ae.pterm == n.pterm
+
+			if !isSnapshot && !isSequentialEntry {
+				n.warn("Expected first catchup entry to be a snapshot and peerstate or sequential entry, will retry")
 				n.cancelCatchup()
 				n.Unlock()
 				return
+			}
+
+			// If it's a snapshot, process it as before
+			if !isSnapshot {
+				// Regular sequential entries during catchup - cancel catchup state and process normally
+				n.cancelCatchup()
+				catchingUp = false
+				// Fall through to CONTINUE to process the entry normally
+				goto CONTINUE
 			}
 
 			if ps, err := decodePeerState(ae.entries[1].Data); err == nil {
