@@ -5139,6 +5139,8 @@ func (s *Server) jsConsumerPauseRequest(sub *subscription, c *client, _ *Account
 }
 
 // jsConsumerPingRequest is to check if a consumer exists.
+// In clustered mode, stream leader handles not-found errors,
+// consumer leader responds with success.
 func (s *Server) jsConsumerPingRequest(sub *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
 	if c == nil || !s.JetStreamEnabled() {
 		return
@@ -5160,7 +5162,8 @@ func (s *Server) jsConsumerPingRequest(sub *subscription, c *client, _ *Account,
 		return
 	}
 
-	// If we are in clustered mode we need to be the consumer leader to proceed.
+	// If we are in clustered mode, stream leader handles not-found,
+	// consumer leader responds with success.
 	if s.JetStreamIsClustered() {
 		js, cc := s.getJetStreamCluster()
 		if js == nil || cc == nil {
@@ -5168,81 +5171,33 @@ func (s *Server) jsConsumerPingRequest(sub *subscription, c *client, _ *Account,
 		}
 
 		js.mu.RLock()
-		meta := cc.meta
-		js.mu.RUnlock()
-
-		if meta == nil {
-			return
-		}
-
-		// Since these could wait on the Raft group lock, don't do so under the JS lock.
-		ourID := meta.ID()
-		groupLeaderless := meta.Leaderless()
-		groupCreated := meta.Created()
-
-		js.mu.RLock()
-		isLeader, sa, ca := cc.isLeader(), js.streamAssignment(acc.Name, streamName), js.consumerAssignment(acc.Name, streamName, consumerName)
-		var rg *raftGroup
-		var isMember bool
-		if ca != nil {
-			if rg = ca.Group; rg != nil {
-				isMember = rg.isMember(ourID)
-			}
-		}
-		// Capture consumer leader here.
+		isMetaLeader := cc.isLeader()
+		sa := js.streamAssignment(acc.Name, streamName)
+		isStreamLeader := cc.isStreamLeader(acc.Name, streamName)
 		isConsumerLeader := cc.isConsumerLeader(acc.Name, streamName, consumerName)
-		// Also capture if we think there is no meta leader.
-		var isLeaderLess bool
-		if !isLeader {
-			isLeaderLess = groupLeaderless && time.Since(groupCreated) > lostQuorumIntervalDefault
-		}
 		js.mu.RUnlock()
 
-		// Meta leader handles error responses when consumer is not found.
-		if isLeader && ca == nil {
-			// We can't find the consumer, so mimic what would be the errors below.
-			if hasJS, doErr := acc.checkJetStream(); !hasJS {
-				if doErr {
-					resp.Error = NewJSNotEnabledForAccountError()
-					s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		// If stream doesn't exist, meta leader responds with error.
+		if sa == nil {
+			if isMetaLeader {
+				if hasJS, doErr := acc.checkJetStream(); !hasJS {
+					if doErr {
+						resp.Error = NewJSNotEnabledForAccountError()
+						s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+					}
+					return
 				}
-				return
-			}
-			if sa == nil {
 				resp.Error = NewJSStreamNotFoundError()
 				s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
-				return
-			}
-			// If we are here the consumer is not present.
-			resp.Error = NewJSConsumerNotFoundError()
-			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
-			return
-		} else if ca == nil {
-			if isLeaderLess {
-				resp.Error = NewJSClusterNotAvailError()
-				// Delaying an error response gives the leader a chance to respond before us
-				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil, errRespDelay)
 			}
 			return
 		}
 
-		// Check to see if we are a member of the group and if the group has no leader.
-		if isMember && js.isGroupLeaderless(ca.Group) {
-			resp.Error = NewJSClusterNotAvailError()
-			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		// Only stream leader or consumer leader should respond.
+		if !isStreamLeader && !isConsumerLeader {
 			return
 		}
-
-		// We have the consumer assigned and a leader, so only the consumer leader should answer.
-		if !isConsumerLeader {
-			if isLeaderLess {
-				resp.Error = NewJSClusterNotAvailError()
-				// Delaying an error response gives the leader a chance to respond before us
-				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), ca.Group, errRespDelay)
-			}
-			return
-		}
-		// Fall through to lookup local consumer for sequence info.
+		// Fall through to local lookup.
 	}
 
 	if errorOnRequiredApiLevel(hdr) {
