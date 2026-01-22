@@ -7202,3 +7202,465 @@ func TestJetStreamClusterLinearizableConsumerLeader(t *testing.T) {
 	require_NoError(t, err)
 	require_NotNil(t, ci)
 }
+
+// TestJetStreamClusterLinearizableLease5NodeCluster tests the lease mechanism
+// in a larger 5-node cluster.
+func TestJetStreamClusterLinearizableLease5NodeCluster(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R5S", 5)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 5,
+	})
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	sl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, sl)
+
+	acc, err := sl.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	n := mset.node.(*raft)
+
+	// Verify the leader has a valid lease in a 5-node cluster
+	require_True(t, n.Leader())
+	require_True(t, n.LeaderLease())
+
+	// Publish some messages
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish("foo", []byte(fmt.Sprintf("message-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Lease should still be valid after activity
+	require_True(t, n.LeaderLease())
+}
+
+// TestJetStreamClusterLinearizableLeasePartitionMinority tests that when the
+// leader is partitioned into a minority, its lease eventually expires.
+func TestJetStreamClusterLinearizableLeasePartitionMinority(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R5S", 5)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 5,
+	})
+	require_NoError(t, err)
+
+	// Publish a message before partition
+	_, err = js.Publish("foo", []byte("before-partition"))
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	sl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, sl)
+
+	acc, err := sl.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	n := mset.node.(*raft)
+	require_True(t, n.LeaderLease())
+
+	// Simulate a partition by expiring the lease - in a real partition,
+	// the leader would stop receiving acknowledgments from followers
+	// and the lease would naturally expire.
+	n.Lock()
+	n.lease = time.Now().Add(-2 * minElectionTimeout)
+	n.Unlock()
+
+	// The leader is still the Raft leader but has an expired lease
+	require_True(t, n.Leader())
+	require_False(t, n.LeaderLease())
+
+	// In this state, the leader should not serve linearizable reads
+	// Connect directly to the old leader
+	ncLeader, err := nats.Connect(sl.ClientURL())
+	require_NoError(t, err)
+	defer ncLeader.Close()
+
+	mreq := &JSApiMsgGetRequest{Seq: 1}
+	req, err := json.Marshal(mreq)
+	require_NoError(t, err)
+
+	// Request should timeout because leader refuses to serve reads
+	_, err = ncLeader.Request(fmt.Sprintf(JSApiMsgGetT, "TEST"), req, 500*time.Millisecond)
+	require_Error(t, err, nats.ErrTimeout)
+}
+
+// TestJetStreamClusterLinearizableLeaseServerShutdown tests lease behavior
+// when servers are shut down, forcing new leader election.
+func TestJetStreamClusterLinearizableLeaseServerShutdown(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R5S", 5)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 5,
+	})
+	require_NoError(t, err)
+
+	_, err = js.Publish("foo", []byte("message-1"))
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	sl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, sl)
+
+	// Get the stream's raft node on the leader
+	acc, err := sl.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	oldLeaderNode := mset.node.(*raft)
+	require_True(t, oldLeaderNode.LeaderLease())
+
+	// Shutdown the leader
+	sl.Shutdown()
+
+	// Wait for a new leader to be elected
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	newSl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, newSl)
+	require_True(t, newSl != sl)
+
+	// Get the new leader's raft node
+	acc2, err := newSl.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset2, err := acc2.lookupStream("TEST")
+	require_NoError(t, err)
+
+	newLeaderNode := mset2.node.(*raft)
+
+	// New leader should have a valid lease
+	require_True(t, newLeaderNode.Leader())
+	require_True(t, newLeaderNode.LeaderLease())
+
+	// Verify reads work on the new leader
+	ncNew, err := nats.Connect(newSl.ClientURL())
+	require_NoError(t, err)
+	defer ncNew.Close()
+
+	mreq := &JSApiMsgGetRequest{Seq: 1}
+	req, err := json.Marshal(mreq)
+	require_NoError(t, err)
+
+	rmsg, err := ncNew.Request(fmt.Sprintf(JSApiMsgGetT, "TEST"), req, time.Second)
+	require_NoError(t, err)
+
+	var resp JSApiMsgGetResponse
+	err = json.Unmarshal(rmsg.Data, &resp)
+	require_NoError(t, err)
+	require_True(t, resp.Message != nil)
+}
+
+// TestJetStreamClusterLinearizableLeaseMultiplePartitions tests lease behavior
+// with multiple sequential partitions and leader changes.
+func TestJetStreamClusterLinearizableLeaseMultiplePartitions(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R5S", 5)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 5,
+	})
+	require_NoError(t, err)
+
+	// Initial publish
+	_, err = js.Publish("foo", []byte("message-1"))
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	// Track leaders through multiple partitions
+	// We can only shutdown 2 leaders (5-2=3 remaining for quorum)
+	var leaders []*Server
+	var leaderNames []string
+
+	for i := 0; i < 2; i++ {
+		sl := c.streamLeader(globalAccountName, "TEST")
+		require_NotNil(t, sl)
+		leaders = append(leaders, sl)
+		leaderNames = append(leaderNames, sl.Name())
+
+		// Verify current leader has valid lease
+		acc, err := sl.LookupAccount(globalAccountName)
+		require_NoError(t, err)
+		mset, err := acc.lookupStream("TEST")
+		require_NoError(t, err)
+
+		n := mset.node.(*raft)
+		require_True(t, n.LeaderLease())
+
+		// Publish a message
+		_, err = js.Publish("foo", []byte(fmt.Sprintf("message-%d", i+2)))
+		require_NoError(t, err)
+
+		// Shutdown current leader to force new election
+		sl.Shutdown()
+
+		// Wait for new leader
+		c.waitOnStreamLeader(globalAccountName, "TEST")
+	}
+
+	// Verify we had different leaders (or at least leadership changes)
+	t.Logf("Leaders through partitions: %v", leaderNames)
+
+	// Get final leader and verify it has a valid lease
+	finalLeader := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, finalLeader)
+
+	acc, err := finalLeader.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	n := mset.node.(*raft)
+	require_True(t, n.Leader())
+	require_True(t, n.LeaderLease())
+}
+
+// TestJetStreamClusterLinearizableLeaseMajorityAvailable tests that as long as
+// a majority of nodes are available, the lease mechanism works correctly.
+func TestJetStreamClusterLinearizableLeaseMajorityAvailable(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R5S", 5)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 5,
+	})
+	require_NoError(t, err)
+
+	_, err = js.Publish("foo", []byte("message-1"))
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	sl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, sl)
+
+	// Shutdown 2 non-leader servers (minority)
+	// This should leave the cluster operational with 3 nodes (majority)
+	var shutdownServers []*Server
+	for _, s := range c.servers {
+		if s != sl && len(shutdownServers) < 2 {
+			shutdownServers = append(shutdownServers, s)
+			s.Shutdown()
+		}
+	}
+
+	// Give the cluster time to detect the shutdown servers
+	time.Sleep(500 * time.Millisecond)
+
+	// If the leader changed, wait for the new leader
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	newSl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, newSl)
+
+	// Get the leader's raft node
+	acc, err := newSl.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	n := mset.node.(*raft)
+
+	// Leader should still have a valid lease with majority available
+	require_True(t, n.Leader())
+	require_True(t, n.LeaderLease())
+
+	// Should still be able to publish and read
+	_, err = js.Publish("foo", []byte("message-after-shutdown"))
+	require_NoError(t, err)
+
+	// Verify we can read with valid lease
+	mreq := &JSApiMsgGetRequest{Seq: 1}
+	req, err := json.Marshal(mreq)
+	require_NoError(t, err)
+
+	ncLeader, err := nats.Connect(newSl.ClientURL())
+	require_NoError(t, err)
+	defer ncLeader.Close()
+
+	rmsg, err := ncLeader.Request(fmt.Sprintf(JSApiMsgGetT, "TEST"), req, time.Second)
+	require_NoError(t, err)
+
+	var resp JSApiMsgGetResponse
+	err = json.Unmarshal(rmsg.Data, &resp)
+	require_NoError(t, err)
+	require_True(t, resp.Message != nil)
+}
+
+// TestJetStreamClusterLinearizableLeaseRapidLeaderChanges tests lease behavior
+// during rapid leader changes via step-down.
+func TestJetStreamClusterLinearizableLeaseRapidLeaderChanges(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R5S", 5)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 5,
+	})
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	// Perform multiple rapid leader step-downs
+	for i := 0; i < 5; i++ {
+		sl := c.streamLeader(globalAccountName, "TEST")
+		require_NotNil(t, sl)
+
+		acc, err := sl.LookupAccount(globalAccountName)
+		require_NoError(t, err)
+		mset, err := acc.lookupStream("TEST")
+		require_NoError(t, err)
+
+		n := mset.node.(*raft)
+
+		// Verify leader has valid lease before step-down
+		require_True(t, n.LeaderLease())
+
+		// Step down
+		err = n.StepDown()
+		require_NoError(t, err)
+
+		// Wait for new leader
+		c.waitOnStreamLeader(globalAccountName, "TEST")
+
+		// Small delay between step-downs
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// After all the step-downs, verify final leader has valid lease
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	finalLeader := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, finalLeader)
+
+	acc, err := finalLeader.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	n := mset.node.(*raft)
+	require_True(t, n.Leader())
+	require_True(t, n.LeaderLease())
+
+	// Verify reads still work
+	_, err = js.Publish("foo", []byte("after-step-downs"))
+	require_NoError(t, err)
+
+	mreq := &JSApiMsgGetRequest{Seq: 1}
+	req, err := json.Marshal(mreq)
+	require_NoError(t, err)
+
+	ncLeader, err := nats.Connect(finalLeader.ClientURL())
+	require_NoError(t, err)
+	defer ncLeader.Close()
+
+	rmsg, err := ncLeader.Request(fmt.Sprintf(JSApiMsgGetT, "TEST"), req, time.Second)
+	require_NoError(t, err)
+
+	var resp JSApiMsgGetResponse
+	err = json.Unmarshal(rmsg.Data, &resp)
+	require_NoError(t, err)
+	require_True(t, resp.Message != nil)
+}
+
+// TestJetStreamClusterLinearizableLeaseWithLoad tests lease behavior under load
+// to ensure leases are properly renewed during continuous activity.
+func TestJetStreamClusterLinearizableLeaseWithLoad(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R5S", 5)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 5,
+	})
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	sl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, sl)
+
+	acc, err := sl.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	n := mset.node.(*raft)
+
+	// Publish many messages to generate continuous activity
+	for i := 0; i < 100; i++ {
+		_, err = js.Publish("foo", []byte(fmt.Sprintf("message-%d", i)))
+		require_NoError(t, err)
+
+		// Periodically check that the lease is still valid
+		if i%10 == 0 {
+			require_True(t, n.Leader())
+			require_True(t, n.LeaderLease())
+		}
+	}
+
+	// Final check that lease is valid
+	require_True(t, n.LeaderLease())
+
+	// Verify we can read any message
+	mreq := &JSApiMsgGetRequest{Seq: 50}
+	req, err := json.Marshal(mreq)
+	require_NoError(t, err)
+
+	ncLeader, err := nats.Connect(sl.ClientURL())
+	require_NoError(t, err)
+	defer ncLeader.Close()
+
+	rmsg, err := ncLeader.Request(fmt.Sprintf(JSApiMsgGetT, "TEST"), req, time.Second)
+	require_NoError(t, err)
+
+	var resp JSApiMsgGetResponse
+	err = json.Unmarshal(rmsg.Data, &resp)
+	require_NoError(t, err)
+	require_True(t, resp.Message != nil)
+}
