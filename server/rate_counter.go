@@ -63,3 +63,9 @@ func (r *rateCounter) countBlocked() uint64 {
 
 	return blocked
 }
+
+func (r *rateCounter) setLimit(limit int64) {
+	r.mu.Lock()
+	r.limit = limit
+	r.mu.Unlock()
+}

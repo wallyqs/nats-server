@@ -300,6 +300,28 @@ func (t *tlsHandshakeFirstFallback) Apply(server *Server) {
 	server.Noticef("Reloaded: Client TLS handshake first fallback delay: %v", t.newValue)
 }
 
+// tlsRateLimitOption implements the option interface for the tls `connection_rate_limit` setting.
+type tlsRateLimitOption struct {
+	noopOption
+	newValue int64
+}
+
+// Apply updates the connection rate limiter with the new limit.
+func (t *tlsRateLimitOption) Apply(server *Server) {
+	server.mu.Lock()
+	if t.newValue > 0 {
+		if server.connRateCounter == nil {
+			server.connRateCounter = newRateCounter(t.newValue)
+		} else {
+			server.connRateCounter.setLimit(t.newValue)
+		}
+	} else {
+		server.connRateCounter = nil
+	}
+	server.mu.Unlock()
+	server.Noticef("Reloaded: tls connection_rate_limit = %v", t.newValue)
+}
+
 // authOption is a base struct that provides default option behaviors.
 type authOption struct {
 	noopOption
@@ -1350,6 +1372,8 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			diffOpts = append(diffOpts, &tlsHandshakeFirst{newValue: newValue.(bool)})
 		case "tlshandshakefirstfallback":
 			diffOpts = append(diffOpts, &tlsHandshakeFirstFallback{newValue: newValue.(time.Duration)})
+		case "tlsratelimit":
+			diffOpts = append(diffOpts, &tlsRateLimitOption{newValue: newValue.(int64)})
 		case "username":
 			diffOpts = append(diffOpts, &usernameOption{})
 		case "password":
