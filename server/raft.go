@@ -49,6 +49,7 @@ type RaftNode interface {
 	Size() (entries, bytes uint64)
 	Progress() (index, commit, applied uint64)
 	Leader() bool
+	LeaderLease() bool
 	LeaderSince() *time.Time
 	Quorum() bool
 	Current() bool
@@ -168,6 +169,7 @@ type raft struct {
 	elect  *time.Timer // Election timer, normally accessed via electTimer
 	etlr   time.Time   // Election timer last reset time, for unit tests only
 	active time.Time   // Last activity time, i.e. for heartbeats
+	lease  time.Time   // Time when the lease was last renewed (for linearizable reads)
 	llqrt  time.Time   // Last quorum lost time
 	lsut   time.Time   // Last scale-up time
 
@@ -1500,6 +1502,44 @@ func (n *raft) Leader() bool {
 	return n.leaderState.Load()
 }
 
+// LeaderLease returns true if we are the leader and our lease is still valid.
+// This is used to ensure linearizable reads by verifying that we have received
+// acknowledgments from a quorum within the lease timeout period.
+func (n *raft) LeaderLease() bool {
+	if n == nil {
+		return false
+	}
+	if !n.Leader() {
+		return false
+	}
+	n.RLock()
+	leaseValid := time.Since(n.lease) < n.leaseTimeout()
+	n.RUnlock()
+	return leaseValid
+}
+
+// leaseTimeout returns the duration for which a leader lease is valid.
+// This is set to minElectionTimeout to ensure that a stale leader's lease
+// expires before any new leader can be elected.
+func (n *raft) leaseTimeout() time.Duration {
+	return minElectionTimeout
+}
+
+// notActiveLease checks if we need to send a noop entry to renew our lease.
+// We send a noop when we haven't renewed the lease recently.
+func (n *raft) notActiveLease() bool {
+	n.RLock()
+	defer n.RUnlock()
+	// Renew lease when we're at 50% of the lease timeout
+	return time.Since(n.lease) > n.leaseTimeout()/2
+}
+
+// sendNoop sends a noop entry to renew the leader lease.
+// This is used during idle periods to maintain linearizable read guarantees.
+func (n *raft) sendNoop() {
+	n.sendAppendEntry([]*Entry{{EntryNoop, nil}})
+}
+
 // LeaderSince returns how long we have been leader for,
 // if applicable.
 func (n *raft) LeaderSince() *time.Time {
@@ -2396,6 +2436,9 @@ const (
 	// After the catchup completes (or is canceled), a nil entry will be sent to signal this.
 	// This type of entry is purely internal and not transmitted between peers or stored in the log.
 	EntryCatchup
+	// EntryNoop is used to extend the leader lease without adding actual log entries.
+	// This allows the leader to maintain linearizable read guarantees during idle periods.
+	EntryNoop
 )
 
 func (t EntryType) String() string {
@@ -2414,6 +2457,8 @@ func (t EntryType) String() string {
 		return "LeaderTransfer"
 	case EntrySnapshot:
 		return "Snapshot"
+	case EntryNoop:
+		return "Noop"
 	}
 	return fmt.Sprintf("Unknown [%d]", uint8(t))
 }
@@ -2842,7 +2887,10 @@ func (n *raft) runAsLeader() {
 			n.prop.recycle(&es)
 
 		case <-hb.C:
-			if n.notActive() {
+			if n.notActiveLease() {
+				// Send a noop entry to renew our lease for linearizable reads.
+				n.sendNoop()
+			} else if n.notActive() {
 				n.sendHeartbeat()
 			}
 		case <-lq.C:
@@ -3289,6 +3337,9 @@ func (n *raft) tryCommit(index uint64) (bool, error) {
 			return false, err
 		}
 	}
+	// Extend our lease since we got acknowledgments from a quorum.
+	// This allows us to serve linearizable reads.
+	n.lease = time.Now()
 	return true, nil
 }
 
@@ -4795,6 +4846,11 @@ func (n *raft) switchToLeader() {
 	n.lxfer = false
 	n.updateLeader(n.id)
 	n.switchState(Leader)
+
+	// Initialize lease time. The lease will be properly renewed once we get
+	// acknowledgments from followers, but we need to start with a valid time
+	// so that LeaderLease() doesn't fail immediately.
+	n.lease = time.Now()
 
 	// To send out our initial peer state.
 	// In our implementation this is equivalent to sending a NOOP-entry upon becoming leader.

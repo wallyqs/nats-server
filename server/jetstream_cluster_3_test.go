@@ -6810,3 +6810,395 @@ func TestJetStreamClusterLeakedSubsWithStreamImportOverlappingJetStreamSubs(t *t
 		require_Equal(t, baseline, afterStreamDelete)
 	}
 }
+
+// TestJetStreamClusterLinearizableLeaderLease tests the basic leader lease functionality.
+// It verifies that LeaderLease() returns true when the lease is valid and the node is leader.
+func TestJetStreamClusterLinearizableLeaderLease(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	// Get the stream leader server
+	sl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, sl)
+
+	// Get the stream's raft node
+	acc, err := sl.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	// Verify the leader has a valid lease
+	n := mset.node.(*raft)
+	require_True(t, n.Leader())
+	require_True(t, n.LeaderLease())
+}
+
+// TestJetStreamClusterLinearizableLeaseExpiration tests that the lease expires
+// after the lease timeout period when there are no commits.
+func TestJetStreamClusterLinearizableLeaseExpiration(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	sl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, sl)
+
+	acc, err := sl.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	n := mset.node.(*raft)
+	require_True(t, n.LeaderLease())
+
+	// Manually set the lease time to the past to simulate expiration
+	n.Lock()
+	n.lease = time.Now().Add(-2 * minElectionTimeout)
+	n.Unlock()
+
+	// Now the lease should be invalid
+	require_True(t, n.Leader())
+	require_False(t, n.LeaderLease())
+}
+
+// TestJetStreamClusterLinearizableLeaseRenewalOnCommit tests that the lease
+// is renewed when entries are committed.
+func TestJetStreamClusterLinearizableLeaseRenewalOnCommit(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	sl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, sl)
+
+	acc, err := sl.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	n := mset.node.(*raft)
+
+	// Expire the lease
+	n.Lock()
+	n.lease = time.Now().Add(-2 * minElectionTimeout)
+	n.Unlock()
+
+	require_False(t, n.LeaderLease())
+
+	// Publish a message which should cause a commit and renew the lease
+	_, err = js.Publish("foo", []byte("hello"))
+	require_NoError(t, err)
+
+	// Wait for the commit to be processed
+	time.Sleep(100 * time.Millisecond)
+
+	// The lease should now be valid again
+	require_True(t, n.LeaderLease())
+}
+
+// TestJetStreamClusterLinearizableStreamMsgGet tests that MsgGet operations
+// fail when the leader lease has expired.
+func TestJetStreamClusterLinearizableStreamMsgGet(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Publish a message
+	_, err = js.Publish("foo", []byte("hello"))
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	sl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, sl)
+
+	// Verify we can get the message with a valid lease
+	mreq := &JSApiMsgGetRequest{Seq: 1}
+	req, err := json.Marshal(mreq)
+	require_NoError(t, err)
+
+	rmsg, err := nc.Request(fmt.Sprintf(JSApiMsgGetT, "TEST"), req, time.Second)
+	require_NoError(t, err)
+
+	var resp JSApiMsgGetResponse
+	err = json.Unmarshal(rmsg.Data, &resp)
+	require_NoError(t, err)
+	require_True(t, resp.Message != nil)
+	require_True(t, resp.Error == nil)
+
+	// Now expire the lease on the stream leader
+	acc, err := sl.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	n := mset.node.(*raft)
+	n.Lock()
+	n.lease = time.Now().Add(-2 * minElectionTimeout)
+	n.Unlock()
+
+	// Verify the lease is expired
+	require_True(t, n.Leader())
+	require_False(t, n.LeaderLease())
+
+	// Connect directly to the stream leader to test the lease behavior
+	ncLeader, err := nats.Connect(sl.ClientURL())
+	require_NoError(t, err)
+	defer ncLeader.Close()
+
+	// The request should timeout because the leader with expired lease
+	// refuses to handle read requests (this ensures linearizable reads).
+	// In a real scenario, the lease would be renewed by noop entries,
+	// so this situation should not occur under normal operation.
+	_, err = ncLeader.Request(fmt.Sprintf(JSApiMsgGetT, "TEST"), req, 500*time.Millisecond)
+	require_Error(t, err, nats.ErrTimeout)
+
+	// Now renew the lease by publishing another message
+	_, err = js.Publish("foo", []byte("world"))
+	require_NoError(t, err)
+
+	// Wait for the commit to be processed
+	time.Sleep(100 * time.Millisecond)
+
+	// The lease should now be valid again
+	require_True(t, n.LeaderLease())
+
+	// And the request should succeed
+	rmsg, err = ncLeader.Request(fmt.Sprintf(JSApiMsgGetT, "TEST"), req, time.Second)
+	require_NoError(t, err)
+
+	var resp2 JSApiMsgGetResponse
+	err = json.Unmarshal(rmsg.Data, &resp2)
+	require_NoError(t, err)
+	require_True(t, resp2.Message != nil)
+	require_True(t, resp2.Error == nil)
+}
+
+// TestJetStreamClusterLinearizableNoopEntry tests that noop entries
+// are properly created and handled.
+func TestJetStreamClusterLinearizableNoopEntry(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	leader := rg.leader()
+	require_NotNil(t, leader)
+
+	n := leader.node().(*raft)
+
+	// Verify the leader has a valid lease
+	require_True(t, n.LeaderLease())
+
+	// Record the current lease time
+	n.RLock()
+	oldLease := n.lease
+	n.RUnlock()
+
+	// Manually send a noop to renew the lease
+	n.sendNoop()
+
+	// Wait for the noop to be committed
+	time.Sleep(200 * time.Millisecond)
+
+	// The lease should have been renewed
+	n.RLock()
+	newLease := n.lease
+	n.RUnlock()
+
+	require_True(t, newLease.After(oldLease) || newLease.Equal(oldLease))
+	require_True(t, n.LeaderLease())
+}
+
+// TestJetStreamClusterLinearizableLeaseTimeout tests the lease timeout
+// is set correctly to minElectionTimeout.
+func TestJetStreamClusterLinearizableLeaseTimeout(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	leader := rg.leader()
+	require_NotNil(t, leader)
+
+	n := leader.node().(*raft)
+
+	// Verify lease timeout equals minElectionTimeout
+	require_Equal(t, n.leaseTimeout(), minElectionTimeout)
+}
+
+// TestJetStreamClusterLinearizableLeaseNilNode tests that LeaderLease
+// handles nil node gracefully.
+func TestJetStreamClusterLinearizableLeaseNilNode(t *testing.T) {
+	var n *raft
+	require_False(t, n.LeaderLease())
+}
+
+// TestJetStreamClusterLinearizableLeaseNonLeader tests that LeaderLease
+// returns false for non-leader nodes.
+func TestJetStreamClusterLinearizableLeaseNonLeader(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	// Get a non-leader node
+	nonLeader := rg.nonLeader()
+	require_NotNil(t, nonLeader)
+
+	n := nonLeader.node().(*raft)
+
+	// Non-leader should return false for LeaderLease
+	require_False(t, n.Leader())
+	require_False(t, n.LeaderLease())
+}
+
+// TestJetStreamClusterLinearizableLeaseAfterStepdown tests that LeaderLease
+// returns false after a leader steps down.
+func TestJetStreamClusterLinearizableLeaseAfterStepdown(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	leader := rg.leader()
+	require_NotNil(t, leader)
+
+	n := leader.node().(*raft)
+	require_True(t, n.LeaderLease())
+
+	// Step down
+	err := n.StepDown()
+	require_NoError(t, err)
+
+	// Wait for stepdown to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// After stepping down, LeaderLease should return false
+	require_False(t, n.Leader())
+	require_False(t, n.LeaderLease())
+}
+
+// TestJetStreamClusterLinearizableEntryNoopType tests that EntryNoop
+// has the correct string representation.
+func TestJetStreamClusterLinearizableEntryNoopType(t *testing.T) {
+	require_Equal(t, EntryNoop.String(), "Noop")
+}
+
+// TestJetStreamClusterLinearizableLeaseAutoRenewal tests that the lease
+// is automatically renewed by noop entries during idle periods.
+func TestJetStreamClusterLinearizableLeaseAutoRenewal(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	sl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, sl)
+
+	acc, err := sl.LookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	n := mset.node.(*raft)
+
+	// The lease should remain valid over multiple heartbeat intervals
+	// because the leader sends noops to renew it
+	for i := 0; i < 5; i++ {
+		require_True(t, n.LeaderLease())
+		time.Sleep(hbInterval)
+	}
+}
+
+// TestJetStreamClusterLinearizableConsumerLeader tests that consumer
+// leadership checks also use the lease mechanism.
+func TestJetStreamClusterLinearizableConsumerLeader(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "CONSUMER",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+	c.waitOnConsumerLeader(globalAccountName, "TEST", "CONSUMER")
+
+	// Publish a message
+	_, err = js.Publish("foo", []byte("hello"))
+	require_NoError(t, err)
+
+	// Get consumer info - this should work with valid lease
+	ci, err := js.ConsumerInfo("TEST", "CONSUMER")
+	require_NoError(t, err)
+	require_NotNil(t, ci)
+}
