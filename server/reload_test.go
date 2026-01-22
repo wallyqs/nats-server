@@ -601,6 +601,63 @@ func TestConfigReloadRotateTLSMultiCert(t *testing.T) {
 	}
 }
 
+func TestConfigReloadTLSConnectionRateLimit(t *testing.T) {
+	// Start server with connection_rate_limit of 5
+	content := []byte(`
+		listen: "127.0.0.1:-1"
+		tls {
+			cert_file: "../test/configs/certs/server-cert.pem"
+			key_file: "../test/configs/certs/server-key.pem"
+			connection_rate_limit: 5
+		}
+	`)
+	server, _, config := runReloadServerWithContent(t, content)
+	defer server.Shutdown()
+
+	// Verify initial rate limit is set
+	server.mu.Lock()
+	if server.connRateCounter == nil {
+		server.mu.Unlock()
+		t.Fatal("Expected connRateCounter to be set")
+	}
+	server.connRateCounter.mu.Lock()
+	initialLimit := server.connRateCounter.limit
+	server.connRateCounter.mu.Unlock()
+	server.mu.Unlock()
+
+	if initialLimit != 5 {
+		t.Fatalf("Expected initial rate limit to be 5, got %d", initialLimit)
+	}
+
+	// Reload with a different rate limit
+	changeCurrentConfigContentWithNewContent(t, config, []byte(`
+		listen: "127.0.0.1:-1"
+		tls {
+			cert_file: "../test/configs/certs/server-cert.pem"
+			key_file: "../test/configs/certs/server-key.pem"
+			connection_rate_limit: 10
+		}
+	`))
+	if err := server.Reload(); err != nil {
+		t.Fatalf("Error reloading config: %v", err)
+	}
+
+	// Verify the rate limit was updated
+	server.mu.Lock()
+	if server.connRateCounter == nil {
+		server.mu.Unlock()
+		t.Fatal("Expected connRateCounter to still be set after reload")
+	}
+	server.connRateCounter.mu.Lock()
+	newLimit := server.connRateCounter.limit
+	server.connRateCounter.mu.Unlock()
+	server.mu.Unlock()
+
+	if newLimit != 10 {
+		t.Fatalf("Expected rate limit to be 10 after reload, got %d", newLimit)
+	}
+}
+
 func TestConfigReloadDefaultSentinel(t *testing.T) {
 	var err error
 	preload := make(map[string]string)
