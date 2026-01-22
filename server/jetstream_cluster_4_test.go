@@ -7367,3 +7367,73 @@ func TestJetStreamClusterMetaCompactSizeThreshold(t *testing.T) {
 		})
 	}
 }
+
+func TestJetStreamClusterConsumerInfoPingMode(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Publish some messages
+	for i := 0; i < 100; i++ {
+		_, err = js.Publish("foo", []byte("msg"))
+		require_NoError(t, err)
+	}
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "my_consumer",
+		Replicas:  3,
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	c.waitOnConsumerLeader(globalAccountName, "TEST", "my_consumer")
+
+	t.Run("NormalMode", func(t *testing.T) {
+		msg, err := nc.Request("$JS.API.CONSUMER.INFO.TEST.my_consumer", nil, time.Second)
+		require_NoError(t, err)
+
+		var resp JSApiConsumerInfoResponse
+		require_NoError(t, json.Unmarshal(msg.Data, &resp))
+		require_True(t, resp.Error == nil)
+		require_Equal(t, resp.NumPending, uint64(100))
+	})
+
+	t.Run("PingMode", func(t *testing.T) {
+		reqBody, _ := json.Marshal(JSApiConsumerInfoRequest{Ping: true})
+		msg, err := nc.Request("$JS.API.CONSUMER.INFO.TEST.my_consumer", reqBody, time.Second)
+		require_NoError(t, err)
+
+		var resp JSApiConsumerInfoResponse
+		require_NoError(t, json.Unmarshal(msg.Data, &resp))
+		require_True(t, resp.Error == nil)
+		require_Equal(t, resp.NumPending, uint64(0)) // Not calculated in ping mode
+		require_Equal(t, resp.Stream, "TEST")
+		require_Equal(t, resp.Name, "my_consumer")
+	})
+
+	t.Run("AfterLeaderStepdown", func(t *testing.T) {
+		// Step down the consumer leader
+		_, err := nc.Request(fmt.Sprintf(JSApiConsumerLeaderStepDownT, "TEST", "my_consumer"), nil, time.Second)
+		require_NoError(t, err)
+		c.waitOnConsumerLeader(globalAccountName, "TEST", "my_consumer")
+
+		// Ping mode should still work after leader change
+		reqBody, _ := json.Marshal(JSApiConsumerInfoRequest{Ping: true})
+		msg, err := nc.Request("$JS.API.CONSUMER.INFO.TEST.my_consumer", reqBody, time.Second)
+		require_NoError(t, err)
+
+		var resp JSApiConsumerInfoResponse
+		require_NoError(t, json.Unmarshal(msg.Data, &resp))
+		require_True(t, resp.Error == nil)
+		require_Equal(t, resp.NumPending, uint64(0))
+	})
+}

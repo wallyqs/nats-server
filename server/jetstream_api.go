@@ -718,6 +718,12 @@ type JSApiConsumerPauseResponse struct {
 	PauseRemaining time.Duration `json:"pause_remaining,omitempty"`
 }
 
+// JSApiConsumerInfoRequest allows requesting consumer info with options.
+type JSApiConsumerInfoRequest struct {
+	// Ping mode skips num_pending calculation for faster response.
+	Ping bool `json:"ping,omitempty"`
+}
+
 type JSApiConsumerInfoResponse struct {
 	ApiResponse
 	*ConsumerInfo
@@ -4695,10 +4701,14 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 
 	var resp = JSApiConsumerInfoResponse{ApiResponse: ApiResponse{Type: JSApiConsumerInfoResponseType}}
 
+	// Parse optional request for ping mode.
+	var req JSApiConsumerInfoRequest
 	if !isEmptyRequest(msg) {
-		resp.Error = NewJSNotEmptyRequestError()
-		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
-		return
+		if err := json.Unmarshal(msg, &req); err != nil {
+			resp.Error = NewJSInvalidJSONError(err)
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			return
+		}
 	}
 
 	// If we are in clustered mode we need to be the consumer leader to proceed.
@@ -4876,7 +4886,13 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 		return
 	}
 
-	if resp.ConsumerInfo = setDynamicConsumerInfoMetadata(obs.info()); resp.ConsumerInfo == nil {
+	// Use ping mode for faster response without num_pending calculation.
+	if req.Ping {
+		resp.ConsumerInfo = setDynamicConsumerInfoMetadata(obs.infoForPing())
+	} else {
+		resp.ConsumerInfo = setDynamicConsumerInfoMetadata(obs.info())
+	}
+	if resp.ConsumerInfo == nil {
 		// This consumer returned nil which means it's closed. Respond with not found.
 		resp.Error = NewJSConsumerNotFoundError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))

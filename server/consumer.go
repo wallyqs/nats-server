@@ -3106,6 +3106,33 @@ func (o *consumer) info() *ConsumerInfo {
 	return o.infoWithSnap(false)
 }
 
+// infoForPing returns minimal consumer state without calculating num_pending for faster response.
+func (o *consumer) infoForPing() *ConsumerInfo {
+	o.mu.RLock()
+	mset := o.mset
+	if o.closed || mset == nil || mset.srv == nil {
+		o.mu.RUnlock()
+		return nil
+	}
+
+	info := &ConsumerInfo{
+		Stream:  o.stream,
+		Name:    o.name,
+		Created: o.created,
+		Delivered: SequenceInfo{
+			Consumer: o.dseq - 1,
+			Stream:   o.sseq - 1,
+		},
+		AckFloor: SequenceInfo{
+			Consumer: o.adflr,
+			Stream:   o.asflr,
+		},
+		TimeStamp: time.Now().UTC(),
+	}
+	o.mu.RUnlock()
+	return info
+}
+
 func (o *consumer) infoWithSnap(snap bool) *ConsumerInfo {
 	return o.infoWithSnapAndReply(snap, _EMPTY_)
 }

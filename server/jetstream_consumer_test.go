@@ -10587,3 +10587,77 @@ func TestJetStreamConsumerNoDeleteAfterConcurrentShutdownAndLeaderChange(t *test
 	o = mset.lookupConsumer("CONSUMER")
 	require_NotNil(t, o)
 }
+
+func TestJetStreamConsumerInfoPingMode(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+	})
+	require_NoError(t, err)
+
+	// Publish some messages
+	for i := 0; i < 100; i++ {
+		_, err = js.Publish("foo", []byte("msg"))
+		require_NoError(t, err)
+	}
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "my_consumer",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	t.Run("NormalMode", func(t *testing.T) {
+		// Normal mode should calculate num_pending
+		msg, err := nc.Request("$JS.API.CONSUMER.INFO.TEST.my_consumer", nil, time.Second)
+		require_NoError(t, err)
+
+		var resp JSApiConsumerInfoResponse
+		require_NoError(t, json.Unmarshal(msg.Data, &resp))
+		require_True(t, resp.Error == nil)
+		require_Equal(t, resp.NumPending, uint64(100))
+	})
+
+	t.Run("PingMode", func(t *testing.T) {
+		// Ping mode should skip num_pending calculation
+		reqBody, _ := json.Marshal(JSApiConsumerInfoRequest{Ping: true})
+		msg, err := nc.Request("$JS.API.CONSUMER.INFO.TEST.my_consumer", reqBody, time.Second)
+		require_NoError(t, err)
+
+		var resp JSApiConsumerInfoResponse
+		require_NoError(t, json.Unmarshal(msg.Data, &resp))
+		require_True(t, resp.Error == nil)
+		require_Equal(t, resp.NumPending, uint64(0)) // Not calculated in ping mode
+		require_Equal(t, resp.Stream, "TEST")
+		require_Equal(t, resp.Name, "my_consumer")
+		require_True(t, !resp.Created.IsZero())
+	})
+
+	t.Run("PingModeWithEmptyRequest", func(t *testing.T) {
+		// Empty request should work (backwards compatible)
+		msg, err := nc.Request("$JS.API.CONSUMER.INFO.TEST.my_consumer", nil, time.Second)
+		require_NoError(t, err)
+
+		var resp JSApiConsumerInfoResponse
+		require_NoError(t, json.Unmarshal(msg.Data, &resp))
+		require_True(t, resp.Error == nil)
+		require_Equal(t, resp.NumPending, uint64(100))
+	})
+
+	t.Run("NonExistingConsumer", func(t *testing.T) {
+		reqBody, _ := json.Marshal(JSApiConsumerInfoRequest{Ping: true})
+		msg, err := nc.Request("$JS.API.CONSUMER.INFO.TEST.non_existing", reqBody, time.Second)
+		require_NoError(t, err)
+
+		var resp JSApiConsumerInfoResponse
+		require_NoError(t, json.Unmarshal(msg.Data, &resp))
+		require_True(t, resp.Error != nil)
+		require_Equal(t, resp.Error.ErrCode, uint16(10014)) // JSConsumerNotFoundErr
+	})
+}
