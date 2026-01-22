@@ -7367,3 +7367,72 @@ func TestJetStreamClusterMetaCompactSizeThreshold(t *testing.T) {
 		})
 	}
 }
+
+func TestJetStreamClusterConsumerPing(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:  "my_consumer",
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	c.waitOnConsumerLeader(globalAccountName, "TEST", "my_consumer")
+
+	t.Run("ExistingConsumer", func(t *testing.T) {
+		msg, err := nc.Request("$JS.API.CONSUMER.PING.TEST.my_consumer", nil, time.Second)
+		require_NoError(t, err)
+
+		var resp JSApiConsumerPingResponse
+		require_NoError(t, json.Unmarshal(msg.Data, &resp))
+		require_True(t, resp.Error == nil)
+		require_Equal(t, resp.Type, JSApiConsumerPingResponseType)
+	})
+
+	t.Run("NonExistingConsumer", func(t *testing.T) {
+		msg, err := nc.Request("$JS.API.CONSUMER.PING.TEST.non_existing", nil, time.Second)
+		require_NoError(t, err)
+
+		var resp JSApiConsumerPingResponse
+		require_NoError(t, json.Unmarshal(msg.Data, &resp))
+		require_True(t, resp.Error != nil)
+		require_Equal(t, resp.Error.ErrCode, uint16(10014)) // JSConsumerNotFoundErr
+	})
+
+	t.Run("NonExistingStream", func(t *testing.T) {
+		msg, err := nc.Request("$JS.API.CONSUMER.PING.NON_EXISTING.my_consumer", nil, time.Second)
+		require_NoError(t, err)
+
+		var resp JSApiConsumerPingResponse
+		require_NoError(t, json.Unmarshal(msg.Data, &resp))
+		require_True(t, resp.Error != nil)
+		require_Equal(t, resp.Error.ErrCode, uint16(10059)) // JSStreamNotFoundErr
+	})
+
+	t.Run("AfterLeaderStepdown", func(t *testing.T) {
+		// Step down the consumer leader
+		_, err := nc.Request(fmt.Sprintf(JSApiConsumerLeaderStepDownT, "TEST", "my_consumer"), nil, time.Second)
+		require_NoError(t, err)
+		c.waitOnConsumerLeader(globalAccountName, "TEST", "my_consumer")
+
+		// Ping should still work after leader change
+		msg, err := nc.Request("$JS.API.CONSUMER.PING.TEST.my_consumer", nil, time.Second)
+		require_NoError(t, err)
+
+		var resp JSApiConsumerPingResponse
+		require_NoError(t, json.Unmarshal(msg.Data, &resp))
+		require_True(t, resp.Error == nil)
+		require_Equal(t, resp.Type, JSApiConsumerPingResponseType)
+	})
+}

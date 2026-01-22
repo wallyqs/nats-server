@@ -152,6 +152,11 @@ const (
 	JSApiConsumerPause  = "$JS.API.CONSUMER.PAUSE.*.*"
 	JSApiConsumerPauseT = "$JS.API.CONSUMER.PAUSE.%s.%s"
 
+	// JSApiConsumerPing is the endpoint to check if a consumer exists.
+	// Will return JSON response.
+	JSApiConsumerPing  = "$JS.API.CONSUMER.PING.*.*"
+	JSApiConsumerPingT = "$JS.API.CONSUMER.PING.%s.%s"
+
 	// JSApiRequestNextT is the prefix for the request next message(s) for a consumer in worker/pull mode.
 	JSApiRequestNextT = "$JS.API.CONSUMER.MSG.NEXT.%s.%s"
 
@@ -718,6 +723,15 @@ type JSApiConsumerPauseResponse struct {
 	PauseRemaining time.Duration `json:"pause_remaining,omitempty"`
 }
 
+const JSApiConsumerPingResponseType = "io.nats.jetstream.api.v1.consumer_ping_response"
+
+type JSApiConsumerPingResponse struct {
+	ApiResponse
+	Created   time.Time    `json:"created,omitempty"`
+	Delivered SequenceInfo `json:"delivered"`
+	AckFloor  SequenceInfo `json:"ack_floor"`
+}
+
 type JSApiConsumerInfoResponse struct {
 	ApiResponse
 	*ConsumerInfo
@@ -944,6 +958,7 @@ func (s *Server) setJetStreamExportSubs() error {
 		{JSApiConsumerInfo, s.jsConsumerInfoRequest},
 		{JSApiConsumerDelete, s.jsConsumerDeleteRequest},
 		{JSApiConsumerPause, s.jsConsumerPauseRequest},
+		{JSApiConsumerPing, s.jsConsumerPingRequest},
 		{JSApiConsumerUnpin, s.jsConsumerUnpinRequest},
 	}
 
@@ -5120,6 +5135,154 @@ func (s *Server) jsConsumerPauseRequest(sub *subscription, c *client, _ *Account
 	if resp.Paused = time.Now().Before(pauseUTC); resp.Paused {
 		resp.PauseRemaining = time.Until(pauseUTC)
 	}
+	s.sendAPIResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(resp))
+}
+
+// jsConsumerPingRequest is to check if a consumer exists.
+func (s *Server) jsConsumerPingRequest(sub *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
+	if c == nil || !s.JetStreamEnabled() {
+		return
+	}
+	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
+	if err != nil {
+		s.Warnf(badAPIRequestT, msg)
+		return
+	}
+
+	streamName := streamNameFromSubject(subject)
+	consumerName := consumerNameFromSubject(subject)
+
+	var resp = JSApiConsumerPingResponse{ApiResponse: ApiResponse{Type: JSApiConsumerPingResponseType}}
+
+	if !isEmptyRequest(msg) {
+		resp.Error = NewJSNotEmptyRequestError()
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+
+	// If we are in clustered mode we need to be the consumer leader to proceed.
+	if s.JetStreamIsClustered() {
+		js, cc := s.getJetStreamCluster()
+		if js == nil || cc == nil {
+			return
+		}
+
+		js.mu.RLock()
+		meta := cc.meta
+		js.mu.RUnlock()
+
+		if meta == nil {
+			return
+		}
+
+		// Since these could wait on the Raft group lock, don't do so under the JS lock.
+		ourID := meta.ID()
+		groupLeaderless := meta.Leaderless()
+		groupCreated := meta.Created()
+
+		js.mu.RLock()
+		isLeader, sa, ca := cc.isLeader(), js.streamAssignment(acc.Name, streamName), js.consumerAssignment(acc.Name, streamName, consumerName)
+		var rg *raftGroup
+		var isMember bool
+		if ca != nil {
+			if rg = ca.Group; rg != nil {
+				isMember = rg.isMember(ourID)
+			}
+		}
+		// Capture consumer leader here.
+		isConsumerLeader := cc.isConsumerLeader(acc.Name, streamName, consumerName)
+		// Also capture if we think there is no meta leader.
+		var isLeaderLess bool
+		if !isLeader {
+			isLeaderLess = groupLeaderless && time.Since(groupCreated) > lostQuorumIntervalDefault
+		}
+		js.mu.RUnlock()
+
+		// Meta leader handles error responses when consumer is not found.
+		if isLeader && ca == nil {
+			// We can't find the consumer, so mimic what would be the errors below.
+			if hasJS, doErr := acc.checkJetStream(); !hasJS {
+				if doErr {
+					resp.Error = NewJSNotEnabledForAccountError()
+					s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+				}
+				return
+			}
+			if sa == nil {
+				resp.Error = NewJSStreamNotFoundError()
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+				return
+			}
+			// If we are here the consumer is not present.
+			resp.Error = NewJSConsumerNotFoundError()
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			return
+		} else if ca == nil {
+			if isLeaderLess {
+				resp.Error = NewJSClusterNotAvailError()
+				// Delaying an error response gives the leader a chance to respond before us
+				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), nil, errRespDelay)
+			}
+			return
+		}
+
+		// Check to see if we are a member of the group and if the group has no leader.
+		if isMember && js.isGroupLeaderless(ca.Group) {
+			resp.Error = NewJSClusterNotAvailError()
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			return
+		}
+
+		// We have the consumer assigned and a leader, so only the consumer leader should answer.
+		if !isConsumerLeader {
+			if isLeaderLess {
+				resp.Error = NewJSClusterNotAvailError()
+				// Delaying an error response gives the leader a chance to respond before us
+				s.sendDelayedAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp), ca.Group, errRespDelay)
+			}
+			return
+		}
+		// Fall through to lookup local consumer for sequence info.
+	}
+
+	if errorOnRequiredApiLevel(hdr) {
+		resp.Error = NewJSRequiredApiLevelError()
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+
+	if !acc.JetStreamEnabled() {
+		resp.Error = NewJSNotEnabledForAccountError()
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+
+	mset, err := acc.lookupStream(streamName)
+	if err != nil {
+		resp.Error = NewJSStreamNotFoundError(Unless(err))
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+
+	obs := mset.lookupConsumer(consumerName)
+	if obs == nil {
+		resp.Error = NewJSConsumerNotFoundError()
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
+
+	// Consumer exists, return success with basic info.
+	obs.mu.RLock()
+	resp.Created = obs.created
+	resp.Delivered = SequenceInfo{
+		Consumer: obs.dseq - 1,
+		Stream:   obs.sseq - 1,
+	}
+	resp.AckFloor = SequenceInfo{
+		Consumer: obs.adflr,
+		Stream:   obs.asflr,
+	}
+	obs.mu.RUnlock()
 	s.sendAPIResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(resp))
 }
 
