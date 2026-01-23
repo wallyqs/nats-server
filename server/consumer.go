@@ -3110,7 +3110,18 @@ func (o *consumer) infoWithSnap(snap bool) *ConsumerInfo {
 	return o.infoWithSnapAndReply(snap, _EMPTY_)
 }
 
+// infoWithAccurateNumPending returns consumer info with accurate NumPending
+// by forcing a full recalculation from the stream store.
+// This is more expensive but provides accurate results for monitoring (e.g., JSZ).
+func (o *consumer) infoWithAccurateNumPending() *ConsumerInfo {
+	return o.infoInternal(false, _EMPTY_, true)
+}
+
 func (o *consumer) infoWithSnapAndReply(snap bool, reply string) *ConsumerInfo {
+	return o.infoInternal(snap, reply, false)
+}
+
+func (o *consumer) infoInternal(snap bool, reply string, accurateNumPending bool) *ConsumerInfo {
 	o.mu.Lock()
 	mset := o.mset
 	if o.closed || mset == nil || mset.srv == nil {
@@ -3139,7 +3150,13 @@ func (o *consumer) infoWithSnapAndReply(snap bool, reply string) *ConsumerInfo {
 		})
 	}
 
-	np, err := o.checkNumPending()
+	var np uint64
+	var err error
+	if accurateNumPending {
+		np, err = o.streamNumPending()
+	} else {
+		np, err = o.checkNumPending()
+	}
 	if err != nil {
 		o.mu.Unlock()
 		return nil
