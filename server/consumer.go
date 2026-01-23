@@ -3119,7 +3119,17 @@ func (o *consumer) infoWithSnap(snap bool) *ConsumerInfo {
 	return o.infoWithSnapAndReply(snap, _EMPTY_)
 }
 
+// infoWithStreamNumPending returns consumer info with results from streamNumPending.
+// This is more expensive but provides accurate results for monitoring (e.g., JSZ).
+func (o *consumer) infoWithStreamNumPending() *ConsumerInfo {
+	return o.infoInternal(false, _EMPTY_, true)
+}
+
 func (o *consumer) infoWithSnapAndReply(snap bool, reply string) *ConsumerInfo {
+	return o.infoInternal(snap, reply, false)
+}
+
+func (o *consumer) infoInternal(snap bool, reply string, streamNumPending bool) *ConsumerInfo {
 	o.mu.Lock()
 	mset := o.mset
 	if o.closed || mset == nil || mset.srv == nil {
@@ -3148,7 +3158,13 @@ func (o *consumer) infoWithSnapAndReply(snap bool, reply string) *ConsumerInfo {
 		})
 	}
 
-	np, err := o.checkNumPending()
+	var np uint64
+	var err error
+	if streamNumPending {
+		np, err = o.streamNumPending()
+	} else {
+		np, err = o.checkNumPending()
+	}
 	if err != nil {
 		o.mu.Unlock()
 		return nil
