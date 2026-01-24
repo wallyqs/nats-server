@@ -8268,6 +8268,235 @@ func TestJetStreamConsumerDontDecrementPendingCountOnSkippedMsg(t *testing.T) {
 	requireExpected(1)
 }
 
+// TestJetStreamConsumerNpcDriftRace tests the race condition where npc can drift
+// when messages are deleted concurrently with consumer delivery.
+//
+// The race scenario:
+// 1. Consumer is at o.sseq = N, about to deliver message N
+// 2. Message N gets deleted concurrently
+// 3. getNextMsg skips message N (deleted), advances o.sseq to N+1
+// 4. decStreamPending(N) is called - but N < o.sseq now, so it doesn't decrement
+// 5. Result: npc is higher than actual pending messages
+//
+// This test demonstrates that checkNumPendingRecalc() correctly recalculates
+// when npc has drifted, while checkNumPending() only caps the value.
+func TestJetStreamConsumerNpcDriftRace(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+	})
+	require_NoError(t, err)
+
+	// Create a pull consumer so we control when messages are fetched.
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "CONSUMER",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	acc, err := s.lookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+	o := mset.lookupConsumer("CONSUMER")
+	require_NotNil(t, o)
+
+	// Publish messages.
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish("foo", []byte("msg"))
+		require_NoError(t, err)
+	}
+
+	// Verify initial state.
+	o.mu.RLock()
+	initialNpc := o.npc
+	o.mu.RUnlock()
+	require_Equal(t, initialNpc, int64(10))
+
+	// Now simulate the race condition:
+	// 1. Advance o.sseq as if getNextMsg skipped some deleted messages
+	// 2. Call decStreamPending for those "skipped" messages
+	// This simulates what happens when deletion and delivery race.
+	o.mu.Lock()
+	// Simulate: consumer was at seq 1, messages 1-3 were deleted while
+	// getNextMsg was running, so it skipped to seq 4.
+	o.sseq = 4
+	o.mu.Unlock()
+
+	// Now decStreamPending is called for the deleted messages.
+	// Since sseq is now 4, messages 1-3 are < sseq, so npc won't be decremented.
+	o.decStreamPending(1, "foo")
+	o.decStreamPending(2, "foo")
+	o.decStreamPending(3, "foo")
+
+	// Check npc - it should still be 10 because the check sseq >= o.sseq failed
+	// for all three deleted messages (1,2,3 < 4).
+	// But actually we only have 7 messages pending (seq 4-10).
+	o.mu.RLock()
+	driftedNpc := o.npc
+	o.mu.RUnlock()
+
+	// npc has drifted - it shows 10 but only 7 messages are actually pending.
+	// This is the race condition!
+	require_Equal(t, driftedNpc, int64(10))
+
+	// Verify the stream actually has 10 messages still (we only simulated the race,
+	// didn't actually delete).
+	si, err := js.StreamInfo("TEST")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, uint64(10))
+
+	// Now demonstrate the fix:
+	// checkNumPending() will cap npc to state.Msgs (10), which happens to be correct
+	// here since we didn't actually delete messages.
+	// But if we had actually deleted, checkNumPendingRecalc() would recalculate correctly.
+
+	// To properly demonstrate, let's actually delete the messages and show the difference.
+	err = js.DeleteMsg("TEST", 1)
+	require_NoError(t, err)
+	err = js.DeleteMsg("TEST", 2)
+	require_NoError(t, err)
+	err = js.DeleteMsg("TEST", 3)
+	require_NoError(t, err)
+
+	// Now stream has 7 messages (seq 4-10), but our npc is still 10.
+	si, err = js.StreamInfo("TEST")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, uint64(7))
+
+	o.mu.RLock()
+	npcAfterDelete := o.npc
+	o.mu.RUnlock()
+	// npc is still 10 (drifted high) because decStreamPending didn't decrement
+	// when we called it earlier (sseq check failed), and actual deletion
+	// also won't decrement because sseq >= o.sseq check will fail (1,2,3 < 4).
+	require_Equal(t, npcAfterDelete, int64(10))
+
+	// checkNumPending() caps to min(npc, state.Msgs) = min(10, 7) = 7
+	ci := o.info()
+	require_Equal(t, ci.NumPending, 7)
+
+	// checkNumPendingRecalc() sees npc(10) > state.Msgs(7), triggers streamNumPending()
+	// which recalculates accurately.
+	ciAccurate := o.infoWithStreamNumPending()
+	require_Equal(t, ciAccurate.NumPending, 7)
+
+	// After recalculation, npc should be corrected.
+	o.mu.RLock()
+	correctedNpc := o.npc
+	o.mu.RUnlock()
+	require_Equal(t, correctedNpc, int64(7))
+}
+
+// TestJetStreamConsumerNpcDriftFilteredConsumer demonstrates that for filtered
+// consumers, checkNumPending()'s cap on state.Msgs is insufficient because
+// state.Msgs is the total stream messages, not messages matching the filter.
+// Only streamNumPending() queries the store with the actual filter.
+func TestJetStreamConsumerNpcDriftFilteredConsumer(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo.*"},
+	})
+	require_NoError(t, err)
+
+	// Create a filtered consumer that only sees "foo.a" messages.
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:       "FILTERED",
+		AckPolicy:     nats.AckExplicitPolicy,
+		FilterSubject: "foo.a",
+	})
+	require_NoError(t, err)
+
+	// Publish 50 messages to "foo.a" and 50 to "foo.b".
+	for i := 0; i < 50; i++ {
+		_, err = js.Publish("foo.a", []byte("msg"))
+		require_NoError(t, err)
+		_, err = js.Publish("foo.b", []byte("msg"))
+		require_NoError(t, err)
+	}
+
+	acc, err := s.lookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+	o := mset.lookupConsumer("FILTERED")
+	require_NotNil(t, o)
+
+	// Stream has 100 messages total, but consumer should only see 50 (foo.a).
+	si, err := js.StreamInfo("TEST")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, uint64(100))
+
+	// Verify consumer initially reports 50 pending.
+	o.mu.RLock()
+	initialNpc := o.npc
+	o.mu.RUnlock()
+	require_Equal(t, initialNpc, int64(50))
+
+	// Simulate npc drift - set it to 80 (higher than actual 50, but less than total 100).
+	o.mu.Lock()
+	o.npc = 80
+	o.mu.Unlock()
+
+	// checkNumPending() caps to min(npc, state.Msgs) = min(80, 100) = 80.
+	// This is WRONG because only 50 messages match the filter!
+	ci := o.info()
+	// The cap doesn't help here - 80 < 100, so it returns 80.
+	require_Equal(t, ci.NumPending, 80) // WRONG - should be 50!
+
+	// checkNumPendingRecalc() sees npc(80) <= state.Msgs(100), so the heuristic
+	// doesn't trigger streamNumPending(). The check is:
+	//   if o.sseq > state.LastSeq && npc > 0 || npc > state.Msgs
+	// With npc=80 and state.Msgs=100, this is false, so no recalc.
+	ciRecalc := o.infoWithStreamNumPending()
+	require_Equal(t, ciRecalc.NumPending, 80) // Still wrong - heuristic didn't trigger
+
+	// Now set npc even higher to exceed state.Msgs and trigger the recalc.
+	// NOTE: We must call infoWithStreamNumPending() BEFORE info() because
+	// info() calls checkNumPending() which has a side effect of capping o.npc.
+	o.mu.Lock()
+	o.npc = 150 // Now > state.Msgs
+	o.mu.Unlock()
+
+	// checkNumPendingRecalc() now sees npc(150) > state.Msgs(100), triggers
+	// streamNumPending() which queries the store WITH the filter.
+	ciAccurate := o.infoWithStreamNumPending()
+	require_Equal(t, ciAccurate.NumPending, 50) // CORRECT - actually queries with filter
+
+	// After infoWithStreamNumPending() triggers streamNumPending(), npc is corrected.
+	o.mu.RLock()
+	correctedNpc := o.npc
+	o.mu.RUnlock()
+	require_Equal(t, correctedNpc, int64(50))
+
+	// Now demonstrate that info() with the corrected npc returns correct value too.
+	ci = o.info()
+	require_Equal(t, ci.NumPending, 50) // Now correct because npc was corrected
+
+	// But if we artificially drift npc again to a value between filtered count
+	// and total count, checkNumPending's cap won't help.
+	o.mu.Lock()
+	o.npc = 80 // Drifted: > 50 (actual), but < 100 (total)
+	o.mu.Unlock()
+
+	// checkNumPending() caps to min(80, 100) = 80, but actual is 50!
+	// This shows the limitation: the heuristic only catches drift > total msgs.
+	ci = o.info()
+	require_Equal(t, ci.NumPending, 80) // WRONG - drift not caught
+}
+
 func TestJetStreamConsumerPendingCountAfterMsgAckAboveFloor(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
