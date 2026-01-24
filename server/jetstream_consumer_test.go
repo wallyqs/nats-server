@@ -8196,6 +8196,143 @@ func TestJetStreamJSZConsumerInfoStreamNumPending(t *testing.T) {
 	require_Equal(t, jsz.AccountDetails[0].Streams[0].Consumer[0].NumPending, 10)
 }
 
+// TestJetStreamConsumerNpcDriftNatural attempts to trigger the npc drift race condition
+// naturally through concurrent message deletion and consumption.
+//
+// The race occurs when:
+// 1. Consumer is at o.sseq = N, about to deliver message N
+// 2. Message N gets deleted concurrently
+// 3. Consumer's getNextMsg sees N is deleted, skips to N+1, advances o.sseq
+// 4. decStreamPending(N) is called - but N < o.sseq now, check fails
+// 5. Result: npc is not decremented but should have been (drifts high)
+func TestJetStreamConsumerNpcDriftNatural(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create stream with small MaxMsgs to force message deletion as new ones arrive.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		MaxMsgs:  10, // Small limit to force rapid deletion
+	})
+	require_NoError(t, err)
+
+	// Create a pull consumer.
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "CONSUMER",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	sub, err := js.PullSubscribe("foo", "CONSUMER")
+	require_NoError(t, err)
+
+	acc, err := s.lookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+	o := mset.lookupConsumer("CONSUMER")
+	require_NotNil(t, o)
+
+	// Track if we ever detect drift.
+	var driftDetected atomic.Bool
+	var maxDrift atomic.Int64
+
+	// Start a goroutine to rapidly publish messages.
+	// This will cause old messages to be deleted due to MaxMsgs limit.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Publisher goroutine - rapidly publish to push out old messages.
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				js.Publish("foo", []byte(fmt.Sprintf("msg-%d", i)))
+				// Small sleep to allow some interleaving
+				if i%100 == 0 {
+					time.Sleep(time.Millisecond)
+				}
+			}
+		}
+	}()
+
+	// Consumer goroutine - fetch and ack messages, check for drift.
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				msgs, err := sub.Fetch(1, nats.MaxWait(100*time.Millisecond))
+				if err != nil {
+					continue
+				}
+				for _, msg := range msgs {
+					msg.Ack()
+				}
+
+				// Check for drift: compare npc with actual stream state.
+				o.mu.RLock()
+				npc := o.npc
+				sseq := o.sseq
+				o.mu.RUnlock()
+
+				var state StreamState
+				mset.store.FastState(&state)
+
+				// Calculate expected max pending: messages from sseq to LastSeq
+				var expectedMax uint64
+				if sseq <= state.LastSeq {
+					expectedMax = state.LastSeq - sseq + 1
+					if expectedMax > state.Msgs {
+						expectedMax = state.Msgs
+					}
+				}
+
+				// If npc > expectedMax, we have drift!
+				if npc > 0 && uint64(npc) > expectedMax {
+					drift := int64(npc) - int64(expectedMax)
+					if drift > maxDrift.Load() {
+						maxDrift.Store(drift)
+					}
+					driftDetected.Store(true)
+				}
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	// Report results.
+	if driftDetected.Load() {
+		t.Logf("Drift detected! Max drift observed: %d", maxDrift.Load())
+	} else {
+		t.Log("No drift detected in this run (race is timing-dependent)")
+	}
+
+	// Now verify that even if drift occurred, infoWithStreamNumPending corrects it.
+	// First artificially set high npc to ensure correction works.
+	o.mu.Lock()
+	o.npc = 1000
+	o.mu.Unlock()
+
+	ci := o.infoWithStreamNumPending()
+	// Should be corrected to actual pending (likely 0-10 given MaxMsgs=10)
+	require_True(t, ci.NumPending <= 10)
+	t.Logf("After correction, NumPending: %d", ci.NumPending)
+}
+
 func TestJetStreamConsumerDontDecrementPendingCountOnSkippedMsg(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
