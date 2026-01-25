@@ -6310,6 +6310,41 @@ func TestMonitorHealthzStatusUnavailable(t *testing.T) {
 	}
 }
 
+func TestServerHealthzPublicMethod(t *testing.T) {
+	s := runMonitorServer()
+	defer s.Shutdown()
+
+	// Test with nil options
+	status := s.Healthz(nil)
+	if status == nil {
+		t.Fatal("Expected non-nil HealthStatus")
+	}
+	if status.Status != "ok" {
+		t.Fatalf("Expected status 'ok', got %q", status.Status)
+	}
+	if status.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status code %d, got %d", http.StatusOK, status.StatusCode)
+	}
+
+	// Test with empty options
+	status = s.Healthz(&HealthzOptions{})
+	if status == nil {
+		t.Fatal("Expected non-nil HealthStatus")
+	}
+	if status.Status != "ok" {
+		t.Fatalf("Expected status 'ok', got %q", status.Status)
+	}
+
+	// Test with JSServerOnly option
+	status = s.Healthz(&HealthzOptions{JSServerOnly: true})
+	if status == nil {
+		t.Fatal("Expected non-nil HealthStatus")
+	}
+	if status.Status != "ok" {
+		t.Fatalf("Expected status 'ok', got %q", status.Status)
+	}
+}
+
 // When we converted ipq to use generics we still were using sync.Map. Currently you can not convert
 // any or any to a generic parameterized type. So this stopped working and panics.
 // Copyright 2013-2024 The NATS Authors
