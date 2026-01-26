@@ -7136,13 +7136,14 @@ func TestJetStreamClusterAccountMaxConnectionsReconnect(t *testing.T) {
 			totalClients := len(clients)
 			acc.mu.RUnlock()
 
-			if numConnections != expectedNumConnections {
+			// Use -1 to skip checking this value.
+			if expectedNumConnections >= 0 && numConnections != expectedNumConnections {
 				return fmt.Errorf("Expected %d connections got %d", expectedNumConnections, numConnections)
 			}
-			if jsClients != expectedJSClients {
+			if expectedJSClients >= 0 && jsClients != expectedJSClients {
 				return fmt.Errorf("Expected %d js clients got %d", expectedJSClients, jsClients)
 			}
-			if totalClients != expectedTotalClients {
+			if expectedTotalClients >= 0 && totalClients != expectedTotalClients {
 				return fmt.Errorf("Expected %d total clients got %d", expectedTotalClients, totalClients)
 			}
 			return nil
@@ -7195,7 +7196,9 @@ func TestJetStreamClusterAccountMaxConnectionsReconnect(t *testing.T) {
 	require_NoError(t, err)
 
 	// JETSTREAM internal clients should still linger after reducing connections.
-	checkCounts(5, 20, 20)
+	// Connection count is racy here since enforcement may have already started
+	// disconnecting regular clients, so skip checking it with -1.
+	checkCounts(-1, 20, 20)
 
 	// Wait for disconnections from the most recent client.
 	disconnectCh := disconnects[2]
