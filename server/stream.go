@@ -7326,8 +7326,7 @@ func (mset *stream) checkInterestState() {
 	// no longer have any interested consumers. We only scan from the head to avoid
 	// expensive full-stream scans for large streams (>100k messages).
 	mset.mu.Lock()
-	// Check retention policy - apply to both InterestPolicy and WorkQueuePolicy
-	if mset.cfg.Retention == LimitsPolicy {
+	if mset.cfg.Retention != InterestPolicy {
 		mset.mu.Unlock()
 		return
 	}

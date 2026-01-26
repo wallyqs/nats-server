@@ -22467,69 +22467,6 @@ func TestJetStreamCleanupNoInterestAboveThreshold(t *testing.T) {
 	require_Equal(t, si.State.FirstSeq, 100_001) // First "b" message
 }
 
-// TestJetStreamWorkQueueCleanupNoInterestHead tests that WorkQueuePolicy
-// streams also benefit from head cleanup when consumers are deleted.
-func TestJetStreamWorkQueueCleanupNoInterestHead(t *testing.T) {
-	s := RunBasicJetStreamServer(t)
-	defer s.Shutdown()
-
-	nc, js := jsClientConnect(t, s)
-	defer nc.Close()
-
-	_, err := js.AddStream(&nats.StreamConfig{
-		Name:      "WQ",
-		Subjects:  []string{"work.*"},
-		Retention: nats.WorkQueuePolicy,
-	})
-	require_NoError(t, err)
-
-	// Create two consumers with different filters
-	_, err = js.AddConsumer("WQ", &nats.ConsumerConfig{
-		Durable:       "WORKER1",
-		FilterSubject: "work.type1",
-		AckPolicy:     nats.AckExplicitPolicy,
-	})
-	require_NoError(t, err)
-
-	_, err = js.AddConsumer("WQ", &nats.ConsumerConfig{
-		Durable:       "WORKER2",
-		FilterSubject: "work.type2",
-		AckPolicy:     nats.AckExplicitPolicy,
-	})
-	require_NoError(t, err)
-
-	// Publish messages - first batch all type1, then all type2
-	// This ensures type1 messages are at the head of the stream
-	for i := 0; i < 1000; i++ {
-		_, err = js.Publish("work.type1", nil)
-		require_NoError(t, err)
-	}
-	for i := 0; i < 1000; i++ {
-		_, err = js.Publish("work.type2", nil)
-		require_NoError(t, err)
-	}
-
-	si, err := js.StreamInfo("WQ")
-	require_NoError(t, err)
-	require_Equal(t, si.State.Msgs, 2000)
-
-	// Delete WORKER1 - type1 messages at the head should be cleaned up
-	err = js.DeleteConsumer("WQ", "WORKER1")
-	require_NoError(t, err)
-
-	// Manually trigger checkInterestState
-	acc := s.GlobalAccount()
-	mset, err := acc.lookupStream("WQ")
-	require_NoError(t, err)
-	mset.checkInterestState()
-
-	// Check that type1 messages were removed
-	si, err = js.StreamInfo("WQ")
-	require_NoError(t, err)
-	require_Equal(t, si.State.Msgs, 1000)
-	require_Equal(t, si.State.FirstSeq, 1001) // First type2 message
-}
-
 // TestJetStreamInterestCleanupInterleavedSubjects tests cleanup when
 // messages from different subjects are interleaved in the stream.
 // For small streams (<100k), all no-interest messages are removed via full scan.
