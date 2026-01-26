@@ -3956,6 +3956,7 @@ func (js *jetStream) processStreamLeaderChange(mset *stream, isLeader bool) {
 			State:     mset.state(),
 			Config:    *setDynamicStreamMetadata(&msetCfg),
 			Cluster:   js.clusterInfo(mset.raftGroup()),
+			Stats:     mset.stats(),
 			Sources:   mset.sourcesInfo(),
 			Mirror:    mset.mirrorInfo(),
 			TimeStamp: time.Now().UTC(),
@@ -4447,6 +4448,7 @@ func (js *jetStream) processClusterUpdateStream(acc *Account, osa, sa *streamAss
 		State:     mset.state(),
 		Config:    *setDynamicStreamMetadata(&msetCfg),
 		Cluster:   js.clusterInfo(mset.raftGroup()),
+		Stats:     mset.stats(),
 		Mirror:    mset.mirrorInfo(),
 		Sources:   mset.sourcesInfo(),
 		TimeStamp: time.Now().UTC(),
@@ -4516,6 +4518,7 @@ func (js *jetStream) processClusterCreateStream(acc *Account, sa *streamAssignme
 								State:     mset.state(),
 								Config:    *setDynamicStreamMetadata(&msetCfg),
 								Cluster:   js.clusterInfo(mset.raftGroup()),
+								Stats:     mset.stats(),
 								Sources:   mset.sourcesInfo(),
 								Mirror:    mset.mirrorInfo(),
 								TimeStamp: time.Now().UTC(),
@@ -9798,8 +9801,6 @@ func (mset *stream) checkClusterInfo(ci *ClusterInfo) {
 			r.Lag = lag
 		}
 	}
-	// Add rolling average of pending replication.
-	ci.PendingAvg = mset.getPendingAvg()
 }
 
 // Return a list of alternates, ranked by preference order to the request, of stream mirrors.
@@ -9884,6 +9885,7 @@ func (mset *stream) processClusterStreamInfoRequest(reply string) {
 		State:     mset.state(),
 		Config:    config,
 		Cluster:   js.clusterInfo(mset.raftGroup()),
+		Stats:     mset.stats(),
 		Sources:   mset.sourcesInfo(),
 		Mirror:    mset.mirrorInfo(),
 		TimeStamp: time.Now().UTC(),
