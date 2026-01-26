@@ -2979,6 +2979,7 @@ type StreamDetail struct {
 	Cluster            *ClusterInfo        `json:"cluster,omitempty"`
 	Config             *StreamConfig       `json:"config,omitempty"`
 	State              StreamState         `json:"state,omitempty"`
+	Stats              StreamStats         `json:"stats"`
 	Consumer           []*ConsumerInfo     `json:"consumer_detail,omitempty"`
 	DirectConsumer     []*ConsumerInfo     `json:"direct_consumer_detail,omitempty"`
 	Mirror             *StreamSourceInfo   `json:"mirror,omitempty"`
@@ -3092,6 +3093,7 @@ func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optDire
 				Name:    stream.name(),
 				Created: stream.createdTime(),
 				State:   stream.state(),
+				Stats:   stream.stats(),
 				Cluster: ci,
 				Config:  cfg,
 				Mirror:  stream.mirrorInfo(),
