@@ -22392,3 +22392,456 @@ func TestJetStreamSourceConfigValidation(t *testing.T) {
 
 	require_Equal(t, string(response.Data), `{"type":"io.nats.jetstream.api.v1.stream_create_response","error":{"code":400,"err_code":10141,"description":"sourced stream name is invalid"}}`)
 }
+
+// TestJetStreamCleanupNoInterestAboveThreshold tests that when a consumer
+// is deleted, messages that no longer have interest are cleaned up even
+// when the stream has more than 100k messages (the bail threshold).
+// Resolves: https://github.com/nats-io/nats-server/issues/6747
+func TestJetStreamCleanupNoInterestAboveThreshold(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      "TEST",
+		Subjects:  []string{"a", "b"},
+		Retention: nats.InterestPolicy,
+	})
+	require_NoError(t, err)
+
+	// Create two consumers, each filtering on different subjects
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:       "A",
+		FilterSubject: "a",
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:       "B",
+		FilterSubject: "b",
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Publish 100k messages to subject "a" first, then 100k to "b"
+	// This ensures all "a" messages are at the head of the stream
+	for i := 0; i < 100_000; i++ {
+		js.PublishAsync("a", nil)
+	}
+	select {
+	case <-js.PublishAsyncComplete():
+	case <-time.After(10 * time.Second):
+		t.Fatal("Did not complete publish for subject a")
+	}
+
+	for i := 0; i < 100_000; i++ {
+		js.PublishAsync("b", nil)
+	}
+	select {
+	case <-js.PublishAsyncComplete():
+	case <-time.After(10 * time.Second):
+		t.Fatal("Did not complete publish for subject b")
+	}
+
+	si, err := js.StreamInfo("TEST")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, 200_000)
+
+	// Delete consumer A - messages on subject "a" should be cleaned up
+	err = js.DeleteConsumer("TEST", "A")
+	require_NoError(t, err)
+
+	// Manually trigger checkInterestState to clean up head messages
+	acc := s.GlobalAccount()
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+	mset.checkInterestState()
+
+	// Verify cleanup - should only have the 100k "b" messages remaining
+	si, err = js.StreamInfo("TEST")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, 100_000)
+	require_Equal(t, si.State.FirstSeq, 100_001) // First "b" message
+}
+
+// TestJetStreamWorkQueueCleanupNoInterestHead tests that WorkQueuePolicy
+// streams also benefit from head cleanup when consumers are deleted.
+func TestJetStreamWorkQueueCleanupNoInterestHead(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      "WQ",
+		Subjects:  []string{"work.*"},
+		Retention: nats.WorkQueuePolicy,
+	})
+	require_NoError(t, err)
+
+	// Create two consumers with different filters
+	_, err = js.AddConsumer("WQ", &nats.ConsumerConfig{
+		Durable:       "WORKER1",
+		FilterSubject: "work.type1",
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("WQ", &nats.ConsumerConfig{
+		Durable:       "WORKER2",
+		FilterSubject: "work.type2",
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Publish messages - first batch all type1, then all type2
+	// This ensures type1 messages are at the head of the stream
+	for i := 0; i < 1000; i++ {
+		_, err = js.Publish("work.type1", nil)
+		require_NoError(t, err)
+	}
+	for i := 0; i < 1000; i++ {
+		_, err = js.Publish("work.type2", nil)
+		require_NoError(t, err)
+	}
+
+	si, err := js.StreamInfo("WQ")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, 2000)
+
+	// Delete WORKER1 - type1 messages at the head should be cleaned up
+	err = js.DeleteConsumer("WQ", "WORKER1")
+	require_NoError(t, err)
+
+	// Manually trigger checkInterestState
+	acc := s.GlobalAccount()
+	mset, err := acc.lookupStream("WQ")
+	require_NoError(t, err)
+	mset.checkInterestState()
+
+	// Check that type1 messages were removed
+	si, err = js.StreamInfo("WQ")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, 1000)
+	require_Equal(t, si.State.FirstSeq, 1001) // First type2 message
+}
+
+// TestJetStreamInterestCleanupInterleavedSubjects tests cleanup when
+// messages from different subjects are interleaved in the stream.
+// For small streams (<100k), all no-interest messages are removed via full scan.
+func TestJetStreamInterestCleanupInterleavedSubjects(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      "INTERLEAVED",
+		Subjects:  []string{"x", "y"},
+		Retention: nats.InterestPolicy,
+	})
+	require_NoError(t, err)
+
+	// Create consumers for each subject
+	_, err = js.AddConsumer("INTERLEAVED", &nats.ConsumerConfig{
+		Durable:       "X",
+		FilterSubject: "x",
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("INTERLEAVED", &nats.ConsumerConfig{
+		Durable:       "Y",
+		FilterSubject: "y",
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Publish interleaved: x, x, y, x, y, y, x, y...
+	// Pattern: 2x, 1y, 1x, 2y, 1x, 1y = 4x, 4y per cycle
+	for cycle := 0; cycle < 250; cycle++ {
+		js.Publish("x", nil)
+		js.Publish("x", nil)
+		js.Publish("y", nil)
+		js.Publish("x", nil)
+		js.Publish("y", nil)
+		js.Publish("y", nil)
+		js.Publish("x", nil)
+		js.Publish("y", nil)
+	}
+
+	si, err := js.StreamInfo("INTERLEAVED")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, 2000) // 250 cycles * 8 msgs
+
+	// Delete consumer X - for small streams, ALL x messages are removed via full scan
+	err = js.DeleteConsumer("INTERLEAVED", "X")
+	require_NoError(t, err)
+
+	// For streams < 100k messages, cleanupNoInterestMessages does a full scan
+	// and removes ALL messages without interest, not just from the head
+	si, err = js.StreamInfo("INTERLEAVED")
+	require_NoError(t, err)
+	// Only the 1000 "y" messages remain (consumer Y is still interested)
+	require_Equal(t, si.State.Msgs, 1000)
+}
+
+// TestJetStreamInterestCleanupAllSameSubject tests that when all messages
+// are from the same subject and that subject's consumer is deleted,
+// all messages are cleaned from the head.
+func TestJetStreamInterestCleanupAllSameSubject(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      "SINGLE",
+		Subjects:  []string{"only"},
+		Retention: nats.InterestPolicy,
+	})
+	require_NoError(t, err)
+
+	// Create a consumer
+	_, err = js.AddConsumer("SINGLE", &nats.ConsumerConfig{
+		Durable:   "ONLY",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Publish messages
+	for i := 0; i < 500; i++ {
+		_, err = js.Publish("only", nil)
+		require_NoError(t, err)
+	}
+
+	si, err := js.StreamInfo("SINGLE")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, 500)
+
+	// Delete the only consumer - all messages should be removed
+	err = js.DeleteConsumer("SINGLE", "ONLY")
+	require_NoError(t, err)
+
+	// The stream should be empty since there are no consumers
+	// Note: This is handled by the deleteNotActive path which purges when consumers == 0
+	checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		si, err := js.StreamInfo("SINGLE")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != 0 {
+			return fmt.Errorf("expected 0 messages, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+}
+
+// TestJetStreamInterestCleanupWithWildcardConsumer tests that head cleanup
+// works correctly when one consumer uses wildcards and another uses specific subjects.
+func TestJetStreamInterestCleanupWithWildcardConsumer(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      "WILD",
+		Subjects:  []string{"events.*"},
+		Retention: nats.InterestPolicy,
+	})
+	require_NoError(t, err)
+
+	// Create a wildcard consumer that matches all
+	_, err = js.AddConsumer("WILD", &nats.ConsumerConfig{
+		Durable:       "ALL",
+		FilterSubject: "events.*",
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Create a specific consumer for events.important
+	_, err = js.AddConsumer("WILD", &nats.ConsumerConfig{
+		Durable:       "IMPORTANT",
+		FilterSubject: "events.important",
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Publish messages: first batch normal, then important
+	for i := 0; i < 100; i++ {
+		_, err = js.Publish("events.normal", nil)
+		require_NoError(t, err)
+	}
+	for i := 0; i < 100; i++ {
+		_, err = js.Publish("events.important", nil)
+		require_NoError(t, err)
+	}
+
+	si, err := js.StreamInfo("WILD")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, 200)
+
+	// Delete the wildcard consumer
+	err = js.DeleteConsumer("WILD", "ALL")
+	require_NoError(t, err)
+
+	acc := s.GlobalAccount()
+	mset, err := acc.lookupStream("WILD")
+	require_NoError(t, err)
+	mset.checkInterestState()
+
+	// The events.normal messages (1-100) should be removed since only IMPORTANT remains
+	// and it doesn't filter on events.normal
+	si, err = js.StreamInfo("WILD")
+	require_NoError(t, err)
+	require_Equal(t, si.State.FirstSeq, 101) // First events.important message
+	require_Equal(t, si.State.Msgs, 100)     // Only events.important messages remain
+}
+
+// TestJetStreamInterestHeadCleanupLargeStreamInterleaved tests that for large
+// streams (>100k messages), only contiguous messages at the head are removed
+// since the full scan bails out for performance reasons.
+func TestJetStreamInterestHeadCleanupLargeStreamInterleaved(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      "LARGE",
+		Subjects:  []string{"head", "tail"},
+		Retention: nats.InterestPolicy,
+	})
+	require_NoError(t, err)
+
+	// Create consumers for each subject
+	_, err = js.AddConsumer("LARGE", &nats.ConsumerConfig{
+		Durable:       "HEAD",
+		FilterSubject: "head",
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("LARGE", &nats.ConsumerConfig{
+		Durable:       "TAIL",
+		FilterSubject: "tail",
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Publish: 50k "head" messages first, then interleaved head/tail to exceed 100k threshold
+	// This ensures "head" messages are at the beginning of the stream
+	for i := 0; i < 50_000; i++ {
+		js.PublishAsync("head", nil)
+	}
+	select {
+	case <-js.PublishAsyncComplete():
+	case <-time.After(10 * time.Second):
+		t.Fatal("Did not complete publish")
+	}
+
+	// Now publish interleaved to get over 100k total
+	for i := 0; i < 30_000; i++ {
+		js.PublishAsync("head", nil)
+		js.PublishAsync("tail", nil)
+	}
+	select {
+	case <-js.PublishAsyncComplete():
+	case <-time.After(10 * time.Second):
+		t.Fatal("Did not complete publish")
+	}
+
+	si, err := js.StreamInfo("LARGE")
+	require_NoError(t, err)
+	// 50k head + 30k head + 30k tail = 110k total
+	require_Equal(t, si.State.Msgs, 110_000)
+
+	// Delete HEAD consumer - for large streams, full scan bails out
+	// and only head cleanup runs
+	err = js.DeleteConsumer("LARGE", "HEAD")
+	require_NoError(t, err)
+
+	// Wait a moment for the async checkInterestState to be triggered
+	time.Sleep(100 * time.Millisecond)
+
+	// Manually trigger checkInterestState for deterministic testing
+	acc := s.GlobalAccount()
+	mset, err := acc.lookupStream("LARGE")
+	require_NoError(t, err)
+	mset.checkInterestState()
+
+	si, err = js.StreamInfo("LARGE")
+	require_NoError(t, err)
+
+	// The first 50k "head" messages should be removed from the head
+	// The interleaved section starts with "head" at 50001, then "tail" at 50002
+	// So seq 50001 is also removed (head, no interest)
+	// Then we hit a "tail" message at seq 50002 which still has interest, so we stop
+	// Total removed: 50001 messages at the beginning (50k head + 1 interleaved head)
+	// Remaining: 29999 interleaved head (no interest but not at head) + 30k tail (has interest) = 59999
+	require_Equal(t, si.State.FirstSeq, 50_002) // First "tail" message in interleaved section
+	require_Equal(t, si.State.Msgs, 59_999)
+}
+
+// TestJetStreamInterestCleanupPreservesWithInterest tests that messages
+// are preserved when there's still a consumer interested in them.
+// For small streams, all no-interest messages are removed, but interested messages remain.
+func TestJetStreamInterestCleanupPreservesWithInterest(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      "PRESERVE",
+		Subjects:  []string{"keep", "remove"},
+		Retention: nats.InterestPolicy,
+	})
+	require_NoError(t, err)
+
+	// Create consumers
+	_, err = js.AddConsumer("PRESERVE", &nats.ConsumerConfig{
+		Durable:       "KEEPER",
+		FilterSubject: "keep",
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("PRESERVE", &nats.ConsumerConfig{
+		Durable:       "REMOVER",
+		FilterSubject: "remove",
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Publish: keep first, so it's at the head
+	for i := 0; i < 50; i++ {
+		_, err = js.Publish("keep", nil)
+		require_NoError(t, err)
+	}
+	for i := 0; i < 50; i++ {
+		_, err = js.Publish("remove", nil)
+		require_NoError(t, err)
+	}
+
+	// Delete REMOVER consumer
+	err = js.DeleteConsumer("PRESERVE", "REMOVER")
+	require_NoError(t, err)
+
+	// "keep" messages should be preserved because KEEPER is still interested
+	// "remove" messages (51-100) have no interest and are removed via full scan
+	si, err := js.StreamInfo("PRESERVE")
+	require_NoError(t, err)
+	require_Equal(t, si.State.FirstSeq, 1) // First "keep" message preserved
+	require_Equal(t, si.State.Msgs, 50)    // Only "keep" messages remain
+}

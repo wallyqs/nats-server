@@ -7308,11 +7308,48 @@ func (mset *stream) checkInterestState() {
 		return
 	}
 
+	// If there are no consumers, the cleanup is handled elsewhere
+	// (in deleteNotActive which calls store.Purge when consumers == 0).
+	if mset.numConsumers() == 0 {
+		return
+	}
+
 	var ss StreamState
 	mset.store.FastState(&ss)
 
 	for _, o := range mset.getConsumers() {
 		o.checkStateForInterestStream(&ss)
+	}
+
+	// Remove as many messages from the head of the stream if there's no interest anymore.
+	// This handles the case where a consumer is deleted and messages at the head
+	// no longer have any interested consumers. We only scan from the head to avoid
+	// expensive full-stream scans for large streams (>100k messages).
+	mset.mu.Lock()
+	// Check retention policy - apply to both InterestPolicy and WorkQueuePolicy
+	if mset.cfg.Retention == LimitsPolicy {
+		mset.mu.Unlock()
+		return
+	}
+
+	var rmseqs []uint64
+	var smv StoreMsg
+	for seq := ss.FirstSeq; seq <= ss.LastSeq; seq++ {
+		var err error
+		_, seq, err = mset.store.LoadNextMsg(_EMPTY_, true, seq, &smv)
+		if err != nil {
+			break
+		}
+		if mset.checkForInterestWithSubject(seq, smv.subj, nil) {
+			break // Stop at first message that still has interest
+		}
+		rmseqs = append(rmseqs, seq)
+	}
+	mset.mu.Unlock()
+
+	// Remove collected sequences outside the lock
+	for _, seq := range rmseqs {
+		mset.store.RemoveMsg(seq)
 	}
 }
 
