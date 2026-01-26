@@ -7317,38 +7317,21 @@ func (mset *stream) checkInterestState() {
 	var ss StreamState
 	mset.store.FastState(&ss)
 
+	asflr := uint64(math.MaxUint64)
 	for _, o := range mset.getConsumers() {
 		o.checkStateForInterestStream(&ss)
+		o.mu.RLock()
+		chkflr := o.chkflr
+		o.mu.RUnlock()
+		asflr = min(asflr, chkflr)
 	}
 
-	// Remove as many messages from the head of the stream if there's no interest anymore.
-	// This handles the case where a consumer is deleted and messages at the head
-	// no longer have any interested consumers. We only scan from the head to avoid
-	// expensive full-stream scans for large streams (>100k messages).
-	mset.mu.Lock()
-	if mset.cfg.Retention != InterestPolicy {
-		mset.mu.Unlock()
-		return
-	}
-
-	var rmseqs []uint64
-	var smv StoreMsg
-	for seq := ss.FirstSeq; seq <= ss.LastSeq; seq++ {
-		var err error
-		_, seq, err = mset.store.LoadNextMsg(_EMPTY_, true, seq, &smv)
-		if err != nil {
-			break
-		}
-		if mset.checkForInterestWithSubject(seq, smv.subj, nil) {
-			break // Stop at first message that still has interest
-		}
-		rmseqs = append(rmseqs, seq)
-	}
-	mset.mu.Unlock()
-
-	// Remove collected sequences outside the lock
-	for _, seq := range rmseqs {
-		mset.store.RemoveMsg(seq)
+	mset.cfgMu.RLock()
+	rp := mset.cfg.Retention
+	mset.cfgMu.RUnlock()
+	// Remove as many messages from the "head" of the stream if there's no interest anymore.
+	if rp == InterestPolicy && asflr != math.MaxUint64 {
+		mset.store.Compact(asflr)
 	}
 }
 

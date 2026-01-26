@@ -6528,8 +6528,20 @@ func (o *consumer) checkStateForInterestStream(ss *StreamState) error {
 		}
 	}
 	// If retry floor was not overwritten, set to ack floor+1, we don't need to account for any retries below it.
+	// For filtered consumers, find the next message matching the filter to set the floor correctly.
 	if retryAsflr == 0 {
 		retryAsflr = asflr + 1
+		if filters != nil {
+			_, nseq, err = store.LoadNextMsgMulti(filters, asflr+1, &smv)
+		} else {
+			_, nseq, err = store.LoadNextMsg(filter, wc, asflr+1, &smv)
+		}
+		if err == nil {
+			retryAsflr = max(asflr+1, nseq)
+		} else if err == ErrStoreEOF {
+			// No more messages matching filter, set to last seq + 1
+			retryAsflr = ss.LastSeq + 1
+		}
 	}
 
 	o.mu.Lock()
