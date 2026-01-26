@@ -274,6 +274,16 @@ type CounterValue struct {
 // e.g. {"stream":{"subject":"123"}}
 type CounterSources map[string]map[string]string
 
+// StreamStats contains cumulative statistics for a stream.
+type StreamStats struct {
+	InMsgs      uint64  `json:"in_msgs"`               // Total messages ever published to this stream (only increases).
+	InBytes     uint64  `json:"in_bytes"`              // Total bytes ever published to this stream (only increases).
+	InQueueLen  int     `json:"in_queue_len"`          // Current number of messages in the ingest queue.
+	InQueueMax  int     `json:"in_queue_max"`          // Max capacity of the ingest queue.
+	InQueueSize uint64  `json:"in_queue_size"`         // Current size in bytes of the ingest queue.
+	PendingAvg  float64 `json:"pending_avg,omitempty"` // Rolling average of pending replication.
+}
+
 // StreamInfo shows config and current state for this stream.
 type StreamInfo struct {
 	Config     StreamConfig        `json:"config"`
@@ -284,6 +294,7 @@ type StreamInfo struct {
 	Mirror     *StreamSourceInfo   `json:"mirror,omitempty"`
 	Sources    []*StreamSourceInfo `json:"sources,omitempty"`
 	Alternates []StreamAlternate   `json:"alternates,omitempty"`
+	Stats      StreamStats         `json:"stats"` // Cumulative ingest statistics.
 	// TimeStamp indicates when the info was gathered
 	TimeStamp time.Time `json:"ts"`
 }
@@ -311,7 +322,6 @@ type ClusterInfo struct {
 	SystemAcc   bool        `json:"system_account,omitempty"`
 	TrafficAcc  string      `json:"traffic_account,omitempty"`
 	Replicas    []*PeerInfo `json:"replicas,omitempty"`
-	PendingAvg  float64     `json:"pending_avg,omitempty"` // Rolling average of pending replication
 }
 
 // PeerInfo shows information about all the peers in the cluster that
@@ -474,6 +484,10 @@ type stream struct {
 	clfs       uint64            // The count (offset) of the number of failed NRG sequences used to compute clseq.
 	pendingAvg int64             // Rolling average of pending replication (scaled by 1000 for precision).
 	lqsent     time.Time         // The time at which the last lost quorum advisory was sent. Used to rate limit.
+
+	// Cumulative ingest counters - these only increase and are not affected by message deletion/purge.
+	inMsgs  atomic.Uint64 // Total messages ever published to this stream.
+	inBytes atomic.Uint64 // Total bytes ever published to this stream.
 	uch       chan struct{}     // The channel to signal updates to the monitor routine.
 	inMonitor bool              // True if the monitor routine has been started.
 
@@ -1376,6 +1390,33 @@ func (mset *stream) getPendingAvg() float64 {
 	mset.clMu.Lock()
 	defer mset.clMu.Unlock()
 	return float64(mset.pendingAvg) / 1000.0
+}
+
+// ingestTotals returns the cumulative total messages and bytes ever published to this stream.
+func (mset *stream) ingestTotals() (uint64, uint64) {
+	return mset.inMsgs.Load(), mset.inBytes.Load()
+}
+
+// ingestQueueStats returns the current length, max capacity, and size of the ingest queue.
+func (mset *stream) ingestQueueStats() (int, int, uint64) {
+	if mset.msgs == nil {
+		return 0, 0, 0
+	}
+	return mset.msgs.len(), mset.msgs.mlen, mset.msgs.size()
+}
+
+// stats returns the StreamStats for this stream.
+func (mset *stream) stats() StreamStats {
+	inMsgs, inBytes := mset.ingestTotals()
+	qLen, qMax, qSize := mset.ingestQueueStats()
+	return StreamStats{
+		InMsgs:      inMsgs,
+		InBytes:     inBytes,
+		InQueueLen:  qLen,
+		InQueueMax:  qMax,
+		InQueueSize: qSize,
+		PendingAvg:  mset.getPendingAvg(),
+	}
 }
 
 func (mset *stream) lastSeq() uint64 {
@@ -6194,6 +6235,10 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	// If here we succeeded in storing the message.
 	mset.lmsgId = msgId
 	mset.lseq = seq
+
+	// Update cumulative ingest counters.
+	mset.inMsgs.Add(1)
+	mset.inBytes.Add(uint64(len(hdr) + len(msg)))
 
 	// If we have a msgId make sure to save.
 	// This will replace our estimate from the cluster layer if we are clustered.
