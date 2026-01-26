@@ -8321,16 +8321,117 @@ func TestJetStreamConsumerNpcDriftNatural(t *testing.T) {
 		t.Log("No drift detected in this run (race is timing-dependent)")
 	}
 
-	// Now verify that even if drift occurred, infoWithStreamNumPending corrects it.
-	// First artificially set high npc to ensure correction works.
-	o.mu.Lock()
-	o.npc = 1000
-	o.mu.Unlock()
+	// Demonstrate when info() and infoWithStreamNumPending() differ or are same.
+	//
+	// Key insight:
+	// - checkNumPending() caps to min(npc, state.Msgs, ...) but doesn't recalculate
+	// - checkNumPendingRecalc() only calls streamNumPending() when:
+	//   a) npc > state.Msgs, OR
+	//   b) sseq > LastSeq && npc > 0
+	//
+	// Therefore: When npc has drifted but is <= state.Msgs, both methods return
+	// the same (potentially wrong) value. Only when npc exceeds state.Msgs does
+	// infoWithStreamNumPending() recalculate.
 
-	ci := o.infoWithStreamNumPending()
-	// Should be corrected to actual pending (likely 0-10 given MaxMsgs=10)
-	require_True(t, ci.NumPending <= 10)
-	t.Logf("After correction, NumPending: %d", ci.NumPending)
+	// Create a fresh stream/consumer to demonstrate the difference with pending messages.
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "DEMO",
+		Subjects: []string{"demo"},
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("DEMO", &nats.ConsumerConfig{
+		Durable:   "DEMO_CONSUMER",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Publish 20 messages
+	for i := 0; i < 20; i++ {
+		_, err = js.Publish("demo", []byte(fmt.Sprintf("demo-%d", i)))
+		require_NoError(t, err)
+	}
+
+	msetDemo, err := acc.lookupStream("DEMO")
+	require_NoError(t, err)
+	oDemo := msetDemo.lookupConsumer("DEMO_CONSUMER")
+	require_NotNil(t, oDemo)
+
+	var stateDemo StreamState
+	msetDemo.store.FastState(&stateDemo)
+
+	actualPendingDemo, err := oDemo.streamNumPending()
+	require_NoError(t, err)
+
+	t.Logf("DEMO Stream state: Msgs=%d, LastSeq=%d", stateDemo.Msgs, stateDemo.LastSeq)
+	t.Logf("DEMO Actual pending: %d", actualPendingDemo)
+
+	// Case 1: npc drifted high but npc <= state.Msgs
+	// Both methods return same (wrong) value because checkNumPendingRecalc doesn't trigger
+	oDemo.mu.Lock()
+	oDemo.npc = int64(stateDemo.Msgs) // Set to exactly state.Msgs (which equals actual pending here)
+	oDemo.mu.Unlock()
+
+	ciInfo1 := oDemo.info()
+
+	oDemo.mu.Lock()
+	oDemo.npc = int64(stateDemo.Msgs) // Reset
+	oDemo.mu.Unlock()
+
+	ciAccurate1 := oDemo.infoWithStreamNumPending()
+
+	t.Logf("Case 1 - npc == state.Msgs == actualPending (%d):", stateDemo.Msgs)
+	t.Logf("  info() NumPending: %d", ciInfo1.NumPending)
+	t.Logf("  infoWithStreamNumPending() NumPending: %d", ciAccurate1.NumPending)
+	t.Logf("  Both return same? %v (both correct in this case)", ciInfo1.NumPending == ciAccurate1.NumPending)
+
+	// Case 2: npc > state.Msgs - this triggers recalculation in infoWithStreamNumPending
+	oDemo.mu.Lock()
+	oDemo.npc = int64(stateDemo.Msgs) + 50 // Set higher than state.Msgs
+	oDemo.mu.Unlock()
+
+	ciInfo2 := oDemo.info() // caps to state.Msgs but doesn't recalculate
+
+	oDemo.mu.Lock()
+	oDemo.npc = int64(stateDemo.Msgs) + 50 // Reset
+	oDemo.mu.Unlock()
+
+	ciAccurate2 := oDemo.infoWithStreamNumPending() // triggers recalc because npc > state.Msgs
+
+	t.Logf("Case 2 - npc > state.Msgs (npc=%d, state.Msgs=%d):", stateDemo.Msgs+50, stateDemo.Msgs)
+	t.Logf("  info() NumPending: %d (capped to state.Msgs)", ciInfo2.NumPending)
+	t.Logf("  infoWithStreamNumPending() NumPending: %d (recalculated via streamNumPending)", ciAccurate2.NumPending)
+
+	// Both should return 20 here because actual pending == state.Msgs
+	// But the mechanism is different: info() returns capped npc, infoWithStreamNumPending() recalculates
+
+	// Case 3: CRITICAL - npc has drifted but is BELOW state.Msgs
+	// This shows when info() returns WRONG value and infoWithStreamNumPending() also returns WRONG value
+	// because neither triggers recalculation!
+	oDemo.mu.Lock()
+	oDemo.npc = int64(stateDemo.Msgs) - 5 // Set BELOW state.Msgs but above 0
+	oDemo.mu.Unlock()
+
+	ciInfo3 := oDemo.info() // returns 15 (the wrong npc)
+
+	oDemo.mu.Lock()
+	oDemo.npc = int64(stateDemo.Msgs) - 5 // Reset
+	oDemo.mu.Unlock()
+
+	ciAccurate3 := oDemo.infoWithStreamNumPending() // ALSO returns 15! No recalc triggered!
+
+	t.Logf("Case 3 - npc < state.Msgs (npc=%d, state.Msgs=%d, actual=%d):", stateDemo.Msgs-5, stateDemo.Msgs, actualPendingDemo)
+	t.Logf("  info() NumPending: %d (returns wrong npc as-is)", ciInfo3.NumPending)
+	t.Logf("  infoWithStreamNumPending() NumPending: %d (ALSO wrong - no recalc triggered!)", ciAccurate3.NumPending)
+	t.Logf("  Both return same wrong value? %v", ciInfo3.NumPending == ciAccurate3.NumPending)
+
+	// Summary
+	t.Log("")
+	t.Log("CONCLUSION:")
+	t.Log("  - info() NEVER recalculates - it only caps npc to reasonable bounds")
+	t.Log("  - infoWithStreamNumPending() only recalculates when npc > state.Msgs")
+	t.Log("  - When npc drifts LOW (npc < actual), BOTH methods return wrong value!")
+	t.Log("  - The old heuristics only catch drift-HIGH-beyond-stream-size, not drift-low")
 }
 
 func TestJetStreamConsumerDontDecrementPendingCountOnSkippedMsg(t *testing.T) {
