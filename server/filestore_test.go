@@ -1670,11 +1670,12 @@ func TestFileStoreReadCache(t *testing.T) {
 		fs.LoadMsg(1, nil)
 		timeout := time.Now().Add(250 * time.Millisecond)
 		for time.Now().Before(timeout) {
+			time.Sleep(5 * time.Millisecond)
+			fs.LoadMsg(1, nil) // register activity.
+			// Check after activity to avoid race where cache expires between iterations.
 			if cls := fs.cacheLoads(); cls != 2 {
 				t.Fatalf("cache loads not 2, got %d", cls)
 			}
-			time.Sleep(5 * time.Millisecond)
-			fs.LoadMsg(1, nil) // register activity.
 		}
 	})
 }
