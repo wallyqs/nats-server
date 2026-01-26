@@ -384,6 +384,14 @@ var (
 	streamMaxBatchTimeout           = streamDefaultMaxBatchTimeout
 )
 
+// preAckEntry is an optimized structure for tracking pre-acks per sequence.
+// Most sequences have only one consumer, so we optimize for that case by storing
+// a single consumer pointer directly, avoiding a map allocation.
+type preAckEntry struct {
+	single *consumer                 // Fast path: single consumer (avoids map allocation)
+	multi  map[*consumer]struct{}   // Slow path: multiple consumers
+}
+
 // Stream is a jetstream stream of messages. When we receive a message internally destined
 // for a Stream we will direct link from the client to this structure.
 type stream struct {
@@ -456,7 +464,7 @@ type stream struct {
 
 	// For non limits policy streams when they process an ack before the actual msg.
 	// Can happen in stretch clusters, multi-cloud, or during catchup for a restarted server.
-	preAcks map[uint64]map[*consumer]struct{}
+	preAcks map[uint64]preAckEntry
 
 	// TODO(dlc) - Hide everything below behind two pointers.
 	// Clustered mode.
@@ -7575,18 +7583,30 @@ func (mset *stream) hasPreAck(o *consumer, seq uint64) bool {
 	if o == nil || len(mset.preAcks) == 0 {
 		return false
 	}
-	consumers := mset.preAcks[seq]
-	if len(consumers) == 0 {
+	entry, exists := mset.preAcks[seq]
+	if !exists {
 		return false
 	}
-	_, found := consumers[o]
-	return found
+	// Fast path: check single consumer.
+	if entry.single != nil {
+		return entry.single == o
+	}
+	// Slow path: check multi-consumer map.
+	if entry.multi != nil {
+		_, found := entry.multi[o]
+		return found
+	}
+	return false
 }
 
 // Check if we have all consumers pre-acked for this sequence and subject.
 // Write lock should be held.
 func (mset *stream) hasAllPreAcks(seq uint64, subj string) bool {
-	if len(mset.preAcks) == 0 || len(mset.preAcks[seq]) == 0 {
+	if len(mset.preAcks) == 0 {
+		return false
+	}
+	entry, exists := mset.preAcks[seq]
+	if !exists || (entry.single == nil && len(entry.multi) == 0) {
 		return false
 	}
 	// Since these can be filtered and mutually exclusive,
@@ -7625,12 +7645,31 @@ func (mset *stream) registerPreAck(o *consumer, seq uint64) {
 		return
 	}
 	if mset.preAcks == nil {
-		mset.preAcks = make(map[uint64]map[*consumer]struct{})
+		mset.preAcks = make(map[uint64]preAckEntry)
 	}
-	if mset.preAcks[seq] == nil {
-		mset.preAcks[seq] = make(map[*consumer]struct{})
+	entry, exists := mset.preAcks[seq]
+	if !exists {
+		// Fast path: first consumer for this sequence, store directly without map allocation.
+		mset.preAcks[seq] = preAckEntry{single: o}
+		return
 	}
-	mset.preAcks[seq][o] = struct{}{}
+	// Check if it's already registered.
+	if entry.single == o {
+		return
+	}
+	if entry.multi != nil {
+		// Already using multi-consumer map.
+		entry.multi[o] = struct{}{}
+		return
+	}
+	// Transition from single to multi: need to create map and add both consumers.
+	entry.multi = make(map[*consumer]struct{}, 2)
+	if entry.single != nil {
+		entry.multi[entry.single] = struct{}{}
+	}
+	entry.multi[o] = struct{}{}
+	entry.single = nil
+	mset.preAcks[seq] = entry
 }
 
 // This will clear an ack for a consumer.
@@ -7639,9 +7678,21 @@ func (mset *stream) clearPreAck(o *consumer, seq uint64) {
 	if o == nil || len(mset.preAcks) == 0 {
 		return
 	}
-	if consumers := mset.preAcks[seq]; len(consumers) > 0 {
-		delete(consumers, o)
-		if len(consumers) == 0 {
+	entry, exists := mset.preAcks[seq]
+	if !exists {
+		return
+	}
+	// Fast path: single consumer.
+	if entry.single != nil {
+		if entry.single == o {
+			delete(mset.preAcks, seq)
+		}
+		return
+	}
+	// Slow path: multi-consumer map.
+	if entry.multi != nil {
+		delete(entry.multi, o)
+		if len(entry.multi) == 0 {
 			delete(mset.preAcks, seq)
 		}
 	}

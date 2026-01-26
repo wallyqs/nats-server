@@ -7188,7 +7188,14 @@ func TestJetStreamClusterClearAllPreAcksOnRemoveMsg(t *testing.T) {
 				}
 				mset.mu.RLock()
 				numPreAcks := len(mset.preAcks)
-				numSeqPreAcks := len(mset.preAcks[seq])
+				var numSeqPreAcks int
+				if entry, ok := mset.preAcks[seq]; ok {
+					if entry.single != nil {
+						numSeqPreAcks = 1
+					} else {
+						numSeqPreAcks = len(entry.multi)
+					}
+				}
 				mset.mu.RUnlock()
 				if numPreAcks != expected {
 					return fmt.Errorf("expected %d pre-acks, got %d", expected, numPreAcks)
