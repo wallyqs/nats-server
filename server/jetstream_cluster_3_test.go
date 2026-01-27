@@ -6915,3 +6915,437 @@ func TestJetStreamClusterInterestStreamWithConsumerFilterUpdate(t *testing.T) {
 		return nil
 	})
 }
+
+// TestJetStreamClusterInterestStreamMultipleConsumersFilterUpdate tests that updating
+// one consumer's filter doesn't affect other consumers on an interest-based stream.
+func TestJetStreamClusterInterestStreamMultipleConsumersFilterUpdate(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      "TEST",
+		Subjects:  []string{"foo.*"},
+		Replicas:  3,
+		Retention: nats.InterestPolicy,
+	})
+	require_NoError(t, err)
+
+	// Create two consumers with different filters.
+	cfg1 := &nats.ConsumerConfig{
+		Durable:        "CONSUMER1",
+		FilterSubjects: []string{"foo.a"},
+		AckPolicy:      nats.AckExplicitPolicy,
+	}
+	_, err = js.AddConsumer("TEST", cfg1)
+	require_NoError(t, err)
+
+	cfg2 := &nats.ConsumerConfig{
+		Durable:        "CONSUMER2",
+		FilterSubjects: []string{"foo.b"},
+		AckPolicy:      nats.AckExplicitPolicy,
+	}
+	_, err = js.AddConsumer("TEST", cfg2)
+	require_NoError(t, err)
+
+	sub1, err := js.PullSubscribe(_EMPTY_, "CONSUMER1", nats.Bind("TEST", "CONSUMER1"))
+	require_NoError(t, err)
+	defer sub1.Drain()
+
+	sub2, err := js.PullSubscribe(_EMPTY_, "CONSUMER2", nats.Bind("TEST", "CONSUMER2"))
+	require_NoError(t, err)
+	defer sub2.Drain()
+
+	// Publish and ack message to foo.a via CONSUMER1.
+	_, err = js.Publish("foo.a", []byte("msg-a1"))
+	require_NoError(t, err)
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if state, err := checkStateAndErr(t, c, globalAccountName, "TEST"); err != nil {
+			return err
+		} else if state.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg, got %d", state.Msgs)
+		}
+		return nil
+	})
+	msgs, err := sub1.Fetch(1, nats.MaxWait(time.Second))
+	require_NoError(t, err)
+	require_Len(t, len(msgs), 1)
+	require_NoError(t, msgs[0].AckSync())
+
+	// Update CONSUMER1's filter to foo.c (no longer interested in foo.a).
+	cfg1.FilterSubjects = []string{"foo.c"}
+	_, err = js.UpdateConsumer("TEST", cfg1)
+	require_NoError(t, err)
+
+	// Verify filter updated on all servers.
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		for _, s := range c.servers {
+			mset, err := s.globalAccount().lookupStream("TEST")
+			if err != nil {
+				return err
+			}
+			o := mset.lookupConsumer("CONSUMER1")
+			if o == nil {
+				return errors.New("consumer not found")
+			}
+			if !slices.Contains(o.config().FilterSubjects, "foo.c") {
+				return fmt.Errorf("expected filter foo.c, got %q", o.config().FilterSubjects)
+			}
+		}
+		return nil
+	})
+
+	// Publish to foo.c - should be persisted (CONSUMER1 interested).
+	_, err = js.Publish("foo.c", []byte("msg-c"))
+	require_NoError(t, err)
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if state, err := checkStateAndErr(t, c, globalAccountName, "TEST"); err != nil {
+			return err
+		} else if state.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg, got %d", state.Msgs)
+		}
+		return nil
+	})
+
+	// Publish to foo.b - should be persisted (CONSUMER2 interested).
+	_, err = js.Publish("foo.b", []byte("msg-b"))
+	require_NoError(t, err)
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if state, err := checkStateAndErr(t, c, globalAccountName, "TEST"); err != nil {
+			return err
+		} else if state.Msgs != 2 {
+			return fmt.Errorf("expected 2 msgs, got %d", state.Msgs)
+		}
+		return nil
+	})
+
+	// Fetch and ack both remaining messages.
+	msgs, err = sub1.Fetch(1, nats.MaxWait(time.Second))
+	require_NoError(t, err)
+	require_Len(t, len(msgs), 1)
+	require_Equal(t, msgs[0].Subject, "foo.c")
+	require_NoError(t, msgs[0].AckSync())
+
+	msgs, err = sub2.Fetch(1, nats.MaxWait(time.Second))
+	require_NoError(t, err)
+	require_Len(t, len(msgs), 1)
+	require_Equal(t, msgs[0].Subject, "foo.b")
+	require_NoError(t, msgs[0].AckSync())
+
+	// All messages should be removed.
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if state, err := checkStateAndErr(t, c, globalAccountName, "TEST"); err != nil {
+			return err
+		} else if state.Msgs != 0 {
+			return fmt.Errorf("expected 0 msgs, got %d", state.Msgs)
+		}
+		return nil
+	})
+}
+
+// TestJetStreamClusterInterestStreamFilterUpdateFromWildcard tests updating a consumer
+// from wildcard (no filter) to specific filters.
+func TestJetStreamClusterInterestStreamFilterUpdateFromWildcard(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      "TEST",
+		Subjects:  []string{"foo.*"},
+		Replicas:  3,
+		Retention: nats.InterestPolicy,
+	})
+	require_NoError(t, err)
+
+	// Create a consumer with no filter (wildcard).
+	cfg := &nats.ConsumerConfig{
+		Durable:   "CONSUMER",
+		AckPolicy: nats.AckExplicitPolicy,
+	}
+	_, err = js.AddConsumer("TEST", cfg)
+	require_NoError(t, err)
+
+	sub, err := js.PullSubscribe(_EMPTY_, "CONSUMER", nats.Bind("TEST", "CONSUMER"))
+	require_NoError(t, err)
+	defer sub.Drain()
+
+	// Publish to foo.a - should persist (wildcard interest).
+	_, err = js.Publish("foo.a", []byte("msg-a"))
+	require_NoError(t, err)
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if state, err := checkStateAndErr(t, c, globalAccountName, "TEST"); err != nil {
+			return err
+		} else if state.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg, got %d", state.Msgs)
+		}
+		return nil
+	})
+
+	// Fetch and ack the message before changing filter.
+	msgs, err := sub.Fetch(1, nats.MaxWait(time.Second))
+	require_NoError(t, err)
+	require_Len(t, len(msgs), 1)
+	require_NoError(t, msgs[0].AckSync())
+
+	// Update consumer to only be interested in foo.c.
+	cfg.FilterSubjects = []string{"foo.c"}
+	_, err = js.UpdateConsumer("TEST", cfg)
+	require_NoError(t, err)
+
+	// Verify filter updated on all servers.
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		for _, s := range c.servers {
+			mset, err := s.globalAccount().lookupStream("TEST")
+			if err != nil {
+				return err
+			}
+			o := mset.lookupConsumer("CONSUMER")
+			if o == nil {
+				return errors.New("consumer not found")
+			}
+			if !slices.Contains(o.config().FilterSubjects, "foo.c") {
+				return fmt.Errorf("expected filter foo.c, got %q", o.config().FilterSubjects)
+			}
+		}
+		return nil
+	})
+
+	// Publish to foo.c (should persist) and foo.d (should NOT persist).
+	_, err = js.Publish("foo.c", []byte("msg-c"))
+	require_NoError(t, err)
+	_, err = js.Publish("foo.d", []byte("msg-d"))
+	require_NoError(t, err)
+
+	// Only foo.c should be persisted (foo.d has no interest).
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if state, err := checkStateAndErr(t, c, globalAccountName, "TEST"); err != nil {
+			return err
+		} else if state.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg, got %d", state.Msgs)
+		}
+		return nil
+	})
+
+	// Fetch and ack the foo.c message.
+	msgs, err = sub.Fetch(1, nats.MaxWait(time.Second))
+	require_NoError(t, err)
+	require_Len(t, len(msgs), 1)
+	require_Equal(t, msgs[0].Subject, "foo.c")
+	require_NoError(t, msgs[0].AckSync())
+
+	// All messages should be removed.
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if state, err := checkStateAndErr(t, c, globalAccountName, "TEST"); err != nil {
+			return err
+		} else if state.Msgs != 0 {
+			return fmt.Errorf("expected 0 msgs, got %d", state.Msgs)
+		}
+		return nil
+	})
+}
+
+// TestJetStreamClusterInterestStreamRapidFilterUpdates tests that rapid successive
+// filter updates are handled correctly across all cluster nodes.
+func TestJetStreamClusterInterestStreamRapidFilterUpdates(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      "TEST",
+		Subjects:  []string{"foo.*"},
+		Replicas:  3,
+		Retention: nats.InterestPolicy,
+	})
+	require_NoError(t, err)
+
+	cfg := &nats.ConsumerConfig{
+		Durable:        "CONSUMER",
+		FilterSubjects: []string{"foo.a"},
+		AckPolicy:      nats.AckExplicitPolicy,
+	}
+	_, err = js.AddConsumer("TEST", cfg)
+	require_NoError(t, err)
+
+	sub, err := js.PullSubscribe(_EMPTY_, "CONSUMER", nats.Bind("TEST", "CONSUMER"))
+	require_NoError(t, err)
+	defer sub.Drain()
+
+	// Perform rapid filter updates.
+	filters := [][]string{
+		{"foo.b"},
+		{"foo.c"},
+		{"foo.a", "foo.b"},
+		{"foo.d"},
+		{"foo.e", "foo.f"},
+	}
+
+	for _, f := range filters {
+		cfg.FilterSubjects = f
+		_, err = js.UpdateConsumer("TEST", cfg)
+		require_NoError(t, err)
+	}
+
+	// Final filter should be foo.e and foo.f.
+	finalFilters := []string{"foo.e", "foo.f"}
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		for _, s := range c.servers {
+			mset, err := s.globalAccount().lookupStream("TEST")
+			if err != nil {
+				return err
+			}
+			o := mset.lookupConsumer("CONSUMER")
+			if o == nil {
+				return errors.New("consumer not found")
+			}
+			for _, expected := range finalFilters {
+				if !slices.Contains(o.config().FilterSubjects, expected) {
+					return fmt.Errorf("expected filter %q, got %q", expected, o.config().FilterSubjects)
+				}
+			}
+		}
+		return nil
+	})
+
+	// Publish to foo.e - should persist.
+	_, err = js.Publish("foo.e", []byte("msg-e"))
+	require_NoError(t, err)
+
+	// Publish to foo.a - should NOT persist (no longer in filter).
+	_, err = js.Publish("foo.a", []byte("msg-a"))
+	require_NoError(t, err)
+
+	// Only foo.e should be persisted.
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if state, err := checkStateAndErr(t, c, globalAccountName, "TEST"); err != nil {
+			return err
+		} else if state.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg, got %d", state.Msgs)
+		}
+		return nil
+	})
+
+	// Fetch and ack the message.
+	msgs, err := sub.Fetch(1, nats.MaxWait(time.Second))
+	require_NoError(t, err)
+	require_Len(t, len(msgs), 1)
+	require_Equal(t, msgs[0].Subject, "foo.e")
+	require_NoError(t, msgs[0].AckSync())
+
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if state, err := checkStateAndErr(t, c, globalAccountName, "TEST"); err != nil {
+			return err
+		} else if state.Msgs != 0 {
+			return fmt.Errorf("expected 0 msgs, got %d", state.Msgs)
+		}
+		return nil
+	})
+}
+
+// TestJetStreamClusterWorkQueueStreamWithConsumerFilterUpdate tests the same fix
+// works for WorkQueue retention policy (not just Interest policy).
+func TestJetStreamClusterWorkQueueStreamWithConsumerFilterUpdate(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      "TEST",
+		Subjects:  []string{"foo.*"},
+		Replicas:  3,
+		Retention: nats.WorkQueuePolicy,
+	})
+	require_NoError(t, err)
+
+	cfg := &nats.ConsumerConfig{
+		Durable:        "CONSUMER",
+		FilterSubjects: []string{"foo.a"},
+		AckPolicy:      nats.AckExplicitPolicy,
+	}
+	_, err = js.AddConsumer("TEST", cfg)
+	require_NoError(t, err)
+
+	sub, err := js.PullSubscribe(_EMPTY_, "CONSUMER", nats.Bind("TEST", "CONSUMER"))
+	require_NoError(t, err)
+	defer sub.Drain()
+
+	// Publish to foo.a.
+	_, err = js.Publish("foo.a", nil)
+	require_NoError(t, err)
+
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if state, err := checkStateAndErr(t, c, globalAccountName, "TEST"); err != nil {
+			return err
+		} else if state.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg, got %d", state.Msgs)
+		}
+		return nil
+	})
+
+	// Fetch and ack the message.
+	msgs, err := sub.Fetch(1)
+	require_NoError(t, err)
+	require_Len(t, len(msgs), 1)
+	require_NoError(t, msgs[0].AckSync())
+
+	// Update consumer filter to foo.b.
+	cfg.FilterSubjects = []string{"foo.b"}
+	_, err = js.UpdateConsumer("TEST", cfg)
+	require_NoError(t, err)
+
+	// Verify filter updated on all servers.
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		for _, s := range c.servers {
+			mset, err := s.globalAccount().lookupStream("TEST")
+			if err != nil {
+				return err
+			}
+			o := mset.lookupConsumer("CONSUMER")
+			if o == nil {
+				return errors.New("consumer not found")
+			}
+			if !slices.Contains(o.config().FilterSubjects, "foo.b") {
+				return fmt.Errorf("expected filter foo.b, got %q", o.config().FilterSubjects)
+			}
+		}
+		return nil
+	})
+
+	// Publish to foo.b - should persist with WorkQueue policy.
+	_, err = js.Publish("foo.b", nil)
+	require_NoError(t, err)
+
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if state, err := checkStateAndErr(t, c, globalAccountName, "TEST"); err != nil {
+			return err
+		} else if state.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg, got %d", state.Msgs)
+		}
+		return nil
+	})
+
+	// Fetch and ack.
+	msgs, err = sub.Fetch(1)
+	require_NoError(t, err)
+	require_Len(t, len(msgs), 1)
+	require_Equal(t, msgs[0].Subject, "foo.b")
+	require_NoError(t, msgs[0].AckSync())
+
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if state, err := checkStateAndErr(t, c, globalAccountName, "TEST"); err != nil {
+			return err
+		} else if state.Msgs != 0 {
+			return fmt.Errorf("expected 0 msgs, got %d", state.Msgs)
+		}
+		return nil
+	})
+}
