@@ -51,15 +51,29 @@ type JetStreamConfig struct {
 	Strict       bool          `json:"strict,omitempty"`        // Strict indicates if strict JSON parsing is performed
 }
 
+// ConsumerCleanupStats holds statistics about consumer cleanup operations.
+type ConsumerCleanupStats struct {
+	Total   uint64  `json:"total"`   // Total number of cleanup operations completed
+	Pending uint64  `json:"pending"` // Number of cleanup operations currently in progress
+	Retries uint64  `json:"retries"` // Total number of cleanup retry attempts
+	P50     float64 `json:"p50"`     // 50th percentile duration in milliseconds
+	P90     float64 `json:"p90"`     // 90th percentile duration in milliseconds
+	P99     float64 `json:"p99"`     // 99th percentile duration in milliseconds
+	P999    float64 `json:"p999"`    // 99.9th percentile duration in milliseconds
+	P9999   float64 `json:"p9999"`   // 99.99th percentile duration in milliseconds
+	Max     float64 `json:"max"`     // Maximum duration in milliseconds
+}
+
 // Statistics about JetStream for this server.
 type JetStreamStats struct {
-	Memory         uint64            `json:"memory"`
-	Store          uint64            `json:"storage"`
-	ReservedMemory uint64            `json:"reserved_memory"`
-	ReservedStore  uint64            `json:"reserved_storage"`
-	Accounts       int               `json:"accounts"`
-	HAAssets       int               `json:"ha_assets"`
-	API            JetStreamAPIStats `json:"api"`
+	Memory          uint64               `json:"memory"`
+	Store           uint64               `json:"storage"`
+	ReservedMemory  uint64               `json:"reserved_memory"`
+	ReservedStore   uint64               `json:"reserved_storage"`
+	Accounts        int                  `json:"accounts"`
+	HAAssets        int                  `json:"ha_assets"`
+	API             JetStreamAPIStats    `json:"api"`
+	ConsumerCleanup ConsumerCleanupStats `json:"consumer_cleanup"`
 }
 
 type JetStreamAccountLimits struct {
@@ -99,25 +113,37 @@ type JetStreamAPIStats struct {
 	Inflight uint64 `json:"inflight,omitempty"` // Inflight are the number of API requests currently being served
 }
 
+// cleanupDurations is a ring buffer for tracking cleanup operation durations.
+type cleanupDurations struct {
+	sync.RWMutex
+	durations []time.Duration
+	idx       int
+	count     int
+}
+
 // This is for internal accounting for JetStream for this server.
 type jetStream struct {
 	// These are here first because of atomics on 32bit systems.
-	apiInflight   int64
-	apiTotal      int64
-	apiErrors     int64
-	memReserved   int64
-	storeReserved int64
-	memUsed       int64
-	storeUsed     int64
-	queueLimit    int64
-	clustered     int32
-	mu            sync.RWMutex
-	srv           *Server
-	config        JetStreamConfig
-	cluster       *jetStreamCluster
-	accounts      map[string]*jsAccount
-	apiSubs       *Sublist
-	started       time.Time
+	apiInflight      int64
+	apiTotal         int64
+	apiErrors        int64
+	memReserved      int64
+	storeReserved    int64
+	memUsed          int64
+	storeUsed        int64
+	queueLimit       int64
+	cleanupPending   int64
+	cleanupRetries   int64
+	cleanupTotal     int64
+	clustered        int32
+	mu               sync.RWMutex
+	srv              *Server
+	config           JetStreamConfig
+	cluster          *jetStreamCluster
+	accounts         map[string]*jsAccount
+	apiSubs          *Sublist
+	started          time.Time
+	cleanupDurs      cleanupDurations
 
 	// System level request to purge a stream move
 	accountPurge *subscription
@@ -130,6 +156,54 @@ type jetStream struct {
 
 	// Atomic versions
 	disabled atomic.Bool
+}
+
+const cleanupDurationsSize = 10000
+
+// record adds a duration to the ring buffer.
+func (cd *cleanupDurations) record(d time.Duration) {
+	cd.Lock()
+	if cd.durations == nil {
+		cd.durations = make([]time.Duration, cleanupDurationsSize)
+	}
+	cd.durations[cd.idx] = d
+	cd.idx = (cd.idx + 1) % cleanupDurationsSize
+	if cd.count < cleanupDurationsSize {
+		cd.count++
+	}
+	cd.Unlock()
+}
+
+// percentiles returns the p50, p90, p99, p999, p9999, and max durations in milliseconds.
+func (cd *cleanupDurations) percentiles() (p50, p90, p99, p999, p9999, max float64) {
+	cd.RLock()
+	if cd.count == 0 {
+		cd.RUnlock()
+		return
+	}
+	// Copy the data for sorting.
+	data := make([]time.Duration, cd.count)
+	copy(data, cd.durations[:cd.count])
+	cd.RUnlock()
+
+	slices.Sort(data)
+	n := len(data)
+
+	percentile := func(p float64) float64 {
+		if n == 0 {
+			return 0
+		}
+		idx := int(float64(n-1) * p)
+		return float64(data[idx].Milliseconds())
+	}
+
+	p50 = percentile(0.50)
+	p90 = percentile(0.90)
+	p99 = percentile(0.99)
+	p999 = percentile(0.999)
+	p9999 = percentile(0.9999)
+	max = float64(data[n-1].Milliseconds())
+	return
 }
 
 type remoteUsage struct {
@@ -2541,6 +2615,12 @@ func (js *jetStream) usageStats() *JetStreamStats {
 	}
 	stats.Store = uint64(used)
 	stats.HAAssets = s.numRaftNodes()
+	// Consumer cleanup stats.
+	stats.ConsumerCleanup.Total = uint64(atomic.LoadInt64(&js.cleanupTotal))
+	stats.ConsumerCleanup.Pending = uint64(atomic.LoadInt64(&js.cleanupPending))
+	stats.ConsumerCleanup.Retries = uint64(atomic.LoadInt64(&js.cleanupRetries))
+	stats.ConsumerCleanup.P50, stats.ConsumerCleanup.P90, stats.ConsumerCleanup.P99,
+		stats.ConsumerCleanup.P999, stats.ConsumerCleanup.P9999, stats.ConsumerCleanup.Max = js.cleanupDurs.percentiles()
 	return &stats
 }
 

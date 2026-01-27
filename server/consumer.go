@@ -2082,6 +2082,13 @@ func (o *consumer) deleteNotActive() {
 		if ca != nil && cc != nil {
 			// Check to make sure we went away.
 			// Don't think this needs to be a monitored go routine.
+			started := time.Now()
+			atomic.AddInt64(&js.cleanupPending, 1)
+			defer func() {
+				atomic.AddInt64(&js.cleanupPending, -1)
+				atomic.AddInt64(&js.cleanupTotal, 1)
+				js.cleanupDurs.record(time.Since(started))
+			}()
 			jitter := time.Duration(rand.Int63n(int64(cnaStart)))
 			interval := cnaStart + jitter
 			ticker := time.NewTicker(interval)
@@ -2104,6 +2111,7 @@ func (o *consumer) deleteNotActive() {
 				// Make sure this is the same consumer assignment, and not a new consumer with the same name.
 				if nca != nil && reflect.DeepEqual(nca, ca) {
 					s.Warnf("Consumer assignment for '%s > %s > %s' not cleaned up, retrying", acc, stream, name)
+					atomic.AddInt64(&js.cleanupRetries, 1)
 					meta.ForwardProposal(removeEntry)
 					if interval < cnaMax {
 						interval *= 2
