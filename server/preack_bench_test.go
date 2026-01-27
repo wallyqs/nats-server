@@ -386,3 +386,246 @@ func BenchmarkPreAck_RegisterOnly_SingleConsumer_New(b *testing.B) {
 		m.register(c, seq)
 	}
 }
+
+// ============================================================================
+// Realistic Interest-Based Retention Scenarios
+// ============================================================================
+
+// Scenario: Interest stream with 3 consumers, ALL pre-ack before message arrives
+// This is the worst case for the new implementation - all consumers racing ahead
+func BenchmarkPreAck_Interest_AllPreAck_Old(b *testing.B) {
+	consumers := createFakeConsumers(3)
+	c1, c2, c3 := consumers[0], consumers[1], consumers[2]
+	numSeqs := 100
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		m := make(oldPreAckMap)
+
+		// Simulate: all 3 consumers pre-ack sequences 0-99
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			m.register(c1, seq)
+			m.register(c2, seq)
+			m.register(c3, seq)
+		}
+
+		// Message arrives, check interest and clear
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			_ = m.has(c1, seq)
+			_ = m.has(c2, seq)
+			_ = m.has(c3, seq)
+			m.clear(c1, seq)
+			m.clear(c2, seq)
+			m.clear(c3, seq)
+		}
+	}
+}
+
+func BenchmarkPreAck_Interest_AllPreAck_New(b *testing.B) {
+	consumers := createFakeConsumers(3)
+	c1, c2, c3 := consumers[0], consumers[1], consumers[2]
+	numSeqs := 100
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		m := make(newPreAckMap)
+
+		// Simulate: all 3 consumers pre-ack sequences 0-99
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			m.register(c1, seq)
+			m.register(c2, seq)
+			m.register(c3, seq)
+		}
+
+		// Message arrives, check interest and clear
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			_ = m.has(c1, seq)
+			_ = m.has(c2, seq)
+			_ = m.has(c3, seq)
+			m.clear(c1, seq)
+			m.clear(c2, seq)
+			m.clear(c3, seq)
+		}
+	}
+}
+
+// Scenario: Interest stream with 3 consumers, staggered pre-acks
+// More realistic: first consumer pre-acks, message arrives, then others ack normally
+// Only ~33% of acks are pre-acks (one consumer racing ahead)
+func BenchmarkPreAck_Interest_StaggeredPreAck_Old(b *testing.B) {
+	consumers := createFakeConsumers(3)
+	c1 := consumers[0]
+	numSeqs := 100
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		m := make(oldPreAckMap)
+
+		// Only first consumer pre-acks (racing ahead)
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			m.register(c1, seq)
+		}
+
+		// Message arrives, clear the pre-ack
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			_ = m.has(c1, seq)
+			m.clear(c1, seq)
+		}
+		// Other consumers ack normally (no pre-ack needed)
+	}
+}
+
+func BenchmarkPreAck_Interest_StaggeredPreAck_New(b *testing.B) {
+	consumers := createFakeConsumers(3)
+	c1 := consumers[0]
+	numSeqs := 100
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		m := make(newPreAckMap)
+
+		// Only first consumer pre-acks (racing ahead)
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			m.register(c1, seq)
+		}
+
+		// Message arrives, clear the pre-ack
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			_ = m.has(c1, seq)
+			m.clear(c1, seq)
+		}
+		// Other consumers ack normally (no pre-ack needed)
+	}
+}
+
+// Scenario: Interest stream, variable pre-ack patterns
+// 50% sequences: 1 consumer pre-acks
+// 30% sequences: 2 consumers pre-ack
+// 20% sequences: 3 consumers pre-ack
+func BenchmarkPreAck_Interest_VariablePreAck_Old(b *testing.B) {
+	consumers := createFakeConsumers(3)
+	c1, c2, c3 := consumers[0], consumers[1], consumers[2]
+	numSeqs := 100
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		m := make(oldPreAckMap)
+
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			m.register(c1, seq) // Always first consumer
+			if seq%10 < 5 {
+				// 50%: only 1 consumer pre-acks
+			} else if seq%10 < 8 {
+				// 30%: 2 consumers pre-ack
+				m.register(c2, seq)
+			} else {
+				// 20%: 3 consumers pre-ack
+				m.register(c2, seq)
+				m.register(c3, seq)
+			}
+		}
+
+		// Clear all
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			m.clear(c1, seq)
+			m.clear(c2, seq)
+			m.clear(c3, seq)
+		}
+	}
+}
+
+func BenchmarkPreAck_Interest_VariablePreAck_New(b *testing.B) {
+	consumers := createFakeConsumers(3)
+	c1, c2, c3 := consumers[0], consumers[1], consumers[2]
+	numSeqs := 100
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		m := make(newPreAckMap)
+
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			m.register(c1, seq) // Always first consumer
+			if seq%10 < 5 {
+				// 50%: only 1 consumer pre-acks
+			} else if seq%10 < 8 {
+				// 30%: 2 consumers pre-ack
+				m.register(c2, seq)
+			} else {
+				// 20%: 3 consumers pre-ack
+				m.register(c2, seq)
+				m.register(c3, seq)
+			}
+		}
+
+		// Clear all
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			m.clear(c1, seq)
+			m.clear(c2, seq)
+			m.clear(c3, seq)
+		}
+	}
+}
+
+// Scenario: WorkQueue retention - only 1 consumer ever acks each message
+// This is the ideal case for the new implementation
+func BenchmarkPreAck_WorkQueue_Old(b *testing.B) {
+	consumers := createFakeConsumers(3)
+	numSeqs := 100
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		m := make(oldPreAckMap)
+
+		// Each sequence is pre-acked by only one consumer (round-robin)
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			c := consumers[seq%3]
+			m.register(c, seq)
+		}
+
+		// Clear
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			c := consumers[seq%3]
+			_ = m.has(c, seq)
+			m.clear(c, seq)
+		}
+	}
+}
+
+func BenchmarkPreAck_WorkQueue_New(b *testing.B) {
+	consumers := createFakeConsumers(3)
+	numSeqs := 100
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		m := make(newPreAckMap)
+
+		// Each sequence is pre-acked by only one consumer (round-robin)
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			c := consumers[seq%3]
+			m.register(c, seq)
+		}
+
+		// Clear
+		for seq := uint64(0); seq < uint64(numSeqs); seq++ {
+			c := consumers[seq%3]
+			_ = m.has(c, seq)
+			m.clear(c, seq)
+		}
+	}
+}
