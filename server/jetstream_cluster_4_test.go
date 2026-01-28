@@ -37,6 +37,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
@@ -7491,6 +7492,156 @@ func TestJetStreamClusterMetaSnapshotMemoryCorrelation(t *testing.T) {
 			t.Logf("  Streams:     %.2fx (%d -> %d)", streamRatio, first.numStreams, last.numStreams)
 			t.Logf("  Snapshot:    %.2fx (%d -> %d bytes)", snapRatio, first.snapshotSize, last.snapshotSize)
 			t.Logf("  Heap Alloc:  %.2fx (%d -> %d bytes)", allocRatio, first.heapAlloc, last.heapAlloc)
+		}
+	}
+}
+
+// TestJetStreamClusterApplyMetaSnapshotMemorySpike confirms that memory allocated
+// during applyMetaSnapshot() is proportional to the snapshot size. Since snapshot
+// size is controlled by meta_compact_size (how much accumulates before compaction),
+// this demonstrates that larger meta_compact_size settings lead to larger memory
+// spikes when followers apply snapshots via s2.Decode() and json.Unmarshal().
+func TestJetStreamClusterApplyMetaSnapshotMemorySpike(t *testing.T) {
+	// Test with different numbers of streams to create snapshots of varying sizes.
+	// This simulates the effect of different meta_compact_size thresholds.
+	testCases := []struct {
+		name       string
+		numStreams int
+	}{
+		{"small_10_streams", 10},
+		{"medium_50_streams", 50},
+		{"large_100_streams", 100},
+	}
+
+	type result struct {
+		numStreams       int
+		compressedSize   int
+		decompressedSize int
+		applyHeapAlloc   uint64
+	}
+	results := make([]result, 0, len(testCases))
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := createJetStreamClusterExplicit(t, "APPLYMEM", 3)
+			defer c.shutdown()
+
+			// Disable automatic compaction
+			for _, s := range c.servers {
+				s.optsMu.Lock()
+				s.opts.JetStreamMetaCompactSize = 1024 * 1024 * 1024
+				s.optsMu.Unlock()
+			}
+
+			nc, _ := jsClientConnect(t, c.servers[0])
+			defer nc.Close()
+
+			// Create streams to build up cluster state
+			for i := 0; i < tc.numStreams; i++ {
+				jsStreamCreate(t, nc, &StreamConfig{
+					Name:     fmt.Sprintf("TEST_%d", i),
+					Subjects: []string{fmt.Sprintf("test.%d", i)},
+					Storage:  MemoryStorage,
+				})
+			}
+
+			c.waitOnAllCurrent()
+
+			leader := c.leader()
+			js, _ := leader.getJetStreamCluster()
+			if js == nil {
+				t.Fatal("No JetStream found")
+			}
+
+			// Create the snapshot (this is what the leader does)
+			snap, err := js.metaSnapshot()
+			if err != nil {
+				t.Fatalf("metaSnapshot failed: %v", err)
+			}
+
+			// Measure decompressed size (what s2.Decode will allocate)
+			decompressed, err := s2.Decode(nil, snap)
+			if err != nil {
+				t.Fatalf("s2.Decode failed: %v", err)
+			}
+
+			// Now measure memory allocation during applyMetaSnapshot on a follower.
+			// Pick a non-leader server to simulate receiving the snapshot.
+			var follower *Server
+			for _, s := range c.servers {
+				if s != leader {
+					follower = s
+					break
+				}
+			}
+
+			followerJs, _ := follower.getJetStreamCluster()
+			if followerJs == nil {
+				t.Fatal("No JetStream on follower")
+			}
+
+			// Force GC and measure memory before applying snapshot
+			runtime.GC()
+			var memBefore runtime.MemStats
+			runtime.ReadMemStats(&memBefore)
+
+			// Apply the snapshot - this is where the memory spike occurs:
+			// 1. s2.Decode(nil, buf) at line 1726 - allocates decompressed buffer
+			// 2. json.Unmarshal(jse, &wsas) at line 1730 - allocates parsed structs
+			err = followerJs.applyMetaSnapshot(snap, nil, false, false)
+			if err != nil {
+				t.Fatalf("applyMetaSnapshot failed: %v", err)
+			}
+
+			var memAfter runtime.MemStats
+			runtime.ReadMemStats(&memAfter)
+
+			applyHeapDelta := memAfter.TotalAlloc - memBefore.TotalAlloc
+
+			t.Logf("Streams: %d, Compressed: %d bytes, Decompressed: %d bytes, applyMetaSnapshot heap: %d bytes",
+				tc.numStreams, len(snap), len(decompressed), applyHeapDelta)
+
+			results = append(results, result{
+				numStreams:       tc.numStreams,
+				compressedSize:   len(snap),
+				decompressedSize: len(decompressed),
+				applyHeapAlloc:   applyHeapDelta,
+			})
+		})
+	}
+
+	// Verify correlation between snapshot size and memory allocation
+	if len(results) >= 2 {
+		for i := 1; i < len(results); i++ {
+			prev := results[i-1]
+			curr := results[i]
+
+			if curr.applyHeapAlloc <= prev.applyHeapAlloc {
+				t.Errorf("Expected applyMetaSnapshot heap allocation to increase: %d streams = %d bytes, %d streams = %d bytes",
+					prev.numStreams, prev.applyHeapAlloc, curr.numStreams, curr.applyHeapAlloc)
+			}
+		}
+
+		t.Logf("\n=== applyMetaSnapshot Memory Spike Summary ===")
+		t.Logf("This demonstrates that larger snapshots (from higher meta_compact_size) cause larger memory spikes")
+		t.Logf("")
+		for _, r := range results {
+			t.Logf("Streams: %3d -> Compressed: %5d, Decompressed: %5d, Apply Heap: %8d bytes",
+				r.numStreams, r.compressedSize, r.decompressedSize, r.applyHeapAlloc)
+		}
+
+		if len(results) >= 2 {
+			first := results[0]
+			last := results[len(results)-1]
+			decompRatio := float64(last.decompressedSize) / float64(first.decompressedSize)
+			applyRatio := float64(last.applyHeapAlloc) / float64(first.applyHeapAlloc)
+
+			t.Logf("\nGrowth ratios (last/first):")
+			t.Logf("  Decompressed size: %.2fx (%d -> %d bytes)", decompRatio, first.decompressedSize, last.decompressedSize)
+			t.Logf("  Apply heap alloc:  %.2fx (%d -> %d bytes)", applyRatio, first.applyHeapAlloc, last.applyHeapAlloc)
+			t.Logf("\nThe apply heap allocation is ~%.1fx the decompressed snapshot size",
+				float64(last.applyHeapAlloc)/float64(last.decompressedSize))
+			t.Logf("This multiplier accounts for: s2.Decode buffer + json.Unmarshal structs + internal allocations")
 		}
 	}
 }
