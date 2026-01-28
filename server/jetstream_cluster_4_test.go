@@ -7363,3 +7363,134 @@ func TestJetStreamClusterMetaCompactSizeThreshold(t *testing.T) {
 		})
 	}
 }
+
+// TestJetStreamClusterMetaSnapshotMemoryCorrelation confirms that as more
+// entries accumulate before compaction (controlled by meta_compact_size),
+// the memory allocated during metaSnapshot() increases proportionally.
+// This demonstrates the memory spike behavior where larger meta_compact_size
+// thresholds lead to higher peak memory usage during snapshot creation.
+func TestJetStreamClusterMetaSnapshotMemoryCorrelation(t *testing.T) {
+	// Test with different numbers of streams to simulate different amounts
+	// of accumulated entries before compaction triggers.
+	testCases := []struct {
+		name       string
+		numStreams int
+	}{
+		{"small_10_streams", 10},
+		{"medium_50_streams", 50},
+		{"large_100_streams", 100},
+	}
+
+	// Collect results for comparison
+	type result struct {
+		numStreams   int
+		snapshotSize int
+		heapAlloc    uint64
+	}
+	results := make([]result, 0, len(testCases))
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := createJetStreamClusterExplicit(t, "MEMTEST", 3)
+			defer c.shutdown()
+
+			// Set a very high threshold to prevent automatic compaction
+			// so we can control when snapshot happens.
+			for _, s := range c.servers {
+				s.optsMu.Lock()
+				s.opts.JetStreamMetaCompactSize = 1024 * 1024 * 1024 // 1GB - effectively disabled
+				s.optsMu.Unlock()
+			}
+
+			nc, _ := jsClientConnect(t, c.servers[0])
+			defer nc.Close()
+
+			// Create streams to accumulate raft entries
+			for i := 0; i < tc.numStreams; i++ {
+				jsStreamCreate(t, nc, &StreamConfig{
+					Name:     fmt.Sprintf("TEST_%d", i),
+					Subjects: []string{fmt.Sprintf("test.%d", i)},
+					Storage:  MemoryStorage,
+				})
+			}
+
+			// Wait for all streams to be fully propagated
+			c.waitOnAllCurrent()
+
+			leader := c.leader()
+			js, _ := leader.getJetStreamCluster()
+			if js == nil {
+				t.Fatal("No JetStream found")
+			}
+
+			// Force GC and get baseline memory
+			runtime.GC()
+			var memBefore runtime.MemStats
+			runtime.ReadMemStats(&memBefore)
+
+			// Call metaSnapshot directly to measure allocation
+			snap, err := js.metaSnapshot()
+			if err != nil {
+				t.Fatalf("metaSnapshot failed: %v", err)
+			}
+
+			// Get memory after snapshot
+			var memAfter runtime.MemStats
+			runtime.ReadMemStats(&memAfter)
+
+			// Calculate heap allocation delta
+			heapDelta := memAfter.TotalAlloc - memBefore.TotalAlloc
+
+			t.Logf("Streams: %d, Snapshot size: %d bytes, Heap allocated: %d bytes",
+				tc.numStreams, len(snap), heapDelta)
+
+			results = append(results, result{
+				numStreams:   tc.numStreams,
+				snapshotSize: len(snap),
+				heapAlloc:    heapDelta,
+			})
+		})
+	}
+
+	// Verify that more streams (simulating more accumulated entries) leads to
+	// larger snapshots and more memory allocation.
+	if len(results) >= 2 {
+		for i := 1; i < len(results); i++ {
+			prev := results[i-1]
+			curr := results[i]
+
+			// Snapshot size should increase with more streams
+			if curr.snapshotSize <= prev.snapshotSize {
+				t.Errorf("Expected snapshot size to increase: %d streams = %d bytes, %d streams = %d bytes",
+					prev.numStreams, prev.snapshotSize, curr.numStreams, curr.snapshotSize)
+			}
+
+			// Memory allocation should increase with more streams
+			if curr.heapAlloc <= prev.heapAlloc {
+				t.Errorf("Expected heap allocation to increase: %d streams = %d bytes, %d streams = %d bytes",
+					prev.numStreams, prev.heapAlloc, curr.numStreams, curr.heapAlloc)
+			}
+		}
+
+		// Log the correlation for visibility
+		t.Logf("\n=== Memory Correlation Summary ===")
+		for _, r := range results {
+			t.Logf("Streams: %3d -> Snapshot: %6d bytes, Heap Alloc: %8d bytes",
+				r.numStreams, r.snapshotSize, r.heapAlloc)
+		}
+
+		// Calculate and log the growth ratios
+		if len(results) >= 2 {
+			first := results[0]
+			last := results[len(results)-1]
+			streamRatio := float64(last.numStreams) / float64(first.numStreams)
+			snapRatio := float64(last.snapshotSize) / float64(first.snapshotSize)
+			allocRatio := float64(last.heapAlloc) / float64(first.heapAlloc)
+
+			t.Logf("\nGrowth ratios (last/first):")
+			t.Logf("  Streams:     %.2fx (%d -> %d)", streamRatio, first.numStreams, last.numStreams)
+			t.Logf("  Snapshot:    %.2fx (%d -> %d bytes)", snapRatio, first.snapshotSize, last.snapshotSize)
+			t.Logf("  Heap Alloc:  %.2fx (%d -> %d bytes)", allocRatio, first.heapAlloc, last.heapAlloc)
+		}
+	}
+}
