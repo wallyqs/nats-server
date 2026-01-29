@@ -920,3 +920,484 @@ func TestJetStreamClusterStreamDeleteDeadlockOnPermissionError(t *testing.T) {
 		t.Logf("Target %s is responsive (not deadlocked)", targetName)
 	}
 }
+
+// TestJetStreamClusterStreamDeleteConsumerFolderDuringRecovery tests the scenario
+// where a consumer's store folder is removed DURING server recovery while the
+// stream is processing tombstones. This matches the production deadlock scenario:
+//
+// During newFileStoreWithCreated (filestore.go):
+//
+//	defer func() { go fs.cleanupOldMeta() }()  // Line 552: tries RLock later
+//	fs.mu.Lock()                                // Line 557: acquired without defer
+//	if len(fs.tombs) > 0 {                      // Line 560: tombstone processing
+//	    for _, seq := range fs.tombs {
+//	        fs.removeMsg(seq, false, true, false) // I/O on message blocks
+//	    }
+//	}
+//	fs.mu.Unlock()                              // Line 589: not reached on panic
+//
+// By removing the consumer's obs/ folder during recovery, we force errors in
+// the consumer's filestore initialization while the stream is still processing
+// tombstones under its lock. If the consumer recovery failure cascades or the
+// concurrent file removal triggers a panic in any recovery path, the lock leak
+// at line 557 causes cleanupOldMeta to deadlock on RLock.
+func TestJetStreamClusterStreamDeleteConsumerFolderDuringRecovery(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "WQ5", 5)
+	defer c.shutdown()
+
+	c.waitOnPeerCount(5)
+
+	nc, js := jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	streamName := "unique_ids"
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      streamName,
+		Subjects:  []string{"unique_ids.>"},
+		Replicas:  3,
+		Retention: nats.WorkQueuePolicy,
+	})
+	require_NoError(t, err)
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Create consumer.
+	_, err = js.AddConsumer(streamName, &nats.ConsumerConfig{
+		Durable:   "worker",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+	c.waitOnConsumerLeader(globalAccountName, streamName, "worker")
+
+	// Publish messages.
+	numMessages := 5000
+	t.Logf("Publishing %d messages...", numMessages)
+	for i := 0; i < numMessages; i++ {
+		subject := fmt.Sprintf("unique_ids.item.%d", i%50)
+		_, err := js.Publish(subject, []byte(fmt.Sprintf("data-%d", i)))
+		if err != nil {
+			t.Fatalf("Publish error at msg %d: %v", i, err)
+		}
+	}
+
+	// Consume and ack most messages to create tombstones.
+	sub, err := js.PullSubscribe("unique_ids.>", "worker")
+	require_NoError(t, err)
+
+	ackedCount := 0
+	toAck := numMessages - 100
+	for ackedCount < toAck {
+		batch := toAck - ackedCount
+		if batch > 100 {
+			batch = 100
+		}
+		msgs, err := sub.Fetch(batch, nats.MaxWait(5*time.Second))
+		if err != nil {
+			t.Logf("Fetch error after %d acks: %v", ackedCount, err)
+			break
+		}
+		for _, m := range msgs {
+			m.Ack()
+			ackedCount++
+		}
+	}
+	t.Logf("Acked %d messages (creating tombstones)", ackedCount)
+
+	// Wait for ack processing.
+	checkFor(t, 10*time.Second, 500*time.Millisecond, func() error {
+		si, err := js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs > uint64(numMessages-ackedCount+100) {
+			return fmt.Errorf("waiting for acks: %d msgs remaining", si.State.Msgs)
+		}
+		return nil
+	})
+
+	si, _ := js.StreamInfo(streamName)
+	t.Logf("State after acks: Msgs=%d, Deleted=%d", si.State.Msgs, si.State.NumDeleted)
+
+	// Pick target replica and capture its store directories.
+	target := c.randomNonStreamLeader(globalAccountName, streamName)
+	require_True(t, target != nil)
+	targetName := target.Name()
+
+	acc, err := target.lookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream(streamName)
+	require_NoError(t, err)
+	fs := mset.store.(*fileStore)
+	storeDir := fs.fcfg.StoreDir
+	consumerObsDir := filepath.Join(storeDir, consumerDir)
+	storeMsgDir := filepath.Join(storeDir, msgDir)
+	t.Logf("Target %s store dir: %s", targetName, storeDir)
+	t.Logf("Consumer obs dir: %s", consumerObsDir)
+	t.Logf("Msgs dir: %s", storeMsgDir)
+
+	// Shut down the target.
+	t.Logf("Shutting down %s...", targetName)
+	target.Shutdown()
+	target.WaitForShutdown()
+
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Reconnect.
+	nc.Close()
+	nc, js = jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	// Start a goroutine that aggressively removes the consumer's obs/ folder
+	// during server restart. This races with the recovery process:
+	// - The server recreates the obs/ directory during startup
+	// - We immediately remove it, causing the consumer recovery to fail
+	// - This happens while the stream is processing tombstones under fs.mu.Lock()
+	stopRemoval := make(chan struct{})
+	removalDone := make(chan struct{})
+	removalCount := 0
+
+	go func() {
+		defer close(removalDone)
+		for {
+			select {
+			case <-stopRemoval:
+				return
+			default:
+			}
+			// Try to remove the consumer obs directory.
+			// During startup, the server creates this directory then recovers consumers.
+			// By removing it mid-recovery, we force consumer initialization to fail.
+			if _, err := os.Stat(consumerObsDir); err == nil {
+				if err := os.RemoveAll(consumerObsDir); err == nil {
+					removalCount++
+				}
+			}
+			// Also try removing individual msg block files to disrupt
+			// tombstone processing in the stream's removeMsg() calls.
+			if entries, err := os.ReadDir(storeMsgDir); err == nil {
+				for _, e := range entries {
+					if filepath.Ext(e.Name()) == ".blk" {
+						os.Remove(filepath.Join(storeMsgDir, e.Name()))
+					}
+				}
+			}
+			// Tight loop to maximize chance of hitting the race window.
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	// Restart the server. This triggers newFileStoreWithCreated which:
+	// 1. Processes tombstones under fs.mu.Lock() (stream store)
+	// 2. Recovers consumer stores (also calls newFileStoreWithCreated)
+	// Our goroutine races to remove files during both of these operations.
+	t.Logf("Restarting %s while consumer folder removal goroutine is active...", targetName)
+
+	restartDone := make(chan struct{})
+	go func() {
+		target = c.restartServer(target)
+		close(restartDone)
+	}()
+
+	// Wait for restart with a timeout to detect deadlock.
+	select {
+	case <-restartDone:
+		t.Logf("Server %s restarted successfully", targetName)
+	case <-time.After(30 * time.Second):
+		close(stopRemoval)
+		<-removalDone
+		t.Fatalf("TIMEOUT: Server restart hung (possible deadlock during recovery with consumer folder removal)")
+	}
+
+	// Stop the removal goroutine.
+	close(stopRemoval)
+	<-removalDone
+	t.Logf("Consumer folder removal goroutine stopped (removed obs dir %d times)", removalCount)
+
+	// Give recovery time to settle.
+	time.Sleep(2 * time.Second)
+
+	// Issue peer-remove. If the stream's fs.mu is leaked, this will hang
+	// because stream.stop() -> store.Delete() needs fs.mu.Lock().
+	t.Logf("Issuing peer-remove for %s...", targetName)
+	peerRemoveDone := make(chan struct{})
+	go func() {
+		defer close(peerRemoveDone)
+		removeSub := fmt.Sprintf(JSApiStreamRemovePeerT, streamName)
+		resp, err := nc.Request(removeSub, []byte(`{"peer":"`+targetName+`"}`), 10*time.Second)
+		if err != nil {
+			t.Logf("Peer remove request error: %v", err)
+			return
+		}
+		var rpResp JSApiStreamRemovePeerResponse
+		json.Unmarshal(resp.Data, &rpResp)
+		t.Logf("Peer remove response: Success=%v, Error=%+v", rpResp.Success, rpResp.Error)
+	}()
+
+	select {
+	case <-peerRemoveDone:
+		t.Log("Peer remove completed")
+	case <-time.After(30 * time.Second):
+		t.Fatal("TIMEOUT: Peer remove hung - possible deadlock (fs.mu leaked during recovery)")
+	}
+
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Verify peer was removed.
+	checkFor(t, 30*time.Second, 500*time.Millisecond, func() error {
+		si, err = js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		for _, r := range si.Cluster.Replicas {
+			if r.Name == targetName {
+				return fmt.Errorf("peer %s still present", targetName)
+			}
+		}
+		return nil
+	})
+
+	t.Logf("Peer %s removed", targetName)
+
+	// Verify stream is functional.
+	_, err = js.Publish("unique_ids.verify", []byte("after-consumer-folder-removal"))
+	require_NoError(t, err)
+
+	si, _ = js.StreamInfo(streamName)
+	t.Logf("Final state: Msgs=%d, Deleted=%d, Leader=%s",
+		si.State.Msgs, si.State.NumDeleted, si.Cluster.Leader)
+
+	// Check target is responsive (not deadlocked).
+	nc2, err := nats.Connect(target.ClientURL())
+	if err != nil {
+		t.Logf("Note: Target %s not connectable: %v", targetName, err)
+	} else {
+		nc2.Close()
+		t.Logf("Target %s is responsive (not deadlocked)", targetName)
+	}
+}
+
+// TestJetStreamClusterStreamDeleteConsumerFolderRepeatedly tests repeated
+// removal of the consumer folder across multiple server restart cycles.
+// This increases the probability of hitting the race window where file
+// removal occurs exactly during tombstone processing or consumer recovery.
+func TestJetStreamClusterStreamDeleteConsumerFolderRepeatedly(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "WQ5", 5)
+	defer c.shutdown()
+
+	c.waitOnPeerCount(5)
+
+	nc, js := jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	streamName := "repeat_wq"
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      streamName,
+		Subjects:  []string{"repeat.>"},
+		Replicas:  3,
+		Retention: nats.WorkQueuePolicy,
+	})
+	require_NoError(t, err)
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Create consumer.
+	_, err = js.AddConsumer(streamName, &nats.ConsumerConfig{
+		Durable:   "worker",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+	c.waitOnConsumerLeader(globalAccountName, streamName, "worker")
+
+	// Publish and ack messages to create tombstones.
+	numMessages := 3000
+	t.Logf("Publishing %d messages...", numMessages)
+	for i := 0; i < numMessages; i++ {
+		_, err := js.Publish(fmt.Sprintf("repeat.item.%d", i%30), []byte(fmt.Sprintf("data-%d", i)))
+		if err != nil {
+			t.Fatalf("Publish error at msg %d: %v", i, err)
+		}
+	}
+
+	sub, err := js.PullSubscribe("repeat.>", "worker")
+	require_NoError(t, err)
+
+	ackedCount := 0
+	toAck := numMessages - 50
+	for ackedCount < toAck {
+		batch := toAck - ackedCount
+		if batch > 100 {
+			batch = 100
+		}
+		msgs, err := sub.Fetch(batch, nats.MaxWait(5*time.Second))
+		if err != nil {
+			break
+		}
+		for _, m := range msgs {
+			m.Ack()
+			ackedCount++
+		}
+	}
+	t.Logf("Acked %d messages", ackedCount)
+
+	// Wait for deletions.
+	checkFor(t, 10*time.Second, 500*time.Millisecond, func() error {
+		si, err := js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs > uint64(numMessages-ackedCount+100) {
+			return fmt.Errorf("waiting: %d msgs", si.State.Msgs)
+		}
+		return nil
+	})
+
+	si, _ := js.StreamInfo(streamName)
+	t.Logf("State: Msgs=%d, Deleted=%d", si.State.Msgs, si.State.NumDeleted)
+
+	// Pick target.
+	target := c.randomNonStreamLeader(globalAccountName, streamName)
+	require_True(t, target != nil)
+	targetName := target.Name()
+
+	// Get store directory before shutdown.
+	acc, err := target.lookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream(streamName)
+	require_NoError(t, err)
+	fs := mset.store.(*fileStore)
+	storeDir := fs.fcfg.StoreDir
+	consumerObsDir := filepath.Join(storeDir, consumerDir)
+	storeMsgDir := filepath.Join(storeDir, msgDir)
+	t.Logf("Target %s: obs=%s, msgs=%s", targetName, consumerObsDir, storeMsgDir)
+
+	// Run multiple restart cycles, each time removing consumer folder during recovery.
+	const restartCycles = 3
+	for cycle := 0; cycle < restartCycles; cycle++ {
+		t.Logf("=== Restart cycle %d/%d ===", cycle+1, restartCycles)
+
+		// Shut down target.
+		target.Shutdown()
+		target.WaitForShutdown()
+
+		c.waitOnStreamLeader(globalAccountName, streamName)
+
+		// Reconnect.
+		nc.Close()
+		nc, js = jsClientConnect(t, c.leader())
+
+		// Publish more messages while target is down to create more tombstones
+		// on recovery.
+		for i := 0; i < 500; i++ {
+			js.Publish(fmt.Sprintf("repeat.new.%d.%d", cycle, i), []byte("new"))
+		}
+
+		// Start aggressive folder removal goroutine.
+		stopRemoval := make(chan struct{})
+		removalDone := make(chan struct{})
+
+		go func() {
+			defer close(removalDone)
+			for {
+				select {
+				case <-stopRemoval:
+					return
+				default:
+				}
+				// Remove consumer folder.
+				if _, err := os.Stat(consumerObsDir); err == nil {
+					os.RemoveAll(consumerObsDir)
+				}
+				// Remove msg block files.
+				if entries, err := os.ReadDir(storeMsgDir); err == nil {
+					for _, e := range entries {
+						if filepath.Ext(e.Name()) == ".blk" {
+							os.Remove(filepath.Join(storeMsgDir, e.Name()))
+						}
+					}
+				}
+				time.Sleep(500 * time.Microsecond) // Very tight loop
+			}
+		}()
+
+		// Restart with timeout.
+		restartDone := make(chan struct{})
+		go func() {
+			target = c.restartServer(target)
+			close(restartDone)
+		}()
+
+		select {
+		case <-restartDone:
+			t.Logf("Cycle %d: server restarted", cycle+1)
+		case <-time.After(30 * time.Second):
+			close(stopRemoval)
+			<-removalDone
+			t.Fatalf("Cycle %d: TIMEOUT - server restart hung (possible deadlock)", cycle+1)
+		}
+
+		close(stopRemoval)
+		<-removalDone
+
+		// Let recovery settle.
+		time.Sleep(2 * time.Second)
+
+		// Verify stream is still accessible.
+		checkFor(t, 15*time.Second, 500*time.Millisecond, func() error {
+			_, err := js.StreamInfo(streamName)
+			return err
+		})
+	}
+
+	// After all cycles, issue peer-remove to test for leaked locks.
+	t.Logf("Issuing peer-remove for %s after %d restart cycles...", targetName, restartCycles)
+	peerRemoveDone := make(chan struct{})
+	go func() {
+		defer close(peerRemoveDone)
+		removeSub := fmt.Sprintf(JSApiStreamRemovePeerT, streamName)
+		resp, err := nc.Request(removeSub, []byte(`{"peer":"`+targetName+`"}`), 10*time.Second)
+		if err != nil {
+			t.Logf("Peer remove error: %v", err)
+			return
+		}
+		var rpResp JSApiStreamRemovePeerResponse
+		json.Unmarshal(resp.Data, &rpResp)
+		t.Logf("Peer remove: Success=%v", rpResp.Success)
+	}()
+
+	select {
+	case <-peerRemoveDone:
+		t.Log("Peer remove completed")
+	case <-time.After(30 * time.Second):
+		t.Fatal("TIMEOUT: Peer remove hung after repeated restarts - possible deadlock")
+	}
+
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Verify stream health.
+	checkFor(t, 30*time.Second, 500*time.Millisecond, func() error {
+		si, err = js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		for _, r := range si.Cluster.Replicas {
+			if r.Name == targetName {
+				return fmt.Errorf("peer %s still present", targetName)
+			}
+		}
+		return nil
+	})
+
+	_, err = js.Publish("repeat.verify", []byte("done"))
+	require_NoError(t, err)
+
+	si, _ = js.StreamInfo(streamName)
+	t.Logf("Final state: Msgs=%d, Deleted=%d, Leader=%s",
+		si.State.Msgs, si.State.NumDeleted, si.Cluster.Leader)
+
+	// Check server is responsive.
+	nc2, err := nats.Connect(target.ClientURL())
+	if err != nil {
+		t.Logf("Note: Target %s not connectable: %v", targetName, err)
+	} else {
+		nc2.Close()
+		t.Logf("Target %s responsive (not deadlocked)", targetName)
+	}
+}
