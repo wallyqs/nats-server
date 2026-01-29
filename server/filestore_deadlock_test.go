@@ -1469,3 +1469,247 @@ func TestFileStoreSkewDetectionPath(t *testing.T) {
 		t.Fatal("DEADLOCK: Recovery timed out")
 	}
 }
+
+// TestFileStoreRecoveryPermissionErrorDeadlock tests the early return bug
+// at filestore.go lines 574-578 where a permission error during
+// expireMsgsOnRecover() causes return without releasing the lock.
+//
+// The bug:
+//
+//	fs.mu.Lock()  // Line 557
+//	...
+//	if fs.cfg.MaxAge != 0 {
+//	    err := fs.expireMsgsOnRecover()
+//	    if isPermissionError(err) {
+//	        return nil, err  // ← LOCK NEVER RELEASED!
+//	    }
+//	}
+//	...
+//	fs.mu.Unlock()  // Line 589 - never reached on permission error
+//
+// This test creates expired messages, makes block files read-only,
+// then attempts recovery to trigger the permission error path.
+func TestFileStoreRecoveryPermissionErrorDeadlock(t *testing.T) {
+	// Skip if running as root (can't test permission errors as root)
+	if os.Getuid() == 0 {
+		t.Skip("Skipping permission test when running as root")
+	}
+
+	storeDir := t.TempDir()
+
+	fcfg := FileStoreConfig{
+		StoreDir:  storeDir,
+		BlockSize: 512,
+	}
+
+	// MaxAge of 1 nanosecond ensures all messages are "expired"
+	cfg := StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"test.>"},
+		Storage:  FileStorage,
+		MaxAge:   1 * time.Nanosecond, // Very short MaxAge to expire messages immediately
+	}
+
+	// Create filestore and add messages
+	fs, err := newFileStore(fcfg, cfg)
+	if err != nil {
+		t.Fatalf("Failed to create filestore: %v", err)
+	}
+
+	// Store some messages
+	for i := 0; i < 50; i++ {
+		subj := fmt.Sprintf("test.msg%d", i)
+		_, _, err := fs.StoreMsg(subj, nil, []byte("data"), 0)
+		if err != nil {
+			t.Fatalf("Failed to store message: %v", err)
+		}
+	}
+
+	state := fs.State()
+	t.Logf("Initial state: Msgs=%d, FirstSeq=%d, LastSeq=%d", state.Msgs, state.FirstSeq, state.LastSeq)
+
+	// Wait a tiny bit to ensure messages are "old"
+	time.Sleep(10 * time.Millisecond)
+
+	msgsDir := filepath.Join(storeDir, msgDir)
+
+	// Stop the filestore
+	fs.Stop()
+
+	// Remove index.db to force block-based recovery
+	os.Remove(filepath.Join(msgsDir, "index.db"))
+
+	// Make the block files read-only to trigger permission error on delete
+	entries, err := os.ReadDir(msgsDir)
+	if err != nil {
+		t.Fatalf("Failed to read msgs dir: %v", err)
+	}
+
+	var blocksProtected []string
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".blk" {
+			blkFile := filepath.Join(msgsDir, entry.Name())
+			// Make the file read-only
+			if err := os.Chmod(blkFile, 0400); err != nil {
+				t.Logf("Warning: Could not chmod %s: %v", entry.Name(), err)
+				continue
+			}
+			blocksProtected = append(blocksProtected, blkFile)
+			t.Logf("Made read-only: %s", entry.Name())
+		}
+	}
+
+	// Also make the directory read-only to prevent file deletion
+	if err := os.Chmod(msgsDir, 0500); err != nil {
+		t.Fatalf("Failed to chmod msgs dir: %v", err)
+	}
+
+	// Ensure we restore permissions for cleanup
+	defer func() {
+		os.Chmod(msgsDir, 0700)
+		for _, f := range blocksProtected {
+			os.Chmod(f, 0600)
+		}
+	}()
+
+	t.Log("Attempting recovery with read-only blocks (should trigger permission error)...")
+
+	// Now attempt recovery - this should hit the permission error in expireMsgsOnRecover
+	// which returns early without unlocking (the bug)
+	recovered := make(chan struct{})
+	var fs2 *fileStore
+	var recoverErr error
+
+	go func() {
+		defer close(recovered)
+		fs2, recoverErr = newFileStore(fcfg, cfg)
+	}()
+
+	// Wait for recovery with timeout
+	select {
+	case <-recovered:
+		if recoverErr != nil {
+			t.Logf("Recovery returned error (expected): %v", recoverErr)
+
+			// The bug: if we hit the permission error path WITHOUT the fix,
+			// fs2 would be nil but the internal lock might still be held on
+			// a partially constructed filestore that could be accessed elsewhere.
+			//
+			// With the fix (defer unlock), even on error return, the lock is released.
+
+			if fs2 != nil {
+				// If we got a filestore back, verify lock isn't held
+				lockCheck := make(chan bool, 1)
+				go func() {
+					fs2.mu.Lock()
+					fs2.mu.Unlock()
+					lockCheck <- true
+				}()
+
+				select {
+				case <-lockCheck:
+					t.Log("SUCCESS: Lock is accessible after permission error")
+				case <-time.After(3 * time.Second):
+					t.Fatal("DEADLOCK: Lock is held after permission error return!")
+				}
+				fs2.Stop()
+			} else {
+				t.Log("Recovery returned nil filestore (expected with permission error)")
+			}
+		} else {
+			t.Log("Recovery succeeded (permission error may not have been triggered)")
+			if fs2 != nil {
+				state := fs2.State()
+				t.Logf("Recovered state: Msgs=%d", state.Msgs)
+				fs2.Stop()
+			}
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DEADLOCK: Recovery timed out - lock is likely held!")
+	}
+}
+
+// TestFileStoreMaxAgeRecoveryWithPermissionError is a more aggressive test
+// that tries multiple approaches to trigger the permission error path.
+func TestFileStoreMaxAgeRecoveryWithPermissionError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("Skipping permission test when running as root")
+	}
+
+	storeDir := t.TempDir()
+
+	fcfg := FileStoreConfig{
+		StoreDir:  storeDir,
+		BlockSize: 256, // Small blocks
+	}
+
+	cfg := StreamConfig{
+		Name:     "TEST_MAXAGE",
+		Subjects: []string{"test.>"},
+		Storage:  FileStorage,
+		MaxAge:   1 * time.Millisecond, // Very short MaxAge
+	}
+
+	fs, err := newFileStore(fcfg, cfg)
+	if err != nil {
+		t.Fatalf("Failed to create filestore: %v", err)
+	}
+
+	// Create multiple blocks worth of messages
+	for i := 0; i < 100; i++ {
+		fs.StoreMsg(fmt.Sprintf("test.key%d", i), nil, []byte("test data payload"), 0)
+	}
+
+	t.Logf("Created %d blocks", len(fs.blks))
+
+	// Wait for messages to expire
+	time.Sleep(50 * time.Millisecond)
+
+	msgsDir := filepath.Join(storeDir, msgDir)
+	fs.Stop()
+
+	// Remove index to force recovery
+	os.Remove(filepath.Join(msgsDir, "index.db"))
+
+	// Make msgs directory read-only (prevents deletion of block files)
+	originalMode, _ := os.Stat(msgsDir)
+	os.Chmod(msgsDir, 0500)
+	defer os.Chmod(msgsDir, originalMode.Mode())
+
+	t.Log("Attempting recovery with protected directory...")
+
+	done := make(chan error, 1)
+	var recoveredFS *fileStore
+
+	go func() {
+		var err error
+		recoveredFS, err = newFileStore(fcfg, cfg)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Logf("Recovery error (may be expected): %v", err)
+		}
+		if recoveredFS != nil {
+			// Verify no deadlock
+			lockOK := make(chan bool, 1)
+			go func() {
+				recoveredFS.mu.Lock()
+				recoveredFS.mu.Unlock()
+				lockOK <- true
+			}()
+
+			select {
+			case <-lockOK:
+				t.Log("SUCCESS: No deadlock after recovery with permission restrictions")
+			case <-time.After(3 * time.Second):
+				t.Fatal("DEADLOCK detected!")
+			}
+			recoveredFS.Stop()
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("TIMEOUT: Recovery hung - likely deadlock!")
+	}
+}
