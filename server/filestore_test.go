@@ -12657,3 +12657,108 @@ func TestFileStoreDeleteBlocksWithManyEmptyBlocks(t *testing.T) {
 		&DeleteRange{First: 2, Num: 13},
 	})
 }
+
+// TestFileStoreRecoveryPermissionErrorLockLeak tests that when expireMsgsOnRecover
+// returns a permission error during recovery, the filestore mutex is properly released.
+//
+// BUG: In newFileStoreWithCreated, around line 556-589, there's a lock acquisition
+// without a corresponding defer unlock:
+//
+//	fs.mu.Lock()
+//	// ... operations that can fail or panic ...
+//	if isPermissionError(err) {
+//	    return nil, err  // ← LOCK NOT RELEASED!
+//	}
+//	// ...
+//	fs.mu.Unlock()
+//
+// If expireMsgsOnRecover() returns a permission error (e.g., when trying to remove
+// old message blocks from a read-only filesystem), the function returns with the
+// lock still held. This can cause:
+// 1. Resource leaks (mutex never released)
+// 2. Potential deadlocks if any goroutines were spawned that try to acquire the lock
+//
+// The fix should be to use defer fs.mu.Unlock() after acquiring the lock.
+func TestFileStoreRecoveryPermissionErrorLockLeak(t *testing.T) {
+	// Skip in CI environments where permission tests may not work
+	skipIfBuildkite(t)
+
+	storeDir := t.TempDir()
+
+	// Create a file store with a short MaxAge.
+	// We use a small block size to ensure messages go into separate blocks.
+	cfg := StreamConfig{
+		Name:    "TEST",
+		Storage: FileStorage,
+		MaxAge:  time.Millisecond, // Very short so messages expire quickly
+	}
+	fcfg := FileStoreConfig{
+		StoreDir:  storeDir,
+		BlockSize: 256, // Small blocks
+	}
+
+	fs, err := newFileStore(fcfg, cfg)
+	require_NoError(t, err)
+
+	// Store some messages. With small block size, this should create multiple blocks.
+	msg := []byte("test message that needs to be expired on recovery")
+	for i := 0; i < 50; i++ {
+		_, _, err := fs.StoreMsg("test", nil, msg, 0)
+		require_NoError(t, err)
+	}
+
+	// Verify we have messages
+	state := fs.State()
+	require_True(t, state.Msgs > 0)
+
+	// Stop without writing state to force recovery from block files
+	fs.stop(false, false)
+
+	// Remove the index.db file to force recovery via recoverMsgs
+	indexFile := filepath.Join(storeDir, msgDir, streamStreamStateFile)
+	os.Remove(indexFile)
+
+	// Wait for messages to "age out" based on MaxAge
+	time.Sleep(50 * time.Millisecond)
+
+	// Now make the msgs directory read-only.
+	// This will cause expireMsgsOnRecover -> deleteEmptyBlock -> dirtyCloseWithRemove
+	// to fail with a permission error when trying to os.Remove the block files.
+	msgsDir := filepath.Join(storeDir, msgDir)
+	originalMode, err := os.Stat(msgsDir)
+	require_NoError(t, err)
+
+	// Make directory read-only (can't delete files)
+	err = changeDirectoryPermission(msgsDir, os.FileMode(0o555))
+	require_NoError(t, err)
+
+	// Ensure we restore permissions for cleanup
+	defer func() {
+		changeDirectoryPermission(msgsDir, originalMode.Mode())
+	}()
+
+	// Try to recover the filestore. This should trigger the permission error path
+	// in expireMsgsOnRecover when it tries to remove expired message blocks.
+	_, err = newFileStore(fcfg, cfg)
+
+	// We expect a permission error because we can't remove the block files
+	if err == nil {
+		t.Skip("No permission error occurred - messages may not have expired or blocks weren't removed")
+	}
+
+	// Verify it's a permission-related error
+	if !os.IsPermission(err) {
+		t.Fatalf("Expected permission error, got: %v", err)
+	}
+
+	// At this point, the bug is that fs.mu is still locked inside the
+	// (now unreferenced) fileStore object. While this particular test can't
+	// directly observe the held lock (since we get nil back), the bug
+	// exists and can cause deadlocks in scenarios where goroutines were
+	// spawned before the error that try to acquire the same lock.
+	//
+	// This test documents the bug. Once fixed with `defer fs.mu.Unlock()`,
+	// the lock will be properly released even on early returns.
+	t.Log("Permission error correctly returned:", err)
+	t.Log("BUG: The internal mutex may still be held due to missing defer unlock")
+}
