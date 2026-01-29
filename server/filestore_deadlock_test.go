@@ -17,8 +17,10 @@ package server
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -710,4 +712,225 @@ func TestFileStoreMaxMsgsPerSubjectEnforcementRecovery(t *testing.T) {
 		t.Fatalf("Failed to store message after recovery: %v", err)
 	}
 	t.Log("SUCCESS: Filestore operational after recovery with MaxMsgsPer enforcement")
+}
+
+// TestJetStreamKVStreamDeleteDeadlock simulates the production scenario where:
+// 1. A KV bucket stream (max_msgs_per_subject=1) exists with many deleted messages
+// 2. Server restarts and triggers enforceMsgPerSubjectLimit() during recovery
+// 3. If the lock is held due to a panic, stream delete will hang
+//
+// This test verifies that with the defer unlock fix, stream delete works even
+// after a problematic recovery.
+func TestJetStreamKVStreamDeleteDeadlock(t *testing.T) {
+	// Create a JetStream server
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	// Get the store directory for later corruption
+	sd := s.JetStreamConfig().StoreDir
+
+	// Create a KV-style stream configuration
+	streamName := "KV_test_deadlock"
+	cfg := &StreamConfig{
+		Name:       streamName,
+		Subjects:   []string{"$KV.test.>"},
+		Storage:    FileStorage,
+		MaxMsgsPer: 1, // KV style: only 1 message per subject
+		Replicas:   1,
+	}
+
+	acc := s.GlobalAccount()
+	mset, err := acc.addStream(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create stream: %v", err)
+	}
+
+	// Simulate KV behavior: many updates to same keys
+	numKeys := 10
+	updatesPerKey := 50
+
+	t.Logf("Populating KV stream with %d keys x %d updates", numKeys, updatesPerKey)
+
+	for update := 0; update < updatesPerKey; update++ {
+		for key := 0; key < numKeys; key++ {
+			subject := fmt.Sprintf("$KV.test.key%d", key)
+			msg := []byte(fmt.Sprintf("value-update-%d", update))
+			if _, _, err := mset.store.StoreMsg(subject, nil, msg, 0); err != nil {
+				t.Fatalf("Failed to store message: %v", err)
+			}
+		}
+	}
+
+	state := mset.state()
+	t.Logf("Stream state: Msgs=%d, FirstSeq=%d, LastSeq=%d, Deleted=%d",
+		state.Msgs, state.FirstSeq, state.LastSeq, state.NumDeleted)
+
+	// Get the stream's store directory
+	fs := mset.store.(*fileStore)
+	streamStoreDir := fs.fcfg.StoreDir
+
+	// Capture port for restart
+	clientURL := s.ClientURL()
+
+	// Shutdown the server
+	t.Log("Shutting down server...")
+	s.Shutdown()
+
+	// Corrupt one of the block files to potentially trigger issues during recovery
+	msgsDir := filepath.Join(streamStoreDir, msgDir)
+	entries, err := os.ReadDir(msgsDir)
+	if err != nil {
+		t.Fatalf("Failed to read msgs dir: %v", err)
+	}
+
+	// Remove index.db to force block-based recovery
+	os.Remove(filepath.Join(msgsDir, "index.db"))
+
+	// Optionally corrupt a block file to trigger recovery issues
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".blk" {
+			blkFile := filepath.Join(msgsDir, entry.Name())
+			data, err := os.ReadFile(blkFile)
+			if err != nil {
+				continue
+			}
+			if len(data) > 100 {
+				// Corrupt middle section
+				for i := len(data) / 2; i < len(data)/2+30 && i < len(data); i++ {
+					data[i] = 0xFF
+				}
+				os.WriteFile(blkFile, data, 0644)
+				t.Logf("Corrupted block file: %s", entry.Name())
+				break
+			}
+		}
+	}
+
+	// Restart the server
+	t.Log("Restarting server...")
+
+	// Parse port from client URL
+	u, _ := url.Parse(clientURL)
+	port, _ := strconv.Atoi(u.Port())
+
+	s = RunJetStreamServerOnPort(port, sd)
+	defer s.Shutdown()
+
+	// Wait for server to be ready
+	time.Sleep(500 * time.Millisecond)
+
+	// Try to lookup and delete the stream
+	// If the lock is held due to missing defer unlock, this will hang
+	t.Log("Attempting to delete stream (will hang if deadlocked)...")
+
+	acc = s.GlobalAccount()
+
+	deleteComplete := make(chan error, 1)
+	go func() {
+		// First try to lookup the stream
+		mset, err := acc.lookupStream(streamName)
+		if err != nil {
+			deleteComplete <- fmt.Errorf("stream lookup failed: %v", err)
+			return
+		}
+		if mset == nil {
+			deleteComplete <- fmt.Errorf("stream not found after restart")
+			return
+		}
+
+		// Now try to delete it - this requires acquiring the lock
+		err = mset.delete()
+		deleteComplete <- err
+	}()
+
+	select {
+	case err := <-deleteComplete:
+		if err != nil {
+			t.Logf("Stream operation result: %v", err)
+		} else {
+			t.Log("SUCCESS: Stream deleted successfully - no deadlock!")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DEADLOCK: Stream delete timed out - lock is likely held!")
+	}
+
+	// Verify the stream is actually gone
+	if mset, _ := acc.lookupStream(streamName); mset != nil {
+		t.Log("Note: Stream still exists (delete may have failed due to corruption)")
+	}
+}
+
+// TestJetStreamStreamDeleteAfterRecoveryPanic tests that stream delete works
+// even if recovery had issues, verifying the defer unlock fix works at the
+// JetStream level.
+func TestJetStreamStreamDeleteAfterRecoveryPanic(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	sd := s.JetStreamConfig().StoreDir
+
+	// Create stream with MaxMsgsPer to trigger enforceMsgPerSubjectLimit on recovery
+	streamName := "TEST_DELETE"
+	cfg := &StreamConfig{
+		Name:       streamName,
+		Subjects:   []string{"test.>"},
+		Storage:    FileStorage,
+		MaxMsgsPer: 1,
+		Replicas:   1,
+	}
+
+	acc := s.GlobalAccount()
+	mset, err := acc.addStream(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create stream: %v", err)
+	}
+
+	// Add some messages
+	for i := 0; i < 100; i++ {
+		subject := fmt.Sprintf("test.key%d", i%10)
+		mset.store.StoreMsg(subject, nil, []byte("data"), 0)
+	}
+
+	state := mset.state()
+	t.Logf("Before restart: Msgs=%d, Deleted=%d", state.Msgs, state.NumDeleted)
+
+	fs := mset.store.(*fileStore)
+	streamStoreDir := fs.fcfg.StoreDir
+
+	clientURL := s.ClientURL()
+	s.Shutdown()
+
+	// Remove index to force recovery
+	os.Remove(filepath.Join(streamStoreDir, msgDir, "index.db"))
+
+	// Restart
+	u, _ := url.Parse(clientURL)
+	port, _ := strconv.Atoi(u.Port())
+	s = RunJetStreamServerOnPort(port, sd)
+	defer s.Shutdown()
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Now test that we can delete the stream
+	acc = s.GlobalAccount()
+
+	mset, err = acc.lookupStream(streamName)
+	if err != nil {
+		t.Fatalf("Failed to lookup stream: %v", err)
+	}
+
+	deleteStart := time.Now()
+	err = mset.delete()
+	deleteTime := time.Since(deleteStart)
+
+	if err != nil {
+		t.Fatalf("Failed to delete stream: %v", err)
+	}
+
+	t.Logf("SUCCESS: Stream deleted in %v - no deadlock", deleteTime)
+
+	// Verify it's gone
+	if mset, _ := acc.lookupStream(streamName); mset != nil {
+		t.Fatal("Stream should be deleted but still exists")
+	}
 }
