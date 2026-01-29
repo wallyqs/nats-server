@@ -1,0 +1,555 @@
+// Copyright 2026 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !skip_js_tests && !skip_js_cluster_tests
+
+package server
+
+import (
+	"encoding/json"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/nats-io/nats.go"
+)
+
+// TestJetStreamClusterWorkqueuePeerRemoveDuringRecovery tests the deadlock
+// scenario where a workqueue stream with many deleted messages recovers on
+// a node while a peer-remove is triggered concurrently. This matches the
+// production incident:
+//
+//	config: {
+//	  name: "unique_ids",
+//	  retention: "workqueue",
+//	  replicas: 3,
+//	  max_msgs_per_subject: -1,
+//	  max_age: 0,
+//	}
+//	state: {
+//	  messages: 1,083,118
+//	  num_deleted: 6,173,268
+//	}
+//
+// The scenario:
+//  1. 5-node cluster with R3 workqueue stream
+//  2. Stream accumulates many messages and deletions (consumer acks)
+//  3. A stream replica is shut down (simulating crash)
+//  4. While it's recovering, a peer-remove is issued against that node
+//  5. This can cause I/O errors during recovery (missing files, directory
+//     removal) which may trigger a panic or early return in
+//     newFileStoreWithCreated (lines 557-589), leaving fs.mu locked
+//  6. The deferred cleanupOldMeta goroutine then deadlocks on RLock
+//
+// Use NATS_LOGGING=info to see server logs during the test.
+func TestJetStreamClusterWorkqueuePeerRemoveDuringRecovery(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "WQ5", 5)
+	defer c.shutdown()
+
+	c.waitOnPeerCount(5)
+
+	// Connect to the meta leader for API operations.
+	nc, js := jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	// Create workqueue stream with R3, matching production config.
+	streamName := "unique_ids"
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      streamName,
+		Subjects:  []string{"unique_ids.>"},
+		Replicas:  3,
+		Retention: nats.WorkQueuePolicy,
+	})
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, streamName)
+	t.Log("Stream created, leader elected")
+
+	// Create a consumer to ack messages (workqueue deletion).
+	_, err = js.AddConsumer(streamName, &nats.ConsumerConfig{
+		Durable:   "worker",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+	c.waitOnConsumerLeader(globalAccountName, streamName, "worker")
+
+	// Publish a batch of messages.
+	numMessages := 5000
+	t.Logf("Publishing %d messages...", numMessages)
+	for i := 0; i < numMessages; i++ {
+		subject := fmt.Sprintf("unique_ids.item.%d", i%50)
+		_, err := js.Publish(subject, []byte(fmt.Sprintf("data-%d", i)))
+		if err != nil {
+			t.Fatalf("Error publishing message %d: %v", i, err)
+		}
+	}
+
+	si, err := js.StreamInfo(streamName)
+	require_NoError(t, err)
+	t.Logf("Stream state after publish: Msgs=%d, FirstSeq=%d, LastSeq=%d",
+		si.State.Msgs, si.State.FirstSeq, si.State.LastSeq)
+
+	// Consume and ack most messages to simulate workqueue deletions.
+	sub, err := js.PullSubscribe("unique_ids.>", "worker")
+	require_NoError(t, err)
+
+	ackedCount := 0
+	toAck := numMessages - 100 // Leave some unacked
+	for ackedCount < toAck {
+		batch := toAck - ackedCount
+		if batch > 100 {
+			batch = 100
+		}
+		msgs, err := sub.Fetch(batch, nats.MaxWait(5*time.Second))
+		if err != nil {
+			t.Logf("Fetch error after %d acks: %v", ackedCount, err)
+			break
+		}
+		for _, m := range msgs {
+			if err := m.Ack(); err != nil {
+				t.Logf("Ack error: %v", err)
+			}
+			ackedCount++
+		}
+	}
+
+	t.Logf("Acked %d messages (simulating workqueue consumer)", ackedCount)
+
+	// Wait for ack processing to complete.
+	checkFor(t, 10*time.Second, 500*time.Millisecond, func() error {
+		si, err := js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs > uint64(numMessages-ackedCount+100) {
+			return fmt.Errorf("waiting for acks to process: %d msgs remaining", si.State.Msgs)
+		}
+		return nil
+	})
+
+	si, err = js.StreamInfo(streamName)
+	require_NoError(t, err)
+	t.Logf("Stream state after acks: Msgs=%d, FirstSeq=%d, LastSeq=%d, Deleted=%d",
+		si.State.Msgs, si.State.FirstSeq, si.State.LastSeq, si.State.NumDeleted)
+
+	// Pick a non-leader replica to shut down and later peer-remove.
+	targetServer := c.randomNonStreamLeader(globalAccountName, streamName)
+	require_True(t, targetServer != nil)
+	targetName := targetServer.Name()
+	t.Logf("Target server for shutdown + peer-remove: %s", targetName)
+
+	// Shut down the target server (simulating crash).
+	t.Logf("Shutting down %s...", targetName)
+	targetServer.Shutdown()
+	targetServer.WaitForShutdown()
+	t.Logf("Server %s is down", targetName)
+
+	// Wait for stream to stabilize with remaining replicas.
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Reconnect to a live server in case we were connected to the shutdown one.
+	nc.Close()
+	nc, js = jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	// Restart the server (triggers recovery of filestore).
+	t.Logf("Restarting %s (will trigger filestore recovery)...", targetName)
+	targetServer = c.restartServer(targetServer)
+
+	// Immediately issue peer-remove while the server is recovering.
+	// This is the critical race: the recovery process is rebuilding state
+	// while the peer-remove triggers file/directory cleanup.
+	t.Logf("Issuing peer-remove for %s during recovery...", targetName)
+
+	removeSub := fmt.Sprintf(JSApiStreamRemovePeerT, streamName)
+	removeReq := []byte(`{"peer":"` + targetName + `"}`)
+	resp, err := nc.Request(removeSub, removeReq, 10*time.Second)
+	require_NoError(t, err)
+
+	var rpResp JSApiStreamRemovePeerResponse
+	err = json.Unmarshal(resp.Data, &rpResp)
+	require_NoError(t, err)
+	t.Logf("Peer remove response: Success=%v, Error=%+v", rpResp.Success, rpResp.Error)
+
+	// Wait for leader to stabilize after peer-remove.
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Verify peer was removed.
+	checkFor(t, 30*time.Second, 500*time.Millisecond, func() error {
+		si, err = js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		for _, r := range si.Cluster.Replicas {
+			if r.Name == targetName {
+				return fmt.Errorf("peer %s still present in replicas", targetName)
+			}
+		}
+		return nil
+	})
+
+	t.Logf("Peer %s removed successfully", targetName)
+	t.Logf("Stream cluster: leader=%s, replicas=%d", si.Cluster.Leader, len(si.Cluster.Replicas))
+
+	// Verify stream is still functional.
+	_, err = js.Publish("unique_ids.verify", []byte("after-peer-remove"))
+	require_NoError(t, err)
+
+	si, err = js.StreamInfo(streamName)
+	require_NoError(t, err)
+	t.Logf("Final stream state: Msgs=%d, FirstSeq=%d, LastSeq=%d, Deleted=%d",
+		si.State.Msgs, si.State.FirstSeq, si.State.LastSeq, si.State.NumDeleted)
+
+	// Verify the restarted server is still functioning (not deadlocked).
+	// Try to connect and perform operations.
+	nc2, err := nats.Connect(targetServer.ClientURL())
+	if err != nil {
+		// Server may have been fully removed from cluster, this is acceptable.
+		t.Logf("Note: could not connect to removed peer %s: %v (expected if fully removed)", targetName, err)
+	} else {
+		nc2.Close()
+		t.Logf("Removed peer %s is still responsive (not deadlocked)", targetName)
+	}
+}
+
+// TestJetStreamClusterWorkqueueLeaderStepdownDuringRecovery tests a
+// scenario where a stream leader crashes and comes back while the
+// remaining replicas may have issued a leader stepdown. This is another
+// path that can trigger I/O issues during recovery.
+func TestJetStreamClusterWorkqueueLeaderStepdownDuringRecovery(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "WQ5", 5)
+	defer c.shutdown()
+
+	c.waitOnPeerCount(5)
+
+	nc, js := jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	streamName := "workqueue_test"
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      streamName,
+		Subjects:  []string{"work.>"},
+		Replicas:  3,
+		Retention: nats.WorkQueuePolicy,
+	})
+	require_NoError(t, err)
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Create consumer for workqueue.
+	_, err = js.AddConsumer(streamName, &nats.ConsumerConfig{
+		Durable:   "processor",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+	c.waitOnConsumerLeader(globalAccountName, streamName, "processor")
+
+	// Publish messages.
+	numMessages := 3000
+	t.Logf("Publishing %d messages...", numMessages)
+	for i := 0; i < numMessages; i++ {
+		_, err := js.Publish(fmt.Sprintf("work.task.%d", i%20), []byte(fmt.Sprintf("payload-%d", i)))
+		if err != nil {
+			t.Fatalf("Publish error at msg %d: %v", i, err)
+		}
+	}
+
+	// Consume and ack to create deletions.
+	sub, err := js.PullSubscribe("work.>", "processor")
+	require_NoError(t, err)
+
+	ackedCount := 0
+	toAck := numMessages - 50
+	for ackedCount < toAck {
+		batch := toAck - ackedCount
+		if batch > 100 {
+			batch = 100
+		}
+		msgs, err := sub.Fetch(batch, nats.MaxWait(5*time.Second))
+		if err != nil {
+			t.Logf("Fetch error after %d acks: %v", ackedCount, err)
+			break
+		}
+		for _, m := range msgs {
+			m.Ack()
+			ackedCount++
+		}
+	}
+	t.Logf("Acked %d messages", ackedCount)
+
+	// Wait for deletions to settle.
+	checkFor(t, 10*time.Second, 500*time.Millisecond, func() error {
+		si, err := js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs > uint64(numMessages-ackedCount+100) {
+			return fmt.Errorf("waiting for deletions, %d msgs remaining", si.State.Msgs)
+		}
+		return nil
+	})
+
+	si, err := js.StreamInfo(streamName)
+	require_NoError(t, err)
+	t.Logf("State before leader shutdown: Msgs=%d, Deleted=%d", si.State.Msgs, si.State.NumDeleted)
+
+	// This time, shut down the stream LEADER (not a follower).
+	leader := c.streamLeader(globalAccountName, streamName)
+	require_True(t, leader != nil)
+	leaderName := leader.Name()
+	t.Logf("Shutting down stream leader: %s", leaderName)
+	leader.Shutdown()
+	leader.WaitForShutdown()
+
+	// A new leader should be elected.
+	c.waitOnStreamLeader(globalAccountName, streamName)
+	t.Log("New stream leader elected")
+
+	// Reconnect.
+	nc.Close()
+	nc, js = jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	// Publish more messages while the old leader is down.
+	t.Log("Publishing 500 more messages while old leader is down...")
+	for i := 0; i < 500; i++ {
+		_, err := js.Publish(fmt.Sprintf("work.new.%d", i), []byte(fmt.Sprintf("new-%d", i)))
+		if err != nil {
+			t.Logf("Publish during recovery: %v", err)
+			break
+		}
+	}
+
+	// Now restart the old leader.
+	t.Logf("Restarting old leader %s...", leaderName)
+	leader = c.restartServer(leader)
+
+	// Immediately issue a peer-remove against the recovering leader.
+	t.Logf("Issuing peer-remove for recovering server %s...", leaderName)
+	removeSub := fmt.Sprintf(JSApiStreamRemovePeerT, streamName)
+	resp, err := nc.Request(removeSub, []byte(`{"peer":"`+leaderName+`"}`), 10*time.Second)
+	require_NoError(t, err)
+
+	var rpResp JSApiStreamRemovePeerResponse
+	json.Unmarshal(resp.Data, &rpResp)
+	t.Logf("Peer remove response: Success=%v", rpResp.Success)
+
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Verify the stream is still healthy.
+	checkFor(t, 30*time.Second, 500*time.Millisecond, func() error {
+		si, err = js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		for _, r := range si.Cluster.Replicas {
+			if r.Name == leaderName {
+				return fmt.Errorf("old leader %s still present", leaderName)
+			}
+		}
+		return nil
+	})
+
+	t.Logf("Old leader %s removed. Stream state: Msgs=%d, Deleted=%d",
+		leaderName, si.State.Msgs, si.State.NumDeleted)
+
+	// Verify stream is functional.
+	_, err = js.Publish("work.verify", []byte("after-recovery"))
+	require_NoError(t, err)
+	t.Log("Stream operational after leader recovery + peer-remove")
+}
+
+// TestJetStreamClusterWorkqueueConcurrentPeerRemoveAndPublish tests the
+// deadlock scenario with concurrent peer-remove, publishing, and consuming
+// happening simultaneously during recovery. This stress-tests the recovery
+// path to increase the chance of triggering I/O errors.
+func TestJetStreamClusterWorkqueueConcurrentPeerRemoveAndPublish(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "WQ5", 5)
+	defer c.shutdown()
+
+	c.waitOnPeerCount(5)
+
+	nc, js := jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	streamName := "concurrent_wq"
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      streamName,
+		Subjects:  []string{"cwork.>"},
+		Replicas:  3,
+		Retention: nats.WorkQueuePolicy,
+	})
+	require_NoError(t, err)
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	_, err = js.AddConsumer(streamName, &nats.ConsumerConfig{
+		Durable:   "worker",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+	c.waitOnConsumerLeader(globalAccountName, streamName, "worker")
+
+	// Publish initial messages.
+	numMessages := 2000
+	t.Logf("Publishing %d initial messages...", numMessages)
+	for i := 0; i < numMessages; i++ {
+		_, err := js.Publish(fmt.Sprintf("cwork.item.%d", i%30), []byte(fmt.Sprintf("data-%d", i)))
+		if err != nil {
+			t.Fatalf("Publish error: %v", err)
+		}
+	}
+
+	// Consume and ack most messages.
+	sub, err := js.PullSubscribe("cwork.>", "worker")
+	require_NoError(t, err)
+
+	ackedCount := 0
+	toAck := numMessages - 50
+	for ackedCount < toAck {
+		batch := toAck - ackedCount
+		if batch > 100 {
+			batch = 100
+		}
+		msgs, err := sub.Fetch(batch, nats.MaxWait(5*time.Second))
+		if err != nil {
+			break
+		}
+		for _, m := range msgs {
+			m.Ack()
+			ackedCount++
+		}
+	}
+	t.Logf("Acked %d messages", ackedCount)
+
+	// Let deletions settle.
+	time.Sleep(2 * time.Second)
+
+	si, _ := js.StreamInfo(streamName)
+	t.Logf("State: Msgs=%d, Deleted=%d", si.State.Msgs, si.State.NumDeleted)
+
+	// Pick target for removal.
+	target := c.randomNonStreamLeader(globalAccountName, streamName)
+	require_True(t, target != nil)
+	targetName := target.Name()
+	t.Logf("Target for shutdown + peer-remove: %s", targetName)
+
+	// Shut down target.
+	target.Shutdown()
+	target.WaitForShutdown()
+
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Reconnect.
+	nc.Close()
+	nc, js = jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	// Start concurrent operations.
+	var wg sync.WaitGroup
+	errCh := make(chan error, 100)
+
+	// Goroutine 1: Keep publishing.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			_, err := js.Publish(fmt.Sprintf("cwork.new.%d", i), []byte(fmt.Sprintf("new-%d", i)))
+			if err != nil {
+				errCh <- fmt.Errorf("publish error during recovery: %v", err)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	// Goroutine 2: Restart the server (triggers recovery).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Small delay to let publishes start.
+		time.Sleep(50 * time.Millisecond)
+		target = c.restartServer(target)
+		t.Logf("Server %s restarted", targetName)
+	}()
+
+	// Goroutine 3: Issue peer-remove after a brief delay.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Wait a bit for the server to start recovering.
+		time.Sleep(200 * time.Millisecond)
+
+		removeSub := fmt.Sprintf(JSApiStreamRemovePeerT, streamName)
+		resp, err := nc.Request(removeSub, []byte(`{"peer":"`+targetName+`"}`), 10*time.Second)
+		if err != nil {
+			errCh <- fmt.Errorf("peer-remove request error: %v", err)
+			return
+		}
+		var rpResp JSApiStreamRemovePeerResponse
+		json.Unmarshal(resp.Data, &rpResp)
+		t.Logf("Peer remove result: Success=%v, Error=%+v", rpResp.Success, rpResp.Error)
+	}()
+
+	// Wait for all concurrent operations.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Log("All concurrent operations completed")
+	case <-time.After(60 * time.Second):
+		t.Fatal("TIMEOUT: Concurrent operations deadlocked!")
+	}
+
+	// Drain errors.
+	close(errCh)
+	for err := range errCh {
+		t.Logf("Concurrent error: %v", err)
+	}
+
+	// Verify stream health.
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	checkFor(t, 30*time.Second, 500*time.Millisecond, func() error {
+		si, err = js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		for _, r := range si.Cluster.Replicas {
+			if r.Name == targetName {
+				return fmt.Errorf("peer %s still present", targetName)
+			}
+		}
+		return nil
+	})
+
+	// Final publish to verify stream is working.
+	_, err = js.Publish("cwork.final", []byte("done"))
+	require_NoError(t, err)
+
+	si, _ = js.StreamInfo(streamName)
+	t.Logf("Final state: Msgs=%d, Deleted=%d, Leader=%s, Replicas=%d",
+		si.State.Msgs, si.State.NumDeleted, si.Cluster.Leader, len(si.Cluster.Replicas))
+
+	// Verify the removed server is still responsive (not deadlocked).
+	nc3, err := nats.Connect(target.ClientURL())
+	if err != nil {
+		t.Logf("Note: Removed peer %s not connectable: %v", targetName, err)
+	} else {
+		nc3.Close()
+		t.Logf("Removed peer %s is responsive (no deadlock)", targetName)
+	}
+}
