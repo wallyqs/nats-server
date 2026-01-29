@@ -12999,30 +12999,27 @@ func TestFileStoreDeleteBlocksWithBinarySearchThreshold(t *testing.T) {
 // boundary and verifies both paths agree.
 func TestFileStoreSelectMsgBlockBinaryVsLinearConsistency(t *testing.T) {
 	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
-		fcfg.BlockSize = 100
-		cfg := StreamConfig{
-			Name:       "zzz",
-			Subjects:   []string{"*"},
-			MaxMsgsPer: 1,
-			Storage:    FileStorage,
-		}
+		fcfg.BlockSize = 256
+		cfg := StreamConfig{Name: "zzz", Storage: FileStorage}
 		fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), prf(&fcfg), nil)
 		require_NoError(t, err)
 		defer fs.Stop()
 
-		// 19 bytes msg → ~50 byte record → 2 msgs per block.
-		msgLen := 19
-		msg := bytes.Repeat([]byte("A"), msgLen)
-
-		subjects := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+@$^"
+		// Use a message size that fills one block per message.
+		msg := make([]byte, 256)
 
 		// Phase 1: Create exactly 31 blocks (below linearThresh=32).
-		// 31 blocks × 2 msgs per block = 62 msgs.
-		for i := 0; i < 62; i++ {
-			subj := string(subjects[i%len(subjects)])
-			fs.StoreMsg(subj, nil, msg, 0)
+		for i := 0; i < 31; i++ {
+			_, _, err = fs.StoreMsg("foo", nil, msg, 0)
+			require_NoError(t, err)
 		}
-		require_Equal(t, fs.numMsgBlocks(), 31)
+		require_Equal(t, 31, fs.numMsgBlocks())
+
+		// Delete some messages to create gaps.
+		for _, seq := range []uint64{5, 10, 11, 20} {
+			_, err = fs.RemoveMsg(seq)
+			require_NoError(t, err)
+		}
 
 		// Record results from linear scan path for all valid sequences.
 		var ss StreamState
@@ -13051,10 +13048,9 @@ func TestFileStoreSelectMsgBlockBinaryVsLinearConsistency(t *testing.T) {
 		}
 
 		// Phase 2: Add more messages to cross the 32-block threshold.
-		// Add 4 more messages → 2 more blocks → 33 blocks total.
-		for i := 0; i < 4; i++ {
-			subj := string(subjects[i%len(subjects)])
-			fs.StoreMsg(subj, nil, msg, 0)
+		for i := 0; i < 6; i++ {
+			_, _, err = fs.StoreMsg("foo", nil, msg, 0)
+			require_NoError(t, err)
 		}
 		require_True(t, fs.numMsgBlocks() >= 33)
 
