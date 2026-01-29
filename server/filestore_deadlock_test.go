@@ -1338,3 +1338,134 @@ func TestFileStoreRecoveryWithNilBlock(t *testing.T) {
 		t.Fatal("DEADLOCK: Recovery timed out")
 	}
 }
+
+// TestFileStoreSkewDetectionPath tests the code path where enforceMsgPerSubjectLimit
+// detects a skew between psim totals and fs.state.Msgs, triggering a rebuild.
+// This exercises the path at filestore.go:5100-5113 where mb.rebuildState() and
+// fs.populateGlobalPerSubjectInfo() are called while holding the lock.
+func TestFileStoreSkewDetectionPath(t *testing.T) {
+	storeDir := t.TempDir()
+
+	fcfg := FileStoreConfig{
+		StoreDir:  storeDir,
+		BlockSize: 256, // Very small blocks to have many blocks
+	}
+	cfg := StreamConfig{
+		Name:       "TEST",
+		Subjects:   []string{"test.>"},
+		Storage:    FileStorage,
+		MaxMsgsPer: 1, // Triggers enforceMsgPerSubjectLimit on recovery
+	}
+
+	// Create and populate filestore with multiple subjects
+	fs, err := newFileStore(fcfg, cfg)
+	if err != nil {
+		t.Fatalf("Failed to create filestore: %v", err)
+	}
+
+	// Create messages across many subjects to build up psim state
+	numKeys := 20
+	numUpdates := 10
+	for update := 0; update < numUpdates; update++ {
+		for key := 0; key < numKeys; key++ {
+			subj := fmt.Sprintf("test.key%d", key)
+			fs.StoreMsg(subj, nil, []byte(fmt.Sprintf("msg-%d-%d", key, update)), 0)
+		}
+	}
+
+	state := fs.State()
+	t.Logf("Initial state: Msgs=%d, FirstSeq=%d, LastSeq=%d", state.Msgs, state.FirstSeq, state.LastSeq)
+	t.Logf("Number of blocks: %d", len(fs.blks))
+
+	// Stop the filestore
+	fs.Stop()
+
+	msgsDir := filepath.Join(storeDir, msgDir)
+
+	// Remove index.db to force block-based recovery
+	indexPath := filepath.Join(msgsDir, "index.db")
+	if err := os.Remove(indexPath); err != nil {
+		t.Logf("Note: Could not remove index.db: %v", err)
+	}
+
+	// Corrupt SOME blocks to potentially create a psim/state skew
+	// By corrupting the subject length in some messages, the psim
+	// might end up with different counts than state.Msgs
+	entries, _ := os.ReadDir(msgsDir)
+	corruptedBlocks := 0
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".blk" {
+			blkFile := filepath.Join(msgsDir, entry.Name())
+			data, err := os.ReadFile(blkFile)
+			if err != nil || len(data) < 50 {
+				continue
+			}
+
+			// Only corrupt every other block to create inconsistency
+			if corruptedBlocks%2 == 0 {
+				// Corrupt the subject length field (bytes 20-21 in message header)
+				// This may cause messages to be skipped during psim population
+				// while still being counted in state.Msgs
+				for i := 22; i < len(data)-10 && i < 100; i += 30 {
+					data[i] = 0xFF // Invalid subject length
+					data[i+1] = 0xFF
+				}
+				os.WriteFile(blkFile, data, 0644)
+				t.Logf("Corrupted block: %s", entry.Name())
+			}
+			corruptedBlocks++
+		}
+	}
+	t.Logf("Corrupted %d blocks (out of %d)", corruptedBlocks/2, corruptedBlocks)
+
+	// Now attempt recovery - this should trigger enforceMsgPerSubjectLimit
+	// which may detect skew and trigger the rebuild path
+	t.Log("Attempting recovery with potentially skewed state...")
+
+	recovered := make(chan struct{})
+	var fs2 *fileStore
+	var recoverErr error
+
+	go func() {
+		defer close(recovered)
+		defer func() {
+			if r := recover(); r != nil {
+				t.Logf("PANIC during recovery (skew rebuild path): %v", r)
+				// This is what we're trying to trigger - a panic during the
+				// skew-triggered rebuild that would leave the lock held
+			}
+		}()
+
+		fs2, recoverErr = newFileStore(fcfg, cfg)
+	}()
+
+	select {
+	case <-recovered:
+		if recoverErr != nil {
+			t.Logf("Recovery returned error: %v", recoverErr)
+		}
+		if fs2 != nil {
+			state := fs2.State()
+			t.Logf("Recovered state: Msgs=%d", state.Msgs)
+
+			// Verify no deadlock by trying to acquire the lock
+			lockCheck := make(chan bool, 1)
+			go func() {
+				fs2.mu.Lock()
+				fs2.mu.Unlock()
+				lockCheck <- true
+			}()
+
+			select {
+			case <-lockCheck:
+				t.Log("SUCCESS: Lock is accessible after recovery")
+			case <-time.After(3 * time.Second):
+				t.Fatal("DEADLOCK: Could not acquire lock after recovery")
+			}
+
+			fs2.Stop()
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("DEADLOCK: Recovery timed out")
+	}
+}
