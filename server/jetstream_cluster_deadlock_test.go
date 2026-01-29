@@ -1401,3 +1401,271 @@ func TestJetStreamClusterStreamDeleteConsumerFolderRepeatedly(t *testing.T) {
 		t.Logf("Target %s responsive (not deadlocked)", targetName)
 	}
 }
+
+// TestJetStreamClusterPeerRemoveWithConsumersDuringRecovery tests the deadlock
+// scenario where a peer with multiple consumers is removed while it is still
+// recovering from a restart and processing tombstones.
+//
+// When a stream peer-remove is issued:
+//  1. removePeerFromStreamLocked() proposes new stream assignment AND
+//     consumer reassignment/deletion for ALL consumers (jetstream_cluster.go:2048-2064)
+//  2. On the removed peer, stream.stop() is called (stream.go:7053)
+//  3. stream.stop() first stops ALL consumers (stream.go:7123-7134):
+//     each consumer.stopWithFlags() acquires mset.mu.Lock(), then calls
+//     consumer store.Delete() which acquires its own fs.mu.Lock()
+//  4. Then stream.stop() calls store.Delete(false) (stream.go:7214) which
+//     acquires the STREAM's fs.mu.Lock() (filestore.go:10338)
+//
+// If the stream's fileStore is still in newFileStoreWithCreated processing
+// tombstones under fs.mu.Lock() (filestore.go:557), then store.Delete()
+// at step 4 would block. Multiple consumers being cleaned up simultaneously
+// creates maximum lock contention across stream and consumer mutexes.
+//
+// This test uses multiple durable consumers to maximize the interaction
+// between consumer cleanup and stream recovery.
+func TestJetStreamClusterPeerRemoveWithConsumersDuringRecovery(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "WQ5", 5)
+	defer c.shutdown()
+
+	c.waitOnPeerCount(5)
+
+	nc, js := jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	streamName := "unique_ids"
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      streamName,
+		Subjects:  []string{"unique_ids.>"},
+		Replicas:  3,
+		Retention: nats.WorkQueuePolicy,
+	})
+	require_NoError(t, err)
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Create multiple durable consumers. When the peer is removed, each
+	// consumer gets reassigned (durable) or deleted (ephemeral), creating
+	// multiple concurrent lock acquisition paths.
+	consumerNames := []string{"worker-1", "worker-2", "worker-3", "worker-4"}
+	for _, cName := range consumerNames {
+		_, err = js.AddConsumer(streamName, &nats.ConsumerConfig{
+			Durable:       cName,
+			AckPolicy:     nats.AckExplicitPolicy,
+			FilterSubject: fmt.Sprintf("unique_ids.%s.>", cName),
+		})
+		require_NoError(t, err)
+		c.waitOnConsumerLeader(globalAccountName, streamName, cName)
+	}
+	t.Logf("Created %d consumers", len(consumerNames))
+
+	// Publish messages across all consumer filter subjects.
+	numMessages := 5000
+	t.Logf("Publishing %d messages...", numMessages)
+	for i := 0; i < numMessages; i++ {
+		cIdx := i % len(consumerNames)
+		subject := fmt.Sprintf("unique_ids.%s.item.%d", consumerNames[cIdx], i)
+		_, err := js.Publish(subject, []byte(fmt.Sprintf("data-%d", i)))
+		if err != nil {
+			t.Fatalf("Publish error at msg %d: %v", i, err)
+		}
+	}
+
+	// Consume and ack from each consumer to create tombstones.
+	totalAcked := 0
+	for _, cName := range consumerNames {
+		sub, err := js.PullSubscribe(
+			fmt.Sprintf("unique_ids.%s.>", cName),
+			cName,
+		)
+		require_NoError(t, err)
+
+		ackedCount := 0
+		for ackedCount < (numMessages/len(consumerNames))-25 {
+			batch := (numMessages / len(consumerNames)) - 25 - ackedCount
+			if batch > 100 {
+				batch = 100
+			}
+			msgs, err := sub.Fetch(batch, nats.MaxWait(5*time.Second))
+			if err != nil {
+				t.Logf("Fetch error for %s after %d acks: %v", cName, ackedCount, err)
+				break
+			}
+			for _, m := range msgs {
+				m.Ack()
+				ackedCount++
+			}
+		}
+		totalAcked += ackedCount
+		t.Logf("Consumer %s: acked %d messages", cName, ackedCount)
+	}
+	t.Logf("Total acked: %d messages (creating tombstones)", totalAcked)
+
+	// Wait for ack processing.
+	checkFor(t, 15*time.Second, 500*time.Millisecond, func() error {
+		si, err := js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		remaining := numMessages - totalAcked + 200
+		if si.State.Msgs > uint64(remaining) {
+			return fmt.Errorf("waiting for acks: %d msgs remaining", si.State.Msgs)
+		}
+		return nil
+	})
+
+	si, _ := js.StreamInfo(streamName)
+	t.Logf("State after acks: Msgs=%d, Deleted=%d", si.State.Msgs, si.State.NumDeleted)
+
+	// Pick a non-leader replica that hosts the stream.
+	target := c.randomNonStreamLeader(globalAccountName, streamName)
+	require_True(t, target != nil)
+	targetName := target.Name()
+	t.Logf("Target for shutdown + peer-remove: %s", targetName)
+
+	// Shut down the target.
+	t.Logf("Shutting down %s...", targetName)
+	target.Shutdown()
+	target.WaitForShutdown()
+
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Reconnect.
+	nc.Close()
+	nc, js = jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	// Publish more messages while target is down so it has more to recover.
+	t.Log("Publishing 1000 more messages while target is down...")
+	for i := 0; i < 1000; i++ {
+		cIdx := i % len(consumerNames)
+		js.Publish(fmt.Sprintf("unique_ids.%s.new.%d", consumerNames[cIdx], i), []byte("new"))
+	}
+
+	// Restart the server. This triggers newFileStoreWithCreated for the
+	// stream store (tombstone processing under fs.mu.Lock()) and for each
+	// consumer store.
+	t.Logf("Restarting %s...", targetName)
+	restartDone := make(chan struct{})
+	go func() {
+		target = c.restartServer(target)
+		close(restartDone)
+	}()
+
+	// Wait for restart to complete.
+	select {
+	case <-restartDone:
+		t.Logf("Server %s restarted", targetName)
+	case <-time.After(30 * time.Second):
+		t.Fatal("TIMEOUT: Server restart hung - possible deadlock during recovery")
+	}
+
+	// Immediately issue peer-remove. This triggers stream.stop() on the
+	// target which:
+	// 1. Stops all 4 consumers (each acquiring mset.mu + consumer store locks)
+	// 2. Then calls stream store.Delete() (acquires stream's fs.mu.Lock())
+	// If stream recovery is still processing tombstones under fs.mu.Lock(),
+	// the store.Delete() at step 2 will block.
+	t.Logf("Issuing peer-remove for %s with %d consumers...", targetName, len(consumerNames))
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 10)
+
+	// Goroutine 1: Issue stream-level peer-remove.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		removeSub := fmt.Sprintf(JSApiStreamRemovePeerT, streamName)
+		resp, err := nc.Request(removeSub, []byte(`{"peer":"`+targetName+`"}`), 15*time.Second)
+		if err != nil {
+			errCh <- fmt.Errorf("peer-remove request error: %v", err)
+			return
+		}
+		var rpResp JSApiStreamRemovePeerResponse
+		json.Unmarshal(resp.Data, &rpResp)
+		t.Logf("Stream peer-remove: Success=%v, Error=%+v", rpResp.Success, rpResp.Error)
+	}()
+
+	// Goroutine 2: Simultaneously delete individual consumers to create
+	// more concurrent deletion pressure on the recovering peer.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Small delay to let peer-remove start first.
+		time.Sleep(100 * time.Millisecond)
+		for _, cName := range consumerNames {
+			err := js.DeleteConsumer(streamName, cName)
+			if err != nil {
+				t.Logf("Delete consumer %s: %v (may be expected during peer-remove)", cName, err)
+			} else {
+				t.Logf("Deleted consumer %s", cName)
+			}
+		}
+	}()
+
+	// Goroutine 3: Keep publishing to create ongoing I/O on the stream.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			_, err := js.Publish(fmt.Sprintf("unique_ids.worker-1.stress.%d", i), []byte("stress"))
+			if err != nil {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	// Wait for all concurrent operations with a deadlock timeout.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Log("All concurrent operations completed")
+	case <-time.After(60 * time.Second):
+		t.Fatal("TIMEOUT: Concurrent operations deadlocked! " +
+			"Likely fs.mu leaked during recovery while consumer cleanup was running")
+	}
+
+	close(errCh)
+	for err := range errCh {
+		t.Logf("Error: %v", err)
+	}
+
+	// Verify stream leader is available.
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Verify peer was removed.
+	checkFor(t, 30*time.Second, 500*time.Millisecond, func() error {
+		si, err = js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		for _, r := range si.Cluster.Replicas {
+			if r.Name == targetName {
+				return fmt.Errorf("peer %s still present", targetName)
+			}
+		}
+		return nil
+	})
+	t.Logf("Peer %s removed", targetName)
+
+	// Verify stream is functional.
+	_, err = js.Publish("unique_ids.worker-1.verify", []byte("after-peer-remove-with-consumers"))
+	require_NoError(t, err)
+
+	si, _ = js.StreamInfo(streamName)
+	t.Logf("Final state: Msgs=%d, Deleted=%d, Leader=%s, Replicas=%d",
+		si.State.Msgs, si.State.NumDeleted, si.Cluster.Leader, len(si.Cluster.Replicas))
+
+	// Verify the removed server is responsive (not deadlocked).
+	nc2, err := nats.Connect(target.ClientURL())
+	if err != nil {
+		t.Logf("Note: Target %s not connectable: %v (expected if fully removed)", targetName, err)
+	} else {
+		nc2.Close()
+		t.Logf("Target %s is responsive (not deadlocked)", targetName)
+	}
+}
