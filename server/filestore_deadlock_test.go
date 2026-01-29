@@ -1648,6 +1648,76 @@ func TestFileStoreRecoveryPermissionErrorDeadlock(t *testing.T) {
 	}
 }
 
+// TestFileStoreCleanupOldMetaDeadlock directly demonstrates the deadlock that occurs
+// when cleanupOldMeta is called while the write lock is held (simulating the
+// early return bug). This test works even as root since it doesn't need
+// actual permission errors.
+//
+// This simulates what happens when:
+// 1. newFileStoreWithCreated acquires fs.mu.Lock() at line 557
+// 2. An early return happens (permission error) at line 577 without unlocking
+// 3. The defer at lines 550-554 launches go fs.cleanupOldMeta()
+// 4. cleanupOldMeta tries fs.mu.RLock() and blocks forever
+func TestFileStoreCleanupOldMetaDeadlock(t *testing.T) {
+	storeDir := t.TempDir()
+
+	fcfg := FileStoreConfig{
+		StoreDir:  storeDir,
+		BlockSize: 512,
+	}
+	cfg := StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"test.>"},
+		Storage:  FileStorage,
+	}
+
+	// Create a normal filestore
+	fs, err := newFileStore(fcfg, cfg)
+	if err != nil {
+		t.Fatalf("Failed to create filestore: %v", err)
+	}
+
+	// Store a message to have some state
+	fs.StoreMsg("test.msg", nil, []byte("data"), 0)
+
+	// Simulate the bug: acquire write lock and don't release it
+	// This simulates what happens at line 557 when an early return occurs
+	t.Log("Simulating bug: acquiring write lock without defer unlock...")
+	fs.mu.Lock()
+	// BUG SIMULATION: In the buggy code, there's no defer fs.mu.Unlock()
+	// and an early return leaves the lock held
+
+	// Now launch cleanupOldMeta like the defer at lines 550-554 would
+	t.Log("Launching cleanupOldMeta goroutine (like the defer does)...")
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		fs.cleanupOldMeta() // This tries to acquire RLock and will block!
+	}()
+
+	// Check if cleanupOldMeta completes or blocks
+	select {
+	case <-cleanupDone:
+		t.Fatal("BUG NOT REPRODUCED: cleanupOldMeta completed (lock was somehow released)")
+	case <-time.After(500 * time.Millisecond):
+		t.Log("DEADLOCK CONFIRMED: cleanupOldMeta is blocked waiting for RLock")
+	}
+
+	// Now simulate the fix: release the lock
+	t.Log("Simulating fix: releasing write lock...")
+	fs.mu.Unlock()
+
+	// Verify cleanupOldMeta can now complete
+	select {
+	case <-cleanupDone:
+		t.Log("SUCCESS: After releasing lock, cleanupOldMeta completed")
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanupOldMeta still blocked even after lock release")
+	}
+
+	fs.Stop()
+}
+
 // TestFileStoreMaxAgeRecoveryWithPermissionError is a more aggressive test
 // that tries multiple approaches to trigger the permission error path.
 func TestFileStoreMaxAgeRecoveryWithPermissionError(t *testing.T) {
