@@ -12657,3 +12657,483 @@ func TestFileStoreDeleteBlocksWithManyEmptyBlocks(t *testing.T) {
 		&DeleteRange{First: 2, Num: 13},
 	})
 }
+
+// Test binary search correctness in selectMsgBlockWithIndex when blocks
+// have been emptied (all messages deleted), creating gaps in the block list.
+// Uses 33+ blocks to trigger the binary search path (linearThresh=32).
+func TestFileStoreSelectMsgBlockBinarySearchWithEmptyBlocks(t *testing.T) {
+	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
+		fcfg.BlockSize = 256
+		cfg := StreamConfig{Name: "zzz", Storage: FileStorage}
+		fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), prf(&fcfg), nil)
+		require_NoError(t, err)
+		defer fs.Stop()
+
+		// Use a message size that results in 1 message per block.
+		msg := make([]byte, 256)
+
+		// Store 40 messages to get 40 blocks (one per block due to BlockSize).
+		for i := 0; i < 40; i++ {
+			_, _, err = fs.StoreMsg("foo", nil, msg, 0)
+			require_NoError(t, err)
+		}
+		require_True(t, fs.numMsgBlocks() >= 33)
+
+		// Delete all messages from several blocks in the middle to create gaps.
+		// Block for seq 15, 16, 17, 18, 19 (5 contiguous empty blocks).
+		for seq := uint64(15); seq <= 19; seq++ {
+			_, err = fs.RemoveMsg(seq)
+			require_NoError(t, err)
+		}
+		// Another gap: blocks for seq 25, 26.
+		for seq := uint64(25); seq <= 26; seq++ {
+			_, err = fs.RemoveMsg(seq)
+			require_NoError(t, err)
+		}
+		// Single gap at seq 35.
+		_, err = fs.RemoveMsg(35)
+		require_NoError(t, err)
+
+		var ss StreamState
+		fs.FastState(&ss)
+
+		// Verify selectMsgBlockWithIndex returns valid results for every
+		// sequence in the valid range. The binary search should correctly
+		// navigate around empty blocks.
+		for seq := ss.FirstSeq; seq <= ss.LastSeq; seq++ {
+			fs.mu.RLock()
+			index, mb := fs.selectMsgBlockWithIndex(seq)
+			fs.mu.RUnlock()
+			require_True(t, index >= 0)
+			require_True(t, mb != nil)
+		}
+
+		// Verify that LoadMsg returns correct results.
+		var smv StoreMsg
+		for seq := ss.FirstSeq; seq <= ss.LastSeq; seq++ {
+			sm, err := fs.LoadMsg(seq, &smv)
+			switch seq {
+			case 15, 16, 17, 18, 19, 25, 26, 35:
+				// These were deleted.
+				require_Error(t, err)
+				require_True(t, sm == nil)
+			default:
+				require_NoError(t, err)
+				require_True(t, sm != nil)
+				require_Equal(t, seq, sm.seq)
+			}
+		}
+	})
+}
+
+// Test binary search with empty blocks that remain in the block list due to
+// containing tombstones for prior blocks. This is the specific scenario where
+// a block is logically empty (first > last) but stays in fs.blks because
+// numPriorTombs > 0.
+func TestFileStoreSelectMsgBlockBinarySearchWithTombstoneBlocks(t *testing.T) {
+	fcfg := FileStoreConfig{
+		Cipher:      NoCipher,
+		Compression: NoCompression,
+		StoreDir:    t.TempDir(),
+		BlockSize:   33 * 6,
+	}
+	cfg := StreamConfig{Name: "zzz", Storage: FileStorage}
+	fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), prf(&fcfg), nil)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	// Store enough messages to get 33+ blocks.
+	// With BlockSize=198 and nil message body, each message is ~33 bytes,
+	// so we get ~6 messages per block.
+	for i := 0; i < 200; i++ {
+		_, _, err = fs.StoreMsg("foo", nil, nil, 0)
+		require_NoError(t, err)
+	}
+	require_True(t, fs.numMsgBlocks() >= 33)
+
+	nblks := fs.numMsgBlocks()
+
+	// Record what each block's first/last seq is before deletions.
+	type blkInfo struct {
+		first, last uint64
+	}
+	blkInfos := make([]blkInfo, nblks)
+	fs.mu.RLock()
+	for i, mb := range fs.blks {
+		blkInfos[i] = blkInfo{
+			first: atomic.LoadUint64(&mb.first.seq),
+			last:  atomic.LoadUint64(&mb.last.seq),
+		}
+	}
+	fs.mu.RUnlock()
+
+	// Delete all messages from blocks in the middle (blocks 10-14).
+	// This should create a gap in the sequence space.
+	for i := 10; i < 15; i++ {
+		for seq := blkInfos[i].first; seq <= blkInfos[i].last; seq++ {
+			_, err = fs.RemoveMsg(seq)
+			require_NoError(t, err)
+		}
+	}
+
+	// Also delete all messages from a block near the end (block 25).
+	for seq := blkInfos[25].first; seq <= blkInfos[25].last; seq++ {
+		_, err = fs.RemoveMsg(seq)
+		require_NoError(t, err)
+	}
+
+	var ss StreamState
+	fs.FastState(&ss)
+
+	// Verify selectMsgBlockWithIndex returns valid results for all sequences.
+	for seq := ss.FirstSeq; seq <= ss.LastSeq; seq++ {
+		fs.mu.RLock()
+		index, mb := fs.selectMsgBlockWithIndex(seq)
+		fs.mu.RUnlock()
+		require_True(t, index >= 0)
+		require_True(t, mb != nil)
+	}
+
+	// Verify LoadMsg works correctly for remaining messages.
+	var smv StoreMsg
+	loadedCount := uint64(0)
+	for seq := ss.FirstSeq; seq <= ss.LastSeq; seq++ {
+		sm, err := fs.LoadMsg(seq, &smv)
+		if err == nil {
+			require_Equal(t, seq, sm.seq)
+			loadedCount++
+		}
+	}
+	require_Equal(t, ss.Msgs, loadedCount)
+}
+
+// Test that RemoveMsg accounting stays correct when operating through the
+// binary search path (33+ blocks) with gaps from prior deletions.
+func TestFileStoreRemoveMsgAccountingWithBinarySearch(t *testing.T) {
+	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
+		fcfg.BlockSize = 256
+		cfg := StreamConfig{Name: "zzz", Storage: FileStorage}
+		fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), prf(&fcfg), nil)
+		require_NoError(t, err)
+		defer fs.Stop()
+
+		msg := make([]byte, 256)
+		totalMsgs := 40
+
+		for i := 0; i < totalMsgs; i++ {
+			_, _, err = fs.StoreMsg("foo", nil, msg, 0)
+			require_NoError(t, err)
+		}
+		require_True(t, fs.numMsgBlocks() >= 33)
+
+		var ss StreamState
+
+		// Verify initial state.
+		fs.FastState(&ss)
+		require_Equal(t, uint64(totalMsgs), ss.Msgs)
+		require_Equal(t, uint64(1), ss.FirstSeq)
+		require_Equal(t, uint64(totalMsgs), ss.LastSeq)
+
+		// Delete every 3rd message to create scattered interior deletes.
+		deletedSeqs := make(map[uint64]bool)
+		for seq := uint64(3); seq <= uint64(totalMsgs); seq += 3 {
+			ok, err := fs.RemoveMsg(seq)
+			require_NoError(t, err)
+			require_True(t, ok)
+			deletedSeqs[seq] = true
+		}
+
+		// Verify accounting after scattered deletes.
+		fs.FastState(&ss)
+		expectedMsgs := uint64(totalMsgs) - uint64(len(deletedSeqs))
+		require_Equal(t, expectedMsgs, ss.Msgs)
+		require_Equal(t, uint64(1), ss.FirstSeq)
+		require_Equal(t, uint64(totalMsgs), ss.LastSeq)
+		require_Equal(t, len(deletedSeqs), ss.NumDeleted)
+
+		// Now delete a contiguous range in the middle (seqs 10-20).
+		for seq := uint64(10); seq <= 20; seq++ {
+			if !deletedSeqs[seq] {
+				ok, err := fs.RemoveMsg(seq)
+				require_NoError(t, err)
+				require_True(t, ok)
+				deletedSeqs[seq] = true
+			}
+		}
+
+		// Verify accounting after contiguous range delete.
+		fs.FastState(&ss)
+		expectedMsgs = uint64(totalMsgs) - uint64(len(deletedSeqs))
+		require_Equal(t, expectedMsgs, ss.Msgs)
+		require_Equal(t, uint64(1), ss.FirstSeq)
+		require_Equal(t, uint64(totalMsgs), ss.LastSeq)
+		require_Equal(t, len(deletedSeqs), ss.NumDeleted)
+
+		// Verify every remaining message can be loaded.
+		var smv StoreMsg
+		loadedCount := uint64(0)
+		for seq := ss.FirstSeq; seq <= ss.LastSeq; seq++ {
+			sm, err := fs.LoadMsg(seq, &smv)
+			if deletedSeqs[seq] {
+				require_Error(t, err)
+			} else {
+				require_NoError(t, err)
+				require_Equal(t, seq, sm.seq)
+				loadedCount++
+			}
+		}
+		require_Equal(t, expectedMsgs, loadedCount)
+
+		// Delete from the front to shift FirstSeq.
+		ok, err := fs.RemoveMsg(1)
+		require_NoError(t, err)
+		require_True(t, ok)
+		deletedSeqs[1] = true
+
+		ok, err = fs.RemoveMsg(2)
+		require_NoError(t, err)
+		require_True(t, ok)
+		deletedSeqs[2] = true
+
+		fs.FastState(&ss)
+		// FirstSeq should have advanced past deleted sequences.
+		require_True(t, ss.FirstSeq > 2)
+		require_Equal(t, uint64(totalMsgs)-uint64(len(deletedSeqs)), ss.Msgs)
+	})
+}
+
+// Test that deleteBlocks returns correct gap information when there are 33+
+// blocks, ensuring the gap-merging logic works correctly at the binary search
+// threshold.
+func TestFileStoreDeleteBlocksWithBinarySearchThreshold(t *testing.T) {
+	fcfg := FileStoreConfig{
+		Cipher:      NoCipher,
+		Compression: NoCompression,
+		StoreDir:    t.TempDir(),
+		BlockSize:   256,
+	}
+	cfg := StreamConfig{Name: "zzz", Storage: FileStorage}
+	fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), prf(&fcfg), nil)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	checkDeleteBlocks := func(exp DeleteBlocks) {
+		t.Helper()
+		dBlocks := fs.deleteBlocks()
+		require_Equal(t, len(exp), len(dBlocks))
+
+		for i, found := range dBlocks {
+			ef, el, en := exp[i].State()
+			ff, fl, fn := found.State()
+
+			require_Equal(t, reflect.TypeOf(exp[i]), reflect.TypeOf(found))
+			require_Equal(t, ef, ff)
+			require_Equal(t, el, fl)
+			require_Equal(t, en, fn)
+		}
+	}
+
+	// Create 40 single-message blocks.
+	msg := make([]byte, 256)
+	for i := 0; i < 40; i++ {
+		_, _, err = fs.StoreMsg("foo", nil, msg, 0)
+		require_NoError(t, err)
+	}
+	require_True(t, fs.numMsgBlocks() >= 33)
+
+	// Create two separate gaps with live blocks between them.
+	// Remove seq 10 → gap at 10.
+	fs.RemoveMsg(10)
+	// Remove seq 30 → gap at 30.
+	fs.RemoveMsg(30)
+
+	// These should be two distinct gaps, not merged.
+	checkDeleteBlocks(DeleteBlocks{
+		&DeleteRange{First: 10, Num: 1},
+		&DeleteRange{First: 30, Num: 1},
+	})
+
+	// Extend the first gap.
+	fs.RemoveMsg(11)
+	fs.RemoveMsg(12)
+
+	checkDeleteBlocks(DeleteBlocks{
+		&DeleteRange{First: 10, Num: 3},
+		&DeleteRange{First: 30, Num: 1},
+	})
+
+	// Create a third gap between the two existing ones.
+	fs.RemoveMsg(20)
+
+	checkDeleteBlocks(DeleteBlocks{
+		&DeleteRange{First: 10, Num: 3},
+		&DeleteRange{First: 20, Num: 1},
+		&DeleteRange{First: 30, Num: 1},
+	})
+
+	// Extend the last gap to span multiple blocks.
+	fs.RemoveMsg(31)
+	fs.RemoveMsg(32)
+	fs.RemoveMsg(33)
+	fs.RemoveMsg(34)
+
+	checkDeleteBlocks(DeleteBlocks{
+		&DeleteRange{First: 10, Num: 3},
+		&DeleteRange{First: 20, Num: 1},
+		&DeleteRange{First: 30, Num: 5},
+	})
+
+	// Remove all messages between first and second gap to merge them.
+	for seq := uint64(13); seq <= 19; seq++ {
+		fs.RemoveMsg(seq)
+	}
+
+	checkDeleteBlocks(DeleteBlocks{
+		&DeleteRange{First: 10, Num: 11},
+		&DeleteRange{First: 30, Num: 5},
+	})
+}
+
+// Test that the binary search in selectMsgBlockWithIndex and the linear scan
+// produce consistent results. Creates blocks that cross the linearThresh
+// boundary and verifies both paths agree.
+func TestFileStoreSelectMsgBlockBinaryVsLinearConsistency(t *testing.T) {
+	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
+		fcfg.BlockSize = 100
+		cfg := StreamConfig{
+			Name:       "zzz",
+			Subjects:   []string{"*"},
+			MaxMsgsPer: 1,
+			Storage:    FileStorage,
+		}
+		fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), prf(&fcfg), nil)
+		require_NoError(t, err)
+		defer fs.Stop()
+
+		// 19 bytes msg → ~50 byte record → 2 msgs per block.
+		msgLen := 19
+		msg := bytes.Repeat([]byte("A"), msgLen)
+
+		subjects := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+@$^"
+
+		// Phase 1: Create exactly 31 blocks (below linearThresh=32).
+		// 31 blocks × 2 msgs per block = 62 msgs.
+		for i := 0; i < 62; i++ {
+			subj := string(subjects[i%len(subjects)])
+			fs.StoreMsg(subj, nil, msg, 0)
+		}
+		require_Equal(t, fs.numMsgBlocks(), 31)
+
+		// Record results from linear scan path for all valid sequences.
+		var ss StreamState
+		fs.FastState(&ss)
+		type blockResult struct {
+			index int
+			first uint64
+			last  uint64
+		}
+		linearResults := make(map[uint64]blockResult)
+		for seq := ss.FirstSeq; seq <= ss.LastSeq; seq++ {
+			fs.mu.RLock()
+			index, mb := fs.selectMsgBlockWithIndex(seq)
+			var res blockResult
+			if mb != nil {
+				res = blockResult{
+					index: index,
+					first: atomic.LoadUint64(&mb.first.seq),
+					last:  atomic.LoadUint64(&mb.last.seq),
+				}
+			} else {
+				res = blockResult{index: -1}
+			}
+			fs.mu.RUnlock()
+			linearResults[seq] = res
+		}
+
+		// Phase 2: Add more messages to cross the 32-block threshold.
+		// Add 4 more messages → 2 more blocks → 33 blocks total.
+		for i := 0; i < 4; i++ {
+			subj := string(subjects[i%len(subjects)])
+			fs.StoreMsg(subj, nil, msg, 0)
+		}
+		require_True(t, fs.numMsgBlocks() >= 33)
+
+		// Now binary search is used. Verify that all previously mapped
+		// sequences still resolve to the same block.
+		for seq, linRes := range linearResults {
+			fs.mu.RLock()
+			index, mb := fs.selectMsgBlockWithIndex(seq)
+			fs.mu.RUnlock()
+			if linRes.index == -1 {
+				continue // Skip sequences that didn't resolve before.
+			}
+			require_True(t, mb != nil)
+			require_Equal(t, linRes.index, index)
+			require_Equal(t, linRes.first, atomic.LoadUint64(&mb.first.seq))
+			require_Equal(t, linRes.last, atomic.LoadUint64(&mb.last.seq))
+		}
+	})
+}
+
+// Test that state accounting remains correct after restart when the binary
+// search path was used with gaps from deleted messages.
+func TestFileStoreRecoverAccountingWithBinarySearchGaps(t *testing.T) {
+	fcfg := FileStoreConfig{
+		Cipher:      NoCipher,
+		Compression: NoCompression,
+		StoreDir:    t.TempDir(),
+		BlockSize:   256,
+	}
+	cfg := StreamConfig{Name: "zzz", Storage: FileStorage}
+	fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), prf(&fcfg), nil)
+	require_NoError(t, err)
+
+	msg := make([]byte, 256)
+	for i := 0; i < 40; i++ {
+		_, _, err = fs.StoreMsg("foo", nil, msg, 0)
+		require_NoError(t, err)
+	}
+	require_True(t, fs.numMsgBlocks() >= 33)
+
+	// Create gaps by deleting messages.
+	deletedSeqs := make(map[uint64]bool)
+	for _, seq := range []uint64{5, 10, 11, 12, 20, 21, 30, 31, 32, 33, 34} {
+		_, err = fs.RemoveMsg(seq)
+		require_NoError(t, err)
+		deletedSeqs[seq] = true
+	}
+
+	// Capture state before stop.
+	var preState StreamState
+	fs.FastState(&preState)
+
+	// Stop and restart.
+	err = fs.Stop()
+	require_NoError(t, err)
+
+	fs, err = newFileStoreWithCreated(fcfg, cfg, time.Now(), prf(&fcfg), nil)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	// Verify state matches after recovery.
+	var postState StreamState
+	fs.FastState(&postState)
+
+	require_Equal(t, preState.Msgs, postState.Msgs)
+	require_Equal(t, preState.Bytes, postState.Bytes)
+	require_Equal(t, preState.FirstSeq, postState.FirstSeq)
+	require_Equal(t, preState.LastSeq, postState.LastSeq)
+	require_Equal(t, preState.NumDeleted, postState.NumDeleted)
+
+	// Verify all messages are loadable and deleted ones are not.
+	var smv StoreMsg
+	for seq := postState.FirstSeq; seq <= postState.LastSeq; seq++ {
+		sm, err := fs.LoadMsg(seq, &smv)
+		if deletedSeqs[seq] {
+			require_Error(t, err)
+		} else {
+			require_NoError(t, err)
+			require_Equal(t, seq, sm.seq)
+		}
+	}
+}
