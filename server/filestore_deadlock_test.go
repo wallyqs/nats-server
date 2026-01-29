@@ -746,10 +746,12 @@ func TestJetStreamKVStreamDeleteDeadlock(t *testing.T) {
 	}
 
 	// Simulate KV behavior: many updates to same keys
-	numKeys := 10
-	updatesPerKey := 50
+	// Use more keys and updates to create a more complex state
+	numKeys := 100
+	updatesPerKey := 100
 
-	t.Logf("Populating KV stream with %d keys x %d updates", numKeys, updatesPerKey)
+	t.Logf("Populating KV stream with %d keys x %d updates = %d total writes",
+		numKeys, updatesPerKey, numKeys*updatesPerKey)
 
 	for update := 0; update < updatesPerKey; update++ {
 		for key := 0; key < numKeys; key++ {
@@ -776,7 +778,7 @@ func TestJetStreamKVStreamDeleteDeadlock(t *testing.T) {
 	t.Log("Shutting down server...")
 	s.Shutdown()
 
-	// Corrupt one of the block files to potentially trigger issues during recovery
+	// Aggressively corrupt the storage to try to trigger panic during recovery
 	msgsDir := filepath.Join(streamStoreDir, msgDir)
 	entries, err := os.ReadDir(msgsDir)
 	if err != nil {
@@ -785,8 +787,10 @@ func TestJetStreamKVStreamDeleteDeadlock(t *testing.T) {
 
 	// Remove index.db to force block-based recovery
 	os.Remove(filepath.Join(msgsDir, "index.db"))
+	t.Log("Removed index.db")
 
-	// Optionally corrupt a block file to trigger recovery issues
+	// Corrupt ALL block files to maximize chance of triggering issues
+	corruptedCount := 0
 	for _, entry := range entries {
 		if filepath.Ext(entry.Name()) == ".blk" {
 			blkFile := filepath.Join(msgsDir, entry.Name())
@@ -794,17 +798,30 @@ func TestJetStreamKVStreamDeleteDeadlock(t *testing.T) {
 			if err != nil {
 				continue
 			}
-			if len(data) > 100 {
-				// Corrupt middle section
-				for i := len(data) / 2; i < len(data)/2+30 && i < len(data); i++ {
+			if len(data) > 50 {
+				// Corrupt multiple sections of the file
+				// Corrupt header area
+				for i := 0; i < 20 && i < len(data); i++ {
 					data[i] = 0xFF
 				}
+				// Corrupt middle section
+				mid := len(data) / 2
+				for i := mid; i < mid+50 && i < len(data); i++ {
+					data[i] = 0x00
+				}
+				// Corrupt end section
+				end := len(data) - 20
+				if end > 0 {
+					for i := end; i < len(data); i++ {
+						data[i] = 0xAB
+					}
+				}
 				os.WriteFile(blkFile, data, 0644)
-				t.Logf("Corrupted block file: %s", entry.Name())
-				break
+				corruptedCount++
 			}
 		}
 	}
+	t.Logf("Corrupted %d block files", corruptedCount)
 
 	// Restart the server
 	t.Log("Restarting server...")
