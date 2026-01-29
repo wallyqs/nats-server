@@ -1158,3 +1158,183 @@ func TestFileStoreDirectLockVerification(t *testing.T) {
 		t.Fatal("DEADLOCK: Recovery timed out")
 	}
 }
+
+// TestFileStorePanicWithCallback tests the deadlock scenario by using
+// a storage callback that panics during message removal.
+// Note: The callback is called OUTSIDE the lock, so this doesn't test
+// the newFileStoreWithCreated deadlock bug directly.
+func TestFileStorePanicWithCallback(t *testing.T) {
+	storeDir := t.TempDir()
+
+	fcfg := FileStoreConfig{
+		StoreDir:  storeDir,
+		BlockSize: 512,
+	}
+	cfg := StreamConfig{
+		Name:       "TEST",
+		Subjects:   []string{"test.>"},
+		Storage:    FileStorage,
+		MaxMsgsPer: 1,
+	}
+
+	fs, err := newFileStore(fcfg, cfg)
+	if err != nil {
+		t.Fatalf("Failed to create filestore: %v", err)
+	}
+
+	// Store messages that will need enforcement
+	for i := 0; i < 100; i++ {
+		subj := fmt.Sprintf("test.key%d", i%10)
+		fs.StoreMsg(subj, nil, []byte(fmt.Sprintf("msg-%d", i)), 0)
+	}
+
+	state := fs.State()
+	t.Logf("Initial state: Msgs=%d", state.Msgs)
+
+	// Register a callback that will panic
+	panicCount := 0
+	fs.RegisterStorageUpdates(func(md, bd int64, seq uint64, subj string) {
+		panicCount++
+		// Panic on the 3rd callback to simulate a panic during enforcement
+		if panicCount == 3 {
+			panic("simulated panic in storage callback")
+		}
+	})
+
+	// Now trigger an operation that will call the callback
+	// Storing a message to a subject that already has MaxMsgsPer messages
+	// will trigger removal of old messages, which calls the callback
+	t.Log("Triggering operation that invokes callback...")
+
+	operationDone := make(chan struct{})
+	go func() {
+		defer close(operationDone)
+		defer func() {
+			if r := recover(); r != nil {
+				t.Logf("Panic caught: %v", r)
+			}
+		}()
+
+		// Store a message that will trigger callback through enforcement
+		_, _, err := fs.StoreMsg("test.key0", nil, []byte("trigger"), 0)
+		if err != nil {
+			t.Logf("Store returned error: %v", err)
+		}
+	}()
+
+	select {
+	case <-operationDone:
+		t.Log("Operation completed or panicked")
+	case <-time.After(5 * time.Second):
+		t.Fatal("DEADLOCK: Operation timed out")
+	}
+
+	// Now verify we can still use the filestore (lock is released)
+	t.Log("Verifying filestore is still usable...")
+	lockCheckDone := make(chan struct{})
+	go func() {
+		defer close(lockCheckDone)
+		// Try to acquire the lock directly
+		fs.mu.Lock()
+		fs.mu.Unlock()
+	}()
+
+	select {
+	case <-lockCheckDone:
+		t.Log("SUCCESS: Lock is not held after panic in callback")
+	case <-time.After(3 * time.Second):
+		t.Fatal("DEADLOCK: Could not acquire lock after panic")
+	}
+
+	fs.Stop()
+}
+
+// TestFileStoreRecoveryWithNilBlock tests that recovery handles nil blocks
+// gracefully and doesn't deadlock. This test directly manipulates internal
+// state to inject a potentially panic-inducing condition.
+func TestFileStoreRecoveryWithNilBlock(t *testing.T) {
+	storeDir := t.TempDir()
+
+	fcfg := FileStoreConfig{
+		StoreDir:  storeDir,
+		BlockSize: 512,
+	}
+	cfg := StreamConfig{
+		Name:       "TEST",
+		Subjects:   []string{"test.>"},
+		Storage:    FileStorage,
+		MaxMsgsPer: 1, // Triggers enforcement
+	}
+
+	// Create and populate filestore
+	fs, err := newFileStore(fcfg, cfg)
+	if err != nil {
+		t.Fatalf("Failed to create filestore: %v", err)
+	}
+
+	for i := 0; i < 50; i++ {
+		subj := fmt.Sprintf("test.key%d", i%5)
+		fs.StoreMsg(subj, nil, []byte("data"), 0)
+	}
+	fs.Stop()
+
+	msgsDir := filepath.Join(storeDir, msgDir)
+
+	// Remove index to force full recovery
+	os.Remove(filepath.Join(msgsDir, "index.db"))
+
+	// Delete ALL block files to create an extreme edge case
+	entries, _ := os.ReadDir(msgsDir)
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".blk" {
+			os.Remove(filepath.Join(msgsDir, entry.Name()))
+			t.Logf("Removed block file: %s", entry.Name())
+		}
+	}
+
+	// Now try recovery with missing blocks
+	t.Log("Attempting recovery with missing blocks...")
+
+	recovered := make(chan struct{})
+	var fs2 *fileStore
+
+	go func() {
+		defer close(recovered)
+		defer func() {
+			if r := recover(); r != nil {
+				t.Logf("PANIC during recovery: %v", r)
+			}
+		}()
+
+		fs2, err = newFileStore(fcfg, cfg)
+		if err != nil {
+			t.Logf("Recovery error (expected): %v", err)
+		}
+	}()
+
+	select {
+	case <-recovered:
+		if fs2 != nil {
+			t.Log("Recovery succeeded")
+			// Verify the lock isn't held
+			done := make(chan bool, 1)
+			go func() {
+				fs2.mu.Lock()
+				fs2.mu.Unlock()
+				done <- true
+			}()
+
+			select {
+			case <-done:
+				t.Log("SUCCESS: Lock is accessible")
+			case <-time.After(2 * time.Second):
+				t.Fatal("DEADLOCK: Lock appears to be held")
+			}
+			fs2.Stop()
+		} else {
+			t.Log("Recovery returned nil (expected with missing blocks)")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DEADLOCK: Recovery timed out")
+	}
+}
