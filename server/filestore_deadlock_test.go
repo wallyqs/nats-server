@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1474,26 +1475,26 @@ func TestFileStoreSkewDetectionPath(t *testing.T) {
 // at filestore.go lines 574-578 where a permission error during
 // expireMsgsOnRecover() causes return without releasing the lock.
 //
-// The bug:
+// The bug mechanism:
 //
-//	fs.mu.Lock()  // Line 557
-//	...
-//	if fs.cfg.MaxAge != 0 {
-//	    err := fs.expireMsgsOnRecover()
-//	    if isPermissionError(err) {
-//	        return nil, err  // ← LOCK NEVER RELEASED!
-//	    }
-//	}
-//	...
-//	fs.mu.Unlock()  // Line 589 - never reached on permission error
+//  1. fs.mu.Lock() at line 557
+//  2. Permission error in expireMsgsOnRecover() at line 575
+//  3. return nil, err at line 577 - LOCK NEVER RELEASED
+//  4. The defer at lines 550-554 launches: go fs.cleanupOldMeta()
+//  5. cleanupOldMeta() tries fs.mu.RLock() at line 2237
+//  6. DEADLOCK: The goroutine blocks forever waiting for the write lock
 //
 // This test creates expired messages, makes block files read-only,
 // then attempts recovery to trigger the permission error path.
+// We detect the deadlock by checking for leaked goroutines.
 func TestFileStoreRecoveryPermissionErrorDeadlock(t *testing.T) {
 	// Skip if running as root (can't test permission errors as root)
 	if os.Getuid() == 0 {
 		t.Skip("Skipping permission test when running as root")
 	}
+
+	// Count goroutines before the test
+	goroutinesBefore := runtime.NumGoroutine()
 
 	storeDir := t.TempDir()
 
@@ -1626,6 +1627,24 @@ func TestFileStoreRecoveryPermissionErrorDeadlock(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("DEADLOCK: Recovery timed out - lock is likely held!")
+	}
+
+	// Wait a bit for any background goroutines to complete or block
+	time.Sleep(100 * time.Millisecond)
+
+	// Check for goroutine leaks - the cleanupOldMeta goroutine would be blocked
+	// if the lock wasn't released
+	goroutinesAfter := runtime.NumGoroutine()
+	leaked := goroutinesAfter - goroutinesBefore
+
+	// Allow for some variance due to runtime goroutines, but if we leaked
+	// a significant number, the bug is present
+	if leaked > 5 {
+		t.Errorf("GOROUTINE LEAK: %d goroutines before, %d after (leaked %d) - "+
+			"cleanupOldMeta goroutine likely blocked on unreleased lock",
+			goroutinesBefore, goroutinesAfter, leaked)
+	} else {
+		t.Logf("Goroutine check: %d before, %d after (diff: %d)", goroutinesBefore, goroutinesAfter, leaked)
 	}
 }
 
