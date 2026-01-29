@@ -13133,3 +13133,131 @@ func TestFileStoreRecoverAccountingWithBinarySearchGaps(t *testing.T) {
 		}
 	}
 }
+
+// TestFileStoreRecoveryTombstoneBlocksMonotonicity verifies that binary search
+// works correctly after recovery when tombstone-only blocks exist in the middle
+// of fs.blks. During recovery via recoverMsgs (when stream state file is missing),
+// tombstone-only blocks can get last.seq values derived from tombstone sequences
+// that reference earlier blocks, which would violate the monotonically increasing
+// last.seq ordering that selectMsgBlockWithIndex's binary search depends on.
+func TestFileStoreRecoveryTombstoneBlocksMonotonicity(t *testing.T) {
+	fcfg := FileStoreConfig{
+		Cipher:      NoCipher,
+		Compression: NoCompression,
+		StoreDir:    t.TempDir(),
+		BlockSize:   512,
+	}
+	cfg := StreamConfig{Name: "zzz", Storage: FileStorage}
+
+	created := time.Now()
+	fs, err := newFileStoreWithCreated(fcfg, cfg, created, prf(&fcfg), nil)
+	require_NoError(t, err)
+
+	// Use small messages so multiple fit per block.
+	// With msgHdrSize(22) + subject("foo"=3) + msg(100) + checksum(8) = 133 bytes
+	// and BlockSize=512, we get ~3-4 messages per block.
+	msg := make([]byte, 100)
+
+	// Store enough messages to create 40+ blocks for binary search threshold.
+	// 160 messages at ~3-4 per block ≈ 40-53 blocks.
+	numMsgs := 160
+	for i := 0; i < numMsgs; i++ {
+		_, _, err = fs.StoreMsg("foo", nil, msg, 0)
+		require_NoError(t, err)
+	}
+	require_True(t, fs.numMsgBlocks() >= 33)
+
+	// Delete middle messages from early blocks using user-initiated RemoveMsg.
+	// Since each block has ~3-4 messages, deleting the 2nd message from each block
+	// means isEmpty=false, so a tombstone is written to the lmb for each deletion.
+	// These tombstones reference low sequence numbers (e.g., 2, 5, 8, ...) but
+	// are physically stored in blocks near the end of fs.blks.
+	deletedSeqs := make(map[uint64]bool)
+	// Delete 2nd message from each of the first 30 blocks (seqs 2, 5, 8, 11, ...).
+	for i := 0; i < 30; i++ {
+		seq := uint64(2 + i*4) // Every 4th starting from 2
+		if seq <= uint64(numMsgs) {
+			_, err = fs.RemoveMsg(seq)
+			require_NoError(t, err)
+			deletedSeqs[seq] = true
+		}
+	}
+
+	// Store more messages to push any tombstone-overflow blocks into the middle
+	// of fs.blks. New messages go to blocks after the tombstone blocks.
+	numExtra := 160
+	for i := 0; i < numExtra; i++ {
+		_, _, err = fs.StoreMsg("foo", nil, msg, 0)
+		require_NoError(t, err)
+	}
+
+	totalStored := numMsgs + numExtra
+	require_True(t, fs.numMsgBlocks() >= 33)
+
+	// Capture state and verify messages are loadable before recovery.
+	var preState StreamState
+	fs.FastState(&preState)
+	require_Equal(t, uint64(totalStored-len(deletedSeqs)), preState.Msgs)
+
+	var smv StoreMsg
+	for seq := uint64(1); seq <= uint64(totalStored); seq++ {
+		if deletedSeqs[seq] {
+			continue
+		}
+		sm, err := fs.LoadMsg(seq, &smv)
+		require_NoError(t, err)
+		require_Equal(t, seq, sm.seq)
+	}
+
+	// Stop the store.
+	err = fs.Stop()
+	require_NoError(t, err)
+
+	// Remove the stream state file to force recoverMsgs fallback path.
+	stateFile := filepath.Join(fcfg.StoreDir, msgDir, streamStreamStateFile)
+	err = os.Remove(stateFile)
+	require_NoError(t, err)
+
+	// Recover the store.
+	fs, err = newFileStoreWithCreated(fcfg, cfg, created, prf(&fcfg), nil)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	// Check for tombstone-only blocks and verify monotonicity.
+	fs.mu.RLock()
+	var prevLast uint64
+	var hasTombstoneOnlyBlocks bool
+	for _, mb := range fs.blks {
+		last := atomic.LoadUint64(&mb.last.seq)
+		if mb.msgs == 0 {
+			hasTombstoneOnlyBlocks = true
+		}
+		// Verify monotonicity: last.seq must never decrease.
+		if last < prevLast {
+			fs.mu.RUnlock()
+			t.Fatalf("Block ordering violation: block index=%d has last.seq=%d but previous block has last.seq=%d",
+				mb.index, last, prevLast)
+		}
+		prevLast = last
+	}
+	nblks := len(fs.blks)
+	fs.mu.RUnlock()
+	t.Logf("After recovery: %d blocks, hasTombstoneOnlyBlocks=%v", nblks, hasTombstoneOnlyBlocks)
+
+	// Verify state matches after recovery.
+	var postState StreamState
+	fs.FastState(&postState)
+	require_Equal(t, preState.Msgs, postState.Msgs)
+	require_Equal(t, preState.FirstSeq, postState.FirstSeq)
+	require_Equal(t, preState.LastSeq, postState.LastSeq)
+
+	// Verify all remaining messages are loadable via binary search.
+	for seq := uint64(1); seq <= uint64(totalStored); seq++ {
+		if deletedSeqs[seq] {
+			continue
+		}
+		sm, err := fs.LoadMsg(seq, &smv)
+		require_NoError(t, err)
+		require_Equal(t, seq, sm.seq)
+	}
+}

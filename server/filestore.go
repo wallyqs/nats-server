@@ -2346,6 +2346,24 @@ func (fs *fileStore) recoverMsgs() error {
 		}
 	}
 
+	// Remove empty non-lmb blocks to ensure last.seq monotonicity for binary search.
+	// During recovery, tombstone-only blocks get last.seq values from tombstone sequences
+	// that reference earlier blocks, which can violate the monotonically increasing
+	// ordering that selectMsgBlockWithIndex depends on. This is consistent with
+	// recoverFullState which also skips empty non-lmb blocks.
+	// Tombstones from these blocks have already been collected into fs.tombs.
+	if len(fs.blks) > 1 {
+		var toRemove []*msgBlock
+		for i := 0; i < len(fs.blks)-1; i++ {
+			if fs.blks[i].msgs == 0 {
+				toRemove = append(toRemove, fs.blks[i])
+			}
+		}
+		for _, mb := range toRemove {
+			fs.removeMsgBlockFromList(mb)
+		}
+	}
+
 	if len(fs.blks) > 0 {
 		fs.lmb = fs.blks[len(fs.blks)-1]
 	} else {
