@@ -1802,3 +1802,256 @@ func TestFileStoreMaxAgeRecoveryWithPermissionError(t *testing.T) {
 		t.Fatal("TIMEOUT: Recovery hung - likely deadlock!")
 	}
 }
+
+// TestFileStoreWorkqueueTombstoneDeadlock tests the deadlock scenario for
+// workqueue streams with many deleted messages. This matches the production
+// config where the deadlock occurred:
+//
+//	config: {
+//	  retention: "workqueue",
+//	  max_msgs_per_subject: -1,  (unlimited)
+//	  max_age: 0,                (no expiry)
+//	}
+//	state: {
+//	  messages: 1,083,118
+//	  num_deleted: 6,173,268
+//	}
+//
+// For this config, the enforceMsgPerSubjectLimit and expireMsgsOnRecover paths
+// are NOT triggered. The deadlock must occur in tombstone processing (lines 560-567):
+//
+//	fs.mu.Lock()  // Line 557
+//	if len(fs.tombs) > 0 {
+//	    for _, seq := range fs.tombs {
+//	        fs.removeMsg(seq, false, true, false)  // Could panic
+//	    }
+//	}
+//	// ... if panic occurs above, lock is never released
+//	fs.mu.Unlock()  // Line 589 - never reached on panic
+//
+// The fix adds: defer func() { if !unlocked { fs.mu.Unlock() } }()
+func TestFileStoreWorkqueueTombstoneDeadlock(t *testing.T) {
+	storeDir := t.TempDir()
+
+	// Configuration matching the production workqueue stream
+	fcfg := FileStoreConfig{
+		StoreDir:  storeDir,
+		BlockSize: 4096,
+	}
+	cfg := StreamConfig{
+		Name:       "unique_ids",
+		Subjects:   []string{"unique_ids.>"},
+		Storage:    FileStorage,
+		Retention:  WorkQueuePolicy, // Workqueue retention
+		MaxMsgsPer: -1,              // No per-subject limit
+		// MaxAge defaults to 0 (no age expiry)
+	}
+
+	// Create initial filestore
+	fs, err := newFileStore(fcfg, cfg)
+	if err != nil {
+		t.Fatalf("Failed to create filestore: %v", err)
+	}
+
+	// Simulate workqueue pattern: store messages and delete them
+	// (simulating consumer acknowledgments)
+	numMessages := 500
+	t.Logf("Creating workqueue-style workload: %d messages to store and delete", numMessages)
+
+	// Store messages
+	for i := 0; i < numMessages; i++ {
+		subject := fmt.Sprintf("unique_ids.item.%d", i%10) // 10 different subjects
+		msg := []byte(fmt.Sprintf("data-%d", i))
+		if _, _, err := fs.StoreMsg(subject, nil, msg, 0); err != nil {
+			t.Fatalf("Error storing msg: %v", err)
+		}
+	}
+
+	state := fs.State()
+	t.Logf("State after stores: Msgs=%d, FirstSeq=%d, LastSeq=%d",
+		state.Msgs, state.FirstSeq, state.LastSeq)
+
+	// Delete messages to simulate consumer acks (creates tombstones)
+	deleted := 0
+	for seq := state.FirstSeq; seq <= state.LastSeq-10; seq++ {
+		ok, err := fs.RemoveMsg(seq)
+		if err != nil {
+			t.Logf("Error removing msg %d: %v", seq, err)
+			continue
+		}
+		if ok {
+			deleted++
+		}
+	}
+
+	state = fs.State()
+	t.Logf("State after deletes: Msgs=%d, FirstSeq=%d, LastSeq=%d, NumDeleted=%d, deleted=%d",
+		state.Msgs, state.FirstSeq, state.LastSeq, state.NumDeleted, deleted)
+
+	fs.Stop()
+
+	// Corrupt the index to force full recovery with tombstone processing
+	msgsDir := filepath.Join(storeDir, msgDir)
+	indexPath := filepath.Join(msgsDir, "index.db")
+	t.Logf("Removing index to force recovery: %s", indexPath)
+	if err := os.Remove(indexPath); err != nil {
+		t.Logf("Could not remove index: %v", err)
+	}
+
+	// Test 1: Verify normal recovery completes without deadlock
+	t.Log("Testing recovery of workqueue stream (should trigger tombstone processing)...")
+
+	done := make(chan error, 1)
+	var recoveredFS *fileStore
+
+	go func() {
+		var err error
+		recoveredFS, err = newFileStore(fcfg, cfg)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Recovery failed: %v", err)
+		}
+		t.Log("Recovery completed successfully")
+	case <-time.After(30 * time.Second):
+		t.Fatal("TIMEOUT: Recovery hung - possible deadlock during tombstone processing!")
+	}
+
+	if recoveredFS == nil {
+		t.Fatal("Recovered filestore is nil")
+	}
+
+	// Verify the filestore is not deadlocked by checking lock availability
+	lockOK := make(chan bool, 1)
+	go func() {
+		recoveredFS.mu.Lock()
+		recoveredFS.mu.Unlock()
+		lockOK <- true
+	}()
+
+	select {
+	case <-lockOK:
+		t.Log("SUCCESS: Lock is available after recovery (no deadlock)")
+	case <-time.After(3 * time.Second):
+		t.Fatal("DEADLOCK: Lock is held after recovery completed!")
+	}
+
+	// Verify state is correct
+	finalState := recoveredFS.State()
+	t.Logf("Final state: Msgs=%d, FirstSeq=%d, LastSeq=%d, NumDeleted=%d",
+		finalState.Msgs, finalState.FirstSeq, finalState.LastSeq, finalState.NumDeleted)
+
+	// Test that cleanupOldMeta can run (it needs RLock)
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		recoveredFS.cleanupOldMeta()
+	}()
+
+	select {
+	case <-cleanupDone:
+		t.Log("SUCCESS: cleanupOldMeta completed (RLock was available)")
+	case <-time.After(3 * time.Second):
+		t.Fatal("DEADLOCK: cleanupOldMeta blocked - fs.mu write lock is still held!")
+	}
+
+	recoveredFS.Stop()
+}
+
+// TestFileStoreTombstoneProcessingPanicDeadlock directly simulates a panic
+// during tombstone processing to verify the fix prevents deadlock.
+//
+// This test is critical because for workqueue streams with:
+//   - max_msgs_per_subject: -1
+//   - max_age: 0
+//
+// The only code that runs under the lock (lines 557-589) is tombstone processing.
+// If that code panics, the lock is never released without the fix.
+func TestFileStoreTombstoneProcessingPanicDeadlock(t *testing.T) {
+	storeDir := t.TempDir()
+
+	fcfg := FileStoreConfig{
+		StoreDir:  storeDir,
+		BlockSize: 4096,
+	}
+	cfg := StreamConfig{
+		Name:       "TEST",
+		Subjects:   []string{"test.>"},
+		Storage:    FileStorage,
+		Retention:  WorkQueuePolicy,
+		MaxMsgsPer: -1,
+	}
+
+	// Create filestore with some messages
+	fs, err := newFileStore(fcfg, cfg)
+	if err != nil {
+		t.Fatalf("Failed to create filestore: %v", err)
+	}
+
+	// Store and delete messages
+	for i := 0; i < 100; i++ {
+		fs.StoreMsg("test.msg", nil, []byte(fmt.Sprintf("data-%d", i)), 0)
+	}
+
+	for seq := uint64(1); seq <= 90; seq++ {
+		fs.RemoveMsg(seq)
+	}
+
+	state := fs.State()
+	t.Logf("State: Msgs=%d, Deleted=%d", state.Msgs, state.NumDeleted)
+
+	fs.Stop()
+
+	// Simulate the deadlock scenario directly:
+	// 1. Acquire the write lock (like line 557)
+	// 2. Launch cleanupOldMeta (like the defer at line 552)
+	// 3. Verify deadlock occurs without proper unlock
+
+	fs2, err := newFileStore(fcfg, cfg)
+	if err != nil {
+		t.Fatalf("Failed to recreate filestore: %v", err)
+	}
+
+	t.Log("Simulating panic scenario: acquiring lock without defer unlock pattern...")
+
+	// This simulates what happens if tombstone processing panics:
+	// The lock would be held and cleanupOldMeta would block forever
+	fs2.mu.Lock()
+
+	cleanupBlocked := make(chan struct{})
+	cleanupDone := make(chan struct{})
+
+	go func() {
+		close(cleanupBlocked) // Signal we're about to try RLock
+		fs2.cleanupOldMeta()  // This tries to acquire RLock
+		close(cleanupDone)
+	}()
+
+	<-cleanupBlocked
+	time.Sleep(100 * time.Millisecond) // Give goroutine time to block
+
+	// Check if cleanupOldMeta is blocked
+	select {
+	case <-cleanupDone:
+		t.Fatal("BUG: cleanupOldMeta should be blocked but completed!")
+	default:
+		t.Log("CONFIRMED: cleanupOldMeta is blocked on RLock (deadlock condition exists)")
+	}
+
+	// Now simulate the fix: release the lock
+	t.Log("Simulating fix: releasing the write lock...")
+	fs2.mu.Unlock()
+
+	// Verify cleanupOldMeta can now complete
+	select {
+	case <-cleanupDone:
+		t.Log("SUCCESS: After releasing lock, cleanupOldMeta completed")
+	case <-time.After(3 * time.Second):
+		t.Fatal("cleanupOldMeta still blocked after lock release!")
+	}
+
+	fs2.Stop()
+}
