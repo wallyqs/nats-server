@@ -2027,13 +2027,36 @@ func TestJetStreamClusterPeerRemoveAndLeaderShutdownDuringRecovery(t *testing.T)
 //  4. Consumer reassignment across the cluster is delayed, creating longer windows
 //     where consumer cleanup races with stream recovery
 func TestJetStreamClusterStretchPeerRemoveDuringRecovery(t *testing.T) {
+	tests := []struct {
+		name    string
+		rtt     time.Duration
+		up      int
+		down    int
+		numMsgs int // fewer messages for higher latency to keep test runtime reasonable
+	}{
+		{"5ms_100MB", 5 * time.Millisecond, 100 * 1024 * 1024, 100 * 1024 * 1024, 5000},
+		{"20ms_100MB", 20 * time.Millisecond, 100 * 1024 * 1024, 100 * 1024 * 1024, 2000},
+		{"50ms_100MB", 50 * time.Millisecond, 100 * 1024 * 1024, 100 * 1024 * 1024, 1000},
+		{"20ms_10MB", 20 * time.Millisecond, 10 * 1024 * 1024, 10 * 1024 * 1024, 1000},
+		{"50ms_1MB", 50 * time.Millisecond, 1 * 1024 * 1024, 1 * 1024 * 1024, 500},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testStretchPeerRemoveDuringRecovery(t, tt.rtt, tt.up, tt.down, tt.numMsgs)
+		})
+	}
+}
+
+func testStretchPeerRemoveDuringRecovery(t *testing.T, rtt time.Duration, up, down, numMessages int) {
 	// Create a 5-node cluster with latency proxies on all routes to simulate
 	// a stretch cluster (e.g., nodes across different availability zones).
 	np := clusterProxy{
-		rtt:  5 * time.Millisecond,       // 5ms RTT between all nodes
-		up:   100 * 1024 * 1024,           // 100 MB/s upstream
-		down: 100 * 1024 * 1024,           // 100 MB/s downstream
+		rtt:  rtt,
+		up:   up,
+		down: down,
 	}
+	t.Logf("Cluster proxy: rtt=%v, up=%d bytes/s, down=%d bytes/s, numMsgs=%d", rtt, up, down, numMessages)
 	c := createJetStreamClusterWithNetProxy(t, "STRETCH5", 5, &np)
 	defer c.shutdown()
 
@@ -2065,20 +2088,31 @@ func TestJetStreamClusterStretchPeerRemoveDuringRecovery(t *testing.T) {
 	}
 	t.Logf("Created %d consumers on stretch cluster", len(consumerNames))
 
-	// Publish messages across all consumer filter subjects.
-	numMessages := 5000
-	t.Logf("Publishing %d messages...", numMessages)
+	// Publish messages using async publishing for performance on high-latency links.
+	t.Logf("Publishing %d messages (async)...", numMessages)
 	for i := 0; i < numMessages; i++ {
 		cIdx := i % len(consumerNames)
 		subject := fmt.Sprintf("unique_ids.%s.item.%d", consumerNames[cIdx], i)
-		_, err := js.Publish(subject, []byte(fmt.Sprintf("data-%d", i)))
+		_, err := js.PublishAsync(subject, []byte(fmt.Sprintf("data-%d", i)))
 		if err != nil {
-			t.Fatalf("Publish error at msg %d: %v", i, err)
+			t.Fatalf("PublishAsync error at msg %d: %v", i, err)
 		}
+	}
+	// Wait for all async publishes to complete.
+	select {
+	case <-js.PublishAsyncComplete():
+		t.Log("All async publishes completed")
+	case <-time.After(120 * time.Second):
+		t.Fatal("TIMEOUT: Async publish did not complete")
 	}
 
 	// Consume and ack from each consumer to create tombstones.
 	totalAcked := 0
+	msgsPerConsumer := numMessages / len(consumerNames)
+	ackTarget := msgsPerConsumer - 25
+	if ackTarget < 10 {
+		ackTarget = msgsPerConsumer - 5
+	}
 	for _, cName := range consumerNames {
 		sub, err := js.PullSubscribe(
 			fmt.Sprintf("unique_ids.%s.>", cName),
@@ -2087,12 +2121,12 @@ func TestJetStreamClusterStretchPeerRemoveDuringRecovery(t *testing.T) {
 		require_NoError(t, err)
 
 		ackedCount := 0
-		for ackedCount < (numMessages/len(consumerNames))-25 {
-			batch := (numMessages / len(consumerNames)) - 25 - ackedCount
+		for ackedCount < ackTarget {
+			batch := ackTarget - ackedCount
 			if batch > 100 {
 				batch = 100
 			}
-			msgs, err := sub.Fetch(batch, nats.MaxWait(10*time.Second))
+			msgs, err := sub.Fetch(batch, nats.MaxWait(15*time.Second))
 			if err != nil {
 				t.Logf("Fetch error for %s after %d acks: %v", cName, ackedCount, err)
 				break
@@ -2108,7 +2142,7 @@ func TestJetStreamClusterStretchPeerRemoveDuringRecovery(t *testing.T) {
 	t.Logf("Total acked: %d messages (creating tombstones)", totalAcked)
 
 	// Wait for ack processing (allow more time for stretch cluster).
-	checkFor(t, 20*time.Second, 500*time.Millisecond, func() error {
+	checkFor(t, 30*time.Second, 500*time.Millisecond, func() error {
 		si, err := js.StreamInfo(streamName)
 		if err != nil {
 			return err
@@ -2146,11 +2180,20 @@ func TestJetStreamClusterStretchPeerRemoveDuringRecovery(t *testing.T) {
 	nc, js = jsClientConnect(t, c.leader())
 	defer nc.Close()
 
-	// Publish more messages while follower is down.
-	t.Log("Publishing 1000 more messages while follower is down...")
-	for i := 0; i < 1000; i++ {
+	// Publish more messages while follower is down (async for speed on latent links).
+	extraMsgs := numMessages / 5
+	if extraMsgs < 100 {
+		extraMsgs = 100
+	}
+	t.Logf("Publishing %d more messages while follower is down (async)...", extraMsgs)
+	for i := 0; i < extraMsgs; i++ {
 		cIdx := i % len(consumerNames)
-		js.Publish(fmt.Sprintf("unique_ids.%s.new.%d", consumerNames[cIdx], i), []byte("new"))
+		js.PublishAsync(fmt.Sprintf("unique_ids.%s.new.%d", consumerNames[cIdx], i), []byte("new"))
+	}
+	select {
+	case <-js.PublishAsyncComplete():
+	case <-time.After(60 * time.Second):
+		t.Fatal("TIMEOUT: Extra async publish did not complete")
 	}
 
 	// Restart the follower. Recovery happens over latent links.
