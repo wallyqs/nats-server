@@ -2007,3 +2007,333 @@ func TestJetStreamClusterPeerRemoveAndLeaderShutdownDuringRecovery(t *testing.T)
 		t.Logf("Former leader %s is responsive", leaderName)
 	}
 }
+
+// TestJetStreamClusterStretchPeerRemoveDuringRecovery tests the deadlock
+// scenario in a stretch cluster where inter-node routes have significant
+// latency. The added RTT widens the race window between:
+//   - Stream filestore recovery (tombstone processing under fs.mu.Lock())
+//   - Peer-remove triggering stream.stop() -> store.Delete() -> fs.mu.Lock()
+//   - Consumer cleanup across multiple durable consumers
+//   - RAFT leader election with delayed round-trips
+//
+// In a stretch cluster, RAFT heartbeats and proposals take longer to propagate.
+// This means:
+//  1. The recovering node spends more time in newFileStoreWithCreated processing
+//     tombstones while RAFT entries are still being replayed over slow links
+//  2. Peer-remove proposals propagate slower, increasing the chance they arrive
+//     while the stream's fs.mu is still held during tombstone processing
+//  3. Leader elections take longer, so the recovering node may be in a transitional
+//     state for an extended period
+//  4. Consumer reassignment across the cluster is delayed, creating longer windows
+//     where consumer cleanup races with stream recovery
+func TestJetStreamClusterStretchPeerRemoveDuringRecovery(t *testing.T) {
+	// Create a 5-node cluster with latency proxies on all routes to simulate
+	// a stretch cluster (e.g., nodes across different availability zones).
+	np := clusterProxy{
+		rtt:  5 * time.Millisecond,       // 5ms RTT between all nodes
+		up:   100 * 1024 * 1024,           // 100 MB/s upstream
+		down: 100 * 1024 * 1024,           // 100 MB/s downstream
+	}
+	c := createJetStreamClusterWithNetProxy(t, "STRETCH5", 5, &np)
+	defer c.shutdown()
+
+	c.waitOnPeerCount(5)
+
+	nc, js := jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	streamName := "unique_ids"
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:      streamName,
+		Subjects:  []string{"unique_ids.>"},
+		Replicas:  3,
+		Retention: nats.WorkQueuePolicy,
+	})
+	require_NoError(t, err)
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Create multiple consumers.
+	consumerNames := []string{"worker-1", "worker-2", "worker-3", "worker-4"}
+	for _, cName := range consumerNames {
+		_, err = js.AddConsumer(streamName, &nats.ConsumerConfig{
+			Durable:       cName,
+			AckPolicy:     nats.AckExplicitPolicy,
+			FilterSubject: fmt.Sprintf("unique_ids.%s.>", cName),
+		})
+		require_NoError(t, err)
+		c.waitOnConsumerLeader(globalAccountName, streamName, cName)
+	}
+	t.Logf("Created %d consumers on stretch cluster", len(consumerNames))
+
+	// Publish messages across all consumer filter subjects.
+	numMessages := 5000
+	t.Logf("Publishing %d messages...", numMessages)
+	for i := 0; i < numMessages; i++ {
+		cIdx := i % len(consumerNames)
+		subject := fmt.Sprintf("unique_ids.%s.item.%d", consumerNames[cIdx], i)
+		_, err := js.Publish(subject, []byte(fmt.Sprintf("data-%d", i)))
+		if err != nil {
+			t.Fatalf("Publish error at msg %d: %v", i, err)
+		}
+	}
+
+	// Consume and ack from each consumer to create tombstones.
+	totalAcked := 0
+	for _, cName := range consumerNames {
+		sub, err := js.PullSubscribe(
+			fmt.Sprintf("unique_ids.%s.>", cName),
+			cName,
+		)
+		require_NoError(t, err)
+
+		ackedCount := 0
+		for ackedCount < (numMessages/len(consumerNames))-25 {
+			batch := (numMessages / len(consumerNames)) - 25 - ackedCount
+			if batch > 100 {
+				batch = 100
+			}
+			msgs, err := sub.Fetch(batch, nats.MaxWait(10*time.Second))
+			if err != nil {
+				t.Logf("Fetch error for %s after %d acks: %v", cName, ackedCount, err)
+				break
+			}
+			for _, m := range msgs {
+				m.Ack()
+				ackedCount++
+			}
+		}
+		totalAcked += ackedCount
+		t.Logf("Consumer %s: acked %d messages", cName, ackedCount)
+	}
+	t.Logf("Total acked: %d messages (creating tombstones)", totalAcked)
+
+	// Wait for ack processing (allow more time for stretch cluster).
+	checkFor(t, 20*time.Second, 500*time.Millisecond, func() error {
+		si, err := js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		remaining := numMessages - totalAcked + 200
+		if si.State.Msgs > uint64(remaining) {
+			return fmt.Errorf("waiting for acks: %d msgs remaining", si.State.Msgs)
+		}
+		return nil
+	})
+
+	si, _ := js.StreamInfo(streamName)
+	t.Logf("State after acks: Msgs=%d, Deleted=%d", si.State.Msgs, si.State.NumDeleted)
+
+	// Identify the stream leader and a follower.
+	streamLeader := c.streamLeader(globalAccountName, streamName)
+	require_True(t, streamLeader != nil)
+	leaderName := streamLeader.Name()
+
+	follower := c.randomNonStreamLeader(globalAccountName, streamName)
+	require_True(t, follower != nil)
+	followerName := follower.Name()
+	require_True(t, leaderName != followerName)
+	t.Logf("Stream leader: %s, Target follower: %s", leaderName, followerName)
+
+	// Shut down the follower.
+	t.Logf("Shutting down follower %s...", followerName)
+	follower.Shutdown()
+	follower.WaitForShutdown()
+
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	// Reconnect.
+	nc.Close()
+	nc, js = jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	// Publish more messages while follower is down.
+	t.Log("Publishing 1000 more messages while follower is down...")
+	for i := 0; i < 1000; i++ {
+		cIdx := i % len(consumerNames)
+		js.Publish(fmt.Sprintf("unique_ids.%s.new.%d", consumerNames[cIdx], i), []byte("new"))
+	}
+
+	// Restart the follower. Recovery happens over latent links.
+	t.Logf("Restarting follower %s (stretch cluster - latent RAFT sync)...", followerName)
+	restartDone := make(chan struct{})
+	go func() {
+		follower = c.restartServer(follower)
+		close(restartDone)
+	}()
+
+	select {
+	case <-restartDone:
+		t.Logf("Follower %s restarted", followerName)
+	case <-time.After(60 * time.Second):
+		t.Fatal("TIMEOUT: Follower restart hung on stretch cluster")
+	}
+
+	// Now simultaneously: shut down leader + peer-remove follower + delete consumers.
+	// On a stretch cluster the latency means RAFT proposals take longer,
+	// widening the window where recovery and cleanup operations overlap.
+	var wg sync.WaitGroup
+	errCh := make(chan error, 20)
+
+	// Goroutine 1: Shut down the stream leader.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(50 * time.Millisecond)
+		t.Logf("Shutting down stream leader %s...", leaderName)
+		streamLeader.Shutdown()
+		streamLeader.WaitForShutdown()
+		t.Logf("Stream leader %s is down", leaderName)
+	}()
+
+	// Goroutine 2: Issue peer-remove for the follower.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Wait for leader election over latent links.
+		time.Sleep(2 * time.Second)
+
+		var liveServer *Server
+		for _, s := range c.servers {
+			if s.Running() && s.Name() != followerName && s.Name() != leaderName {
+				liveServer = s
+				break
+			}
+		}
+		if liveServer == nil {
+			errCh <- fmt.Errorf("no live server found")
+			return
+		}
+		ncPR, err := nats.Connect(liveServer.ClientURL())
+		if err != nil {
+			errCh <- fmt.Errorf("connect: %v", err)
+			return
+		}
+		defer ncPR.Close()
+
+		var success bool
+		for attempt := 0; attempt < 30; attempt++ {
+			time.Sleep(time.Second)
+			removeSub := fmt.Sprintf(JSApiStreamRemovePeerT, streamName)
+			resp, err := ncPR.Request(removeSub, []byte(`{"peer":"`+followerName+`"}`), 10*time.Second)
+			if err != nil {
+				t.Logf("Peer-remove attempt %d: %v", attempt+1, err)
+				continue
+			}
+			var rpResp JSApiStreamRemovePeerResponse
+			json.Unmarshal(resp.Data, &rpResp)
+			if rpResp.Error != nil {
+				t.Logf("Peer-remove attempt %d: %+v", attempt+1, rpResp.Error)
+				continue
+			}
+			t.Logf("Peer-remove for %s: Success=%v", followerName, rpResp.Success)
+			success = true
+			break
+		}
+		if !success {
+			errCh <- fmt.Errorf("peer-remove for %s never succeeded", followerName)
+		}
+	}()
+
+	// Goroutine 3: Delete consumers.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(3 * time.Second)
+		for _, cName := range consumerNames {
+			var liveServer *Server
+			for _, s := range c.servers {
+				if s.Running() && s.Name() != leaderName {
+					liveServer = s
+					break
+				}
+			}
+			if liveServer == nil {
+				return
+			}
+			ncDel, err := nats.Connect(liveServer.ClientURL())
+			if err != nil {
+				continue
+			}
+			jsDel, err := ncDel.JetStream()
+			if err != nil {
+				ncDel.Close()
+				continue
+			}
+			err = jsDel.DeleteConsumer(streamName, cName)
+			if err != nil {
+				t.Logf("Delete consumer %s: %v", cName, err)
+			} else {
+				t.Logf("Deleted consumer %s", cName)
+			}
+			ncDel.Close()
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Log("All concurrent operations completed on stretch cluster")
+	case <-time.After(120 * time.Second):
+		t.Fatal("TIMEOUT: Operations deadlocked on stretch cluster!")
+	}
+
+	close(errCh)
+	for err := range errCh {
+		t.Logf("Concurrent error: %v", err)
+	}
+
+	// Restart the leader.
+	t.Logf("Restarting former leader %s...", leaderName)
+	streamLeader = c.restartServer(streamLeader)
+
+	c.waitOnStreamLeader(globalAccountName, streamName)
+
+	nc.Close()
+	nc, js = jsClientConnect(t, c.leader())
+	defer nc.Close()
+
+	// Verify peer was removed.
+	checkFor(t, 60*time.Second, time.Second, func() error {
+		si, err = js.StreamInfo(streamName)
+		if err != nil {
+			return err
+		}
+		for _, r := range si.Cluster.Replicas {
+			if r.Name == followerName {
+				return fmt.Errorf("follower %s still present", followerName)
+			}
+		}
+		return nil
+	})
+	t.Logf("Follower %s removed from stream", followerName)
+
+	// Verify stream is functional.
+	_, err = js.Publish("unique_ids.worker-1.verify", []byte("after-stretch-chaos"))
+	require_NoError(t, err)
+
+	si, _ = js.StreamInfo(streamName)
+	t.Logf("Final state: Msgs=%d, Deleted=%d, Leader=%s, Replicas=%d",
+		si.State.Msgs, si.State.NumDeleted, si.Cluster.Leader, len(si.Cluster.Replicas))
+
+	// Verify both servers are responsive.
+	nc2, err := nats.Connect(follower.ClientURL())
+	if err != nil {
+		t.Logf("Note: Follower %s not connectable: %v", followerName, err)
+	} else {
+		nc2.Close()
+		t.Logf("Follower %s is responsive (not deadlocked)", followerName)
+	}
+
+	nc3, err := nats.Connect(streamLeader.ClientURL())
+	if err != nil {
+		t.Logf("Note: Former leader %s not connectable: %v", leaderName, err)
+	} else {
+		nc3.Close()
+		t.Logf("Former leader %s is responsive", leaderName)
+	}
+}
