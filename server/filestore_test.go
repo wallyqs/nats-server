@@ -3580,6 +3580,116 @@ func TestFileStoreCompactReclaimHeadSpace(t *testing.T) {
 	})
 }
 
+func TestFileStoreCompactReclaimRecyclesPoolBuffer(t *testing.T) {
+	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
+		fcfg.BlockSize = 4 * 1024 * 1024
+		cfg := StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage}
+		created := time.Now()
+
+		// Phase 1: Write data, then stop to flush everything and let
+		// background goroutines (e.g. S2 recompression) finish.
+		// Use unique random data per message so that S2 cannot compress
+		// the payload, keeping the on-disk file close to uncompressed size
+		// and ensuring the head reclaim condition (rbytes > compactMinimum
+		// && bytes*2 < rbytes) is met for all permutations.
+		msg := make([]byte, 64*1024)
+		fs, err := newFileStoreWithCreated(fcfg, cfg, created, prf(&fcfg), nil)
+		require_NoError(t, err)
+		for i := 0; i < 100; i++ {
+			crand.Read(msg)
+			_, _, err := fs.StoreMsg("z", nil, msg, 0)
+			require_NoError(t, err)
+		}
+		fs.Stop()
+
+		// Phase 2: Reopen with original pools, then expire caches so
+		// compact must reload from disk.
+		fs, err = newFileStoreWithCreated(fcfg, cfg, created, prf(&fcfg), nil)
+		require_NoError(t, err)
+		defer fs.Stop()
+
+		fs.mu.RLock()
+		for _, mb := range fs.blks {
+			mb.mu.Lock()
+			mb.tryForceExpireCacheLocked()
+			mb.mu.Unlock()
+		}
+		fs.mu.RUnlock()
+
+		// Phase 3: Install debug hooks to track pool buffer Gets and
+		// Puts (recycles) per tier during compact. This approach is
+		// deterministic unlike probing the sync.Pool after the fact.
+		var getTiny, getSmall, getMedium, getBig atomic.Int64
+		var putTiny, putSmall, putMedium, putBig atomic.Int64
+		debugGetHook = func(sz int, buf []byte) {
+			switch cap(buf) {
+			case defaultTinyBlockSize:
+				getTiny.Add(1)
+			case defaultSmallBlockSize:
+				getSmall.Add(1)
+			case defaultMediumBlockSize:
+				getMedium.Add(1)
+			case defaultLargeBlockSize:
+				getBig.Add(1)
+			}
+		}
+		debugRecycleHook = func(buf []byte) {
+			switch cap(buf) {
+			case defaultTinyBlockSize:
+				putTiny.Add(1)
+			case defaultSmallBlockSize:
+				putSmall.Add(1)
+			case defaultMediumBlockSize:
+				putMedium.Add(1)
+			case defaultLargeBlockSize:
+				putBig.Add(1)
+			}
+		}
+
+		// Phase 4: Compact triggers head reclaim on the first block.
+		// >50% of block 1 consists of removed messages (1..32 of ~63).
+		// This exercises getMsgBlockBuf (for the copy buffer) and
+		// loadMsgsWithLock→loadBlock (which reads the block from disk).
+		_, err = fs.Compact(33)
+		require_NoError(t, err)
+		debugGetHook = nil
+		debugRecycleHook = nil
+
+		// Phase 5: Verify that every pool buffer obtained via
+		// getMsgBlockBuf was returned via recycleMsgBlockBuf.
+		// Check each tier independently.
+		type tierCheck struct {
+			name     string
+			gets     int64
+			puts     int64
+		}
+		tiers := []tierCheck{
+			{"tiny", getTiny.Load(), putTiny.Load()},
+			{"small", getSmall.Load(), putSmall.Load()},
+			{"medium", getMedium.Load(), putMedium.Load()},
+			{"big", getBig.Load(), putBig.Load()},
+		}
+		var totalGets, totalPuts int64
+		for _, tc := range tiers {
+			totalGets += tc.gets
+			totalPuts += tc.puts
+			if tc.gets != tc.puts {
+				t.Errorf("Pool buffer leak in %s tier: %d buffer(s) obtained but %d recycled (leaked %d)",
+					tc.name, tc.gets, tc.puts, tc.gets-tc.puts)
+			}
+		}
+		if totalGets == 0 {
+			t.Fatal("Expected pool Gets during compact, got 0")
+		}
+		t.Logf("Pool buffer balance: total gets=%d puts=%d (tiny=%d/%d small=%d/%d medium=%d/%d big=%d/%d)",
+			totalGets, totalPuts,
+			getTiny.Load(), putTiny.Load(),
+			getSmall.Load(), putSmall.Load(),
+			getMedium.Load(), putMedium.Load(),
+			getBig.Load(), putBig.Load())
+	})
+}
+
 func TestFileStoreRememberLastMsgTime(t *testing.T) {
 	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
 		var fs *fileStore

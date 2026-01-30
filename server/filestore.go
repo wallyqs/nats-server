@@ -996,23 +996,34 @@ var blkPoolBig = &sync.Pool{
 func getMsgBlockBuf(sz int) (buf []byte) {
 	switch {
 	case sz <= defaultTinyBlockSize:
-		return blkPoolTiny.Get().(*[defaultTinyBlockSize]byte)[:0]
+		buf = blkPoolTiny.Get().(*[defaultTinyBlockSize]byte)[:0]
 	case sz <= defaultSmallBlockSize:
-		return blkPoolSmall.Get().(*[defaultSmallBlockSize]byte)[:0]
+		buf = blkPoolSmall.Get().(*[defaultSmallBlockSize]byte)[:0]
 	case sz <= defaultMediumBlockSize:
-		return blkPoolMedium.Get().(*[defaultMediumBlockSize]byte)[:0]
+		buf = blkPoolMedium.Get().(*[defaultMediumBlockSize]byte)[:0]
 	case sz <= defaultLargeBlockSize:
-		return blkPoolBig.Get().(*[defaultLargeBlockSize]byte)[:0]
+		buf = blkPoolBig.Get().(*[defaultLargeBlockSize]byte)[:0]
 	default:
 		// Ideally this should not happen, once we return a buffer that's
 		// larger than defaultLargeBlockSize then we will refuse to recycle
 		// it to stop the pools from bloating excessively.
-		return make([]byte, 0, sz)
+		buf = make([]byte, 0, sz)
 	}
+	if debugGetHook != nil {
+		debugGetHook(sz, buf)
+	}
+	return buf
 }
+
+// Debug hooks for testing pool recycling.
+var debugRecycleHook func(buf []byte)
+var debugGetHook func(sz int, buf []byte)
 
 // Recycle the msg block.
 func recycleMsgBlockBuf(buf []byte) {
+	if debugRecycleHook != nil {
+		debugRecycleHook(buf)
+	}
 	switch cap(buf) {
 	case defaultTinyBlockSize:
 		b := (*[defaultTinyBlockSize]byte)(buf[0:defaultTinyBlockSize])
@@ -2229,12 +2240,15 @@ func (mb *msgBlock) lastChecksum() []byte {
 		return nil
 	}
 	if mb.bek != nil {
-		if buf, _ := mb.loadBlock(nil); len(buf) >= checksumSize {
+		buf, _ := mb.loadBlock(nil)
+		if len(buf) >= checksumSize {
 			if err = mb.encryptOrDecryptIfNeeded(buf); err != nil {
+				recycleMsgBlockBuf(buf)
 				return nil
 			}
 			copy(lchk[0:], buf[len(buf)-checksumSize:])
 		}
+		recycleMsgBlockBuf(buf)
 	} else {
 		f.ReadAt(lchk[:], int64(mb.rbytes)-checksumSize)
 	}
@@ -7776,8 +7790,13 @@ checkCache:
 		return err
 	}
 	// Check for compression.
+	loadBuf := buf
 	if buf, err = mb.decompressIfNeeded(buf); err != nil {
 		return err
+	}
+	// If decompression allocated a new buffer, recycle the original pool buffer.
+	if len(loadBuf) > 0 && len(buf) > 0 && &buf[0] != &loadBuf[0] {
+		recycleMsgBlockBuf(loadBuf)
 	}
 
 	if err := mb.indexCacheBuf(buf); err != nil {
@@ -9299,6 +9318,7 @@ func (fs *fileStore) compact(seq uint64) (uint64, error) {
 	var smv StoreMsg
 	var err error
 	var tombs []msgId
+	var compactBuf []byte
 
 	smb.mu.Lock()
 	if atomic.LoadUint64(&smb.first.seq) == seq {
@@ -9384,6 +9404,7 @@ func (fs *fileStore) compact(seq uint64) (uint64, error) {
 			buf := smb.cache.buf[moff:]
 			// Don't reuse, copy to new recycled buf.
 			nbuf := getMsgBlockBuf(len(buf))
+			compactBuf = nbuf // Track pool buffer for recycling at SKIP.
 			nbuf = append(nbuf, buf...)
 			smb.closeFDsLockedNoCheck()
 			// Check for encryption.
@@ -9427,6 +9448,7 @@ func (fs *fileStore) compact(seq uint64) (uint64, error) {
 	}
 
 SKIP:
+	recycleMsgBlockBuf(compactBuf)
 	smb.mu.Unlock()
 
 	// Write any tombstones as needed.
