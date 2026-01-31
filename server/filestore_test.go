@@ -3690,6 +3690,71 @@ func TestFileStoreCompactReclaimRecyclesPoolBuffer(t *testing.T) {
 	})
 }
 
+// Verify that lastChecksum recycles the pool buffer it obtains via
+// loadBlock when decrypting encrypted blocks. Before the fix, each call
+// to lastChecksum on an encrypted block leaked one pool buffer.
+func TestFileStoreLastChecksumRecyclesPoolBuffer(t *testing.T) {
+	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
+		fcfg.BlockSize = defaultMediumBlockSize
+		cfg := StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage}
+		created := time.Now()
+
+		fs, err := newFileStoreWithCreated(fcfg, cfg, created, prf(&fcfg), nil)
+		require_NoError(t, err)
+
+		// Write enough data to create a block with a valid checksum.
+		msg := make([]byte, 64*1024)
+		crand.Read(msg)
+		for i := 0; i < 10; i++ {
+			_, _, err := fs.StoreMsg("z", nil, msg, 0)
+			require_NoError(t, err)
+		}
+
+		// Stop and reopen so all state is flushed and clean.
+		fs.Stop()
+		fs, err = newFileStoreWithCreated(fcfg, cfg, created, prf(&fcfg), nil)
+		require_NoError(t, err)
+		defer fs.Stop()
+
+		fs.mu.RLock()
+		mb := fs.blks[0]
+		fs.mu.RUnlock()
+
+		// Zero out lchk so ensureLastChecksumLoaded will call lastChecksum.
+		mb.mu.Lock()
+		mb.tryForceExpireCacheLocked()
+		mb.lchk = [8]byte{}
+		mb.mu.Unlock()
+
+		// Install debug hooks.
+		var gets, puts atomic.Int64
+		debugGetHook = func(sz int, buf []byte) { gets.Add(1) }
+		debugRecycleHook = func(buf []byte) { puts.Add(1) }
+
+		// Trigger lastChecksum via ensureLastChecksumLoaded.
+		mb.mu.Lock()
+		mb.ensureLastChecksumLoaded()
+		mb.mu.Unlock()
+
+		debugGetHook = nil
+		debugRecycleHook = nil
+
+		g, p := gets.Load(), puts.Load()
+		if mb.bek != nil {
+			// Encrypted: lastChecksum must loadBlock (1 get) and recycle it (1 put).
+			if g != 1 || p != 1 {
+				t.Fatalf("Encrypted lastChecksum: expected 1 get and 1 put, got gets=%d puts=%d", g, p)
+			}
+		} else {
+			// Unencrypted: lastChecksum uses ReadAt, no pool buffer needed.
+			if g != 0 || p != 0 {
+				t.Fatalf("Unencrypted lastChecksum: expected 0 gets and 0 puts, got gets=%d puts=%d", g, p)
+			}
+		}
+		t.Logf("lastChecksum pool balance: gets=%d puts=%d (encrypted=%v)", g, p, mb.bek != nil)
+	})
+}
+
 func TestFileStoreRememberLastMsgTime(t *testing.T) {
 	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
 		var fs *fileStore
