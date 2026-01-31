@@ -12759,3 +12759,56 @@ func TestFileStoreCompactRecyclesPoolBuf(t *testing.T) {
 		}
 	})
 }
+
+// Test that lastChecksum recycles the pooled buffer obtained via loadBlock
+// back to the pool. When encryption is enabled (mb.bek != nil), lastChecksum
+// loads the entire block into a pool-allocated buffer to decrypt it.
+// Previously the buffer was never recycled.
+func TestFileStoreLastChecksumRecyclesPoolBuf(t *testing.T) {
+	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
+		fcfg.BlockSize = defaultSmallBlockSize // 1MB blocks.
+		cfg := StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage}
+		fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), prf(&fcfg), nil)
+		require_NoError(t, err)
+		defer fs.Stop()
+
+		// Write enough to fill at least 2 blocks so the first block is
+		// inactive and flushed to disk.
+		msg := make([]byte, 8*1024) // 8KB messages.
+		for i := 0; i < 256; i++ {
+			crand.Read(msg)
+			_, _, err = fs.StoreMsg("foo", nil, msg, 0)
+			require_NoError(t, err)
+		}
+		require_True(t, fs.numMsgBlocks() >= 2)
+
+		mb := fs.getFirstBlock()
+
+		// Check whether this permutation has encryption enabled.
+		mb.mu.Lock()
+		encrypted := mb.bek != nil
+		mb.mu.Unlock()
+
+		// The pool buffer path in lastChecksum only runs for encrypted
+		// blocks, so only encrypted permutations can verify recycling.
+		if !encrypted {
+			return
+		}
+
+		// Drain pool so we start from a known empty state.
+		drainBlkPool()
+
+		// Call lastChecksum which loads the entire block via loadBlock(nil)
+		// into a pool-allocated buffer to decrypt and extract the checksum.
+		mb.mu.Lock()
+		mb.lastChecksum()
+		mb.mu.Unlock()
+
+		// The buffer obtained via getMsgBlockBuf in loadBlock should have
+		// been recycled back to the pool.
+		if !blkPoolGet(blkPoolTiny) && !blkPoolGet(blkPoolSmall) &&
+			!blkPoolGet(blkPoolMedium) && !blkPoolGet(blkPoolBig) {
+			t.Fatalf("lastChecksum did not recycle pooled buffer back to any pool")
+		}
+	})
+}
