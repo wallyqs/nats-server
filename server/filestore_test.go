@@ -12657,3 +12657,105 @@ func TestFileStoreDeleteBlocksWithManyEmptyBlocks(t *testing.T) {
 		&DeleteRange{First: 2, Num: 13},
 	})
 }
+
+// drainBlkPool removes all items from the given sync.Pool by running GC twice.
+// sync.Pool items move to the victim cache on the first GC and are collected
+// on the second.
+func drainBlkPool() {
+	runtime.GC()
+	runtime.GC()
+}
+
+// blkPoolGet attempts to get an item from the given pool without triggering
+// the New function. Returns true if a recycled buffer was available.
+func blkPoolGet(pool *sync.Pool) bool {
+	origNew := pool.New
+	pool.New = nil
+	item := pool.Get()
+	pool.New = origNew
+	if item != nil {
+		// Put it back so we don't disturb the pool.
+		pool.Put(item)
+		return true
+	}
+	return false
+}
+
+// Test that fileStore.compact recycles the pooled working buffer back to the
+// pool. Previously there was no recycleMsgBlockBuf call at all in the
+// head-reclaim code path. When S2 compression is active, Compress() returns
+// a new allocation and reassigns nbuf, orphaning the original pooled buffer.
+// Without compression, the same pooled buffer flows through but was still
+// never returned to the pool.
+func TestFileStoreCompactRecyclesPoolBuf(t *testing.T) {
+	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
+		fcfg.BlockSize = defaultMediumBlockSize // 4MB blocks.
+		cfg := StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage}
+		fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), prf(&fcfg), nil)
+		require_NoError(t, err)
+		defer fs.Stop()
+
+		// Use unique random data per message to prevent S2 from compressing
+		// effectively, ensuring that rbytes (on-disk size) stays above
+		// compactMinimum (2MB) even after compression.
+		msg := make([]byte, 8*1024)
+
+		// Write enough to fill at least 2 blocks (~500 msgs per 4MB block).
+		for i := 0; i < 1100; i++ {
+			crand.Read(msg)
+			_, _, err = fs.StoreMsg("foo", nil, msg, 0)
+			require_NoError(t, err)
+		}
+		require_True(t, fs.numMsgBlocks() >= 2)
+
+		// When compression is enabled, wait for the first block to be
+		// compressed on disk so the head-reclaim path exercises the
+		// Compress() call (which reassigns nbuf).
+		mb := fs.getFirstBlock()
+		if fcfg.Compression != NoCompression {
+			checkFor(t, 5*time.Second, 50*time.Millisecond, func() error {
+				mb.mu.RLock()
+				cmp := mb.cmp
+				mb.mu.RUnlock()
+				if cmp == NoCompression {
+					return fmt.Errorf("first block not yet compressed")
+				}
+				return nil
+			})
+		}
+
+		// Calculate a compact target that removes ~80% of the first block's
+		// messages so the head-reclaim path triggers (requires bytes*2 < rbytes
+		// and rbytes > compactMinimum).
+		mb.mu.RLock()
+		firstSeq := atomic.LoadUint64(&mb.first.seq)
+		lastSeq := atomic.LoadUint64(&mb.last.seq)
+		rbytes := mb.rbytes
+		mbBytes := mb.bytes
+		mb.mu.RUnlock()
+		totalMsgs := lastSeq - firstSeq + 1
+		compactSeq := firstSeq + (totalMsgs * 80 / 100)
+
+		// Verify the head-reclaim conditions will be met after deletion.
+		expectedBytes := mbBytes * 20 / 100
+		require_True(t, rbytes > compactMinimum)
+		require_True(t, expectedBytes*2 < rbytes)
+
+		// Drain pool so we start from a known empty state.
+		drainBlkPool()
+
+		// Compact up to compactSeq. This triggers the head-reclaim path in
+		// fileStore.compact(), which allocates a pool buffer for the
+		// rewritten block data.
+		purged, err := fs.Compact(compactSeq)
+		require_NoError(t, err)
+		require_True(t, purged > 0)
+
+		// The buffer obtained via getMsgBlockBuf in the head-reclaim path
+		// should have been recycled back to the pool.
+		if !blkPoolGet(blkPoolTiny) && !blkPoolGet(blkPoolSmall) &&
+			!blkPoolGet(blkPoolMedium) && !blkPoolGet(blkPoolBig) {
+			t.Fatalf("fileStore.compact did not recycle pooled buffer back to any pool")
+		}
+	})
+}
