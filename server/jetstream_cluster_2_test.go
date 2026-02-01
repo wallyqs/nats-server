@@ -5431,6 +5431,88 @@ func TestJetStreamClusterNewHealthz(t *testing.T) {
 	c.waitOnServerHealthz(sl)
 }
 
+func TestJetStreamClusterHealthzInaccessibleConsumer(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "JSC", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Create an R3 stream.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Create an R1 consumer so it lives on exactly one server.
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "consumer",
+		AckPolicy: nats.AckExplicitPolicy,
+		Replicas:  1,
+	})
+	require_NoError(t, err)
+
+	c.waitOnConsumerLeader("$G", "TEST", "consumer")
+
+	// Find the server hosting the R1 consumer.
+	cl := c.consumerLeader("$G", "TEST", "consumer")
+	require_True(t, cl != nil)
+
+	// Pick a server that is NOT the consumer leader to run healthz on.
+	var healthSrv *Server
+	for _, s := range c.servers {
+		if s != cl {
+			healthSrv = s
+			break
+		}
+	}
+	require_True(t, healthSrv != nil)
+
+	// Before shutdown, healthz with consumers=true should be ok.
+	hs := healthSrv.healthz(&HealthzOptions{Consumers: true, Details: true})
+	require_Equal(t, hs.Status, "ok")
+	for _, e := range hs.Errors {
+		if e.Type == HealthzErrorInaccessibleConsumer {
+			t.Fatalf("Did not expect inaccessible consumer errors, got: %+v", e)
+		}
+	}
+
+	// Shut down the consumer leader.
+	cl.Shutdown()
+	cl.WaitForShutdown()
+
+	// Wait for the remaining servers to detect the shutdown.
+	// The nodeToInfo will be updated when the shutdown event is processed.
+	checkFor(t, 10*time.Second, 250*time.Millisecond, func() error {
+		hs := healthSrv.healthz(&HealthzOptions{Consumers: true, Details: true})
+		for _, e := range hs.Errors {
+			if e.Type == HealthzErrorInaccessibleConsumer {
+				return nil
+			}
+		}
+		return fmt.Errorf("expected inaccessible consumer error, got status=%s errors=%+v", hs.Status, hs.Errors)
+	})
+
+	// Verify the details of the error.
+	hs = healthSrv.healthz(&HealthzOptions{Consumers: true, Details: true})
+	var found bool
+	for _, e := range hs.Errors {
+		if e.Type == HealthzErrorInaccessibleConsumer && e.Stream == "TEST" && e.Consumer == "consumer" {
+			found = true
+			break
+		}
+	}
+	require_True(t, found)
+	require_Equal(t, hs.Status, "error")
+
+	// Also test without details - should get a single error.
+	hs = healthSrv.healthz(&HealthzOptions{Consumers: true})
+	require_Equal(t, hs.Status, "unavailable")
+	require_Contains(t, hs.Error, "inaccessible")
+}
+
 func TestJetStreamClusterConsumerOverrides(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "JSC", 3)
 	defer c.shutdown()

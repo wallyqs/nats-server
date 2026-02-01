@@ -2950,6 +2950,7 @@ type HealthzOptions struct {
 	Account       string `json:"account,omitempty"`
 	Stream        string `json:"stream,omitempty"`
 	Consumer      string `json:"consumer,omitempty"`
+	Consumers     bool   `json:"consumers,omitempty"`
 	Details       bool   `json:"details,omitempty"`
 }
 
@@ -3429,6 +3430,7 @@ const (
 	HealthzErrorAccount
 	HealthzErrorStream
 	HealthzErrorConsumer
+	HealthzErrorInaccessibleConsumer
 )
 
 func (t HealthZErrorType) String() string {
@@ -3445,6 +3447,8 @@ func (t HealthZErrorType) String() string {
 		return "STREAM"
 	case HealthzErrorConsumer:
 		return "CONSUMER"
+	case HealthzErrorInaccessibleConsumer:
+		return "INACCESSIBLE_CONSUMER"
 	default:
 		return "unknown"
 	}
@@ -3468,6 +3472,8 @@ func (t *HealthZErrorType) UnmarshalJSON(data []byte) error {
 		*t = HealthzErrorStream
 	case `"CONSUMER"`:
 		*t = HealthzErrorConsumer
+	case `"INACCESSIBLE_CONSUMER"`:
+		*t = HealthzErrorInaccessibleConsumer
 	default:
 		return fmt.Errorf("unknown healthz error type %q", data)
 	}
@@ -3504,6 +3510,10 @@ func (s *Server) HandleHealthz(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	consumers, err := decodeBool(w, r, "consumers")
+	if err != nil {
+		return
+	}
 
 	hs := s.healthz(&HealthzOptions{
 		JSEnabled:     jsEnabled,
@@ -3513,6 +3523,7 @@ func (s *Server) HandleHealthz(w http.ResponseWriter, r *http.Request) {
 		Account:       r.URL.Query().Get("account"),
 		Stream:        r.URL.Query().Get("stream"),
 		Consumer:      r.URL.Query().Get("consumer"),
+		Consumers:     consumers,
 		Details:       includeDetails,
 	})
 
@@ -4007,6 +4018,63 @@ func (s *Server) healthz(opts *HealthzOptions) *HealthStatus {
 			}
 		}
 	}
+
+	// Check for inaccessible consumers across all streams in the metadata.
+	// An inaccessible consumer is one that exists in the consumer names metadata
+	// but all peers in its raft group are offline, meaning no server can serve it.
+	if opts.Consumers {
+		type consumerCheck struct {
+			accName  string
+			stream   string
+			consumer string
+			group    *raftGroup
+		}
+		var checks []consumerCheck
+
+		js.mu.RLock()
+		for accName, asa := range cc.streams {
+			if opts.Account != _EMPTY_ && accName != opts.Account {
+				continue
+			}
+			for stream, sa := range asa {
+				if opts.Stream != _EMPTY_ && stream != opts.Stream {
+					continue
+				}
+				for consumer, ca := range sa.consumers {
+					if opts.Consumer != _EMPTY_ && consumer != opts.Consumer {
+						continue
+					}
+					if ca.Group != nil {
+						checks = append(checks, consumerCheck{
+							accName:  accName,
+							stream:   stream,
+							consumer: consumer,
+							group:    ca.Group,
+						})
+					}
+				}
+			}
+		}
+		js.mu.RUnlock()
+
+		for _, c := range checks {
+			if s.allPeersOffline(c.group) {
+				if !details {
+					health.Status = na
+					health.Error = fmt.Sprintf("JetStream consumer '%s > %s > %s' is inaccessible", c.accName, c.stream, c.consumer)
+					return health
+				}
+				health.Errors = append(health.Errors, HealthzError{
+					Type:     HealthzErrorInaccessibleConsumer,
+					Account:  c.accName,
+					Stream:   c.stream,
+					Consumer: c.consumer,
+					Error:    fmt.Sprintf("JetStream consumer '%s > %s > %s' is inaccessible", c.accName, c.stream, c.consumer),
+				})
+			}
+		}
+	}
+
 	// Success.
 	return health
 }
