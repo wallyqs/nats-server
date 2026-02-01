@@ -12657,3 +12657,61 @@ func TestFileStoreDeleteBlocksWithManyEmptyBlocks(t *testing.T) {
 		&DeleteRange{First: 2, Num: 13},
 	})
 }
+
+// Test that the recovery path correctly holds the lock when checking
+// prior.LastSeq > fs.state.LastSeq after a fallback from recoverFullState
+// to recoverMsgs. This exercises the fix for the filestore race during
+// recovery (PR #7783).
+func TestFileStoreRecoverFallbackHoldsLock(t *testing.T) {
+	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
+		cfg := StreamConfig{Name: "zzz", Subjects: []string{"foo"}, Storage: FileStorage}
+		created := time.Now()
+		fcfg.BlockSize = 512
+		fs, err := newFileStoreWithCreated(fcfg, cfg, created, prf(&fcfg), nil)
+		require_NoError(t, err)
+
+		msg := bytes.Repeat([]byte("A"), 100)
+		toStore := 50
+		for i := 0; i < toStore; i++ {
+			_, _, err := fs.StoreMsg("foo", nil, msg, 0)
+			require_NoError(t, err)
+		}
+
+		var ss StreamState
+		fs.FastState(&ss)
+		require_Equal(t, ss.Msgs, uint64(toStore))
+
+		// Make sure we have multiple blocks.
+		fs.mu.RLock()
+		nblks := len(fs.blks)
+		lastBlkMfn := fs.lmb.mfn
+		fs.mu.RUnlock()
+		require_True(t, nblks > 1)
+
+		// Write out the full state so the index.db has our LastSeq.
+		require_NoError(t, fs.writeFullState())
+		fs.Stop()
+
+		// Remove the last block file. This will cause recoverFullState to
+		// return errPriorState because the block referenced by the index
+		// is missing. The fallback to recoverMsgs will find a lower LastSeq
+		// since the last block's messages are gone. The prior.LastSeq check
+		// (now under lock) should preserve the correct LastSeq.
+		require_NoError(t, os.Remove(lastBlkMfn))
+
+		// Reopen. This triggers the recovery fallback path.
+		fs, err = newFileStoreWithCreated(fcfg, cfg, created, prf(&fcfg), nil)
+		require_NoError(t, err)
+		defer fs.Stop()
+
+		// Verify that LastSeq was preserved from the prior state (index.db)
+		// even though the last block was missing.
+		fs.FastState(&ss)
+		require_Equal(t, ss.LastSeq, uint64(toStore))
+
+		// The missing block's messages should be recorded as lost.
+		ld := fs.lostData()
+		require_True(t, ld != nil)
+		require_True(t, len(ld.Msgs) > 0)
+	})
+}
