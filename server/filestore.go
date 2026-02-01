@@ -9726,8 +9726,10 @@ func (fs *fileStore) Truncate(seq uint64) error {
 
 	// If the selected block is not found or the message was deleted, we'll need to write a tombstone
 	// at the truncated sequence so we don't roll backward on our last sequence and timestamp.
+	var hasWrittenTombstones bool
 	if lsm == nil || removeSmb {
 		fs.writeTombstone(seq, lastTime)
+		hasWrittenTombstones = true
 	}
 
 	var purged, bytes uint64
@@ -9756,6 +9758,7 @@ func (fs *fileStore) Truncate(seq uint64) error {
 			for _, tomb := range tombs {
 				if tomb.seq < seq {
 					fs.writeTombstone(tomb.seq, tomb.ts)
+					hasWrittenTombstones = true
 				}
 			}
 			mb.mu.Lock()
@@ -9764,7 +9767,6 @@ func (fs *fileStore) Truncate(seq uint64) error {
 		mb.mu.Unlock()
 	}
 
-	hasWrittenTombstones := len(tmb.tombs()) > 0
 	if smb != nil {
 		smb.mu.Lock()
 		if removeSmb {
@@ -9778,6 +9780,7 @@ func (fs *fileStore) Truncate(seq uint64) error {
 				for _, tomb := range tombs {
 					if tomb.seq < seq {
 						fs.writeTombstone(tomb.seq, tomb.ts)
+						hasWrittenTombstones = true
 					}
 				}
 				smb.mu.Lock()
