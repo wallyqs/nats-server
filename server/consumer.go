@@ -6439,13 +6439,22 @@ func (o *consumer) isMonitorRunning() bool {
 var errAckFloorHigherThanLastSeq = errors.New("consumer ack floor is higher than streams last sequence")
 var errAckFloorInvalid = errors.New("consumer ack floor is invalid")
 
-// Maximum number of messages to process per invocation of checkStateForInterestStream.
-// This limits the number of raft delete proposals generated in a single call, preventing
-// memory spikes from flooding the raft pipeline. The chkflr mechanism ensures forward
-// progress across periodic invocations.
-const defaultMaxInterestCheckBatch = 200_000
+// Adaptive limits for checkStateForInterestStream to prevent memory spikes from
+// flooding the raft pipeline with delete proposals. The chkflr mechanism ensures
+// forward progress across periodic invocations.
+const (
+	defaultMaxInterestCheckBatch  = 200_000
+	defaultMaxInterestCheckTime   = 2 * time.Second
+	defaultInterestCheckInterval  = 1_000
+	defaultMaxInterestRaftPending = 50_000
+)
 
-var maxInterestCheckBatch = defaultMaxInterestCheckBatch
+var (
+	maxInterestCheckBatch  = defaultMaxInterestCheckBatch
+	maxInterestCheckTime   = defaultMaxInterestCheckTime
+	interestCheckInterval  = defaultInterestCheckInterval
+	maxInterestRaftPending = uint64(defaultMaxInterestRaftPending)
+)
 
 // If we are a consumer of an interest or workqueue policy stream, process that state and make sure consistent.
 func (o *consumer) checkStateForInterestStream(ss *StreamState) error {
@@ -6467,6 +6476,8 @@ func (o *consumer) checkStateForInterestStream(ss *StreamState) error {
 	}
 	chkfloor := o.chkflr
 	o.mu.RUnlock()
+
+	node := mset.raftNode()
 
 	if err != nil {
 		return err
@@ -6500,6 +6511,7 @@ func (o *consumer) checkStateForInterestStream(ss *StreamState) error {
 
 	var retryAsflr uint64
 	var processed int
+	started := time.Now()
 	for seq = fseq; dflr > 0 && seq <= dflr; seq++ {
 		if filters != nil {
 			_, nseq, err = store.LoadNextMsgMulti(filters, seq, &smv)
@@ -6539,6 +6551,24 @@ func (o *consumer) checkStateForInterestStream(ss *StreamState) error {
 					retryAsflr = seq + 1
 				}
 				break
+			}
+			// Periodically check time budget and raft backpressure.
+			if processed%interestCheckInterval == 0 {
+				if time.Since(started) >= maxInterestCheckTime {
+					if retryAsflr == 0 {
+						retryAsflr = seq + 1
+					}
+					break
+				}
+				if node != nil {
+					index, _, applied := node.Progress()
+					if index > applied && (index-applied) > maxInterestRaftPending {
+						if retryAsflr == 0 {
+							retryAsflr = seq + 1
+						}
+						break
+					}
+				}
 			}
 		} else if err == ErrStoreEOF {
 			break
