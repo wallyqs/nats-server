@@ -3636,16 +3636,40 @@ func TestNRGRaftzWALPendingBytes(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
 
-	s := c.leader()
-	status := s.Raftz(&RaftzOptions{})
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	msg := []byte("Hello JS Clustering")
+	for i := 0; i < 100; i++ {
+		_, err = js.Publish("foo", msg)
+		require_NoError(t, err)
+	}
+
+	sl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, sl)
+
+	status := sl.Raftz(&RaftzOptions{AccountFilter: globalAccountName})
 	require_NotNil(t, status)
 
-	groups, ok := (*status)[DEFAULT_SYSTEM_ACCOUNT]
+	groups, ok := (*status)[globalAccountName]
 	require_True(t, ok)
 
-	mg, ok := groups[defaultMetaGroupName]
-	require_True(t, ok)
-	require_True(t, mg.WALPendingBytes > 0)
+	// Find the stream's raft group and check WALPendingBytes.
+	var found bool
+	for _, g := range groups {
+		if g.WALPendingBytes > 0 {
+			found = true
+			break
+		}
+	}
+	require_True(t, found)
 }
 
 func TestNRGTrackPeerActive(t *testing.T) {
