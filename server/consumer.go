@@ -6446,7 +6446,7 @@ const (
 	defaultMaxInterestCheckBatch  = 200_000
 	defaultMaxInterestCheckTime   = 2 * time.Second
 	defaultInterestCheckInterval  = 1_000
-	defaultMaxInterestRaftPending = 50_000
+	defaultMaxInterestRaftPending = 1_000_000
 )
 
 var (
