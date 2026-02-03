@@ -7315,6 +7315,8 @@ func (mset *stream) checkInterestState() {
 	}
 	defer mset.cisrun.Store(false)
 
+	start := time.Now()
+
 	var ss StreamState
 	mset.store.FastState(&ss)
 
@@ -7333,6 +7335,11 @@ func (mset *stream) checkInterestState() {
 	// Remove as many messages from the "head" of the stream if there's no interest anymore.
 	if rp == InterestPolicy && asflr != math.MaxUint64 {
 		mset.store.Compact(asflr)
+	}
+
+	took := time.Since(start)
+	if took > 2*time.Second {
+		mset.srv.Warnf("Interest state check for stream '%s > %s' took %v", mset.account(), mset.name(), took.Round(time.Millisecond))
 	}
 }
 
