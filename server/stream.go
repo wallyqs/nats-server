@@ -486,7 +486,8 @@ type stream struct {
 	clfs            uint64            // The count (offset) of the number of failed NRG sequences used to compute clseq.
 	pendingAvg      int64             // Rolling average of pending replication count (scaled by 1000).
 	pendingAvgSize  int64             // Rolling average of pending replication size in bytes (scaled by 1000).
-	pendingAvgReady bool              // True after first EMA sample has been recorded.
+	pendingAvgReady      bool          // True after first EMA sample has been recorded.
+	pendingAvgLastUpdate time.Time     // Time of last EMA sample.
 	lqsent          time.Time         // The time at which the last lost quorum advisory was sent. Used to rate limit.
 
 	// Cumulative ingest counters - these only increase and are not affected by message deletion/purge.
@@ -1386,12 +1387,40 @@ func (mset *stream) updatePendingAvg(pending uint64, pendingSize uint64) {
 		mset.pendingAvg = (emaAlpha*pendingScaled + (emaScale-emaAlpha)*mset.pendingAvg) / emaScale
 		mset.pendingAvgSize = (emaAlpha*sizeScaled + (emaScale-emaAlpha)*mset.pendingAvgSize) / emaScale
 	}
+	mset.pendingAvgLastUpdate = time.Now()
+}
+
+// decayPendingAvg applies time-based decay to the pending averages when
+// no new samples have been recorded. For each elapsed interval without
+// traffic the EMA is multiplied by (1-α), equivalent to feeding in
+// zero-value samples. clMu must be held when calling this function.
+func (mset *stream) decayPendingAvg() {
+	if !mset.pendingAvgReady {
+		return
+	}
+	now := time.Now()
+	elapsed := now.Sub(mset.pendingAvgLastUpdate)
+	const decayInterval = time.Second
+	n := int(elapsed / decayInterval)
+	if n == 0 {
+		return
+	}
+	if n > 50 {
+		mset.pendingAvg = 0
+		mset.pendingAvgSize = 0
+	} else {
+		factor := math.Pow(0.9, float64(n))
+		mset.pendingAvg = int64(float64(mset.pendingAvg) * factor)
+		mset.pendingAvgSize = int64(float64(mset.pendingAvgSize) * factor)
+	}
+	mset.pendingAvgLastUpdate = now
 }
 
 // getPendingAvg returns the rolling average of pending replication.
 func (mset *stream) getPendingAvg() float64 {
 	mset.clMu.Lock()
 	defer mset.clMu.Unlock()
+	mset.decayPendingAvg()
 	return float64(mset.pendingAvg) / 1000.0
 }
 
@@ -1399,6 +1428,7 @@ func (mset *stream) getPendingAvg() float64 {
 func (mset *stream) getPendingAvgSize() float64 {
 	mset.clMu.Lock()
 	defer mset.clMu.Unlock()
+	mset.decayPendingAvg()
 	return float64(mset.pendingAvgSize) / 1000.0
 }
 
