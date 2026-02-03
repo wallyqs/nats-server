@@ -3939,6 +3939,17 @@ func (o *consumer) nextWaiting(sz int) *waitingRequest {
 		priorityGroup = o.cfg.PriorityGroups[0]
 	}
 
+	// Track the currently read-locked sublist to batch interest checks
+	// and avoid per-request RLock/RUnlock contention.
+	var lockedSL *Sublist
+	unlockSL := func() {
+		if lockedSL != nil {
+			lockedSL.RUnlock()
+			lockedSL = nil
+		}
+	}
+	defer unlockSL()
+
 	numCycled := 0
 	for wr := o.waiting.peek(); !o.waiting.isEmpty(); wr = o.waiting.peek() {
 		if wr == nil {
@@ -4024,7 +4035,13 @@ func (o *consumer) nextWaiting(sz int) *waitingRequest {
 					continue
 				}
 			}
-			if wr.acc.sl.HasInterest(wr.interest) {
+			sl := wr.acc.sl
+			if sl != lockedSL {
+				unlockSL()
+				sl.RLock()
+				lockedSL = sl
+			}
+			if sl.hasInterest(wr.interest, false, nil, nil) {
 				if needNewPin {
 					o.sendPinnedAdvisoryLocked(priorityGroup)
 				}
@@ -4531,6 +4548,19 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 		return next
 	}
 
+	// Track the currently read-locked sublist to batch interest checks.
+	// This avoids per-request RLock/RUnlock on the sublist which causes
+	// severe cache-line contention on multi-core machines when many
+	// consumers check interest concurrently.
+	var lockedSL *Sublist
+	unlockSL := func() {
+		if lockedSL != nil {
+			lockedSL.RUnlock()
+			lockedSL = nil
+		}
+	}
+	defer unlockSL()
+
 	var pre *waitingRequest
 	for wr := wq.head; wr != nil; {
 		// Check expiration.
@@ -4566,7 +4596,14 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 			}
 		}
 		// Now check interest.
-		interest := wr.acc.sl.HasInterest(wr.interest)
+		// Hold the sublist read lock across iterations to batch checks.
+		sl := wr.acc.sl
+		if sl != lockedSL {
+			unlockSL()
+			sl.RLock()
+			lockedSL = sl
+		}
+		interest := sl.hasInterest(wr.interest, false, nil, nil)
 		if !interest && (s.leafNodeEnabled || s.gateway.enabled) {
 			// If we are here check on gateways and leaf nodes (as they can mask gateways on the other end).
 			// If we have interest or the request is too young break and do not expire.
