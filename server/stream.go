@@ -275,12 +275,13 @@ type CounterSources map[string]map[string]string
 
 // StreamStats contains cumulative statistics for a stream.
 type StreamStats struct {
-	InMsgs      uint64  `json:"in_msgs"`               // Total messages ever published to this stream (only increases).
-	InBytes     uint64  `json:"in_bytes"`              // Total bytes ever published to this stream (only increases).
-	InQueueLen  int     `json:"in_queue_len"`          // Current number of messages in the ingest queue.
-	InQueueMax  int     `json:"in_queue_max"`          // Max capacity of the ingest queue.
-	InQueueSize uint64  `json:"in_queue_size"`         // Current size in bytes of the ingest queue.
-	PendingAvg  float64 `json:"pending_avg,omitempty"` // Rolling average of pending replication.
+	InMsgs         uint64  `json:"in_msgs"`                    // Total messages ever published to this stream (only increases).
+	InBytes        uint64  `json:"in_bytes"`                   // Total bytes ever published to this stream (only increases).
+	InQueueLen     int     `json:"in_queue_len"`               // Current number of messages in the ingest queue.
+	InQueueMax     int     `json:"in_queue_max"`               // Max capacity of the ingest queue.
+	InQueueSize    uint64  `json:"in_queue_size"`              // Current size in bytes of the ingest queue.
+	PendingAvg     float64 `json:"pending_avg,omitempty"`      // Rolling average of pending replication.
+	PendingAvgSize float64 `json:"pending_avg_size,omitempty"` // Rolling average of pending replication size in bytes.
 }
 
 // StreamInfo shows config and current state for this stream.
@@ -472,23 +473,25 @@ type stream struct {
 
 	// TODO(dlc) - Hide everything below behind two pointers.
 	// Clustered mode.
-	sa        *streamAssignment // What the meta controller uses to assign streams to peers.
-	node      RaftNode          // Our RAFT node for the stream's group.
-	catchup   atomic.Bool       // Used to signal we are in catchup mode.
-	catchups  map[string]uint64 // The number of messages that need to be caught per peer.
-	syncSub   *subscription     // Internal subscription for sync messages (on "$JSC.SYNC").
-	infoSub   *subscription     // Internal subscription for stream info requests.
-	clMu       sync.Mutex        // The mutex for clseq and clfs.
-	clseq      uint64            // The current last seq being proposed to the NRG layer.
-	clfs       uint64            // The count (offset) of the number of failed NRG sequences used to compute clseq.
-	pendingAvg int64             // Rolling average of pending replication (scaled by 1000 for precision).
-	lqsent     time.Time         // The time at which the last lost quorum advisory was sent. Used to rate limit.
+	sa              *streamAssignment // What the meta controller uses to assign streams to peers.
+	node            RaftNode          // Our RAFT node for the stream's group.
+	catchup         atomic.Bool       // Used to signal we are in catchup mode.
+	catchups        map[string]uint64 // The number of messages that need to be caught per peer.
+	syncSub         *subscription     // Internal subscription for sync messages (on "$JSC.SYNC").
+	infoSub         *subscription     // Internal subscription for stream info requests.
+	clMu            sync.Mutex        // The mutex for clseq and clfs.
+	clseq           uint64            // The current last seq being proposed to the NRG layer.
+	clfs            uint64            // The count (offset) of the number of failed NRG sequences used to compute clseq.
+	pendingAvg      int64             // Rolling average of pending replication count (scaled by 1000).
+	pendingAvgSize  int64             // Rolling average of pending replication size in bytes (scaled by 1000).
+	pendingAvgReady bool              // True after first EMA sample has been recorded.
+	lqsent          time.Time         // The time at which the last lost quorum advisory was sent. Used to rate limit.
 
 	// Cumulative ingest counters - these only increase and are not affected by message deletion/purge.
-	inMsgs  atomic.Uint64 // Total messages ever published to this stream.
-	inBytes atomic.Uint64 // Total bytes ever published to this stream.
-	uch       chan struct{}     // The channel to signal updates to the monitor routine.
-	inMonitor bool              // True if the monitor routine has been started.
+	inMsgs    atomic.Uint64 // Total messages ever published to this stream.
+	inBytes   atomic.Uint64 // Total bytes ever published to this stream.
+	uch       chan struct{} // The channel to signal updates to the monitor routine.
+	inMonitor bool          // True if the monitor routine has been started.
 
 	inflight                    map[string]*inflightSubjectRunningTotal // Inflight message sizes per subject.
 	clusteredCounterTotal       map[string]*msgCounterRunningTotal      // Inflight counter totals.
@@ -1367,19 +1370,20 @@ func (mset *stream) setCLFS(clfs uint64) {
 //
 // The average is stored scaled by 1000 for precision in atomic integer operations.
 // clMu must be held when calling this function.
-func (mset *stream) updatePendingAvg(pending uint64) {
+func (mset *stream) updatePendingAvg(pending uint64, pendingSize uint64) {
 	const emaScale int64 = 1000
 	const emaAlpha int64 = 100 // α=0.1 scaled by 1000
 	pendingScaled := int64(pending) * emaScale
+	sizeScaled := int64(pendingSize) * emaScale
 
-	oldAvg := mset.pendingAvg
-	var newAvg int64
-	if oldAvg == 0 {
-		newAvg = pendingScaled
+	if !mset.pendingAvgReady {
+		mset.pendingAvg = pendingScaled
+		mset.pendingAvgSize = sizeScaled
+		mset.pendingAvgReady = true
 	} else {
-		newAvg = (emaAlpha*pendingScaled + (emaScale-emaAlpha)*oldAvg) / emaScale
+		mset.pendingAvg = (emaAlpha*pendingScaled + (emaScale-emaAlpha)*mset.pendingAvg) / emaScale
+		mset.pendingAvgSize = (emaAlpha*sizeScaled + (emaScale-emaAlpha)*mset.pendingAvgSize) / emaScale
 	}
-	mset.pendingAvg = newAvg
 }
 
 // getPendingAvg returns the rolling average of pending replication.
@@ -1387,6 +1391,13 @@ func (mset *stream) getPendingAvg() float64 {
 	mset.clMu.Lock()
 	defer mset.clMu.Unlock()
 	return float64(mset.pendingAvg) / 1000.0
+}
+
+// getPendingAvgSize returns the rolling average of pending replication size in bytes.
+func (mset *stream) getPendingAvgSize() float64 {
+	mset.clMu.Lock()
+	defer mset.clMu.Unlock()
+	return float64(mset.pendingAvgSize) / 1000.0
 }
 
 // ingestTotals returns the cumulative total messages and bytes ever published to this stream.
@@ -1407,12 +1418,13 @@ func (mset *stream) stats() StreamStats {
 	inMsgs, inBytes := mset.ingestTotals()
 	qLen, qMax, qSize := mset.ingestQueueStats()
 	return StreamStats{
-		InMsgs:      inMsgs,
-		InBytes:     inBytes,
-		InQueueLen:  qLen,
-		InQueueMax:  qMax,
-		InQueueSize: qSize,
-		PendingAvg:  mset.getPendingAvg(),
+		InMsgs:         inMsgs,
+		InBytes:        inBytes,
+		InQueueLen:     qLen,
+		InQueueMax:     qMax,
+		InQueueSize:    qSize,
+		PendingAvg:     mset.getPendingAvg(),
+		PendingAvgSize: mset.getPendingAvgSize(),
 	}
 }
 

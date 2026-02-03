@@ -9099,7 +9099,7 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 
 	// Calculate and track pending replication.
 	pending := mset.clseq - (lseq + mset.clfs)
-	mset.updatePendingAvg(pending)
+	mset.updatePendingAvg(pending, pending*uint64(len(esm)))
 
 	// Check to see if we are being overrun.
 	// TODO(dlc) - Make this a limit where we drop messages to protect ourselves, but allow to be configured.
