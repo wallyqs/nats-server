@@ -4106,9 +4106,10 @@ type RaftzGroup struct {
 	IPQEntryLen   int                       `json:"ipq_entry_len"`
 	IPQRespLen    int                       `json:"ipq_resp_len"`
 	IPQApplyLen   int                       `json:"ipq_apply_len"`
-	WAL           StreamState               `json:"wal"`
-	WALError      error                     `json:"wal_error,omitempty"`
-	Peers         map[string]RaftzGroupPeer `json:"peers"`
+	WAL             StreamState               `json:"wal"`
+	WALPendingBytes uint64                    `json:"wal_pending_bytes"`
+	WALError        error                     `json:"wal_error,omitempty"`
+	Peers           map[string]RaftzGroupPeer `json:"peers"`
 }
 
 type RaftzGroupPeer struct {
@@ -4214,8 +4215,9 @@ func (s *Server) Raftz(opts *RaftzOptions) *RaftzStatus {
 			IPQEntryLen:   n.entry.len(),
 			IPQRespLen:    n.resp.len(),
 			IPQApplyLen:   n.apply.len(),
-			WALError:      n.werr,
-			Peers:         map[string]RaftzGroupPeer{},
+			WALPendingBytes: n.bytes,
+			WALError:        n.werr,
+			Peers:           map[string]RaftzGroupPeer{},
 		}
 		n.wal.FastState(&info.WAL)
 		for id, p := range n.peers {
