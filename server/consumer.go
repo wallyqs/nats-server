@@ -6439,6 +6439,14 @@ func (o *consumer) isMonitorRunning() bool {
 var errAckFloorHigherThanLastSeq = errors.New("consumer ack floor is higher than streams last sequence")
 var errAckFloorInvalid = errors.New("consumer ack floor is invalid")
 
+// Maximum number of messages to process per invocation of checkStateForInterestStream.
+// This limits the number of raft delete proposals generated in a single call, preventing
+// memory spikes from flooding the raft pipeline. The chkflr mechanism ensures forward
+// progress across periodic invocations.
+const defaultMaxInterestCheckBatch = 200_000
+
+var maxInterestCheckBatch = defaultMaxInterestCheckBatch
+
 // If we are a consumer of an interest or workqueue policy stream, process that state and make sure consistent.
 func (o *consumer) checkStateForInterestStream(ss *StreamState) error {
 	o.mu.RLock()
@@ -6491,6 +6499,7 @@ func (o *consumer) checkStateForInterestStream(ss *StreamState) error {
 	}
 
 	var retryAsflr uint64
+	var processed int
 	for seq = fseq; dflr > 0 && seq <= dflr; seq++ {
 		if filters != nil {
 			_, nseq, err = store.LoadNextMsgMulti(filters, seq, &smv)
@@ -6520,6 +6529,16 @@ func (o *consumer) checkStateForInterestStream(ss *StreamState) error {
 					// The filters are already taken into account,
 					mset.ackMsg(o, seq)
 				}
+			}
+			// Limit the number of messages processed per invocation to prevent flooding
+			// the raft pipeline with delete proposals which causes memory spikes cluster-wide.
+			// Progress is saved via chkflr and resumed on the next periodic invocation.
+			processed++
+			if processed >= maxInterestCheckBatch {
+				if retryAsflr == 0 {
+					retryAsflr = seq + 1
+				}
+				break
 			}
 		} else if err == ErrStoreEOF {
 			break
