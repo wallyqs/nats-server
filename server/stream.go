@@ -282,6 +282,8 @@ type StreamStats struct {
 	InQueueSize    uint64  `json:"in_queue_size"`              // Current size in bytes of the ingest queue.
 	PendingAvg     float64 `json:"pending_avg,omitempty"`      // Rolling average of pending replication.
 	PendingAvgSize float64 `json:"pending_avg_size,omitempty"` // Rolling average of pending replication size in bytes.
+	RaftPending     uint64 `json:"raft_pending,omitempty"`      // Raft entries pending apply.
+	RaftPendingSize uint64 `json:"raft_pending_size,omitempty"` // Raft pending size in bytes.
 }
 
 // StreamInfo shows config and current state for this stream.
@@ -1417,7 +1419,7 @@ func (mset *stream) ingestQueueStats() (int, int, uint64) {
 func (mset *stream) stats() StreamStats {
 	inMsgs, inBytes := mset.ingestTotals()
 	qLen, qMax, qSize := mset.ingestQueueStats()
-	return StreamStats{
+	ss := StreamStats{
 		InMsgs:         inMsgs,
 		InBytes:        inBytes,
 		InQueueLen:     qLen,
@@ -1426,6 +1428,10 @@ func (mset *stream) stats() StreamStats {
 		PendingAvg:     mset.getPendingAvg(),
 		PendingAvgSize: mset.getPendingAvgSize(),
 	}
+	if node := mset.raftNode(); node != nil {
+		ss.RaftPending, ss.RaftPendingSize = node.Size()
+	}
+	return ss
 }
 
 func (mset *stream) lastSeq() uint64 {
