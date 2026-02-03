@@ -3613,6 +3613,10 @@ type waitingRequest struct {
 	hbt           time.Time
 	noWait        bool
 	priorityGroup *PriorityGroup
+	// Sublist generation when interest was last verified.
+	// If the sublist genid hasn't changed since, interest is still valid
+	// and the hasInterest call can be skipped entirely.
+	slGenid uint64
 }
 
 // sync.Pool for waiting requests.
@@ -3942,6 +3946,7 @@ func (o *consumer) nextWaiting(sz int) *waitingRequest {
 	// Track the currently read-locked sublist to batch interest checks
 	// and avoid per-request RLock/RUnlock contention.
 	var lockedSL *Sublist
+	var currentGen uint64
 	unlockSL := func() {
 		if lockedSL != nil {
 			lockedSL.RUnlock()
@@ -4040,8 +4045,10 @@ func (o *consumer) nextWaiting(sz int) *waitingRequest {
 				unlockSL()
 				sl.RLock()
 				lockedSL = sl
+				currentGen = sl.genid
 			}
-			if sl.hasInterest(wr.interest, false, nil, nil) {
+			if wr.slGenid == currentGen || sl.hasInterest(wr.interest, false, nil, nil) {
+				wr.slGenid = currentGen
 				if needNewPin {
 					o.sendPinnedAdvisoryLocked(priorityGroup)
 				}
@@ -4553,6 +4560,7 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 	// severe cache-line contention on multi-core machines when many
 	// consumers check interest concurrently.
 	var lockedSL *Sublist
+	var currentGen uint64
 	unlockSL := func() {
 		if lockedSL != nil {
 			lockedSL.RUnlock()
@@ -4602,8 +4610,16 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 			unlockSL()
 			sl.RLock()
 			lockedSL = sl
+			currentGen = sl.genid
 		}
-		interest := sl.hasInterest(wr.interest, false, nil, nil)
+		// If the sublist generation hasn't changed since this request's last
+		// successful interest check, skip the hasInterest call entirely.
+		// genid only changes on subscription insert/remove, so stable genid
+		// means interest state is unchanged.
+		interest := wr.slGenid == currentGen || sl.hasInterest(wr.interest, false, nil, nil)
+		if interest {
+			wr.slGenid = currentGen
+		}
 		if !interest && (s.leafNodeEnabled || s.gateway.enabled) {
 			// If we are here check on gateways and leaf nodes (as they can mask gateways on the other end).
 			// If we have interest or the request is too young break and do not expire.
