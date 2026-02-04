@@ -124,6 +124,10 @@ const (
 	stallClientMinDuration = 2 * time.Millisecond
 	stallClientMaxDuration = 5 * time.Millisecond
 	stallTotalAllowed      = 10 * time.Millisecond
+	// Minimum number of messages a producer must have processed in the current
+	// readLoop iteration before stalling is applied. Producers with fewer messages
+	// are not considered "fast" and should not be penalized.
+	stallMinMsgs = 2
 )
 
 var readLoopReportThreshold = readLoopReport
@@ -3804,8 +3808,10 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 
 	// If we are a client and we detect that the consumer we are
 	// sending to is in a stalled state, go ahead and wait here
-	// with a limit.
-	if c.kind == CLIENT && client.out.stc != nil {
+	// with a limit. Skip stalling for low-volume producers that have
+	// only processed a small number of messages in this readLoop
+	// iteration since they are not considered fast producers.
+	if c.kind == CLIENT && client.out.stc != nil && c.in.msgs >= stallMinMsgs {
 		if srv.getOpts().NoFastProducerStall {
 			mt.addEgressEvent(client, sub, errMsgTraceFastProdNoStall)
 			client.mu.Unlock()

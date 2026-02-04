@@ -3040,6 +3040,13 @@ func TestNoRaceNoFastProducerStall(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
+			// Send priming messages first so that when the traced message
+			// is processed, c.in.msgs >= stallMinMsgs and the stall path
+			// is reached. Without these, a single-message producer would
+			// not be considered a fast producer and would skip stalling.
+			for i := int32(0); i < stallMinMsgs-1; i++ {
+				ncProd.Publish("foo", payload)
+			}
 			msg := nats.NewMsg("foo")
 			msg.Header.Set(MsgTraceDest, traceSub.Subject)
 			msg.Data = payload
@@ -3124,14 +3131,12 @@ func TestNoRaceProducerStallLimits(t *testing.T) {
 	c.out.stc = make(chan struct{})
 	c.mu.Unlock()
 
-	start := time.Now()
 	_, err = ncProd.Request("foo", []byte("HELLO"), time.Second)
-	elapsed := time.Since(start)
 	require_NoError(t, err)
 
-	// This should have not cleared on its own but should have between min and max pause.
-	require_True(t, elapsed >= stallClientMinDuration)
-	require_LessThan(t, elapsed, stallClientMaxDuration+5*time.Millisecond)
+	// A single-message producer should not be stalled since it is not
+	// considered a fast producer (c.in.msgs < stallMinMsgs).
+	require_Equal(t, atomic.LoadInt64(&c.stalls), int64(0))
 
 	// Now test total maximum by loading up a bunch of requests and measuring the last one.
 	// Artificially set a stall channel again on the subscriber.
@@ -3145,9 +3150,9 @@ func TestNoRaceProducerStallLimits(t *testing.T) {
 		err = ncProd.PublishRequest("foo", "bar", []byte("HELLO"))
 		require_NoError(t, err)
 	}
-	start = time.Now()
+	start := time.Now()
 	_, err = ncProd.Request("foo", []byte("HELLO"), time.Second)
-	elapsed = time.Since(start)
+	elapsed := time.Since(start)
 	require_NoError(t, err)
 
 	require_True(t, elapsed >= stallTotalAllowed)
