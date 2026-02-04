@@ -4519,6 +4519,17 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 	var expired, brp int
 	s, now := o.srv, time.Now()
 
+	// Cache HasInterest result per (account, subject) to avoid repeated
+	// RLock/RUnlock on the account Sublist causing atomic contention.
+	var (
+		lastAcc      *Account
+		lastSubject  string
+		lastHasInt   bool // cached HasInterest result
+		lastGwInt    bool // cached hasGatewayInterest result
+		cachedHasInt bool // whether lastHasInt is valid
+		cachedGwInt  bool // whether lastGwInt is valid
+	)
+
 	wq := o.waiting
 	remove := func(pre, wr *waitingRequest) *waitingRequest {
 		expired++
@@ -4565,15 +4576,29 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 				continue
 			}
 		}
-		// Now check interest.
-		interest := wr.acc.sl.HasInterest(wr.interest)
+		// Check interest using cached result when account and subject match
+		// the previous request. Avoids repeated RLock/RUnlock on the Sublist
+		// which causes severe atomic contention on the RWMutex reader counter.
+		var interest bool
+		if cachedHasInt && wr.acc == lastAcc && wr.interest == lastSubject {
+			interest = lastHasInt
+		} else {
+			interest = wr.acc.sl.HasInterest(wr.interest)
+			lastAcc, lastSubject, lastHasInt, cachedHasInt = wr.acc, wr.interest, interest, true
+			cachedGwInt = false
+		}
 		if !interest && (s.leafNodeEnabled || s.gateway.enabled) {
-			// If we are here check on gateways and leaf nodes (as they can mask gateways on the other end).
-			// If we have interest or the request is too young break and do not expire.
+			// Note: time.Since check is per-request (depends on wr.received), not cached.
 			if time.Since(wr.received) < defaultGatewayRecentSubExpiration {
 				interest = true
-			} else if s.gateway.enabled && s.hasGatewayInterest(wr.acc.Name, wr.interest) {
-				interest = true
+			} else if s.gateway.enabled {
+				if cachedGwInt {
+					interest = lastGwInt
+				} else {
+					lastGwInt = s.hasGatewayInterest(wr.acc.Name, wr.interest)
+					cachedGwInt = true
+					interest = lastGwInt
+				}
 			}
 		}
 		// Check if we have interest.
