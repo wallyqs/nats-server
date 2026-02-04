@@ -13167,3 +13167,54 @@ func TestFileStoreRemoveMsgsInRangeWithTombstones(t *testing.T) {
 	checkBlock(fs.blks[1], 13, 12, []uint64{4, 3, 2, 10})
 	checkBlock(fs.blks[2], 18, 20, []uint64{9, 11, 17})
 }
+
+// Test that removeMsgsInRange handles out-of-range sequences correctly.
+// This tests the fix for a bounds check issue where sort.Search returns len(fs.blks)
+// when all blocks have last.seq < first. The old code used > instead of >=.
+// While the loop condition prevents an actual out-of-bounds access, the function
+// should return early for correctness and clarity when there are no blocks to process.
+func TestFileStoreRemoveMsgsInRangeOutOfBounds(t *testing.T) {
+	fcfg := FileStoreConfig{
+		Cipher:      NoCipher,
+		Compression: NoCompression,
+		StoreDir:    t.TempDir(),
+		BlockSize:   256,
+	}
+	fs, err := newFileStoreWithCreated(fcfg, StreamConfig{Name: "zzz", Storage: FileStorage}, time.Now(), prf(&fcfg), nil)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	// Create blocks with messages [1-20]
+	msg := make([]byte, 256)
+	for range 20 {
+		_, _, err = fs.StoreMsg("foo", nil, msg, 0)
+		require_NoError(t, err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	initialBlockCount := len(fs.blks)
+	require_Equal(t, initialBlockCount, 20)
+
+	// Try to remove messages with sequences entirely after all existing blocks.
+	// This should be a noop and return early.
+	// Before the fix:
+	// - sort.Search returns len(fs.blks) (20)
+	// - The check was "firstBlock > len(fs.blks)" which is "20 > 20" = false
+	// - Function doesn't return early (incorrect, though loop condition prevents issues)
+	// After the fix with >=:
+	// - The check is "firstBlock >= len(fs.blks)" which is "20 >= 20" = true
+	// - Function returns early (correct)
+	fs.removeMsgsInRange(100, 200, false)
+
+	// Verify no blocks were removed
+	require_Equal(t, len(fs.blks), initialBlockCount)
+
+	// Also test with a range starting exactly after the last sequence
+	lastSeq := atomic.LoadUint64(&fs.blks[len(fs.blks)-1].last.seq)
+	fs.removeMsgsInRange(lastSeq+1, lastSeq+10, false)
+
+	// Verify no blocks were removed
+	require_Equal(t, len(fs.blks), initialBlockCount)
+}

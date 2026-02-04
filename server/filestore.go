@@ -5495,7 +5495,7 @@ func (fs *fileStore) removeMsgsInRange(first, last uint64, viaLimits bool) {
 		return atomic.LoadUint64(&fs.blks[i].last.seq) >= first
 	})
 
-	if firstBlock > len(fs.blks) {
+	if firstBlock >= len(fs.blks) {
 		return
 	}
 
