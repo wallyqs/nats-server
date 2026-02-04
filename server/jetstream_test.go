@@ -344,11 +344,16 @@ func TestJetStreamAutoTuneFSConfig(t *testing.T) {
 	_, err := acc.addStream(streamConfig("dummy", 1, 0))
 	require_NoError(t, err)
 
-	testBlkSize("foo", 1, 0, FileStoreMinBlkSize)
-	testBlkSize("foo", 1, 512, FileStoreMinBlkSize)
-	testBlkSize("foo", 1, 1024*1024, defaultMediumBlockSize)
-	testBlkSize("foo", 1, 8*1024*1024, defaultMediumBlockSize)
-	testBlkSize("foo_bar_baz", -1, 32*1024*1024, FileStoreMaxBlkSize)
+	// With pool-aligned block sizes:
+	// - Small streams (< 256KB) -> 256KB (TINY pool)
+	// - Medium streams (< 1MB) -> 1MB (SMALL pool)
+	// - Larger streams (< 4MB) -> 4MB (MEDIUM pool)
+	// - Very large streams -> 8MB (LARGE pool)
+	testBlkSize("foo", 1, 0, defaultTinyBlockSize)          // 512B estimated -> 256KB
+	testBlkSize("foo", 1, 512, defaultTinyBlockSize)        // 512B -> 256KB
+	testBlkSize("foo", 1, 1024*1024, defaultSmallBlockSize) // 1MB -> 1MB
+	testBlkSize("foo", 1, 8*1024*1024, defaultMediumBlockSize) // 8MB -> 4MB
+	testBlkSize("foo_bar_baz", -1, 32*1024*1024, FileStoreMaxBlkSize) // 32MB -> 8MB
 }
 
 func TestJetStreamPubAck(t *testing.T) {

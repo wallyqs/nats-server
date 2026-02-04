@@ -767,16 +767,33 @@ func dynBlkSize(retention RetentionPolicy, maxBytes int64, encrypted bool) uint6
 		if m := blkSize % 100; m != 0 {
 			blkSize += 100 - m
 		}
-		if blkSize <= FileStoreMinBlkSize {
+		// Enforce minimum
+		if blkSize < FileStoreMinBlkSize {
 			blkSize = FileStoreMinBlkSize
-		} else if blkSize >= FileStoreMaxBlkSize {
-			blkSize = FileStoreMaxBlkSize
-		} else {
-			blkSize = defaultMediumBlockSize
 		}
+
+		// Round to nearest sync pool capacity for better memory reuse.
+		// This ensures blocks align with the sync pool tiers (256KB, 1MB, 4MB, 8MB)
+		// to maximize buffer recycling and reduce allocations.
+		if blkSize <= defaultTinyBlockSize {
+			blkSize = defaultTinyBlockSize
+		} else if blkSize <= defaultSmallBlockSize {
+			blkSize = defaultSmallBlockSize
+		} else if blkSize <= defaultMediumBlockSize {
+			blkSize = defaultMediumBlockSize
+		} else if blkSize <= FileStoreMaxBlkSize {
+			blkSize = defaultLargeBlockSize
+		} else {
+			blkSize = FileStoreMaxBlkSize
+		}
+
+		// For encrypted stores, cap at a smaller size for performance.
+		// Round down to the nearest pool capacity below the encryption limit.
 		if encrypted && blkSize > maximumEncryptedBlockSize {
-			// Notes on this below.
-			blkSize = maximumEncryptedBlockSize
+			// maximumEncryptedBlockSize is 2MB, which falls between smallBlockSize (1MB)
+			// and mediumBlockSize (4MB). Round down to smallBlockSize to ensure we use
+			// a sync pool and stay well under the encryption performance limit.
+			blkSize = defaultSmallBlockSize
 		}
 		return uint64(blkSize)
 	}
@@ -786,8 +803,8 @@ func dynBlkSize(retention RetentionPolicy, maxBytes int64, encrypted bool) uint6
 		// In the case of encrypted stores, large blocks can result in worsened perf
 		// since many writes on disk involve re-encrypting the entire block. For now,
 		// we will enforce a cap on the block size when encryption is enabled to avoid
-		// this.
-		return maximumEncryptedBlockSize
+		// this. Use 1MB (smallBlockSize) to align with sync pool capacity.
+		return defaultSmallBlockSize
 	case retention == LimitsPolicy:
 		// TODO(dlc) - Make the blocksize relative to this if set.
 		return defaultLargeBlockSize

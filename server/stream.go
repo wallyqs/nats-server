@@ -1272,12 +1272,24 @@ func (mset *stream) autoTuneFileStorageBlockSize(fsCfg *FileStoreConfig) {
 	if m := blkSize % 100; m != 0 {
 		blkSize += 100 - m
 	}
-	if blkSize <= FileStoreMinBlkSize {
+	// Enforce minimum
+	if blkSize < FileStoreMinBlkSize {
 		blkSize = FileStoreMinBlkSize
-	} else if blkSize >= FileStoreMaxBlkSize {
-		blkSize = FileStoreMaxBlkSize
-	} else {
+	}
+
+	// Round to nearest sync pool capacity for better memory reuse.
+	// This ensures blocks align with the sync pool tiers (256KB, 1MB, 4MB, 8MB)
+	// to maximize buffer recycling and reduce allocations.
+	if blkSize <= defaultTinyBlockSize {
+		blkSize = defaultTinyBlockSize
+	} else if blkSize <= defaultSmallBlockSize {
+		blkSize = defaultSmallBlockSize
+	} else if blkSize <= defaultMediumBlockSize {
 		blkSize = defaultMediumBlockSize
+	} else if blkSize <= FileStoreMaxBlkSize {
+		blkSize = defaultLargeBlockSize
+	} else {
+		blkSize = FileStoreMaxBlkSize
 	}
 	fsCfg.BlockSize = uint64(blkSize)
 }
