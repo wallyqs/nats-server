@@ -10153,3 +10153,309 @@ func TestFileStoreRemoveBlockWithStaleStreamState(t *testing.T) {
 		}
 	})
 }
+
+// TestFileStoreRemoveMsgCacheMemoryImpact measures the memory impact of removeMsg's
+// cache behavior during sequential removals. In v2.11.x, removeMsg does not release
+// the cache after loading it — once loaded the cache stays resident until the cache
+// expiration timer fires. This test demonstrates the behavior during sequential
+// removals typical of limit enforcement.
+func TestFileStoreRemoveMsgCacheMemoryImpact(t *testing.T) {
+	fcfg := FileStoreConfig{
+		StoreDir:    t.TempDir(),
+		BlockSize:   512 * 1024, // 512KB blocks
+		CacheExpire: 50 * time.Millisecond,
+	}
+	cfg := StreamConfig{Name: "zzz", Storage: FileStorage}
+
+	fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), nil, nil)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	subj := "foo"
+	// Use 1KB messages so each message is large enough to measure cache impact.
+	msg := make([]byte, 1024)
+	storedMsgSize := fileStoreMsgSize(subj, nil, msg)
+
+	// Calculate how many messages fit in one block.
+	msgsPerBlock := int(fcfg.BlockSize / uint64(storedMsgSize))
+	// Store enough for one complete block plus some in a second block
+	// so the first block is not the lmb (last message block).
+	totalMsgs := msgsPerBlock + 50
+	for i := 0; i < totalMsgs; i++ {
+		_, _, err := fs.StoreMsg(subj, nil, msg, 0)
+		require_NoError(t, err)
+	}
+
+	state := fs.State()
+	t.Logf("Stored %d messages, %s total, across %d blocks",
+		state.Msgs, friendlyBytes(int64(state.Bytes)), fs.numMsgBlocks())
+
+	// Verify we have at least 2 blocks.
+	fs.mu.RLock()
+	numBlocks := len(fs.blks)
+	fs.mu.RUnlock()
+	if numBlocks < 2 {
+		t.Fatalf("Expected at least 2 blocks, got %d", numBlocks)
+	}
+
+	// Wait for cache on non-lmb blocks to fully expire so we start clean.
+	checkFor(t, 2*time.Second, 10*time.Millisecond, func() error {
+		if csz := fs.cacheSize(); csz != 0 {
+			return fmt.Errorf("cache size not 0, got %s", friendlyBytes(int64(csz)))
+		}
+		return nil
+	})
+
+	// Force GC to ensure clean state.
+	runtime.GC()
+	runtime.GC()
+
+	// Get a handle to the first block (not lmb).
+	fs.mu.RLock()
+	firstMB := fs.blks[0]
+	fs.mu.RUnlock()
+	firstMB.mu.RLock()
+	firstBlockMsgCount := firstMB.msgs
+	firstMB.mu.RUnlock()
+
+	t.Logf("First block has %d messages, block size %s",
+		firstBlockMsgCount, friendlyBytes(int64(fcfg.BlockSize)))
+
+	// Measure heap before removals.
+	runtime.GC()
+	var memBefore runtime.MemStats
+	runtime.ReadMemStats(&memBefore)
+
+	// Track per-removal cache state.
+	type removeStat struct {
+		seq         uint64
+		cacheLoaded bool
+		cacheBufLen int
+	}
+	stats := make([]removeStat, 0, firstBlockMsgCount)
+
+	// Remove messages from the first block sequentially, simulating
+	// what enforceMsgLimit does (tight loop, fs lock held across calls).
+	fs.mu.Lock()
+	startSeq := fs.state.FirstSeq
+	for i := uint64(0); i < firstBlockMsgCount; i++ {
+		seq := startSeq + i
+		removed, err := fs.removeMsgViaLimits(seq)
+		if err != nil || !removed {
+			continue
+		}
+
+		// Inspect cache state after the removal.
+		firstMB.mu.RLock()
+		hasCache := firstMB.cache != nil
+		var bufLen int
+		if firstMB.cache != nil {
+			bufLen = len(firstMB.cache.buf)
+		}
+		firstMB.mu.RUnlock()
+		stats = append(stats, removeStat{seq: seq, cacheLoaded: hasCache, cacheBufLen: bufLen})
+	}
+	fs.mu.Unlock()
+
+	// Measure heap after removals.
+	runtime.GC()
+	var memAfter runtime.MemStats
+	runtime.ReadMemStats(&memAfter)
+
+	// Report results.
+	t.Logf("Heap before removals: %s", friendlyBytes(int64(memBefore.HeapInuse)))
+	t.Logf("Heap after removals:  %s", friendlyBytes(int64(memAfter.HeapInuse)))
+
+	if len(stats) == 0 {
+		t.Fatal("No messages were removed")
+	}
+
+	// Count how many removals had the cache pinned.
+	var pinnedCount int
+	for _, s := range stats {
+		if s.cacheLoaded {
+			pinnedCount++
+		}
+	}
+
+	// Report first few and last few entries for visibility.
+	reportCount := 5
+	if reportCount > len(stats) {
+		reportCount = len(stats)
+	}
+	t.Logf("Cache state for first %d removals:", reportCount)
+	for i := 0; i < reportCount; i++ {
+		s := stats[i]
+		t.Logf("  seq=%d cache_loaded=%v cache_buf_len=%d", s.seq, s.cacheLoaded, s.cacheBufLen)
+	}
+	if len(stats) > reportCount {
+		t.Logf("Cache state for last %d removals:", reportCount)
+		for i := len(stats) - reportCount; i < len(stats); i++ {
+			s := stats[i]
+			t.Logf("  seq=%d cache_loaded=%v cache_buf_len=%d", s.seq, s.cacheLoaded, s.cacheBufLen)
+		}
+	}
+
+	t.Logf("Cache was pinned in memory during %d of %d removals (%.1f%%)",
+		pinnedCount, len(stats), float64(pinnedCount)/float64(len(stats))*100)
+
+	// Find the max cache buf size observed during any removal.
+	var maxBufLen int
+	for _, s := range stats {
+		if s.cacheBufLen > maxBufLen {
+			maxBufLen = s.cacheBufLen
+		}
+	}
+
+	if pinnedCount == 0 {
+		t.Logf("NOTE: Cache was released after every removal (unexpected)")
+	} else {
+		t.Logf("NOTE: Cache was pinned for %d removals, holding ~%s of block data in memory",
+			pinnedCount, friendlyBytes(int64(maxBufLen)))
+	}
+}
+
+// TestFileStoreRemoveMsgCacheReleasedWithGC demonstrates the cache behavior when
+// GC runs between each removeMsg call. In v2.11.x without the elastic pointer,
+// once the cache is loaded it stays as a strong reference in mb.cache. GC between
+// calls does not help release it — only the cache expiration timer can release it.
+func TestFileStoreRemoveMsgCacheReleasedWithGC(t *testing.T) {
+	fcfg := FileStoreConfig{
+		StoreDir:    t.TempDir(),
+		BlockSize:   512 * 1024, // 512KB blocks
+		CacheExpire: 50 * time.Millisecond,
+	}
+	cfg := StreamConfig{Name: "zzz", Storage: FileStorage}
+
+	fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), nil, nil)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	subj := "foo"
+	msg := make([]byte, 1024)
+	storedMsgSize := fileStoreMsgSize(subj, nil, msg)
+	msgsPerBlock := int(fcfg.BlockSize / uint64(storedMsgSize))
+	totalMsgs := msgsPerBlock + 50
+	for i := 0; i < totalMsgs; i++ {
+		_, _, err := fs.StoreMsg(subj, nil, msg, 0)
+		require_NoError(t, err)
+	}
+
+	// Wait for cache to expire.
+	checkFor(t, 2*time.Second, 10*time.Millisecond, func() error {
+		if csz := fs.cacheSize(); csz != 0 {
+			return fmt.Errorf("cache size not 0, got %s", friendlyBytes(int64(csz)))
+		}
+		return nil
+	})
+	runtime.GC()
+	runtime.GC()
+
+	fs.mu.RLock()
+	firstMB := fs.blks[0]
+	fs.mu.RUnlock()
+	firstMB.mu.RLock()
+	firstBlockMsgCount := firstMB.msgs
+	firstMB.mu.RUnlock()
+
+	// Remove messages, but force GC between each removal.
+	// In v2.11.x the cache is a direct pointer (no weak ref), so GC
+	// alone cannot release it — only the cache expiration timer can.
+	var pinnedCount int
+	numToRemove := firstBlockMsgCount
+	if numToRemove > 20 {
+		numToRemove = 20 // Limit iterations since GC between each is slow.
+	}
+
+	fs.mu.Lock()
+	startSeq := fs.state.FirstSeq
+	fs.mu.Unlock()
+
+	for i := uint64(0); i < numToRemove; i++ {
+		seq := startSeq + i
+		// Force GC between removals.
+		runtime.GC()
+		runtime.GC()
+
+		fs.mu.Lock()
+		removed, err := fs.removeMsgViaLimits(seq)
+		fs.mu.Unlock()
+		if err != nil || !removed {
+			continue
+		}
+
+		// Check cache state after removal.
+		firstMB.mu.RLock()
+		hasCache := firstMB.cache != nil
+		firstMB.mu.RUnlock()
+		if hasCache {
+			pinnedCount++
+		}
+	}
+
+	t.Logf("With GC between removals: cache was pinned during %d of %d removals (%.1f%%)",
+		pinnedCount, numToRemove, float64(pinnedCount)/float64(numToRemove)*100)
+}
+
+// BenchmarkFileStoreRemoveMsgMemory benchmarks the memory impact of removeMsg
+// during sequential limit enforcement. It measures both the allocation overhead
+// and the cache pinning behavior.
+func BenchmarkFileStoreRemoveMsgMemory(b *testing.B) {
+	fcfg := FileStoreConfig{
+		StoreDir:    b.TempDir(),
+		BlockSize:   512 * 1024,
+		CacheExpire: time.Second, // Longer expire to ensure cache doesn't expire mid-bench.
+	}
+	cfg := StreamConfig{Name: "zzz", Storage: FileStorage}
+
+	fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), nil, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer fs.Stop()
+
+	subj := "foo"
+	msg := make([]byte, 1024)
+	storedMsgSize := fileStoreMsgSize(subj, nil, msg)
+	msgsPerBlock := int(fcfg.BlockSize / uint64(storedMsgSize))
+
+	// Pre-populate with enough messages for each benchmark iteration to
+	// have a full block to remove from.
+	totalMsgs := msgsPerBlock * (b.N + 2)
+	for i := 0; i < totalMsgs; i++ {
+		if _, _, err := fs.StoreMsg(subj, nil, msg, 0); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	// Wait for caches to expire on older blocks.
+	time.Sleep(2 * fcfg.CacheExpire)
+	runtime.GC()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		// Simulate enforceMsgLimit: remove all messages from the first block.
+		fs.mu.Lock()
+		startSeq := fs.state.FirstSeq
+		fs.mu.Unlock()
+
+		fs.mu.Lock()
+		for j := 0; j < msgsPerBlock; j++ {
+			seq := startSeq + uint64(j)
+			fs.removeMsgViaLimits(seq)
+		}
+		fs.mu.Unlock()
+	}
+
+	b.StopTimer()
+
+	// Measure final heap to show total retained memory.
+	runtime.GC()
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	b.ReportMetric(float64(mem.HeapInuse), "heap-bytes")
+	b.ReportMetric(float64(storedMsgSize), "stored-msg-size")
+	b.ReportMetric(float64(msgsPerBlock), "msgs-per-block")
+}
