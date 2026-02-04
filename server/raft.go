@@ -2304,6 +2304,7 @@ func (ce *CommittedEntry) ReturnToPool() {
 	}
 	if len(ce.Entries) > 0 {
 		for _, e := range ce.Entries {
+			e.Data = nil
 			entryPool.Put(e)
 		}
 	}
@@ -3166,7 +3167,10 @@ func (n *raft) applyCommit(index uint64) error {
 		delete(n.acks, index)
 	}
 
-	ae := n.pae[index]
+	// Track whether the entry was loaded from the WAL. In that case,
+	// entry data are sub-slices of the WAL read buffer (ae.buf) and
+	// need to be copied to avoid pinning the entire buffer in memory.
+	ae, fromWAL := n.pae[index], false
 	if ae == nil {
 		if index < n.papplied {
 			return nil
@@ -3184,6 +3188,7 @@ func (n *raft) applyCommit(index uint64) error {
 			}
 			return errEntryLoadFailed
 		}
+		fromWAL = true
 	} else {
 		defer delete(n.pae, index)
 	}
@@ -3206,11 +3211,23 @@ func (n *raft) applyCommit(index uint64) error {
 	for _, e := range ae.entries {
 		switch e.Type {
 		case EntryNormal:
+			if fromWAL {
+				// Copy data to break sub-slice references to ae.buf,
+				// which can pin the entire underlying buffer in memory.
+				e.Data = copyBytes(e.Data)
+			}
 			committed = append(committed, e)
 		case EntryOldSnapshot:
 			// For old snapshots in our WAL.
-			committed = append(committed, newEntry(EntrySnapshot, e.Data))
+			data := e.Data
+			if fromWAL {
+				data = copyBytes(data)
+			}
+			committed = append(committed, newEntry(EntrySnapshot, data))
 		case EntrySnapshot:
+			if fromWAL {
+				e.Data = copyBytes(e.Data)
+			}
 			committed = append(committed, e)
 			// If we have no snapshot, install the leader's snapshot as our own.
 			if len(ae.entries) == 1 && n.snapfile == _EMPTY_ && ae.commit > 0 {
@@ -4205,6 +4222,11 @@ func (n *raft) sendAppendEntryLocked(entries []*Entry, checkLeader bool) error {
 	n.sendRPC(n.asubj, n.areply, ae.buf)
 	if !shouldStore {
 		ae.returnToPool()
+	} else {
+		// The buf is no longer needed after being stored to WAL and sent
+		// to followers. Nil it out to allow GC to reclaim the memory,
+		// otherwise pae entries retain these large serialized buffers.
+		ae.buf = nil
 	}
 	if n.csz == 1 {
 		n.tryCommit(n.pindex)
