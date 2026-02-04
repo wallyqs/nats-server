@@ -7731,11 +7731,10 @@ func (mset *stream) ackMsg(o *consumer, seq uint64) bool {
 	// Only propose message deletion to the stream if we're consumer leader, otherwise all followers would also propose.
 	// We must be the consumer leader, since we know for sure we've stored the message and don't register as pre-ack.
 	if o != nil && !o.IsLeader() {
-		// Currently, interest-based streams can race on "no interest" because consumer creates/updates go over
-		// the meta layer and published messages go over the stream layer. Some servers could then either store
-		// or not store some initial set of messages that gained new interest. To get the stream back in sync,
-		// we allow moving the first sequence up.
-		// TODO(mvv): later on only the stream leader should determine "no interest"
+		// Interest-based streams can race on "no interest" at message arrival time because consumer
+		// creates/updates go over the meta layer and published messages go over the stream layer.
+		// Some servers could then either store or not store some initial set of messages that gained
+		// new interest. To get the stream back in sync, we allow moving the first sequence up.
 		interestRaiseFirst := mset.cfg.Retention == InterestPolicy && seq == state.FirstSeq
 		mset.mu.Unlock()
 		if interestRaiseFirst {
@@ -7748,10 +7747,83 @@ func (mset *stream) ackMsg(o *consumer, seq uint64) bool {
 		return true
 	}
 
+	// For interest-based streams, have the stream leader authoritatively determine
+	// "no interest" before deleting. This avoids races where consumer leaders on
+	// different nodes may have stale consumer state due to meta layer propagation
+	// delays for new consumer creates/updates.
+	if mset.cfg.Retention == InterestPolicy {
+		var consumerName string
+		if o != nil {
+			consumerName = o.name
+		}
+		ci := streamCheckInterest{Seq: seq, Stream: mset.cfg.Name, Consumer: consumerName}
+		mset.node.ForwardProposal(encodeCheckInterest(&ci))
+		mset.mu.Unlock()
+		return true
+	}
+
 	md := streamMsgDelete{Seq: seq, NoErase: true, Stream: mset.cfg.Name}
 	mset.node.ForwardProposal(encodeMsgDelete(&md))
 	mset.mu.Unlock()
 	return true
+}
+
+// checkInterestAndProposeDeletion is called by the stream leader when processing a
+// checkInterestOp. It authoritatively determines whether there is remaining interest
+// in a message and proposes a deleteMsgOp if there is none.
+// The consumer name is used to exclude that consumer from the interest check since
+// it has already acknowledged the message.
+func (mset *stream) checkInterestAndProposeDeletion(seq uint64, consumerName string) {
+	mset.mu.Lock()
+	if mset.closed.Load() {
+		mset.mu.Unlock()
+		return
+	}
+
+	store := mset.store
+	var state StreamState
+	store.FastState(&state)
+
+	// If the sequence is above our last sequence, nothing to do.
+	if seq > state.LastSeq {
+		mset.mu.Unlock()
+		return
+	}
+
+	// If the message has already been removed locally (e.g. via interestRaiseFirst
+	// on a consumer follower co-located with this stream leader, or by compaction),
+	// we still propose the deletion so that all peers converge.
+	if seq < state.FirstSeq {
+		node := mset.node
+		name := mset.cfg.Name
+		mset.mu.Unlock()
+		if node != nil {
+			md := streamMsgDelete{Seq: seq, NoErase: true, Stream: name}
+			node.Propose(encodeMsgDelete(&md))
+		}
+		return
+	}
+
+	// Look up the consumer by name on this server to exclude from the interest check.
+	var obs *consumer
+	if consumerName != _EMPTY_ {
+		obs = mset.consumers[consumerName]
+	}
+
+	if !mset.noInterest(seq, obs) {
+		mset.mu.Unlock()
+		return
+	}
+
+	// No interest remains, propose a message delete to replicate across all peers.
+	node := mset.node
+	name := mset.cfg.Name
+	mset.mu.Unlock()
+
+	if node != nil {
+		md := streamMsgDelete{Seq: seq, NoErase: true, Stream: name}
+		node.Propose(encodeMsgDelete(&md))
+	}
 }
 
 // Snapshot creates a snapshot for the stream and possibly consumers.

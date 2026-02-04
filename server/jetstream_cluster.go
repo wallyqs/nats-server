@@ -135,6 +135,8 @@ const (
 	// Batch stream ops.
 	batchMsgOp
 	batchCommitMsgOp
+	// Interest stream check interest op.
+	checkInterestOp
 )
 
 // raftGroups are controlled by the metagroup controller.
@@ -347,6 +349,15 @@ type streamMsgDelete struct {
 	NoErase bool        `json:"no_erase,omitempty"`
 	Subject string      `json:"subject"`
 	Reply   string      `json:"reply"`
+}
+
+// streamCheckInterest is proposed by a consumer leader for interest-based streams
+// to have the stream leader authoritatively determine whether there is remaining
+// interest in a message after a consumer has acknowledged it.
+type streamCheckInterest struct {
+	Stream   string `json:"stream"`
+	Seq      uint64 `json:"seq"`
+	Consumer string `json:"consumer"`
 }
 
 const (
@@ -3544,6 +3555,27 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 						resp.Success = true
 						s.sendAPIResponse(sp.Client, mset.account(), sp.Subject, sp.Reply, _EMPTY_, s.jsonResponse(resp))
 					}
+				}
+			case checkInterestOp:
+				ci, err := decodeCheckInterest(buf[1:])
+				if err != nil {
+					if node := mset.raftNode(); node != nil {
+						s := js.srv
+						s.Errorf("JetStream cluster could not decode check interest for '%s > %s' [%s]",
+							mset.account(), mset.name(), node.Group())
+					}
+					panic(err.Error())
+				}
+				// Only the stream leader should determine "no interest" and propose
+				// a message delete. This avoids races where consumer leaders on
+				// different nodes may have stale consumer state (e.g. due to meta
+				// layer propagation delays for new consumer creates/updates).
+				var isLeader bool
+				if node := mset.raftNode(); node != nil && node.Leader() {
+					isLeader = true
+				}
+				if isLeader && !isRecovering {
+					mset.checkInterestAndProposeDeletion(ci.Seq, ci.Consumer)
 				}
 			default:
 				panic(fmt.Sprintf("JetStream Cluster Unknown group entry op type: %v", op))
@@ -8077,6 +8109,19 @@ func decodeMsgDelete(buf []byte) (*streamMsgDelete, error) {
 	var md streamMsgDelete
 	err := json.Unmarshal(buf, &md)
 	return &md, err
+}
+
+func encodeCheckInterest(ci *streamCheckInterest) []byte {
+	var bb bytes.Buffer
+	bb.WriteByte(byte(checkInterestOp))
+	json.NewEncoder(&bb).Encode(ci)
+	return bb.Bytes()
+}
+
+func decodeCheckInterest(buf []byte) (*streamCheckInterest, error) {
+	var ci streamCheckInterest
+	err := json.Unmarshal(buf, &ci)
+	return &ci, err
 }
 
 func (s *Server) jsClusteredMsgDeleteRequest(ci *ClientInfo, acc *Account, mset *stream, stream, subject, reply string, req *JSApiMsgDeleteRequest, rmsg []byte) {
