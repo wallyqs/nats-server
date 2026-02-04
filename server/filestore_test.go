@@ -10597,3 +10597,294 @@ func TestFileStoreRemoveMsgMultiBlockCachePinning(t *testing.T) {
 			peakLoadedBlocks, friendlyBytes(int64(peakCacheMem)))
 	}
 }
+
+// TestFileStoreWorkQueueRemoveMsgCachePinning simulates the production scenario
+// of a WorkQueue stream with 3 replicas and 40 consumers on different subjects.
+//
+// In this scenario:
+//  1. Messages are published to 40 subjects, interleaved across many blocks
+//  2. Each consumer ACKs its messages, which are proposed for deletion through raft
+//  3. The raft apply loop calls store.RemoveMsg(seq) in rapid succession
+//  4. On v2.11.8: removeMsg loads the cache and NEVER releases it (no finishedWithCache)
+//     so every block touched gets its cache pinned until the expiration timer fires
+//
+// With messages spread across many blocks, this pins ~blockSize * numBlocks
+// of cache memory simultaneously.
+func TestFileStoreWorkQueueRemoveMsgCachePinning(t *testing.T) {
+	fcfg := FileStoreConfig{
+		StoreDir:    t.TempDir(),
+		BlockSize:   8 * 1024 * 1024, // 8MB, same as defaultLargeBlockSize
+		CacheExpire: 100 * time.Millisecond,
+	}
+	scfg := StreamConfig{
+		Name:      "WORK",
+		Storage:   FileStorage,
+		Retention: WorkQueuePolicy,
+	}
+
+	fs, err := newFileStoreWithCreated(fcfg, scfg, time.Now(), prf(&fcfg), nil)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	// Simulate 40 consumers on different subjects.
+	numSubjects := 40
+	msgPayload := make([]byte, 4*1024) // 4KB messages
+
+	sampleSubj := fmt.Sprintf("work.%d", 0)
+	storedMsgSize := fileStoreMsgSize(sampleSubj, nil, msgPayload)
+	msgsPerBlock := int(fcfg.BlockSize / uint64(storedMsgSize))
+
+	// Fill enough blocks that the problem is visible. We want ~10 blocks.
+	numBlocks := 10
+	totalMsgs := msgsPerBlock * numBlocks
+	msgsPerSubject := totalMsgs / numSubjects
+
+	t.Logf("Configuration: %d subjects, %d msgs/subject, %d total msgs", numSubjects, msgsPerSubject, totalMsgs)
+	t.Logf("  msg_size=%d, msgs/block=%d, target blocks=%d", storedMsgSize, msgsPerBlock, numBlocks)
+
+	// Phase 1: Publish messages round-robin across subjects to interleave
+	// them in storage blocks (matches production pattern).
+	seqsBySubject := make(map[int][]uint64, numSubjects)
+	for i := 0; i < totalMsgs; i++ {
+		subjIdx := i % numSubjects
+		subj := fmt.Sprintf("work.%d", subjIdx)
+		seq, _, err := fs.StoreMsg(subj, nil, msgPayload, 0)
+		require_NoError(t, err)
+		seqsBySubject[subjIdx] = append(seqsBySubject[subjIdx], seq)
+	}
+
+	state := fs.State()
+	actualBlocks := fs.numMsgBlocks()
+	t.Logf("After publish: %d msgs, %s, %d blocks", state.Msgs, friendlyBytes(int64(state.Bytes)), actualBlocks)
+
+	// Wait for all caches to expire so we start clean.
+	checkFor(t, 5*time.Second, 50*time.Millisecond, func() error {
+		if csz := fs.cacheSize(); csz != 0 {
+			return fmt.Errorf("cache size not 0, got %s", friendlyBytes(int64(csz)))
+		}
+		return nil
+	})
+	runtime.GC()
+	runtime.GC()
+
+	var memBefore runtime.MemStats
+	runtime.ReadMemStats(&memBefore)
+
+	// Phase 2: Simulate the raft apply loop processing ACK-triggered deletions.
+	//
+	// In production with 40 consumers on different subjects, ACKs arrive
+	// concurrently but the raft apply loop serializes them. We simulate
+	// staggered consumers: each consumer is at a different position in the
+	// stream, so deletions touch messages across many blocks simultaneously.
+	//
+	// This matches the raft apply path:
+	//   applyStreamEntries -> deleteMsgOp -> mset.removeMsg(seq) -> store.RemoveMsg(seq)
+
+	// Build removal order that simulates staggered consumers.
+	staggerPerConsumer := msgsPerSubject / numSubjects
+	if staggerPerConsumer < 1 {
+		staggerPerConsumer = 1
+	}
+	indices := make([]int, numSubjects)
+	for s := 0; s < numSubjects; s++ {
+		indices[s] = (s * staggerPerConsumer) % len(seqsBySubject[s])
+	}
+	var removalOrder []uint64
+	for removed := 0; removed < totalMsgs; {
+		for s := 0; s < numSubjects; s++ {
+			seqs := seqsBySubject[s]
+			if len(seqs) == 0 {
+				continue
+			}
+			idx := indices[s] % len(seqs)
+			removalOrder = append(removalOrder, seqs[idx])
+			seqsBySubject[s] = append(seqs[:idx], seqs[idx+1:]...)
+			if len(seqsBySubject[s]) > 0 {
+				indices[s] = idx % len(seqsBySubject[s])
+			}
+			removed++
+		}
+	}
+
+	t.Logf("Removing %d messages in interleaved order (simulating raft apply loop)...", len(removalOrder))
+
+	// Track peak cache state during removals.
+	var peakLoadedBlocks int
+	var peakCacheMem uint64
+	sampleInterval := len(removalOrder) / 50 // Sample 50 times
+	if sampleInterval < 1 {
+		sampleInterval = 1
+	}
+
+	removedCount := 0
+	for idx, seq := range removalOrder {
+		ok, err := fs.RemoveMsg(seq)
+		require_NoError(t, err)
+		if ok {
+			removedCount++
+		}
+
+		// Sample cache state periodically.
+		if idx%sampleInterval == 0 {
+			fs.mu.RLock()
+			var loaded int
+			var cmem uint64
+			for _, mb := range fs.blks {
+				mb.mu.RLock()
+				if mb.cache != nil {
+					loaded++
+					cmem += uint64(len(mb.cache.buf))
+				}
+				mb.mu.RUnlock()
+			}
+			fs.mu.RUnlock()
+			if loaded > peakLoadedBlocks {
+				peakLoadedBlocks = loaded
+			}
+			if cmem > peakCacheMem {
+				peakCacheMem = cmem
+			}
+		}
+	}
+
+	// Measure memory immediately after the removal storm.
+	runtime.GC()
+	var memAfter runtime.MemStats
+	runtime.ReadMemStats(&memAfter)
+
+	// Check how many block caches are currently loaded.
+	fs.mu.RLock()
+	var loadedBlocks int
+	var totalCacheMem uint64
+	for _, mb := range fs.blks {
+		mb.mu.RLock()
+		if mb.cache != nil {
+			loadedBlocks++
+			totalCacheMem += uint64(len(mb.cache.buf))
+		}
+		mb.mu.RUnlock()
+	}
+	totalBlocks := len(fs.blks)
+	fs.mu.RUnlock()
+
+	heapDelta := int64(memAfter.HeapInuse) - int64(memBefore.HeapInuse)
+
+	t.Logf("Results (WorkQueue raft apply simulation):")
+	t.Logf("  Messages removed: %d / %d", removedCount, len(removalOrder))
+	t.Logf("  Heap before: %s", friendlyBytes(int64(memBefore.HeapInuse)))
+	t.Logf("  Heap after:  %s", friendlyBytes(int64(memAfter.HeapInuse)))
+	t.Logf("  Heap delta:  %s", friendlyBytes(heapDelta))
+	t.Logf("  PEAK blocks with cache loaded: %d / %d", peakLoadedBlocks, totalBlocks)
+	t.Logf("  PEAK total cache memory:       %s", friendlyBytes(int64(peakCacheMem)))
+	t.Logf("  Final blocks with cache loaded: %d / %d", loadedBlocks, totalBlocks)
+	t.Logf("  Final total cache memory:       %s", friendlyBytes(int64(totalCacheMem)))
+	t.Logf("  Expected if all pinned:         ~%s (%d blocks x %s)",
+		friendlyBytes(int64(actualBlocks)*int64(fcfg.BlockSize)),
+		actualBlocks, friendlyBytes(int64(fcfg.BlockSize)))
+
+	if peakLoadedBlocks > 2 {
+		t.Logf("ISSUE: %d block caches were pinned simultaneously (peak %s)",
+			peakLoadedBlocks, friendlyBytes(int64(peakCacheMem)))
+		t.Logf("  On v2.11.8: removeMsg loads cache and NEVER releases it.")
+		t.Logf("  Cache stays until expiration timer fires (default 5s in production).")
+	}
+
+	// Phase 3: Now test what happens if we give GC time between removals.
+	fs2, err := newFileStoreWithCreated(FileStoreConfig{
+		StoreDir:    t.TempDir(),
+		BlockSize:   8 * 1024 * 1024,
+		CacheExpire: 100 * time.Millisecond,
+	}, scfg, time.Now(), prf(&fcfg), nil)
+	require_NoError(t, err)
+	defer fs2.Stop()
+
+	seqsBySubject2 := make(map[int][]uint64, numSubjects)
+	for i := 0; i < totalMsgs; i++ {
+		subjIdx := i % numSubjects
+		subj := fmt.Sprintf("work.%d", subjIdx)
+		seq, _, err := fs2.StoreMsg(subj, nil, msgPayload, 0)
+		require_NoError(t, err)
+		seqsBySubject2[subjIdx] = append(seqsBySubject2[subjIdx], seq)
+	}
+
+	// Wait for caches to expire.
+	checkFor(t, 5*time.Second, 50*time.Millisecond, func() error {
+		if csz := fs2.cacheSize(); csz != 0 {
+			return fmt.Errorf("cache size not 0, got %s", friendlyBytes(int64(csz)))
+		}
+		return nil
+	})
+	runtime.GC()
+	runtime.GC()
+
+	// Remove messages in block-sized batches with GC between each batch.
+	var peakLoadedWithGC int
+	var peakCacheWithGC uint64
+
+	batchSize := msgsPerBlock
+	msgsPerSubject2 := len(seqsBySubject2[0])
+	stagger2 := msgsPerSubject2 / numSubjects
+	if stagger2 < 1 {
+		stagger2 = 1
+	}
+	indices2 := make([]int, numSubjects)
+	for s := 0; s < numSubjects; s++ {
+		indices2[s] = (s * stagger2) % len(seqsBySubject2[s])
+	}
+	var removalOrder2 []uint64
+	for removed2 := 0; removed2 < totalMsgs; {
+		for s := 0; s < numSubjects; s++ {
+			seqs := seqsBySubject2[s]
+			if len(seqs) == 0 {
+				continue
+			}
+			idx := indices2[s] % len(seqs)
+			removalOrder2 = append(removalOrder2, seqs[idx])
+			seqsBySubject2[s] = append(seqs[:idx], seqs[idx+1:]...)
+			if len(seqsBySubject2[s]) > 0 {
+				indices2[s] = idx % len(seqsBySubject2[s])
+			}
+			removed2++
+		}
+	}
+
+	for batchStart := 0; batchStart < len(removalOrder2); batchStart += batchSize {
+		batchEnd := batchStart + batchSize
+		if batchEnd > len(removalOrder2) {
+			batchEnd = len(removalOrder2)
+		}
+		for _, seq := range removalOrder2[batchStart:batchEnd] {
+			fs2.RemoveMsg(seq)
+		}
+
+		// Force GC between batches.
+		runtime.GC()
+		runtime.GC()
+		time.Sleep(time.Millisecond)
+
+		fs2.mu.RLock()
+		var loaded int
+		var cmem uint64
+		for _, mb := range fs2.blks {
+			mb.mu.RLock()
+			if mb.cache != nil {
+				loaded++
+				cmem += uint64(len(mb.cache.buf))
+			}
+			mb.mu.RUnlock()
+		}
+		fs2.mu.RUnlock()
+		if loaded > peakLoadedWithGC {
+			peakLoadedWithGC = loaded
+		}
+		if cmem > peakCacheWithGC {
+			peakCacheWithGC = cmem
+		}
+	}
+
+	t.Logf("\nWith GC between batches of %d removals:", batchSize)
+	t.Logf("  PEAK blocks with cache loaded: %d", peakLoadedWithGC)
+	t.Logf("  PEAK total cache memory:       %s", friendlyBytes(int64(peakCacheWithGC)))
+	t.Logf("  (Compare tight loop peak: %d blocks, %s)",
+		peakLoadedBlocks, friendlyBytes(int64(peakCacheMem)))
+}
