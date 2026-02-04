@@ -13117,3 +13117,173 @@ func BenchmarkFileStoreRemoveMsgMemory(b *testing.B) {
 	b.ReportMetric(float64(storedMsgSize), "stored-msg-size")
 	b.ReportMetric(float64(msgsPerBlock), "msgs-per-block")
 }
+
+// TestFileStoreRemoveMsgMultiBlockCachePinning demonstrates the production-scale
+// memory impact of removeMsg when per-subject limits cause cache loading across
+// multiple blocks. This simulates a stream with many subjects whose oldest messages
+// are spread across different blocks, which is the common case for high-cardinality
+// subject streams with MaxMsgsPer.
+//
+// The key sequence that pins memory on every storeMsg with MaxMsgsPer:
+//  1. firstSeqForSubj() loads block N's cache via loadMsgsWithLock to find fss
+//  2. firstSeqForSubj() returns WITHOUT releasing the cache (line ~5002-5005)
+//  3. removeMsgViaLimits() -> removeMsg sees cache already loaded -> didLoad=false
+//  4. finishedWithCache() is a no-op -> block N's cache stays pinned (~8MB each)
+//
+// With subjects spread across K blocks, K * blockSize bytes of cache get pinned.
+func TestFileStoreRemoveMsgMultiBlockCachePinning(t *testing.T) {
+	// Use default-like block size to match production conditions.
+	fcfg := FileStoreConfig{
+		StoreDir:    t.TempDir(),
+		BlockSize:   8 * 1024 * 1024, // 8MB, same as defaultLargeBlockSize
+		CacheExpire: 100 * time.Millisecond,
+	}
+	scfg := StreamConfig{
+		Name:       "zzz",
+		Storage:    FileStorage,
+		MaxMsgsPer: 1, // Per-subject limit: keep only 1 message per subject
+	}
+
+	fs, err := newFileStoreWithCreated(fcfg, scfg, time.Now(), nil, nil)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	// Use 4KB messages to fill blocks faster while still being realistic.
+	msgPayload := make([]byte, 4*1024)
+	subjectBase := "events.%d"
+
+	// Calculate how many messages fit in one block.
+	sampleSubj := fmt.Sprintf(subjectBase, 0)
+	storedMsgSize := fileStoreMsgSize(sampleSubj, nil, msgPayload)
+	msgsPerBlock := int(fcfg.BlockSize / uint64(storedMsgSize))
+
+	// We want to fill multiple blocks with unique subjects so that each subject's
+	// oldest message is in a different block. We'll then publish new messages for
+	// those same subjects, triggering per-subject limit enforcement across many blocks.
+	numBlocks := 10
+	totalSubjects := msgsPerBlock * numBlocks
+	t.Logf("Storing %d messages across ~%d blocks (msgs/block=%d, msg_size=%d)",
+		totalSubjects, numBlocks, msgsPerBlock, storedMsgSize)
+
+	// Phase 1: Fill blocks with unique subjects.
+	for i := 0; i < totalSubjects; i++ {
+		subj := fmt.Sprintf(subjectBase, i)
+		_, _, err := fs.StoreMsg(subj, nil, msgPayload, 0)
+		require_NoError(t, err)
+	}
+
+	state := fs.State()
+	actualBlocks := fs.numMsgBlocks()
+	t.Logf("After initial fill: %d msgs, %s, %d blocks",
+		state.Msgs, friendlyBytes(int64(state.Bytes)), actualBlocks)
+
+	// Wait for all caches to expire so we start clean.
+	checkFor(t, 5*time.Second, 50*time.Millisecond, func() error {
+		if csz := fs.cacheSize(); csz != 0 {
+			return fmt.Errorf("cache size not 0, got %s", friendlyBytes(int64(csz)))
+		}
+		return nil
+	})
+
+	runtime.GC()
+	runtime.GC()
+
+	var memBefore runtime.MemStats
+	runtime.ReadMemStats(&memBefore)
+
+	// Phase 2: Publish new messages for subjects spread across OLD blocks.
+	// Interleave subjects from different blocks to simulate realistic production
+	// traffic where publishes arrive for random subjects whose oldest messages
+	// are in different blocks. This causes multiple block caches to be loaded
+	// and pinned simultaneously.
+	//
+	// Build a subject order that round-robins across blocks:
+	// subject from block 0, subject from block 1, ..., subject from block N-1, repeat
+	blocksToTouch := numBlocks - 1 // Don't touch lmb's subjects
+	subjectsPerOldBlock := msgsPerBlock
+	subjectsToRepublish := subjectsPerOldBlock * blocksToTouch
+
+	subjectOrder := make([]int, 0, subjectsToRepublish)
+	for offset := 0; offset < subjectsPerOldBlock; offset++ {
+		for blk := 0; blk < blocksToTouch; blk++ {
+			subjectOrder = append(subjectOrder, blk*msgsPerBlock+offset)
+		}
+	}
+
+	// Track peak cache state during the republish storm by sampling periodically.
+	var peakLoadedBlocks int
+	var peakCacheMem uint64
+	sampleInterval := len(subjectOrder) / 20 // Sample 20 times during the storm
+	if sampleInterval < 1 {
+		sampleInterval = 1
+	}
+
+	for idx, i := range subjectOrder {
+		subj := fmt.Sprintf(subjectBase, i)
+		_, _, err := fs.StoreMsg(subj, nil, msgPayload, 0)
+		require_NoError(t, err)
+
+		// Sample cache state periodically.
+		if idx%sampleInterval == 0 {
+			fs.mu.RLock()
+			var loaded int
+			var cmem uint64
+			for _, mb := range fs.blks {
+				mb.mu.RLock()
+				if mb.cache != nil {
+					loaded++
+					cmem += uint64(len(mb.cache.buf))
+				}
+				mb.mu.RUnlock()
+			}
+			fs.mu.RUnlock()
+			if loaded > peakLoadedBlocks {
+				peakLoadedBlocks = loaded
+			}
+			if cmem > peakCacheMem {
+				peakCacheMem = cmem
+			}
+		}
+	}
+
+	// Measure memory immediately after the republish storm.
+	runtime.GC()
+	var memAfter runtime.MemStats
+	runtime.ReadMemStats(&memAfter)
+
+	// Check how many block caches are currently loaded.
+	fs.mu.RLock()
+	var loadedBlocks int
+	var totalCacheMem uint64
+	for _, mb := range fs.blks {
+		mb.mu.RLock()
+		if mb.cache != nil {
+			loadedBlocks++
+			totalCacheMem += uint64(len(mb.cache.buf))
+		}
+		mb.mu.RUnlock()
+	}
+	totalBlocks := len(fs.blks)
+	fs.mu.RUnlock()
+
+	heapDelta := int64(memAfter.HeapInuse) - int64(memBefore.HeapInuse)
+
+	t.Logf("After republish of %d subjects (interleaved across %d blocks):", subjectsToRepublish, blocksToTouch)
+	t.Logf("  Heap before: %s", friendlyBytes(int64(memBefore.HeapInuse)))
+	t.Logf("  Heap after:  %s", friendlyBytes(int64(memAfter.HeapInuse)))
+	t.Logf("  Heap delta:  %s", friendlyBytes(heapDelta))
+	t.Logf("  PEAK blocks with cache loaded: %d", peakLoadedBlocks)
+	t.Logf("  PEAK total cache memory:       %s", friendlyBytes(int64(peakCacheMem)))
+	t.Logf("  Final blocks with cache loaded: %d / %d", loadedBlocks, totalBlocks)
+	t.Logf("  Final total cache memory:       %s", friendlyBytes(int64(totalCacheMem)))
+	t.Logf("  Expected if all pinned:   ~%s (%d blocks x %s)",
+		friendlyBytes(int64(numBlocks)*int64(fcfg.BlockSize)),
+		numBlocks, friendlyBytes(int64(fcfg.BlockSize)))
+
+	if peakLoadedBlocks > 1 {
+		t.Logf("WARNING: Up to %d block caches were pinned simultaneously (peak %s of cache memory)",
+			peakLoadedBlocks, friendlyBytes(int64(peakCacheMem)))
+		t.Logf("  This happens because firstSeqForSubj loads the cache and returns without")
+		t.Logf("  releasing it, then removeMsg sees didLoad=false and skips finishedWithCache.")
+	}
+}
