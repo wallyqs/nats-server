@@ -322,7 +322,14 @@ var (
 	errNoInternalClient  = errors.New("raft: no internal client")
 	errMembershipChange  = errors.New("raft: membership change in progress")
 	errRemoveLastNode    = errors.New("raft: cannot remove the last peer")
+	errApplyQueueFull    = errors.New("raft: apply queue is full")
 )
+
+// Maximum number of outstanding entries in the apply queue before we
+// defer further commits. Entries deferred will remain in WAL and be
+// applied later when the queue drains. This bounds apply queue memory
+// usage: at ~7KB per entry, 32768 entries ≈ 230MB.
+var maxApplyOutstanding uint64 = 32768
 
 // This will bootstrap a raftNode by writing its config into the store directory.
 func (s *Server) bootstrapRaftNode(cfg *RaftConfig, knownPeers []string, allPeersKnown bool) error {
@@ -1098,7 +1105,9 @@ func (n *raft) ResumeApply() {
 		n.debug("Resuming %d replays", n.hcommit+1-n.commit)
 		for index := n.commit + 1; index <= n.hcommit; index++ {
 			if err := n.applyCommit(index); err != nil {
-				n.warn("Got error on apply commit during replay: %v", err)
+				if err != errApplyQueueFull {
+					n.warn("Got error on apply commit during replay: %v", err)
+				}
 				break
 			}
 			// We want to unlock here to allow the upper layers to call Applied() without blocking.
@@ -3162,6 +3171,11 @@ func (n *raft) applyCommit(index uint64) error {
 		n.debug("Ignoring apply commit for %d, already processed", index)
 		return nil
 	}
+	// Prevent unbounded apply queue growth which can cause excessive memory usage.
+	// Entries will remain in WAL and be applied on the next heartbeat/response.
+	if n.commit > n.applied && (n.commit-n.applied) >= maxApplyOutstanding {
+		return errApplyQueueFull
+	}
 
 	if n.State() == Leader {
 		delete(n.acks, index)
@@ -3300,6 +3314,11 @@ func (n *raft) tryCommit(index uint64) (bool, error) {
 	// We have a quorum
 	for i := n.commit + 1; i <= index; i++ {
 		if err := n.applyCommit(i); err != nil {
+			// Apply queue full is not a fatal error - entries remain in WAL
+			// and will be applied when the queue drains on the next response.
+			if err == errApplyQueueFull {
+				return true, nil
+			}
 			if err != errNodeClosed && err != errNodeRemoved {
 				n.error("Got an error applying commit for %d: %v", i, err)
 			}
