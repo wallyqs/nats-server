@@ -2679,7 +2679,13 @@ func (mb *msgBlock) firstMatchingMulti(sl *gsl.SimpleSublist, start uint64, sm *
 		if updateLLTS {
 			mb.llts = ats.AccessTime()
 		}
-		mb.finishedWithCache()
+		// If we loaded the block in this call, recycle the buffer back to
+		// the pool immediately. The fss metadata is preserved by clearCache.
+		if didLoad {
+			mb.clearCache()
+		} else {
+			mb.finishedWithCache()
+		}
 		mb.mu.Unlock()
 	}()
 
@@ -2814,17 +2820,25 @@ func (mb *msgBlock) firstMatchingMulti(sl *gsl.SimpleSublist, start uint64, sm *
 func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *StoreMsg) (*StoreMsg, bool, error) {
 	mb.mu.Lock()
 	var updateLLTS bool
+	var didLoad bool
 	defer func() {
 		if updateLLTS {
 			mb.llts = ats.AccessTime()
 		}
-		mb.finishedWithCache()
+		// If we loaded the block in this call, recycle the buffer back to
+		// the pool immediately. The fss metadata is preserved by clearCache
+		// for future calls. If the cache was pre-loaded, just drop the
+		// strong reference as before.
+		if didLoad {
+			mb.clearCache()
+		} else {
+			mb.finishedWithCache()
+		}
 		mb.mu.Unlock()
 	}()
 
 	fseq, isAll := start, filter == _EMPTY_ || filter == fwcs
 
-	var didLoad bool
 	if mb.fssNotLoaded() {
 		// Make sure we have fss loaded.
 		if err := mb.loadMsgsWithLock(); err != nil {
@@ -2961,7 +2975,13 @@ func (mb *msgBlock) prevMatchingMulti(sl *gsl.SimpleSublist, start uint64, sm *S
 		if updateLLTS {
 			mb.llts = ats.AccessTime()
 		}
-		mb.finishedWithCache()
+		// If we loaded the block in this call, recycle the buffer back to
+		// the pool immediately.
+		if didLoad {
+			mb.clearCache()
+		} else {
+			mb.finishedWithCache()
+		}
 		mb.mu.Unlock()
 	}()
 
@@ -5467,7 +5487,17 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 		fs.removeMsgBlock(mb)
 		firstSeqNeedsUpdate = seq == fs.state.FirstSeq
 	}
-	finishedWithCache()
+	// Release the cache. For non-last blocks (which have no pending writes),
+	// recycle the buffer back to the pool immediately so it's available for
+	// other concurrent block loads. For the last block, just drop the strong
+	// reference since there may be pending writes.
+	if !isEmpty {
+		if isLastBlock {
+			mb.finishedWithCache()
+		} else {
+			mb.clearCache()
+		}
+	}
 	mb.mu.Unlock()
 
 	// If we emptied the current message block and the seq was state.FirstSeq
