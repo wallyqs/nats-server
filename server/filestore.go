@@ -5306,17 +5306,19 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 	// We used to not have to load in the messages except with callbacks or the filtered subject state (which is now always on).
 	// Now just load regardless.
 	// TODO(dlc) - Figure out a way not to have to load it in, we need subject tracking outside main data block.
-	var didLoad bool
+	// Track whether cache was already present before we got here. If not, we are
+	// responsible for releasing it when done — whether loaded from disk or recovered
+	// from the elastic weak pointer via cacheAlreadyLoaded().
+	hadCache := mb.cache != nil
 	if mb.cacheNotLoaded() {
 		if err := mb.loadMsgsWithLock(); err != nil {
 			mb.mu.Unlock()
 			fsUnlock()
 			return false, err
 		}
-		didLoad = true
 	}
 	finishedWithCache := func() {
-		if didLoad {
+		if !hadCache {
 			mb.finishedWithCache()
 		}
 	}
@@ -5352,12 +5354,16 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 		mb.mu.Unlock() // Only safe way to checkLastBlock is to unlock here...
 		lmb, err := fs.checkLastBlock(emptyRecordLen)
 		if err != nil {
+			mb.mu.Lock()
 			finishedWithCache()
+			mb.mu.Unlock()
 			fsUnlock()
 			return false, err
 		}
 		if err := lmb.writeTombstone(sm.seq, sm.ts); err != nil {
+			mb.mu.Lock()
 			finishedWithCache()
+			mb.mu.Unlock()
 			fsUnlock()
 			return false, err
 		}
