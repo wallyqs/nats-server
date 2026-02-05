@@ -1277,9 +1277,9 @@ func (n *raft) InstallSnapshot(data []byte) error {
 		return werr
 	}
 
-	// Check that a catchup isn't already taking place. If it is then we won't
-	// allow installing snapshots until it is done.
-	if len(n.progress) > 0 || n.paused {
+	// If we are paused (receiving a snapshot/catchup from the leader) then
+	// we should not install snapshots ourselves until that is done.
+	if n.paused {
 		return errCatchupsRunning
 	}
 
@@ -2981,9 +2981,31 @@ func (n *raft) runCatchup(ar *appendEntryResponse, indexUpdatesQ *ipQueue[uint64
 			}
 			ae, err := n.loadEntry(next)
 			if err != nil {
-				if err != ErrStoreEOF {
-					n.warn("Got an error loading %d index: %v", next, err)
+				if err == ErrStoreEOF {
+					return true
 				}
+				// The entry may have been compacted due to a snapshot being installed.
+				// Check if we can send the snapshot to the follower and resume from there.
+				var state StreamState
+				n.wal.FastState(&state)
+				if state.FirstSeq > next {
+					n.debug("Catchup for %q: entry %d was compacted, sending snapshot to resume", peer, next)
+					n.Lock()
+					lastIndex, snapErr := n.sendSnapshotToFollower(subj)
+					if snapErr != nil {
+						n.Unlock()
+						n.warn("Catchup for %q: failed to send snapshot after compaction: %v", peer, snapErr)
+						return true
+					}
+					next = lastIndex
+					last = n.pindex
+					n.Unlock()
+					// Reset outstanding tracking since the follower will start fresh from the snapshot.
+					total = 0
+					om = make(map[uint64]int)
+					continue
+				}
+				n.warn("Got an error loading %d index: %v", next, err)
 				return true
 			}
 			// Re-encode with the lterm if needed
