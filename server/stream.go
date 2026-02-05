@@ -7754,6 +7754,101 @@ func (mset *stream) ackMsg(o *consumer, seq uint64) bool {
 	return true
 }
 
+// ackMsgsBatch processes multiple message acks for interest-based retention in a batch.
+// This reduces raft log pressure by proposing a single batch delete instead of individual deletes.
+// Returns the number of sequences that were proposed for removal.
+func (mset *stream) ackMsgsBatch(o *consumer, seqs []uint64) int {
+	if len(seqs) == 0 {
+		return 0
+	}
+
+	mset.mu.Lock()
+	if mset.closed.Load() || mset.cfg.Retention == LimitsPolicy {
+		mset.mu.Unlock()
+		return 0
+	}
+
+	store := mset.store
+	var state StreamState
+	store.FastState(&state)
+
+	isClustered := mset.isClustered()
+	isConsumerLeader := o == nil || o.IsLeader()
+	retention := mset.cfg.Retention
+	streamName := mset.cfg.Name
+
+	// Collect sequences that should be removed.
+	var toRemove []uint64
+
+	for _, seq := range seqs {
+		if seq == 0 {
+			continue
+		}
+
+		// If this has arrived before we have processed the message itself.
+		if seq > state.LastSeq {
+			mset.registerPreAck(o, seq)
+			continue
+		}
+
+		// Always clear pre-ack if here.
+		mset.clearPreAck(o, seq)
+
+		// Make sure this sequence is not below our first sequence.
+		if seq < state.FirstSeq {
+			continue
+		}
+
+		var shouldRemove bool
+		switch retention {
+		case WorkQueuePolicy:
+			shouldRemove = mset.directs <= 0 || mset.noInterest(seq, o)
+		case InterestPolicy:
+			shouldRemove = mset.noInterest(seq, o)
+		}
+
+		if !shouldRemove {
+			continue
+		}
+
+		if !isClustered {
+			// Non-clustered: directly remove.
+			if _, err := store.RemoveMsg(seq); err == ErrStoreEOF {
+				mset.registerPreAck(o, seq)
+			}
+			continue
+		}
+
+		// For clustered, only consumer leader proposes deletions.
+		if !isConsumerLeader {
+			// Allow moving first sequence up for interest-based streams (race condition workaround).
+			if retention == InterestPolicy && seq == state.FirstSeq {
+				if _, err := store.RemoveMsg(seq); err == ErrStoreEOF {
+					mset.registerPreAck(o, seq)
+				}
+				// Update state since we removed the first seq.
+				store.FastState(&state)
+			}
+			continue
+		}
+
+		// Collect for batch proposal.
+		toRemove = append(toRemove, seq)
+	}
+
+	// Release lock before proposing to raft.
+	node := mset.node
+	mset.mu.Unlock()
+
+	// Propose batch delete if we have sequences to remove.
+	if len(toRemove) > 0 && node != nil {
+		mdb := streamMsgDeleteBatch{Stream: streamName, Seqs: toRemove}
+		node.ForwardProposal(encodeMsgDeleteBatch(&mdb))
+	}
+
+	return len(toRemove)
+}
+
 // Snapshot creates a snapshot for the stream and possibly consumers.
 func (mset *stream) snapshot(deadline time.Duration, checkMsgs, includeConsumers bool) (*SnapshotResult, error) {
 	if mset.closed.Load() {

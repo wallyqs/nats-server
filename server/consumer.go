@@ -6491,6 +6491,9 @@ func (o *consumer) checkStateForInterestStream(ss *StreamState) error {
 	}
 
 	var retryAsflr uint64
+	// Collect sequences for batch deletion to reduce raft log pressure.
+	var seqsToAck []uint64
+
 	for seq = fseq; dflr > 0 && seq <= dflr; seq++ {
 		if filters != nil {
 			_, nseq, err = store.LoadNextMsgMulti(filters, seq, &smv)
@@ -6504,10 +6507,9 @@ func (o *consumer) checkStateForInterestStream(ss *StreamState) error {
 		if err == nil {
 			// Only ack though if no error and seq <= ack floor.
 			if seq <= asflr {
-				didRemove := mset.ackMsg(o, seq)
-				// Removing the message could fail. For example if clustered since we need to propose it.
-				// Overwrite retry floor (only the first time) to allow us to check next time if the removal was successful.
-				if didRemove && retryAsflr == 0 {
+				seqsToAck = append(seqsToAck, seq)
+				// Track the first sequence for retry floor.
+				if retryAsflr == 0 {
 					retryAsflr = seq
 				}
 			} else if seq <= dflr {
@@ -6517,13 +6519,17 @@ func (o *consumer) checkStateForInterestStream(ss *StreamState) error {
 				}
 				// If we have pending, we will need to walk through to delivered in case we missed any of those acks as well.
 				if _, ok := state.Pending[seq]; !ok {
-					// The filters are already taken into account,
-					mset.ackMsg(o, seq)
+					seqsToAck = append(seqsToAck, seq)
 				}
 			}
 		} else if err == ErrStoreEOF {
 			break
 		}
+	}
+
+	// Process all collected sequences in a batch.
+	if len(seqsToAck) > 0 {
+		mset.ackMsgsBatch(o, seqsToAck)
 	}
 	// If retry floor was not overwritten, set to ack floor+1, we don't need to account for any retries below it.
 	// However, our ack floor may be lower than the next message we can receive, so we correct it upward if needed.

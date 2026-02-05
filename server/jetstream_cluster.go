@@ -135,6 +135,8 @@ const (
 	// Batch stream ops.
 	batchMsgOp
 	batchCommitMsgOp
+	// Batch delete for interest-based retention.
+	deleteMsgBatchOp
 )
 
 // raftGroups are controlled by the metagroup controller.
@@ -347,6 +349,13 @@ type streamMsgDelete struct {
 	NoErase bool        `json:"no_erase,omitempty"`
 	Subject string      `json:"subject"`
 	Reply   string      `json:"reply"`
+}
+
+// streamMsgDeleteBatch is used for batching multiple message deletions from interest-based retention.
+// This reduces raft log pressure when many messages are deleted at once.
+type streamMsgDeleteBatch struct {
+	Stream string   `json:"stream"`
+	Seqs   []uint64 `json:"seqs"`
 }
 
 const (
@@ -3544,6 +3553,21 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 						resp.Success = true
 						s.sendAPIResponse(sp.Client, mset.account(), sp.Subject, sp.Reply, _EMPTY_, s.jsonResponse(resp))
 					}
+				}
+			case deleteMsgBatchOp:
+				// Batch delete for interest-based retention - reduces raft log pressure.
+				mdb, err := decodeMsgDeleteBatch(buf[1:])
+				if err != nil {
+					if node := mset.raftNode(); node != nil {
+						s := js.srv
+						s.Errorf("JetStream cluster could not decode batch delete msg for '%s > %s' [%s]",
+							mset.account(), mset.name(), node.Group())
+					}
+					panic(err.Error())
+				}
+				// Remove each message in the batch.
+				for _, seq := range mdb.Seqs {
+					mset.removeMsg(seq)
 				}
 			default:
 				panic(fmt.Sprintf("JetStream Cluster Unknown group entry op type: %v", op))
@@ -8077,6 +8101,19 @@ func decodeMsgDelete(buf []byte) (*streamMsgDelete, error) {
 	var md streamMsgDelete
 	err := json.Unmarshal(buf, &md)
 	return &md, err
+}
+
+func encodeMsgDeleteBatch(mdb *streamMsgDeleteBatch) []byte {
+	var bb bytes.Buffer
+	bb.WriteByte(byte(deleteMsgBatchOp))
+	json.NewEncoder(&bb).Encode(mdb)
+	return bb.Bytes()
+}
+
+func decodeMsgDeleteBatch(buf []byte) (*streamMsgDeleteBatch, error) {
+	var mdb streamMsgDeleteBatch
+	err := json.Unmarshal(buf, &mdb)
+	return &mdb, err
 }
 
 func (s *Server) jsClusteredMsgDeleteRequest(ci *ClientInfo, acc *Account, mset *stream, stream, subject, reply string, req *JSApiMsgDeleteRequest, rmsg []byte) {
