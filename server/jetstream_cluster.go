@@ -6924,6 +6924,21 @@ func groupName(prefix string, peers []string, storage StorageType) string {
 	return fmt.Sprintf("%s-R%d%s-%s", prefix, len(peers), storage.String()[:1], gns)
 }
 
+// groupNameRenamePreserveLabel creates a new group name with a new hash
+// but preserves the original replica label (e.g., R3F stays R3F even if
+// the group is scaled down to 1 peer).
+func groupNameRenamePreserveLabel(oldName string) string {
+	// Name format: {prefix}-R{count}{storage}-{hash}
+	// Example: S-R3F-abc123 or C-R1M-xyz789
+	parts := strings.SplitN(oldName, "-", 3)
+	if len(parts) < 2 {
+		// Fallback: return original name if parsing fails
+		return oldName
+	}
+	gns := getHash(nuid.Next())
+	return fmt.Sprintf("%s-%s-%s", parts[0], parts[1], gns)
+}
+
 // returns stream count for this tier as well as applicable reservation size (not including cfg)
 // jetStream read lock should be held
 func tieredStreamAndReservationCount(asa map[string]*streamAssignment, tier string, cfg *StreamConfig) (int, int64) {
@@ -7411,7 +7426,7 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 			// Single nodes are not recorded by the NRG layer so we can rename.
 			// MUST do this, otherwise a scaleup afterward could potentially lead to inconsistencies.
 			if len(rg.Peers) == 1 {
-				rg.Name = groupNameForStream(rg.Peers, rg.Storage)
+				rg.Name = groupNameRenamePreserveLabel(rg.Name)
 			}
 		}
 
@@ -8581,7 +8596,7 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 			// Single nodes are not recorded by the NRG layer so we can rename.
 			// MUST do this, otherwise a scaleup afterward could potentially lead to inconsistencies.
 			if len(nca.Group.Peers) == 1 {
-				nca.Group.Name = groupNameForConsumer(nca.Group.Peers, nca.Group.Storage)
+				nca.Group.Name = groupNameRenamePreserveLabel(nca.Group.Name)
 			}
 		}
 
