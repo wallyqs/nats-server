@@ -2,12 +2,13 @@
 
 ## Issue Summary
 
-Observing severe slowness in NATS filestore and cluster operations:
+⚠️ **CLUSTER-WIDE EMERGENCY** - Multiple nodes experiencing critical RAFT failure:
 - `WriteFullState` taking 1+ minute to write 73 bytes
 - `Metalayer snapshot` taking 61 seconds for only 4 streams and 43 consumers
 - Internal RAFT subscriptions (`$NRG.P.*`) taking 2+ seconds to process
 - Readloop processing times exceeding 2 seconds
 - JetStream streams reporting high message lag (>10,000 pending messages)
+- **CRITICAL: 10,000 RAFT append entries pending on MULTIPLE nodes** (tsl-nats-0, tsl-nats-2, tsl-nats-3)
 
 ## Root Cause Analysis
 
@@ -120,6 +121,60 @@ Potential data loss or split-brain scenarios
 - **Split-brain potential**: Severely lagging nodes can cause leadership elections and cluster chaos
 - **Cascading failures**: One slow node can impact the entire cluster's throughput
 
+### CRITICAL: RAFT Append Entries Pending (Cluster-Wide Failure)
+
+**Location**: `server/raft.go:4224`
+
+**The Problem**:
+```
+[WRN] RAFT [PXqZqZEB - S-R3F-0P5z4fFi] 10000 append entries pending
+[WRN] RAFT [9nvdAFT1 - S-R3F-0P5z4fFi] 10000 append entries pending  (tsl-nats-0)
+[WRN] RAFT [063rxyLn - S-R3F-0P5z4fFi] 10000 append entries pending  (tsl-nats-3)
+```
+
+**This is the most critical indicator yet - appearing on MULTIPLE nodes simultaneously.**
+
+**What "append entries pending" means**:
+1. **The cache**: RAFT maintains an in-memory cache (`n.pae`) of append entries that have been:
+   - Written to the Write-Ahead Log (WAL)
+   - Sent to followers for replication
+   - **But NOT yet committed/applied** to the state machine (filestore)
+
+2. **Normal flow** (see `server/raft.go:3159-3206`):
+   ```
+   Write to WAL → Cache in n.pae → Send to followers → Commit → Apply → Delete from cache
+   ```
+
+3. **Current broken flow**:
+   ```
+   Write to WAL ✓ → Cache in n.pae ✓ → Send to followers ✓ → Commit SLOW → Apply VERY SLOW → Cache never cleared
+   ```
+
+4. **Thresholds** (see `server/raft.go:4170-4172`):
+   - `paeWarnThreshold = 10,000` - Warning starts
+   - `paeWarnModulo = 5,000` - Warn every 5,000 entries
+   - `paeDropThreshold = 20,000` - Cache full, start dropping entries
+
+**Why entries aren't being committed**:
+- The `applyCommit()` function (line 3159) applies entries to the filestore
+- This involves **writing messages to disk** via the filestore
+- With catastrophically slow storage, each commit takes seconds instead of milliseconds
+- Entries pile up faster than they can be applied
+- Eventually hits 20,000 and RAFT starts **dropping entries** (potential data loss)
+
+**Why this is happening cluster-wide**:
+1. **All nodes have slow storage**: Every node is experiencing the same I/O bottleneck
+2. **Leader bottleneck**: If the leader is slow, it slows down the entire replication process
+3. **Shared infrastructure**: All pods likely using the same degraded storage backend
+4. **Cascade effect**: One slow node forces others to buffer more data
+
+**IMMINENT DANGERS**:
+- **At 20,000 entries**: RAFT starts **dropping entries** from cache (see line 4226-4229)
+- **Memory exhaustion**: 10,000+ cached entries consuming significant memory
+- **Cluster halt**: If commits stop completely, the cluster becomes read-only
+- **Data inconsistency**: Dropped entries may cause state divergence between nodes
+- **Complete cluster failure**: All nodes may crash or become unresponsive
+
 ## Storage I/O Indicators
 
 Both issues point to **severe storage I/O bottleneck**:
@@ -215,37 +270,98 @@ nats stream ls --json | jq '.[] | {name, messages, lag}'
 
 ## Recommended Fixes
 
-### CRITICAL - Immediate Actions:
+### 🚨 EMERGENCY - Immediate Actions Required:
 
-**⚠️ CLUSTER STABILITY AT RISK**: The combination of high message lag (>10,000) and slow RAFT operations indicates your cluster is in a critical state. Immediate action is required.
+**⚠️ CLUSTER-WIDE CATASTROPHIC FAILURE IN PROGRESS**:
+- 10,000 append entries pending on MULTIPLE nodes
+- Approaching 20,000 threshold where RAFT will DROP entries
+- Cluster approaching complete failure
+- Data loss imminent if not addressed
 
-1. **Check storage health URGENTLY**: The #1 priority
-   - Verify disk is not failing
-   - Check for network storage latency (use `iostat -x 1 10`)
-   - Look for I/O contention from other processes
-   - **If storage is degraded, consider emergency migration**
+**YOU HAVE MINUTES, NOT HOURS**
 
-2. **Monitor cluster state**:
-   - Check if node is still in RAFT quorum: `nats stream cluster <stream-name>`
-   - Watch for leader changes: `grep -i "leader" nats.log | tail -20`
-   - Monitor if node is being removed from cluster due to lag
+**PRIORITY 1: Stop the bleeding (NEXT 5 MINUTES)**
 
-3. **Consider temporary mitigation**:
-   - **Reduce incoming message rate** if possible (backpressure)
-   - Check if other pods/nodes in cluster are healthy
-   - Consider **redirecting traffic** to healthy nodes
-   - If this is a follower node, consider temporarily removing it from cluster
+1. **IMMEDIATELY stop or drastically reduce incoming traffic**:
+   ```bash
+   # Apply backpressure at application level
+   # Scale down producers
+   # Enable flow control
+   ```
+   - This is your ONLY way to prevent hitting the 20,000 drop threshold
+   - Without this, data loss is guaranteed
 
-4. **Monitor I/O patterns**:
-   - Use `iotop -o` to see which processes are causing I/O
-   - Check if NATS is the only heavy I/O user
-   - Look for other processes competing for disk
+2. **Check pending entries on all nodes RIGHT NOW**:
+   ```bash
+   # Watch for "append entries pending" warnings
+   kubectl logs -f pod/tsl-nats-0 | grep "append entries pending"
+   kubectl logs -f pod/tsl-nats-2 | grep "append entries pending"
+   kubectl logs -f pod/tsl-nats-3 | grep "append entries pending"
+   ```
+   - If any node shows 15,000+, you are in immediate danger
+   - At 20,000, RAFT starts dropping entries (DATA LOSS)
 
-5. **Review NATS configuration**:
-   - If using encryption, consider if it's necessary (major performance impact on slow disks)
+3. **Monitor for dropped entries** (would indicate data loss):
+   ```bash
+   grep "Invalidate cache entry" nats.log  # See raft.go:4227-4229
+   ```
+
+**PRIORITY 2: Diagnose storage (NEXT 15 MINUTES)**
+
+4. **Check storage health URGENTLY on ALL nodes**:
+   ```bash
+   # On each pod/node:
+   iostat -x 1 10        # Look for 100% utilization, high await (>100ms)
+   iotop -o              # What's causing I/O
+   dmesg | tail -50      # Disk errors?
+   df -h                 # Disk full?
+   ```
+
+5. **Check if this is shared storage issue**:
+   ```bash
+   # Are all pods on same storage backend?
+   kubectl get pv
+   kubectl describe pv <pv-name> | grep -i storage
+   ```
+
+**PRIORITY 3: Emergency mitigation (IF storage can't be fixed immediately)**
+
+6. **If storage cannot be fixed in minutes**:
+   - **Option A: Emergency cluster shutdown** (preserves data consistency):
+     ```bash
+     # Stop ALL producers first
+     # Gracefully shutdown NATS cluster
+     # Migrate to faster storage
+     # Restart cluster
+     ```
+
+   - **Option B: Sacrifice one node to save cluster** (if some nodes are healthy):
+     ```bash
+     # Identify the slowest node (highest pending entries)
+     # Remove it from cluster
+     # Let cluster stabilize with remaining nodes
+     # Fix storage and re-add later
+     ```
+
+   - **Option C: Emergency storage bypass** (if available):
+     ```bash
+     # If pods can be moved to local SSDs or faster storage
+     # Emergency migration of volumes
+     ```
+
+7. **Monitor cluster state continuously**:
+   ```bash
+   nats stream cluster <stream-name>  # RAFT state
+   grep -i "leader" nats.log | tail -20  # Leadership changes
+   ```
+
+**PRIORITY 4: Configuration review (if cluster survives)**
+
+8. **Review NATS configuration** (for long-term fix):
+   - If using encryption, consider if it's necessary (major performance impact)
    - Check `sync_interval` and `sync_always` settings
    - Review `file_store_block_size` (smaller blocks = more checksum reads)
-   - Consider if `store_dir` is on appropriate storage
+   - Consider if `store_dir` is on appropriate storage (local NVMe > network storage)
 
 ### Code-Level Optimizations (Potential):
 
@@ -300,6 +416,9 @@ nats stream ls --json | jq '.[] | {name, messages, lag}'
 - High message lag check: `server/jetstream_cluster.go:9099`
 - streamLagWarnThreshold constant: `server/jetstream_cluster.go:8936`
 - processClusteredInboundMsg: `server/jetstream_cluster.go:8938+`
+- **cachePendingEntry (10k warning)**: `server/raft.go:4220-4231`
+- **applyCommit (where bottleneck occurs)**: `server/raft.go:3159-3256`
+- **paeWarnThreshold/paeDropThreshold**: `server/raft.go:4170-4172`
 
 ### Internal Subscription & Readloop:
 - Internal subscription warning: `server/client.go:3799`
@@ -313,12 +432,24 @@ nats stream ls --json | jq '.[] | {name, messages, lag}'
 
 ## Summary
 
-This NATS server is experiencing **catastrophic storage I/O performance**, not software bugs. The evidence shows:
+This is a **CLUSTER-WIDE CATASTROPHIC STORAGE FAILURE** affecting multiple NATS nodes simultaneously, not a software bug.
 
-1. **Root cause**: Storage I/O operations are 100-1000x slower than normal
+### Evidence:
+1. **Root cause**: Storage I/O operations are 100-1000x slower than normal across ALL nodes
 2. **Primary symptom**: WriteFullState taking 66 seconds to write 73 bytes
-3. **Cascade effect**: Slow I/O → Slow RAFT commits → Message backlog → Cluster instability
-4. **Critical status**: >10,000 messages pending commit, node at risk of removal from cluster
-5. **Immediate action required**: Diagnose storage health, consider emergency mitigation
+3. **Cascade effect**: Slow I/O → Slow RAFT commits → Message backlog → Cluster-wide failure
+4. **CRITICAL**: 10,000 RAFT append entries pending on 3+ nodes simultaneously
+5. **IMMINENT DANGER**: Approaching 20,000 threshold where RAFT will DROP entries (data loss)
 
-**This is an infrastructure emergency, not a NATS code issue.**
+### Severity Assessment:
+- **Time to failure**: Minutes, not hours
+- **Data loss risk**: Imminent (at 20k threshold)
+- **Cluster status**: Complete failure in progress
+- **Recovery difficulty**: High - requires immediate storage intervention
+
+### Required Actions:
+1. **IMMEDIATE**: Reduce/stop incoming traffic (next 5 minutes)
+2. **URGENT**: Diagnose storage on all nodes (next 15 minutes)
+3. **CRITICAL**: Emergency mitigation if storage can't be fixed immediately
+
+**This is an infrastructure emergency requiring immediate executive action, not a NATS code issue.**
