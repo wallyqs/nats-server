@@ -972,6 +972,16 @@ var (
 	blkPoolPuts atomic.Int64
 )
 
+// Counters to track block size distribution for monitoring.
+var (
+	blkPoolGetsTiny      atomic.Int64
+	blkPoolGetsSmall     atomic.Int64
+	blkPoolGetsMedium    atomic.Int64
+	blkPoolGetsLarge     atomic.Int64
+	blkPoolGetsOversized atomic.Int64
+	blkPoolGetsUnknown   atomic.Int64 // Buffers with unexpected capacities
+)
+
 // Pools to recycle the blocks to help with memory pressure.
 var blkPoolTiny = &sync.Pool{
 	New: func() any {
@@ -1003,20 +1013,25 @@ func getMsgBlockBuf(sz int) (buf []byte) {
 	switch {
 	case sz <= defaultTinyBlockSize:
 		blkPoolGets.Add(1)
+		blkPoolGetsTiny.Add(1)
 		return blkPoolTiny.Get().(*[defaultTinyBlockSize]byte)[:0]
 	case sz <= defaultSmallBlockSize:
 		blkPoolGets.Add(1)
+		blkPoolGetsSmall.Add(1)
 		return blkPoolSmall.Get().(*[defaultSmallBlockSize]byte)[:0]
 	case sz <= defaultMediumBlockSize:
 		blkPoolGets.Add(1)
+		blkPoolGetsMedium.Add(1)
 		return blkPoolMedium.Get().(*[defaultMediumBlockSize]byte)[:0]
 	case sz <= defaultLargeBlockSize:
 		blkPoolGets.Add(1)
+		blkPoolGetsLarge.Add(1)
 		return blkPoolBig.Get().(*[defaultLargeBlockSize]byte)[:0]
 	default:
 		// Ideally this should not happen, once we return a buffer that's
 		// larger than defaultLargeBlockSize then we will refuse to recycle
 		// it to stop the pools from bloating excessively.
+		blkPoolGetsOversized.Add(1)
 		return make([]byte, 0, sz)
 	}
 }
@@ -1026,22 +1041,45 @@ func recycleMsgBlockBuf(buf []byte) {
 	switch cap(buf) {
 	case defaultTinyBlockSize:
 		blkPoolPuts.Add(1)
+		blkPoolGetsTiny.Add(-1)
 		b := (*[defaultTinyBlockSize]byte)(buf[0:defaultTinyBlockSize])
 		blkPoolTiny.Put(b)
 	case defaultSmallBlockSize:
 		blkPoolPuts.Add(1)
+		blkPoolGetsSmall.Add(-1)
 		b := (*[defaultSmallBlockSize]byte)(buf[0:defaultSmallBlockSize])
 		blkPoolSmall.Put(b)
 	case defaultMediumBlockSize:
 		blkPoolPuts.Add(1)
+		blkPoolGetsMedium.Add(-1)
 		b := (*[defaultMediumBlockSize]byte)(buf[0:defaultMediumBlockSize])
 		blkPoolMedium.Put(b)
 	case defaultLargeBlockSize:
 		blkPoolPuts.Add(1)
+		blkPoolGetsLarge.Add(-1)
 		b := (*[defaultLargeBlockSize]byte)(buf[0:defaultLargeBlockSize])
 		blkPoolBig.Put(b)
 	default:
 		// Too large, let the GC collect it instead.
+		// Only decrement if this is actually an oversized buffer we tracked.
+		if cap(buf) > defaultLargeBlockSize {
+			blkPoolGetsOversized.Add(-1)
+		} else {
+			// This is a buffer with an unexpected capacity (not from our pools).
+			blkPoolGetsUnknown.Add(1)
+		}
+	}
+}
+
+// getBlockStats returns the current count of outstanding (in-use) block buffers by size.
+func getBlockStats() *BlockStats {
+	return &BlockStats{
+		Tiny:      uint64(blkPoolGetsTiny.Load()),
+		Small:     uint64(blkPoolGetsSmall.Load()),
+		Medium:    uint64(blkPoolGetsMedium.Load()),
+		Large:     uint64(blkPoolGetsLarge.Load()),
+		Oversized: uint64(blkPoolGetsOversized.Load()),
+		Unknown:   uint64(blkPoolGetsUnknown.Load()),
 	}
 }
 

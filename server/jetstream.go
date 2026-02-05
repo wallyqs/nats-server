@@ -60,6 +60,17 @@ type JetStreamStats struct {
 	Accounts       int               `json:"accounts"`
 	HAAssets       int               `json:"ha_assets"`
 	API            JetStreamAPIStats `json:"api"`
+	Blocks         *BlockStats       `json:"blocks,omitempty"`
+}
+
+// BlockStats contains statistics about outstanding message block buffers currently in use.
+type BlockStats struct {
+	Tiny      uint64 `json:"tiny"`      // Outstanding tiny blocks (<= 256KB)
+	Small     uint64 `json:"small"`     // Outstanding small blocks (<= 1MB)
+	Medium    uint64 `json:"medium"`    // Outstanding medium blocks (<= 4MB)
+	Large     uint64 `json:"large"`     // Outstanding large blocks (<= 8MB)
+	Oversized uint64 `json:"oversized"` // Outstanding oversized blocks (> 8MB)
+	Unknown   uint64 `json:"unknown"`   // Buffers with unexpected capacities (not from getMsgBlockBuf)
 }
 
 type JetStreamAccountLimits struct {
@@ -2541,6 +2552,7 @@ func (js *jetStream) usageStats() *JetStreamStats {
 	}
 	stats.Store = uint64(used)
 	stats.HAAssets = s.numRaftNodes()
+	stats.Blocks = getBlockStats()
 	return &stats
 }
 
