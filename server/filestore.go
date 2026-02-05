@@ -5368,18 +5368,15 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 	// We used to not have to load in the messages except with callbacks or the filtered subject state (which is now always on).
 	// Now just load regardless.
 	// TODO(dlc) - Figure out a way not to have to load it in, we need subject tracking outside main data block.
-	var didLoad bool
+	// Note: we do not immediately nil the cache after loading here. The cache expire timer
+	// (started by loadMsgsWithLock) will handle cleanup. This allows sequential removeMsg calls
+	// to the same block to reuse the cached data instead of reloading the block from disk each time,
+	// which is critical for interest retention streams with many consumers producing delete bursts.
 	if mb.cacheNotLoaded() {
 		if err := mb.loadMsgsWithLock(); err != nil {
 			mb.mu.Unlock()
 			fsUnlock()
 			return false, err
-		}
-		didLoad = true
-	}
-	finishedWithCache := func() {
-		if didLoad {
-			mb.finishedWithCache()
 		}
 	}
 
@@ -5396,7 +5393,6 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 		sm, err = mb.cacheLookupNoCopy(seq, &smv)
 	}
 	if err != nil {
-		finishedWithCache()
 		mb.mu.Unlock()
 		fsUnlock()
 		// Mimic err behavior from above check to dmap. No error returned if already removed.
@@ -5414,12 +5410,10 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 		mb.mu.Unlock() // Only safe way to checkLastBlock is to unlock here...
 		lmb, err := fs.checkLastBlock(emptyRecordLen)
 		if err != nil {
-			finishedWithCache()
 			fsUnlock()
 			return false, err
 		}
 		if err := lmb.writeTombstone(sm.seq, sm.ts); err != nil {
-			finishedWithCache()
 			fsUnlock()
 			return false, err
 		}
@@ -5437,13 +5431,11 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 		// Grab record info, but use the pre-computed record length.
 		ri, _, _, err := mb.slotInfo(int(seq - mb.cache.fseq))
 		if err != nil {
-			finishedWithCache()
 			mb.mu.Unlock()
 			fsUnlock()
 			return false, err
 		}
 		if err := mb.eraseMsg(seq, int(ri), int(msz), isLastBlock); err != nil {
-			finishedWithCache()
 			mb.mu.Unlock()
 			fsUnlock()
 			return false, err
@@ -5529,7 +5521,6 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 		fs.removeMsgBlock(mb)
 		firstSeqNeedsUpdate = seq == fs.state.FirstSeq
 	}
-	finishedWithCache()
 	mb.mu.Unlock()
 
 	// If we emptied the current message block and the seq was state.FirstSeq
