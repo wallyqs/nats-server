@@ -5436,6 +5436,88 @@ func TestJetStreamClusterDurableConsumerInactiveThresholdLeaderSwitch(t *testing
 	}
 }
 
+// TestJetStreamClusterConsumerDeleteNotActiveQuitChanCleanup tests that when a consumer
+// is stopped while deleteNotActive is in its retry loop, the goroutine exits properly
+// via the consumer's quit channel. This verifies the fix for lingering goroutines when
+// a consumer is deleted by another code path while deleteNotActive is retrying.
+func TestJetStreamClusterConsumerDeleteNotActiveQuitChanCleanup(t *testing.T) {
+	// Shorten the retry intervals for the test.
+	oStartInterval := consumerNotActiveStartInterval
+	oMaxInterval := consumerNotActiveMaxInterval
+	consumerNotActiveStartInterval = 50 * time.Millisecond
+	consumerNotActiveMaxInterval = 100 * time.Millisecond
+	t.Cleanup(func() {
+		consumerNotActiveStartInterval = oStartInterval
+		consumerNotActiveMaxInterval = oMaxInterval
+	})
+
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	// Create a durable pull consumer with a short inactive threshold.
+	// This will trigger deleteNotActive when inactive.
+	consumerName := "INACTIVE_TEST"
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:           consumerName,
+		AckPolicy:         nats.AckExplicitPolicy,
+		InactiveThreshold: 100 * time.Millisecond,
+	})
+	require_NoError(t, err)
+
+	c.waitOnConsumerLeader(globalAccountName, "TEST", consumerName)
+
+	// Get consumer leader server and the consumer object.
+	cl := c.consumerLeader(globalAccountName, "TEST", consumerName)
+	mset, err := cl.GlobalAccount().lookupStream("TEST")
+	require_NoError(t, err)
+	o := mset.lookupConsumer(consumerName)
+	require_NotNil(t, o)
+
+	// Capture the consumer's quit channel before deleteNotActive runs.
+	o.mu.RLock()
+	oqch := o.qch
+	o.mu.RUnlock()
+	require_NotNil(t, oqch)
+
+	// Wait for the consumer to become inactive. The deleteNotActive goroutine
+	// will start running and enter its retry loop.
+	time.Sleep(200 * time.Millisecond)
+
+	// Now explicitly delete the consumer via API while deleteNotActive may be
+	// in its retry loop. This will close o.qch.
+	err = js.DeleteConsumer("TEST", consumerName)
+	require_NoError(t, err)
+
+	// Verify the quit channel was closed.
+	select {
+	case <-oqch:
+		// Good, channel was closed.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Consumer quit channel was not closed")
+	}
+
+	// Verify the consumer is gone.
+	checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		_, err := js.ConsumerInfo("TEST", consumerName)
+		if err == nil {
+			return errors.New("consumer still exists")
+		}
+		return nil
+	})
+}
+
 func TestJetStreamClusterConsumerMaxDeliveryNumAckPendingBug(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
