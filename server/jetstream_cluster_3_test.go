@@ -7305,6 +7305,104 @@ func TestJetStreamClusterConsumerScaleDownChangesRaftGroup(t *testing.T) {
 	})
 }
 
+// TestJetStreamClusterScaleDownPreservesReplicaLabel verifies that when a stream
+// or consumer is scaled down to R1, the Raft group name is changed (new hash)
+// but preserves the original replica label (e.g., R3F stays R3F, not R1F).
+func TestJetStreamClusterScaleDownPreservesReplicaLabel(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Create an R3 stream for testing stream scale down.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST_STREAM",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Create a separate R3 stream that stays at R3 for testing consumer scale down independently.
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "TEST_CONSUMER",
+		Subjects: []string{"bar"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Create an R3 consumer on the stream that will stay at R3.
+	_, err = js.AddConsumer("TEST_CONSUMER", &nats.ConsumerConfig{
+		Durable:  "CONSUMER",
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST_STREAM")
+	c.waitOnStreamLeader(globalAccountName, "TEST_CONSUMER")
+	c.waitOnConsumerLeader(globalAccountName, "TEST_CONSUMER", "CONSUMER")
+
+	// Get group names from the meta layer.
+	ml := c.leader()
+	mjs := ml.getJetStream()
+	mjs.mu.RLock()
+	saStream := mjs.streamAssignment(globalAccountName, "TEST_STREAM")
+	ca := mjs.consumerAssignment(globalAccountName, "TEST_CONSUMER", "CONSUMER")
+	streamGroupBefore := saStream.Group.Name
+	consumerGroupBefore := ca.Group.Name
+	mjs.mu.RUnlock()
+
+	require_True(t, strings.Contains(streamGroupBefore, "-R3"))
+	require_True(t, strings.Contains(consumerGroupBefore, "-R3"))
+
+	// Scale stream down to R1.
+	_, err = js.UpdateStream(&nats.StreamConfig{
+		Name:     "TEST_STREAM",
+		Subjects: []string{"foo"},
+		Replicas: 1,
+	})
+	require_NoError(t, err)
+
+	// Scale consumer down to R1 (on a stream that stays at R3).
+	_, err = js.UpdateConsumer("TEST_CONSUMER", &nats.ConsumerConfig{
+		Durable:  "CONSUMER",
+		Replicas: 1,
+	})
+	require_NoError(t, err)
+
+	// Wait for the changes to propagate.
+	c.waitOnStreamLeader(globalAccountName, "TEST_STREAM")
+
+	// Check group names from the meta layer after scale down.
+	// The group names should have changed (new hash) but still contain R3.
+	checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+		mjs.mu.RLock()
+		saStream = mjs.streamAssignment(globalAccountName, "TEST_STREAM")
+		ca = mjs.consumerAssignment(globalAccountName, "TEST_CONSUMER", "CONSUMER")
+		streamGroupAfter := saStream.Group.Name
+		consumerGroupAfter := ca.Group.Name
+		mjs.mu.RUnlock()
+
+		// Stream group should have changed but still contain R3.
+		if streamGroupBefore == streamGroupAfter {
+			return fmt.Errorf("stream group should have changed, got %q", streamGroupAfter)
+		}
+		if !strings.Contains(streamGroupAfter, "-R3") {
+			return fmt.Errorf("stream group should still contain -R3, got %q", streamGroupAfter)
+		}
+
+		// Consumer group should have changed but still contain R3.
+		if consumerGroupBefore == consumerGroupAfter {
+			return fmt.Errorf("consumer group should have changed, got %q", consumerGroupAfter)
+		}
+		if !strings.Contains(consumerGroupAfter, "-R3") {
+			return fmt.Errorf("consumer group should still contain -R3, got %q", consumerGroupAfter)
+		}
+
+		return nil
+	})
+}
+
 func TestJetStreamClusterConsumerRescaleCatchup(t *testing.T) {
 	test := func(t *testing.T, doSnapshot bool) {
 		c := createJetStreamClusterExplicit(t, "R3S", 3)
