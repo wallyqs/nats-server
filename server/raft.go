@@ -4167,9 +4167,9 @@ func (n *raft) storeToWAL(ae *appendEntry) error {
 }
 
 const (
-	paeDropThreshold = 20_000
-	paeWarnThreshold = 10_000
-	paeWarnModulo    = 5_000
+	paeDropThreshold = 10_000
+	paeWarnThreshold = 5_000
+	paeWarnModulo    = 2_500
 )
 
 func (n *raft) sendAppendEntry(entries []*Entry) {
