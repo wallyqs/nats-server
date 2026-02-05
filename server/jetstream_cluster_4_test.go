@@ -7587,7 +7587,7 @@ func TestJetStreamClusterApplyMetaSnapshotMemorySpike(t *testing.T) {
 			// Apply the snapshot - this is where the memory spike occurs:
 			// 1. s2.Decode(nil, buf) at line 1726 - allocates decompressed buffer
 			// 2. json.Unmarshal(jse, &wsas) at line 1730 - allocates parsed structs
-			err = followerJs.applyMetaSnapshot(snap, nil, false, false)
+			err = followerJs.applyMetaSnapshot(snap, nil, false)
 			if err != nil {
 				t.Fatalf("applyMetaSnapshot failed: %v", err)
 			}
@@ -7642,5 +7642,154 @@ func TestJetStreamClusterApplyMetaSnapshotMemorySpike(t *testing.T) {
 				float64(last.applyHeapAlloc)/float64(last.decompressedSize))
 			t.Logf("This multiplier accounts for: s2.Decode buffer + json.Unmarshal structs + internal allocations")
 		}
+	}
+}
+
+// TestJetStreamClusterMetaCompactSizeConsumerMemorySpike sets meta_compact_size
+// to 256KB and continuously creates R1 memory-based consumers. As consumers
+// accumulate, the WAL grows until it exceeds the threshold, triggering compaction.
+// At each compaction point, the test measures the WAL size, the resulting snapshot
+// size, and the memory allocated during snapshotting and application. This
+// demonstrates that as total cluster state grows (more consumers), each compaction
+// cycle produces a larger snapshot and a correspondingly larger memory spike.
+func TestJetStreamClusterMetaCompactSizeConsumerMemorySpike(t *testing.T) {
+	const (
+		metaCompactSize = 256 * 1024 // 256KB threshold
+		numConsumers    = 2000
+	)
+
+	c := createJetStreamClusterExplicit(t, "CMEM", 3)
+	defer c.shutdown()
+
+	// Set meta_compact_size on all servers.
+	for _, s := range c.servers {
+		s.optsMu.Lock()
+		s.opts.JetStreamMetaCompactSize = metaCompactSize
+		s.optsMu.Unlock()
+	}
+
+	nc, js := jsClientConnect(t, c.servers[0])
+	defer nc.Close()
+
+	// Create a single R1 memory-based stream.
+	jsStreamCreate(t, nc, &StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"test.>"},
+		Replicas: 1,
+		Storage:  MemoryStorage,
+	})
+
+	leader := c.leader()
+	_, cc := leader.getJetStreamCluster()
+	rg := cc.meta.(*raft)
+
+	type compactionEvent struct {
+		consumersSoFar   int
+		walSizeBefore    uint64
+		snapshotSize     int
+		decompressedSize int
+		heapAlloc        uint64
+	}
+	var compactions []compactionEvent
+
+	// Continuously create R1 memory-based consumers.
+	for i := 0; i < numConsumers; i++ {
+		_, err := js.AddConsumer("TEST", &nats.ConsumerConfig{
+			Durable:   fmt.Sprintf("C_%d", i),
+			AckPolicy: nats.AckExplicitPolicy,
+		})
+		require_NoError(t, err)
+
+		// Check WAL size after each consumer creation.
+		_, walSize := cc.meta.Size()
+
+		// When WAL exceeds the threshold, trigger compaction and measure.
+		if walSize > metaCompactSize {
+			rg.RLock()
+			papplied := rg.papplied
+			rg.RUnlock()
+
+			// Measure memory around the compaction cycle.
+			runtime.GC()
+			var memBefore runtime.MemStats
+			runtime.ReadMemStats(&memBefore)
+
+			// Trigger compaction via leadc channel.
+			rg.leadc <- true
+
+			// Wait for compaction to complete.
+			checkFor(t, 5*time.Second, 10*time.Millisecond, func() error {
+				rg.RLock()
+				npapplied := rg.papplied
+				rg.RUnlock()
+				if npapplied <= papplied {
+					return fmt.Errorf("haven't snapshotted yet (%d <= %d)", npapplied, papplied)
+				}
+				return nil
+			})
+
+			var memAfter runtime.MemStats
+			runtime.ReadMemStats(&memAfter)
+			heapDelta := memAfter.TotalAlloc - memBefore.TotalAlloc
+
+			// Capture the snapshot and its decompressed size.
+			jsCluster, _ := leader.getJetStreamCluster()
+			var snapSize, decompSize int
+			if jsCluster != nil {
+				if snap, err := jsCluster.metaSnapshot(); err == nil {
+					snapSize = len(snap)
+					if decompressed, err := s2.Decode(nil, snap); err == nil {
+						decompSize = len(decompressed)
+					}
+				}
+			}
+
+			compactions = append(compactions, compactionEvent{
+				consumersSoFar:   i + 1,
+				walSizeBefore:    walSize,
+				snapshotSize:     snapSize,
+				decompressedSize: decompSize,
+				heapAlloc:        heapDelta,
+			})
+
+			// Verify compaction reset the WAL.
+			_, newSize := cc.meta.Size()
+			require_Equal(t, newSize, 0)
+		}
+	}
+
+	// Log all compaction events.
+	t.Logf("meta_compact_size: %d bytes (%dKB)", metaCompactSize, metaCompactSize/1024)
+	t.Logf("Total consumers created: %d", numConsumers)
+	t.Logf("Total compactions: %d", len(compactions))
+	t.Logf("")
+	t.Logf("%-12s %10s %10s %12s %12s %12s",
+		"Compaction", "Consumers", "WAL Size", "Snap(comp)", "Snap(decomp)", "Heap Alloc")
+	for j, ce := range compactions {
+		t.Logf("%-12d %10d %10d %12d %12d %12d",
+			j+1, ce.consumersSoFar, ce.walSizeBefore,
+			ce.snapshotSize, ce.decompressedSize, ce.heapAlloc)
+	}
+
+	// Show growth: as consumers accumulate, snapshot size and memory grow.
+	if len(compactions) >= 2 {
+		first := compactions[0]
+		last := compactions[len(compactions)-1]
+
+		t.Logf("")
+		t.Logf("=== Growth from first to last compaction ===")
+		t.Logf("Consumers:       %d -> %d (%.1fx)", first.consumersSoFar, last.consumersSoFar,
+			float64(last.consumersSoFar)/float64(first.consumersSoFar))
+		t.Logf("Snapshot (comp): %d -> %d bytes (%.1fx)", first.snapshotSize, last.snapshotSize,
+			float64(last.snapshotSize)/float64(first.snapshotSize))
+		t.Logf("Snapshot (raw):  %d -> %d bytes (%.1fx)", first.decompressedSize, last.decompressedSize,
+			float64(last.decompressedSize)/float64(first.decompressedSize))
+		t.Logf("Heap alloc:      %d -> %d bytes (%.1fx)", first.heapAlloc, last.heapAlloc,
+			float64(last.heapAlloc)/float64(first.heapAlloc))
+		t.Logf("")
+		t.Logf("At the last compaction, snapshot decompressed size is %.1fx the compressed size",
+			float64(last.decompressedSize)/float64(last.snapshotSize))
+		t.Logf("Heap alloc is %.1fx the decompressed snapshot size",
+			float64(last.heapAlloc)/float64(last.decompressedSize))
 	}
 }
