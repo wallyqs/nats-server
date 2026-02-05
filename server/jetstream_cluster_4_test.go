@@ -7654,8 +7654,8 @@ func TestJetStreamClusterApplyMetaSnapshotMemorySpike(t *testing.T) {
 // cycle produces a larger snapshot and a correspondingly larger memory spike.
 func TestJetStreamClusterMetaCompactSizeConsumerMemorySpike(t *testing.T) {
 	const (
-		metaCompactSize = 256 * 1024 // 256KB threshold
-		numConsumers    = 2000
+		metaCompactSize = 1024 * 1024 // 1MB threshold
+		numConsumers    = 5000
 	)
 
 	c := createJetStreamClusterExplicit(t, "CMEM", 3)
