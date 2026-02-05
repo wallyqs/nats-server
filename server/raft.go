@@ -3167,10 +3167,8 @@ func (n *raft) applyCommit(index uint64) error {
 		delete(n.acks, index)
 	}
 
-	// Track whether the entry was loaded from the WAL. In that case,
-	// entry data are sub-slices of the WAL read buffer (ae.buf) and
-	// need to be copied to avoid pinning the entire buffer in memory.
-	ae, fromWAL := n.pae[index], false
+	// Get the append entry from cache or load from WAL.
+	ae := n.pae[index]
 	if ae == nil {
 		if index < n.papplied {
 			return nil
@@ -3188,7 +3186,6 @@ func (n *raft) applyCommit(index uint64) error {
 			}
 			return errEntryLoadFailed
 		}
-		fromWAL = true
 	} else {
 		defer delete(n.pae, index)
 	}
@@ -3211,23 +3208,23 @@ func (n *raft) applyCommit(index uint64) error {
 	for _, e := range ae.entries {
 		switch e.Type {
 		case EntryNormal:
-			if fromWAL {
-				// Copy data to break sub-slice references to ae.buf,
-				// which can pin the entire underlying buffer in memory.
-				e.Data = copyBytes(e.Data)
-			}
+			// Always copy data to break references to original buffers.
+			// For WAL entries, this breaks sub-slice references to ae.buf.
+			// For pae cache entries, this breaks references to the original
+			// encodeStreamMsgAllowCompressAndBatch buffers, allowing them to
+			// be GC'd immediately rather than retained throughout the apply
+			// queue processing. This is critical with millions of entries
+			// in flight across multiple consumer raft groups.
+			e.Data = copyBytes(e.Data)
 			committed = append(committed, e)
 		case EntryOldSnapshot:
 			// For old snapshots in our WAL.
-			data := e.Data
-			if fromWAL {
-				data = copyBytes(data)
-			}
+			// Always copy to break buffer references.
+			data := copyBytes(e.Data)
 			committed = append(committed, newEntry(EntrySnapshot, data))
 		case EntrySnapshot:
-			if fromWAL {
-				e.Data = copyBytes(e.Data)
-			}
+			// Always copy to break buffer references.
+			e.Data = copyBytes(e.Data)
 			committed = append(committed, e)
 			// If we have no snapshot, install the leader's snapshot as our own.
 			if len(ae.entries) == 1 && n.snapfile == _EMPTY_ && ae.commit > 0 {
