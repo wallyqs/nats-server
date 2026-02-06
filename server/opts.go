@@ -323,101 +323,283 @@ type AuthCallout struct {
 // Options block for nats-server.
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
+//
+// For embedding the NATS server programmatically, create an Options value,
+// set the desired fields, and pass it to server.NewServer(). Fields left at
+// their zero value will use sensible defaults (see setBaselineOptions).
 type Options struct {
-	ConfigFile      string `json:"-"`
-	ServerName      string `json:"server_name"`
-	Host            string `json:"addr"`
-	Port            int    `json:"port"`
-	DontListen      bool   `json:"dont_listen"`
+	// ConfigFile is the path to the configuration file used to load these options.
+	// When embedding, this can be left empty if options are set programmatically.
+	ConfigFile string `json:"-"`
+	// ServerName is an optional name to identify this server. Used in logging
+	// and monitoring. If empty, the server will generate a unique ID.
+	ServerName string `json:"server_name"`
+	// Host is the network interface address to listen on for client connections.
+	// Defaults to "0.0.0.0" (all interfaces). See DEFAULT_HOST.
+	Host string `json:"addr"`
+	// Port is the port to listen on for client connections.
+	// Defaults to 4222. Use -1 (RANDOM_PORT) for a random available port. See DEFAULT_PORT.
+	Port int `json:"port"`
+	// DontListen when true prevents the server from accepting client connections.
+	// Useful for leaf node or cluster-only configurations.
+	DontListen bool `json:"dont_listen"`
+	// ClientAdvertise is an optional host:port to advertise to clients in the
+	// INFO protocol instead of the actual listen address. Useful behind a load
+	// balancer or NAT.
 	ClientAdvertise string `json:"-"`
-	Trace           bool   `json:"-"`
-	Debug           bool   `json:"-"`
-	TraceVerbose    bool   `json:"-"`
+
+	// Trace enables protocol-level message tracing in the server logs.
+	Trace bool `json:"-"`
+	// Debug enables debug-level logging output.
+	Debug bool `json:"-"`
+	// TraceVerbose enables verbose protocol tracing including full payload bodies.
+	TraceVerbose bool `json:"-"`
 
 	// TraceHeaders if true will only trace message headers, not the payload.
-	TraceHeaders               bool          `json:"-"`
-	NoLog                      bool          `json:"-"`
-	NoSigs                     bool          `json:"-"`
-	NoSublistCache             bool          `json:"-"`
-	NoHeaderSupport            bool          `json:"-"`
-	DisableShortFirstPing      bool          `json:"-"`
-	Logtime                    bool          `json:"-"`
-	LogtimeUTC                 bool          `json:"-"`
-	MaxConn                    int           `json:"max_connections"`
-	MaxSubs                    int           `json:"max_subscriptions,omitempty"`
-	MaxSubTokens               uint8         `json:"-"`
-	Nkeys                      []*NkeyUser   `json:"-"`
-	Users                      []*User       `json:"-"`
-	Accounts                   []*Account    `json:"-"`
-	NoAuthUser                 string        `json:"-"`
-	DefaultSentinel            string        `json:"-"`
-	SystemAccount              string        `json:"-"`
-	NoSystemAccount            bool          `json:"-"`
-	Username                   string        `json:"-"`
-	Password                   string        `json:"-"`
-	ProxyRequired              bool          `json:"-"`
-	ProxyProtocol              bool          `json:"-"`
-	Authorization              string        `json:"-"`
-	AuthCallout                *AuthCallout  `json:"-"`
-	PingInterval               time.Duration `json:"ping_interval"`
-	MaxPingsOut                int           `json:"ping_max"`
-	HTTPHost                   string        `json:"http_host"`
-	HTTPPort                   int           `json:"http_port"`
-	HTTPBasePath               string        `json:"http_base_path"`
-	HTTPSPort                  int           `json:"https_port"`
-	AuthTimeout                float64       `json:"auth_timeout"`
-	MaxControlLine             int32         `json:"max_control_line"`
-	MaxPayload                 int32         `json:"max_payload"`
-	MaxPending                 int64         `json:"max_pending"`
-	NoFastProducerStall        bool          `json:"-"`
-	Cluster                    ClusterOpts   `json:"cluster,omitempty"`
-	Gateway                    GatewayOpts   `json:"gateway,omitempty"`
-	LeafNode                   LeafNodeOpts  `json:"leaf,omitempty"`
-	JetStream                  bool          `json:"jetstream"`
-	NoJetStreamStrict          bool          `json:"-"` // Strict by default.
-	JetStreamMaxMemory         int64         `json:"-"`
-	JetStreamMaxStore          int64         `json:"-"`
-	JetStreamDomain            string        `json:"-"`
-	JetStreamExtHint           string        `json:"-"`
-	JetStreamKey               string        `json:"-"`
-	JetStreamOldKey            string        `json:"-"`
-	JetStreamCipher            StoreCipher   `json:"-"`
-	JetStreamUniqueTag         string
-	JetStreamLimits            JSLimitOpts
-	JetStreamTpm               JSTpmOpts
-	JetStreamMaxCatchup        int64
+	TraceHeaders bool `json:"-"`
+	// NoLog disables all logging output from the server.
+	NoLog bool `json:"-"`
+	// NoSigs when true disables OS signal handling (e.g. SIGINT, SIGUSR1).
+	// Useful when embedding the server in an application that handles its own signals.
+	NoSigs bool `json:"-"`
+	// NoSublistCache disables the subscription list cache, which may reduce
+	// memory usage at the cost of higher CPU for subject matching.
+	NoSublistCache bool `json:"-"`
+	// NoHeaderSupport disables NATS message header support.
+	NoHeaderSupport bool `json:"-"`
+	// DisableShortFirstPing disables sending an initial ping sooner than PingInterval
+	// after a client connects. When false, the first ping is sent shortly after
+	// connection to detect stale clients faster.
+	DisableShortFirstPing bool `json:"-"`
+	// Logtime enables timestamps in log output. Defaults to true in config.
+	Logtime bool `json:"-"`
+	// LogtimeUTC when true uses UTC instead of local time for log timestamps.
+	LogtimeUTC bool `json:"-"`
+	// MaxConn is the maximum number of concurrent client connections allowed.
+	// Defaults to 65536. See DEFAULT_MAX_CONNECTIONS.
+	MaxConn int `json:"max_connections"`
+	// MaxSubs is the maximum number of subscriptions per client connection.
+	// A value of 0 means unlimited.
+	MaxSubs int `json:"max_subscriptions,omitempty"`
+	// MaxSubTokens is the maximum number of tokens in a subject for subscriptions.
+	// A value of 0 means no limit is enforced.
+	MaxSubTokens uint8 `json:"-"`
+
+	// Nkeys defines NKey-based users for authentication.
+	Nkeys []*NkeyUser `json:"-"`
+	// Users defines user accounts for username/password authentication.
+	Users []*User `json:"-"`
+	// Accounts defines multi-tenant account configurations for subject isolation.
+	Accounts []*Account `json:"-"`
+	// NoAuthUser is the username of a user in the Users list that will be used
+	// when a client connects without any authentication credentials.
+	NoAuthUser string `json:"-"`
+	// DefaultSentinel is used internally to detect and prevent conflicting
+	// configurations between authorization block defaults and NoAuthUser.
+	DefaultSentinel string `json:"-"`
+	// SystemAccount is the name of the account used for internal system
+	// communication (e.g. cluster coordination, advisory messages). Defaults to "$SYS".
+	SystemAccount string `json:"-"`
+	// NoSystemAccount disables the system account entirely.
+	NoSystemAccount bool `json:"-"`
+	// Username sets a single default username for client authentication.
+	// For multiple users, use the Users field instead.
+	Username string `json:"-"`
+	// Password sets a single default password for client authentication.
+	// For multiple users, use the Users field instead.
+	Password string `json:"-"`
+	// ProxyRequired when true requires clients to use the PROXY protocol.
+	ProxyRequired bool `json:"-"`
+	// ProxyProtocol when true enables PROXY protocol support for client connections.
+	ProxyProtocol bool `json:"-"`
+	// Authorization is the authorization token required for client connections.
+	Authorization string `json:"-"`
+	// AuthCallout configures external authentication callout,
+	// allowing authentication decisions to be delegated to an external service.
+	AuthCallout *AuthCallout `json:"-"`
+
+	// PingInterval is the interval between server-to-client PING messages.
+	// Defaults to 2 minutes. See DEFAULT_PING_INTERVAL.
+	PingInterval time.Duration `json:"ping_interval"`
+	// MaxPingsOut is the maximum number of unanswered PINGs before the server
+	// considers a client connection stale and closes it.
+	// Defaults to 2. See DEFAULT_PING_MAX_OUT.
+	MaxPingsOut int `json:"ping_max"`
+
+	// HTTPHost is the network interface address for the HTTP monitoring server.
+	// Defaults to the same value as Host.
+	HTTPHost string `json:"http_host"`
+	// HTTPPort is the port for the HTTP monitoring server.
+	// Set to -1 for a random port, or 0 to disable. See DEFAULT_HTTP_PORT (8222).
+	HTTPPort int `json:"http_port"`
+	// HTTPBasePath is the base path prefix for all HTTP monitoring endpoints.
+	// Defaults to "/". See DEFAULT_HTTP_BASE_PATH.
+	HTTPBasePath string `json:"http_base_path"`
+	// HTTPSPort is the port for the HTTPS monitoring server.
+	// When set, TLS configuration must also be provided.
+	HTTPSPort int `json:"https_port"`
+
+	// AuthTimeout is the maximum time in seconds allowed for a client to authenticate
+	// after connecting. Defaults to 2 seconds. See AUTH_TIMEOUT.
+	AuthTimeout float64 `json:"auth_timeout"`
+	// MaxControlLine is the maximum length of a protocol control line (e.g. PUB, SUB commands)
+	// in bytes. Defaults to 4096. See MAX_CONTROL_LINE_SIZE.
+	MaxControlLine int32 `json:"max_control_line"`
+	// MaxPayload is the maximum allowed message payload size in bytes.
+	// Defaults to 1MB. See MAX_PAYLOAD_SIZE.
+	MaxPayload int32 `json:"max_payload"`
+	// MaxPending is the maximum total size of outbound messages pending flush
+	// per client connection in bytes. Defaults to 64MB. See MAX_PENDING_SIZE.
+	MaxPending int64 `json:"max_pending"`
+	// NoFastProducerStall disables the fast producer stall mechanism.
+	// When false (default), the server will slow down producers that are sending
+	// faster than their messages can be delivered to subscribers.
+	NoFastProducerStall bool `json:"-"`
+
+	// Cluster configures clustering for route-based server-to-server communication.
+	Cluster ClusterOpts `json:"cluster,omitempty"`
+	// Gateway configures gateway connectors for multi-cluster communication.
+	Gateway GatewayOpts `json:"gateway,omitempty"`
+	// LeafNode configures leaf node connections for extending a cluster.
+	LeafNode LeafNodeOpts `json:"leaf,omitempty"`
+
+	// JetStream enables the JetStream subsystem for persistent messaging,
+	// streaming, and key-value storage.
+	JetStream bool `json:"jetstream"`
+	// NoJetStreamStrict disables strict JetStream API mode. Strict mode is
+	// enabled by default and returns errors for unknown fields in API requests.
+	NoJetStreamStrict bool `json:"-"`
+	// JetStreamMaxMemory is the maximum amount of memory in bytes available
+	// to JetStream for in-memory storage. A value of -1 means use all available.
+	JetStreamMaxMemory int64 `json:"-"`
+	// JetStreamMaxStore is the maximum amount of disk storage in bytes available
+	// to JetStream for file-based storage. A value of -1 means use all available.
+	JetStreamMaxStore int64 `json:"-"`
+	// JetStreamDomain is an optional domain name for this JetStream instance,
+	// used to isolate JetStream APIs across different clusters or supercluster domains.
+	JetStreamDomain string `json:"-"`
+	// JetStreamExtHint is a server tag hint used for placement of streams
+	// and consumers across tagged servers.
+	JetStreamExtHint string `json:"-"`
+	// JetStreamKey is the encryption key used for JetStream at-rest encryption.
+	// When set, all JetStream storage will be encrypted using this key.
+	JetStreamKey string `json:"-"`
+	// JetStreamOldKey is the previous encryption key, used during key rotation.
+	// Allows the server to decrypt data encrypted with the old key while encrypting
+	// new data with JetStreamKey.
+	JetStreamOldKey string `json:"-"`
+	// JetStreamCipher selects the cipher for JetStream at-rest encryption.
+	// Supported values are ChaCha (default when key is set) and AES.
+	JetStreamCipher StoreCipher `json:"-"`
+	// JetStreamUniqueTag is a server tag key used to enforce unique placement of
+	// stream replicas across servers with different tag values (e.g. "az" for
+	// availability zone placement).
+	JetStreamUniqueTag string
+	// JetStreamLimits configures operational limits for the JetStream meta controller,
+	// including max request batch, max ack pending, and max HA assets.
+	JetStreamLimits JSLimitOpts
+	// JetStreamTpm configures Trusted Platform Module (TPM) options for
+	// hardware-backed encryption key management in JetStream.
+	JetStreamTpm JSTpmOpts
+	// JetStreamMaxCatchup is the maximum outstanding bytes allowed during
+	// stream replica catchup. Controls memory usage during replica synchronization.
+	JetStreamMaxCatchup int64
+	// JetStreamRequestQueueLimit is the maximum number of pending JetStream
+	// API requests that can be queued. Limits memory usage under heavy API load.
 	JetStreamRequestQueueLimit int64
-	JetStreamMetaCompact       uint64
-	JetStreamMetaCompactSize   uint64
-	StreamMaxBufferedMsgs      int               `json:"-"`
-	StreamMaxBufferedSize      int64             `json:"-"`
-	StoreDir                   string            `json:"-"`
-	SyncInterval               time.Duration     `json:"-"`
-	SyncAlways                 bool              `json:"-"`
-	JsAccDefaultDomain         map[string]string `json:"-"` // account to domain name mapping
-	Websocket                  WebsocketOpts     `json:"-"`
-	MQTT                       MQTTOpts          `json:"-"`
-	ProfPort                   int               `json:"-"`
-	ProfBlockRate              int               `json:"-"`
-	PidFile                    string            `json:"-"`
-	PortsFileDir               string            `json:"-"`
-	LogFile                    string            `json:"-"`
-	LogSizeLimit               int64             `json:"-"`
-	LogMaxFiles                int64             `json:"-"`
-	Syslog                     bool              `json:"-"`
-	RemoteSyslog               string            `json:"-"`
-	Routes                     []*url.URL        `json:"-"`
-	RoutesStr                  string            `json:"-"`
-	TLSTimeout                 float64           `json:"tls_timeout"`
-	TLS                        bool              `json:"-"`
-	TLSVerify                  bool              `json:"-"`
-	TLSMap                     bool              `json:"-"`
-	TLSCert                    string            `json:"-"`
-	TLSKey                     string            `json:"-"`
-	TLSCaCert                  string            `json:"-"`
-	TLSConfig                  *tls.Config       `json:"-"`
-	TLSPinnedCerts             PinnedCertSet     `json:"-"`
-	TLSRateLimit               int64             `json:"-"`
+	// JetStreamMetaCompact sets a minimum number of meta operations before
+	// a compaction of the meta RAFT group is considered.
+	JetStreamMetaCompact uint64
+	// JetStreamMetaCompactSize sets the minimum size in bytes of the meta RAFT
+	// log before a compaction is triggered.
+	JetStreamMetaCompactSize uint64
+	// StreamMaxBufferedMsgs is the maximum number of messages that can be buffered
+	// per stream for asynchronous storage writes.
+	StreamMaxBufferedMsgs int `json:"-"`
+	// StreamMaxBufferedSize is the maximum total size in bytes of buffered messages
+	// per stream for asynchronous storage writes.
+	StreamMaxBufferedSize int64 `json:"-"`
+	// StoreDir is the directory path for JetStream file-based storage.
+	// Defaults to a temporary directory if not set and JetStream is enabled.
+	StoreDir string `json:"-"`
+	// SyncInterval is the interval at which JetStream file storage is synced
+	// to disk. A shorter interval improves durability at the cost of throughput.
+	SyncInterval time.Duration `json:"-"`
+	// SyncAlways when true forces an fsync after every write to JetStream storage,
+	// providing the strongest durability guarantee at the cost of throughput.
+	SyncAlways bool `json:"-"`
+	// JsAccDefaultDomain maps account names to JetStream domain names, allowing
+	// accounts to default to a specific JetStream domain.
+	JsAccDefaultDomain map[string]string `json:"-"`
+
+	// Websocket configures WebSocket support for client connections.
+	Websocket WebsocketOpts `json:"-"`
+	// MQTT configures MQTT protocol support for IoT client connections.
+	MQTT MQTTOpts `json:"-"`
+
+	// ProfPort is the port for the Go pprof HTTP profiling server.
+	// Set to a non-zero value to enable profiling (e.g. 6060).
+	ProfPort int `json:"-"`
+	// ProfBlockRate controls the fraction of goroutine blocking events reported
+	// in the blocking profile. See runtime.SetBlockProfileRate.
+	ProfBlockRate int `json:"-"`
+
+	// PidFile is the path to write the server's process ID file.
+	PidFile string `json:"-"`
+	// PortsFileDir is the directory where the server writes a file containing
+	// the resolved ports it is listening on. Useful when using random ports.
+	PortsFileDir string `json:"-"`
+
+	// LogFile is the path to the log file. If empty, logs are written to stderr.
+	LogFile string `json:"-"`
+	// LogSizeLimit is the maximum size in bytes of the log file before it is rotated.
+	// A value of 0 means no limit.
+	LogSizeLimit int64 `json:"-"`
+	// LogMaxFiles is the maximum number of rotated log files to retain.
+	// A value of 0 means no limit.
+	LogMaxFiles int64 `json:"-"`
+	// Syslog enables logging to the local syslog daemon.
+	Syslog bool `json:"-"`
+	// RemoteSyslog is the address (e.g. "udp://logs.example.com:514") of a remote
+	// syslog server to send log output to.
+	RemoteSyslog string `json:"-"`
+
+	// Routes is a list of route URLs for clustering. Each URL specifies a remote
+	// server to establish a route connection to.
+	Routes []*url.URL `json:"-"`
+	// RoutesStr is the comma-separated string representation of routes,
+	// typically used when routes are specified via command-line flag.
+	RoutesStr string `json:"-"`
+
+	// TLSTimeout is the maximum time in seconds allowed for a TLS handshake
+	// to complete. Defaults to 2 seconds. See TLS_TIMEOUT.
+	TLSTimeout float64 `json:"tls_timeout"`
+	// TLS enables TLS for client connections. Requires TLSCert and TLSKey
+	// to be set, or TLSConfig to be provided.
+	TLS bool `json:"-"`
+	// TLSVerify requires clients to present a valid TLS certificate.
+	// Enables mutual TLS authentication.
+	TLSVerify bool `json:"-"`
+	// TLSMap when true uses the client's TLS certificate CN or SAN for
+	// authentication, mapping it to a configured user.
+	TLSMap bool `json:"-"`
+	// TLSCert is the path to the server's TLS certificate file (PEM format).
+	TLSCert string `json:"-"`
+	// TLSKey is the path to the server's TLS private key file (PEM format).
+	TLSKey string `json:"-"`
+	// TLSCaCert is the path to the CA certificate file (PEM format) used to
+	// verify client certificates when TLSVerify is enabled.
+	TLSCaCert string `json:"-"`
+	// TLSConfig is a custom tls.Config for advanced TLS settings. When set,
+	// it takes precedence over the individual TLS* fields above.
+	TLSConfig *tls.Config `json:"-"`
+	// TLSPinnedCerts is a set of hex-encoded SHA-256 hashes of DER-encoded
+	// SubjectPublicKeyInfo. Only clients whose certificate public key matches
+	// one of the pinned hashes are allowed to connect.
+	TLSPinnedCerts PinnedCertSet `json:"-"`
+	// TLSRateLimit limits the number of TLS handshakes per second from a
+	// single IP address. A value of 0 means no limit.
+	TLSRateLimit int64 `json:"-"`
 	// When set to true, the server will perform the TLS handshake before
 	// sending the INFO protocol. For clients that are not configured
 	// with a similar option, their connection will fail with some sort
@@ -429,29 +611,56 @@ type Options struct {
 	// to start before falling back to previous behavior of sending the
 	// INFO protocol first. It allows for a mix of newer clients that can
 	// require a TLS handshake first, and older clients that can't.
-	TLSHandshakeFirstFallback time.Duration      `json:"-"`
-	AllowNonTLS               bool               `json:"-"`
-	WriteDeadline             time.Duration      `json:"-"`
-	WriteTimeout              WriteTimeoutPolicy `json:"-"`
-	MaxClosedClients          int                `json:"-"`
-	LameDuckDuration          time.Duration      `json:"-"`
-	LameDuckGracePeriod       time.Duration      `json:"-"`
+	TLSHandshakeFirstFallback time.Duration `json:"-"`
+	// AllowNonTLS when true allows both TLS and non-TLS client connections
+	// on the same port. If false and TLS is enabled, only TLS connections are accepted.
+	AllowNonTLS bool `json:"-"`
+
+	// WriteDeadline is the maximum time the server will wait when writing to a
+	// slow client connection before considering it stale.
+	// Defaults to 10 seconds. See DEFAULT_FLUSH_DEADLINE.
+	WriteDeadline time.Duration `json:"-"`
+	// WriteTimeout controls the behavior when a write deadline is exceeded.
+	// Options are: default (close), close, or retry. See WriteTimeoutPolicy.
+	WriteTimeout WriteTimeoutPolicy `json:"-"`
+	// MaxClosedClients is the maximum number of recently closed client connections
+	// tracked for monitoring. Defaults to 10000. See DEFAULT_MAX_CLOSED_CLIENTS.
+	MaxClosedClients int `json:"-"`
+	// LameDuckDuration is the duration over which client connections are gradually
+	// closed during a graceful server shutdown (lame duck mode).
+	// Defaults to 2 minutes. See DEFAULT_LAME_DUCK_DURATION.
+	LameDuckDuration time.Duration `json:"-"`
+	// LameDuckGracePeriod is the time the server waits after entering lame duck
+	// mode before it starts closing client connections.
+	// Defaults to 10 seconds. See DEFAULT_LAME_DUCK_GRACE_PERIOD.
+	LameDuckGracePeriod time.Duration `json:"-"`
 
 	// MaxTracedMsgLen is the maximum printable length for traced messages.
 	MaxTracedMsgLen int `json:"-"`
 
 	// Operating a trusted NATS server
-	TrustedKeys              []string              `json:"-"`
-	TrustedOperators         []*jwt.OperatorClaims `json:"-"`
-	AccountResolver          AccountResolver       `json:"-"`
-	AccountResolverTLSConfig *tls.Config           `json:"-"`
+	// TrustedKeys is a list of trusted public NKeys (operator keys) for operator mode.
+	TrustedKeys []string `json:"-"`
+	// TrustedOperators is a list of operator JWTs defining the trusted operators.
+	// When set, the server operates in operator/JWT mode.
+	TrustedOperators []*jwt.OperatorClaims `json:"-"`
+	// AccountResolver is the resolver used to look up account JWTs in operator mode.
+	// Common implementations include NATS-based, memory, and directory resolvers.
+	AccountResolver AccountResolver `json:"-"`
+	// AccountResolverTLSConfig is the TLS configuration used when the AccountResolver
+	// communicates over TLS (e.g. for NATS-based resolvers).
+	AccountResolverTLSConfig *tls.Config `json:"-"`
 
 	// AlwaysEnableNonce will always present a nonce to new connections
 	// typically used by custom Authentication implementations who embeds
 	// the server and so not presented as a configuration option
 	AlwaysEnableNonce bool
 
+	// CustomClientAuthentication allows providing a custom Authentication
+	// implementation for client connections when embedding the server.
 	CustomClientAuthentication Authentication `json:"-"`
+	// CustomRouterAuthentication allows providing a custom Authentication
+	// implementation for route (cluster) connections when embedding the server.
 	CustomRouterAuthentication Authentication `json:"-"`
 
 	// CheckConfig configuration file syntax test was successful and exit.
@@ -481,7 +690,7 @@ type Options struct {
 	OCSPConfig    *OCSPConfig
 	tlsConfigOpts *TLSConfigOpts
 
-	// Proxies configuration.
+	// Proxies defines trusted proxy configurations for the server.
 	Proxies *ProxiesConfig
 
 	// private fields, used to know if bool options are explicitly
