@@ -1839,7 +1839,7 @@ func (n *raft) Peers() []*Peer {
 	n.RLock()
 	defer n.RUnlock()
 
-	var peers []*Peer
+	peers := make([]*Peer, 0, len(n.peers))
 	for id, ps := range n.peers {
 		var lag uint64
 		if n.commit > ps.li {
@@ -2499,11 +2499,22 @@ func decodeAppendEntry(msg []byte, sub *subscription, reply string) (*appendEntr
 
 	var le = binary.LittleEndian
 
-	ae := newAppendEntry(string(msg[:idLen]), le.Uint64(msg[8:]), le.Uint64(msg[16:]), le.Uint64(msg[24:]), le.Uint64(msg[32:]), nil)
+	// Intern the leader string to reduce per-message allocations.
+	leader, ok := peers.Load(string(msg[:idLen]))
+	if !ok {
+		leader = string(msg[:idLen])
+		peers.Store(leader, leader)
+	}
+
+	ae := newAppendEntry(leader.(string), le.Uint64(msg[8:]), le.Uint64(msg[16:]), le.Uint64(msg[24:]), le.Uint64(msg[32:]), nil)
 	ae.reply, ae.sub = reply, sub
 
 	// Decode Entries.
 	ne, ri := int(le.Uint16(msg[40:])), uint64(42)
+	// Pre-allocate entries slice since we know the count upfront.
+	if ne > 0 {
+		ae.entries = make([]*Entry, 0, ne)
+	}
 	for i, max := 0, uint64(len(msg)); i < ne; i++ {
 		if ri >= max-1 {
 			return nil, errBadAppendEntry
@@ -2809,9 +2820,10 @@ func (n *raft) runAsLeader() {
 		case <-n.prop.ch:
 			const maxBatch = 256 * 1024
 			const maxEntries = 512
-			var entries []*Entry
 
 			es, sz := n.prop.pop(), 0
+			// Pre-allocate entries to avoid repeated slice growth.
+			entries := make([]*Entry, 0, min(len(es), maxEntries))
 			for _, b := range es {
 				if b.ChangesMembership() {
 					n.sendMembershipChange(b.Entry)
@@ -3165,6 +3177,11 @@ func (n *raft) applyCommit(index uint64) error {
 
 	if n.State() == Leader {
 		delete(n.acks, index)
+		// Go maps do not shrink on delete. Periodically compact the acks map
+		// to release memory after bursts of uncommitted entries drain.
+		if len(n.acks) == 0 {
+			n.acks = make(map[uint64]map[string]struct{})
+		}
 	}
 
 	// Get the append entry from cache or load from WAL.
@@ -3187,12 +3204,20 @@ func (n *raft) applyCommit(index uint64) error {
 			return errEntryLoadFailed
 		}
 	} else {
-		defer delete(n.pae, index)
+		defer func() {
+			delete(n.pae, index)
+			// Go maps do not shrink on delete. Compact the pae map when it drains
+			// to zero to release memory after bursts of pending entries are committed.
+			if len(n.pae) == 0 {
+				n.pae = make(map[uint64]*appendEntry)
+			}
+		}()
 	}
 
 	n.commit = index
 	ae.buf = nil
-	var committed []*Entry
+	// Pre-allocate committed slice since we know the max number of entries.
+	committed := make([]*Entry, 0, len(ae.entries))
 
 	defer func() {
 		// Pass to the upper layers if we have normal entries. It is
@@ -4286,6 +4311,8 @@ func decodePeerState(buf []byte) (*peerState, error) {
 	ps := &peerState{clusterSize: int(le.Uint32(buf[0:]))}
 	expectedPeers := int(le.Uint32(buf[4:]))
 	buf = buf[8:]
+	// Pre-allocate knownPeers since we know the expected count.
+	ps.knownPeers = make([]string, 0, expectedPeers)
 	ri := 0
 	for i, n := 0, expectedPeers; i < n && ri < len(buf); i++ {
 		ps.knownPeers = append(ps.knownPeers, string(buf[ri:ri+idLen]))
@@ -4302,7 +4329,7 @@ func decodePeerState(buf []byte) (*peerState, error) {
 
 // Lock should be held.
 func (n *raft) peerNames() []string {
-	var peers []string
+	peers := make([]string, 0, len(n.peers))
 	for name, peer := range n.peers {
 		if peer.kp {
 			peers = append(peers, name)
