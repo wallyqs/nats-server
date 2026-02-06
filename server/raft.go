@@ -4035,13 +4035,40 @@ CONTINUE:
 	aeCommit := ae.commit
 	aeReply := ae.reply
 
+	// If we previously deferred commits due to apply queue backpressure
+	// and the queue has now drained, catch up on deferred commits first.
+	if n.hcommit > n.commit && !n.paused && !n.applyQueueBehind() {
+		for index := n.commit + 1; index <= n.hcommit; index++ {
+			if n.applyQueueBehind() {
+				break
+			}
+			if err := n.applyCommit(index); err != nil {
+				break
+			}
+		}
+		if n.commit >= n.hcommit {
+			n.hcommit = 0
+		}
+	}
+
 	// Apply anything we need here.
 	if aeCommit > n.commit {
 		if n.paused {
 			n.hcommit = aeCommit
 			n.debug("Paused, not applying %d", aeCommit)
+		} else if n.applyQueueBehind() {
+			// Apply queue is backed up. Defer applying to prevent unbounded
+			// memory growth when the upper layer is slow to consume. Entries
+			// are still in the WAL and will be applied once the queue drains.
+			n.hcommit = aeCommit
+			n.debug("Apply queue backpressure, deferring commits up to %d", aeCommit)
 		} else {
 			for index := n.commit + 1; index <= aeCommit; index++ {
+				if n.applyQueueBehind() {
+					// Queue filled up mid-loop, defer remaining.
+					n.hcommit = aeCommit
+					break
+				}
 				if err := n.applyCommit(index); err != nil {
 					break
 				}
@@ -4217,6 +4244,13 @@ const (
 	paeDropThreshold = 20_000
 	paeWarnThreshold = 10_000
 	paeWarnModulo    = 5_000
+
+	// applyQueueBackpressureLen is the apply queue depth (pending + in-progress)
+	// beyond which we defer pushing new commits to the upper layer.
+	// This prevents unbounded memory growth when the upper layer is slow to
+	// process commits (e.g. due to lock contention from compaction).
+	// Entries are still stored in the WAL and will be applied once the queue drains.
+	applyQueueBackpressureLen = 16_384
 )
 
 func (n *raft) sendAppendEntry(entries []*Entry) {
@@ -4265,6 +4299,15 @@ func (n *raft) sendAppendEntryLocked(entries []*Entry, checkLeader bool) error {
 		n.tryCommit(n.pindex)
 	}
 	return nil
+}
+
+// applyQueueBehind returns true if the apply queue has more items pending
+// and in-progress than the backpressure threshold allows. This is used to
+// defer pushing new commits to the upper layer when it's falling behind,
+// preventing unbounded memory growth.
+// Lock should be held.
+func (n *raft) applyQueueBehind() bool {
+	return int64(n.apply.len())+n.apply.inProgress() > applyQueueBackpressureLen
 }
 
 // cachePendingEntry saves append entries in memory for faster processing during applyCommit.
