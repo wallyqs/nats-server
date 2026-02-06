@@ -3191,7 +3191,29 @@ func (n *raft) applyCommit(index uint64) error {
 	}
 
 	n.commit = index
-	ae.buf = nil
+
+	// If ae.buf exists (from pae cache), decode it to get fresh entries.
+	// Entry.Data was nil'd after encode to free the original buffers.
+	// If ae.buf is nil (loaded from WAL), entries are already populated.
+	if ae.buf != nil {
+		// Save reference to buffer and immediately nil it to allow earlier GC.
+		// The buffer will still be referenced by Entry.Data slices until copyBytes() below.
+		buf := ae.buf
+		ae.buf = nil
+
+		decoded, err := decodeAppendEntry(buf, ae.sub, ae.reply)
+		if err != nil {
+			n.warn("Failed to decode append entry at index %d: %v", index, err)
+			return err
+		}
+		// Use the decoded entries, keep other ae fields
+		ae.entries = decoded.entries
+
+		// Nil the buffer in the decoded entry as well to release our reference.
+		// The underlying buffer is still held by Entry.Data slices until copied.
+		decoded.buf = nil
+	}
+
 	var committed []*Entry
 
 	defer func() {
@@ -3208,13 +3230,10 @@ func (n *raft) applyCommit(index uint64) error {
 	for _, e := range ae.entries {
 		switch e.Type {
 		case EntryNormal:
-			// Always copy data to break references to original buffers.
-			// For WAL entries, this breaks sub-slice references to ae.buf.
-			// For pae cache entries, this breaks references to the original
-			// encodeStreamMsgAllowCompressAndBatch buffers, allowing them to
-			// be GC'd immediately rather than retained throughout the apply
-			// queue processing. This is critical with millions of entries
-			// in flight across multiple consumer raft groups.
+			// Always copy data to break sub-slice references.
+			// Entry.Data are sub-slices of either the decoded ae.buf (pae cache)
+			// or the WAL read buffer. Copying creates independent buffers for
+			// the apply queue, allowing ae.buf and WAL buffers to be GC'd.
 			e.Data = copyBytes(e.Data)
 			committed = append(committed, e)
 		case EntryOldSnapshot:
@@ -4220,10 +4239,14 @@ func (n *raft) sendAppendEntryLocked(entries []*Entry, checkLeader bool) error {
 	if !shouldStore {
 		ae.returnToPool()
 	} else {
-		// The buf is no longer needed after being stored to WAL and sent
-		// to followers. Nil it out to allow GC to reclaim the memory,
-		// otherwise pae entries retain these large serialized buffers.
-		ae.buf = nil
+		// Keep ae.buf for decoding in applyCommit, but nil Entry.Data
+		// to free the original encodeStreamMsgAllowCompressAndBatch buffers.
+		// This eliminates double-retention: instead of holding both individual
+		// Entry.Data buffers (~5KB each × thousands) AND ae.buf in pae cache,
+		// we only hold the compact serialized ae.buf and decode on demand.
+		for _, e := range ae.entries {
+			e.Data = nil
+		}
 	}
 	if n.csz == 1 {
 		n.tryCommit(n.pindex)
