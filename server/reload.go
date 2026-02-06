@@ -426,7 +426,11 @@ func (c *clusterOption) Apply(s *Server) {
 		s.routeInfo.WSConnectURLs = nil
 	} else {
 		s.routeInfo.ClientConnectURLs = s.clientConnectURLs
-		s.routeInfo.WSConnectURLs = s.websocket.connectURLs
+		if !s.getOpts().Websocket.NoAdvertise {
+			s.routeInfo.WSConnectURLs = s.websocket.connectURLs
+		} else {
+			s.routeInfo.WSConnectURLs = nil
+		}
 	}
 	s.setRouteInfoHostPortAndIP()
 	var routes []*client

@@ -726,6 +726,9 @@ func (c *client) processRouteInfo(info *Info) {
 		// If the remote is going into LDM and there are client connect URLs
 		// associated with this route and we are allowed to advertise, remove
 		// those URLs and update our clients.
+		if opts.Websocket.NoAdvertise {
+			wsConnectURLs = nil
+		}
 		if (len(connectURLs) > 0 || len(wsConnectURLs) > 0) && !opts.Cluster.NoAdvertise {
 			s.mu.Lock()
 			s.removeConnectURLsAndSendINFOToClients(connectURLs, wsConnectURLs)
@@ -2389,7 +2392,11 @@ func (s *Server) addRoute(c *client, didSolicit, sendDelayedInfo bool, gossipMod
 			// Unless disabled, possibly update the server's INFO protocol
 			// and send to clients that know how to handle async INFOs.
 			if !opts.Cluster.NoAdvertise {
-				s.addConnectURLsAndSendINFOToClients(info.ClientConnectURLs, info.WSConnectURLs)
+				wsURLs := info.WSConnectURLs
+				if opts.Websocket.NoAdvertise {
+					wsURLs = nil
+				}
+				s.addConnectURLsAndSendINFOToClients(info.ClientConnectURLs, wsURLs)
 			}
 
 			// Add the remote's leafnodeURL to our list of URLs and send the update
@@ -2760,7 +2767,9 @@ func (s *Server) startRouteAcceptLoop() {
 	// Set this if only if advertise is not disabled
 	if !opts.Cluster.NoAdvertise {
 		info.ClientConnectURLs = s.clientConnectURLs
-		info.WSConnectURLs = s.websocket.connectURLs
+		if !opts.Websocket.NoAdvertise {
+			info.WSConnectURLs = s.websocket.connectURLs
+		}
 	}
 	// If we have selected a random port...
 	if port == 0 {
@@ -3191,6 +3200,9 @@ func (s *Server) removeRoute(c *client) {
 			// Since this is the last route for this remote, possibly update
 			// the client connect URLs and send an update to connected
 			// clients.
+			if opts.Websocket.NoAdvertise {
+				wsConnectURLs = nil
+			}
 			if (len(connectURLs) > 0 || len(wsConnectURLs) > 0) && !opts.Cluster.NoAdvertise {
 				s.removeConnectURLsAndSendINFOToClients(connectURLs, wsConnectURLs)
 			}

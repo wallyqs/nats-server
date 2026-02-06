@@ -1122,7 +1122,11 @@ func (s *Server) removeLeafNodeURL(urlStr string) bool {
 func (s *Server) generateLeafNodeInfoJSON() {
 	s.leafNodeInfo.Cluster = s.cachedClusterName()
 	s.leafNodeInfo.LeafNodeURLs = s.leafURLsMap.getAsStringSlice()
-	s.leafNodeInfo.WSConnectURLs = s.websocket.connectURLsMap.getAsStringSlice()
+	if !s.getOpts().Websocket.NoAdvertise {
+		s.leafNodeInfo.WSConnectURLs = s.websocket.connectURLsMap.getAsStringSlice()
+	} else {
+		s.leafNodeInfo.WSConnectURLs = nil
+	}
 	s.leafNodeInfoJSON = generateInfoJSON(&s.leafNodeInfo)
 }
 

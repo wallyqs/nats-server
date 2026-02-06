@@ -1197,12 +1197,14 @@ func (s *Server) startWebsocketServer() {
 	s.websocket.host, s.websocket.port = o.Host, o.Port
 
 	// This will be updated when/if the cluster changes.
-	s.websocket.connectURLs, err = s.getConnectURLs(o.Advertise, o.Host, o.Port)
-	if err != nil {
-		s.Fatalf("Unable to get websocket connect URLs: %v", err)
-		hl.Close()
-		s.mu.Unlock()
-		return
+	if !o.NoAdvertise {
+		s.websocket.connectURLs, err = s.getConnectURLs(o.Advertise, o.Host, o.Port)
+		if err != nil {
+			s.Fatalf("Unable to get websocket connect URLs: %v", err)
+			hl.Close()
+			s.mu.Unlock()
+			return
+		}
 	}
 	hasLeaf := sopts.LeafNode.Port != 0
 	mux := http.NewServeMux()

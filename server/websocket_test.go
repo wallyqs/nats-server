@@ -1554,6 +1554,12 @@ func TestWSParseOptions(t *testing.T) {
 			}
 			return nil
 		}, ""},
+		{"no_advertise", `websocket { no_advertise: true }`, func(wo *WebsocketOpts) error {
+			if !wo.NoAdvertise {
+				return fmt.Errorf("expected no_advertise==true, got %v", wo.NoAdvertise)
+			}
+			return nil
+		}, ""},
 		{"same origin", `websocket { same_origin: true }`, func(wo *WebsocketOpts) error {
 			if !wo.SameOrigin {
 				return fmt.Errorf("expected same_origin==true, got %v", wo.SameOrigin)
@@ -2681,6 +2687,49 @@ func TestWSAdvertise(t *testing.T) {
 	s2 = RunServer(o2)
 	defer s2.Shutdown()
 	checkInfo([]string{"host1:1234", "host3:9012"})
+}
+
+func TestWSNoAdvertise(t *testing.T) {
+	// Start first server with advertise set normally.
+	o1 := testWSOptions()
+	o1.Websocket.Advertise = "host1:1234"
+	s1 := RunServer(o1)
+	defer s1.Shutdown()
+
+	// Start second server with no_advertise set.
+	o2 := testWSOptions()
+	o2.Websocket.Advertise = "host2:5678"
+	o2.Websocket.NoAdvertise = true
+	o2.Routes = RoutesFromStr(fmt.Sprintf("nats://%s:%d", o1.Cluster.Host, o1.Cluster.Port))
+	s2 := RunServer(o2)
+	defer s2.Shutdown()
+
+	checkClusterFormed(t, s1, s2)
+
+	// Now connect a WS client to s1 and check the initial INFO.
+	// Since s2 has no_advertise, only s1's WS URL should be present.
+	_, _, infob := testWSCreateClientGetInfo(t, false, false, o1.Websocket.Host, o1.Websocket.Port)
+	info := &Info{}
+	json.Unmarshal(infob[5:], info)
+
+	// For a WS client, ClientConnectURLs is set to WSConnectURLs in
+	// generateClientInfoJSON. So check ClientConnectURLs.
+	expected := []string{"host1:1234"}
+	if n := len(info.ClientConnectURLs); n != len(expected) {
+		t.Fatalf("Expected %d connect URLs, got %d: %+v", len(expected), n, info.ClientConnectURLs)
+	}
+	for _, eu := range expected {
+		found := false
+		for _, u := range info.ClientConnectURLs {
+			if u == eu {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("Expected URL %q not found in %q", eu, info.ClientConnectURLs)
+		}
+	}
 }
 
 func TestWSFrameOutbound(t *testing.T) {

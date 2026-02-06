@@ -521,6 +521,8 @@ type WebsocketOpts struct {
 	Port int
 	// The host:port to advertise to websocket clients in the cluster.
 	Advertise string
+	// If true, do not advertise websocket connect URLs to clients and routes.
+	NoAdvertise bool
 
 	// If no user name is provided when a client connects, will default to the
 	// matching user from the global list of users in `Options.Users`.
@@ -5346,6 +5348,8 @@ func parseWebsocket(v any, o *Options, errors *[]error, warnings *[]error) error
 			o.Websocket.Host = mv.(string)
 		case "advertise":
 			o.Websocket.Advertise = mv.(string)
+		case "no_advertise":
+			o.Websocket.NoAdvertise = mv.(bool)
 		case "no_tls":
 			o.Websocket.NoTLS = mv.(bool)
 		case "tls":

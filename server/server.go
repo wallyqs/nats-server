@@ -4586,8 +4586,10 @@ func (s *Server) sendLDMToClients() {
 		for url := range s.clientConnectURLsMap {
 			s.info.ClientConnectURLs = append(s.info.ClientConnectURLs, url)
 		}
-		for url := range s.websocket.connectURLsMap {
-			s.info.WSConnectURLs = append(s.info.WSConnectURLs, url)
+		if !s.getOpts().Websocket.NoAdvertise {
+			for url := range s.websocket.connectURLsMap {
+				s.info.WSConnectURLs = append(s.info.WSConnectURLs, url)
+			}
 		}
 	}
 	// Send to all registered clients that support async INFO protocols.
