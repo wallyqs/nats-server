@@ -5497,12 +5497,11 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 	} else if !isEmpty {
 		// Out of order delete.
 		mb.dmap.Insert(seq)
-		// Make simple check here similar to Compact(). If we can save 50% and over a certain threshold do inline.
-		// All other more thorough cleanup will happen in syncBlocks logic.
-		// Note that we do not have to store empty records for the deleted, so don't use to calculate.
-		// TODO(dlc) - This should not be inline, should kick the sync routine.
+		// Check if this block would benefit from compaction. Rather than running
+		// compact inline (which holds fs.mu.Lock during heavy I/O, blocking all
+		// writers and readers), kick the sync routine to handle it asynchronously.
 		if !isLastBlock && mb.shouldCompactInline() {
-			mb.compact()
+			fs.kickSyncBlocks()
 		}
 	}
 
@@ -10514,6 +10513,18 @@ func (fs *fileStore) cancelSyncTimer() {
 	if fs.syncTmr != nil {
 		fs.syncTmr.Stop()
 		fs.syncTmr = nil
+	}
+}
+
+// Kick the sync routine to fire sooner than the normal interval.
+// This is used when a block needs compaction but we don't want to
+// run it inline (e.g. from removeMsg which holds fs.mu.Lock).
+// The short delay allows batching multiple removes before triggering
+// a single compaction pass in syncBlocks.
+// Lock should be held.
+func (fs *fileStore) kickSyncBlocks() {
+	if fs.syncTmr != nil {
+		fs.syncTmr.Reset(time.Second)
 	}
 }
 

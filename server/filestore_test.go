@@ -7726,6 +7726,10 @@ func TestFileStoreMsgBlockShouldCompact(t *testing.T) {
 	for seq := 64; seq <= 127; seq++ {
 		fs.RemoveMsg(uint64(seq))
 	}
+
+	// Compaction is now deferred to the sync routine. Trigger it to run compaction.
+	fs.syncBlocks()
+
 	fs.mu.RLock()
 	fblk := fs.blks[0]
 	sblk := fs.blks[1]
@@ -7735,7 +7739,7 @@ func TestFileStoreMsgBlockShouldCompact(t *testing.T) {
 	bytes, rbytes := fblk.bytes, fblk.rbytes
 	shouldCompact := fblk.shouldCompactInline()
 	fblk.mu.RUnlock()
-	// Should have tripped compaction already.
+	// Should have tripped compaction via syncBlocks.
 	require_Equal(t, bytes, rbytes)
 	require_False(t, shouldCompact)
 
