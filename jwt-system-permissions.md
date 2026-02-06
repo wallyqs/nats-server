@@ -63,6 +63,7 @@ These require the caller to be connected to the system account.
 
 | Subject | Description | Access Required |
 |---|---|---|
+| `$SYS.REQ.SERVER.PING.IDZ` | Server identity | Publish |
 | `$SYS.REQ.SERVER.PING.STATSZ` | Server statistics | Publish |
 | `$SYS.REQ.SERVER.PING.VARZ` | Server variables | Publish |
 | `$SYS.REQ.SERVER.PING.CONNZ` | Connection information | Publish |
@@ -71,13 +72,32 @@ These require the caller to be connected to the system account.
 | `$SYS.REQ.SERVER.PING.LEAFZ` | Leaf node information | Publish |
 | `$SYS.REQ.SERVER.PING.SUBSZ` | Subscription information | Publish |
 | `$SYS.REQ.SERVER.PING.ACCOUNTZ` | Account information | Publish |
+| `$SYS.REQ.SERVER.PING.JSZ` | JetStream information | Publish |
+| `$SYS.REQ.SERVER.PING.HEALTHZ` | Health check | Publish |
 | `$SYS.REQ.SERVER.PING.PROFILEZ` | Profiling data | Publish |
+| `$SYS.REQ.SERVER.PING.EXPVARZ` | Extended variables | Publish |
+| `$SYS.REQ.SERVER.PING.IPQUEUESZ` | Internal IP queues | Publish |
+| `$SYS.REQ.SERVER.PING.RAFTZ` | Raft group information | Publish |
 
 ### Direct Server Requests
 
 | Subject | Description | Access Required |
 |---|---|---|
+| `$SYS.REQ.SERVER.<server_id>.IDZ` | Identity for specific server | Publish |
 | `$SYS.REQ.SERVER.<server_id>.STATSZ` | Statistics for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.VARZ` | Variables for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.CONNZ` | Connections for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.ROUTEZ` | Routes for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.GATEWAYZ` | Gateways for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.LEAFZ` | Leaf nodes for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.SUBSZ` | Subscriptions for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.ACCOUNTZ` | Accounts for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.JSZ` | JetStream for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.HEALTHZ` | Health check for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.PROFILEZ` | Profiling for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.EXPVARZ` | Extended variables for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.IPQUEUESZ` | Internal IP queues for specific server | Publish |
+| `$SYS.REQ.SERVER.<server_id>.RAFTZ` | Raft groups for specific server | Publish |
 | `$SYS.REQ.SERVER.<server_id>.RELOAD` | Reload specific server configuration | Publish |
 
 ## Account Management (`$SYS.REQ.ACCOUNT.>`)
