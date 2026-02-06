@@ -2290,7 +2290,7 @@ func (n *raft) run() {
 			ready = len(gw.out)+len(gw.in) > 0
 			gw.RUnlock()
 		}
-		if !ready {
+		if !ready && !raftOverrideDegraded.Load() {
 			select {
 			case <-s.quitCh:
 				return
@@ -2300,6 +2300,11 @@ func (n *raft) run() {
 		} else {
 			break
 		}
+	}
+
+	// If we are forcing to come up in degraded mode then we need to be leader.
+	if raftOverrideDegraded.Load() {
+		n.switchToLeader()
 	}
 
 	// We may have paused adding entries to apply queue, resume here.
