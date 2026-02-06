@@ -4020,6 +4020,17 @@ CONTINUE:
 		}
 	}
 
+	// On followers, entry Data fields are sub-slices of ae.buf (from
+	// decodeAppendEntry). Copy each entry's Data to break the sub-slice
+	// references, then nil ae.buf so the serialized buffer can be GC'd
+	// immediately. This mirrors the leader path in sendAppendEntryLocked.
+	if sub != nil && ae.shouldStore() {
+		for _, e := range ae.entries {
+			e.Data = copyBytes(e.Data)
+		}
+		ae.buf = nil
+	}
+
 	// Make a copy of these values, as the AppendEntry might be cached and returned to the pool in applyCommit.
 	aeCommit := ae.commit
 	aeReply := ae.reply

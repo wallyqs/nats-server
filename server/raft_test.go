@@ -1411,6 +1411,42 @@ func TestNRGCatchupCanTruncateMultipleEntriesWithoutQuorum(t *testing.T) {
 	require_True(t, n.catchup == nil)
 }
 
+func TestNRGFollowerPaeCacheReleasesBuffer(t *testing.T) {
+	n, cleanup := initSingleMemRaftNode(t)
+	defer cleanup()
+
+	// Create a sample entry with stream message data.
+	esm := encodeStreamMsgAllowCompress("foo", "_INBOX.foo", nil, []byte("hello"), 0, 0, true)
+	entries := []*Entry{newEntry(EntryNormal, esm)}
+
+	nats0 := "S1Nunr6R" // "nats-0"
+
+	// First append entry with data.
+	ae := encode(t, &appendEntry{leader: nats0, term: 1, commit: 0, pterm: 0, pindex: 0, entries: entries})
+
+	// Process as follower (using n.aesub, not nil).
+	n.processAppendEntry(ae, n.aesub)
+
+	// Verify entry was stored in WAL.
+	require_Equal(t, n.wal.State().Msgs, 1)
+
+	// Verify pae cache entry has buf set to nil (buffer released early).
+	n.Lock()
+	pae := n.pae[1]
+	n.Unlock()
+	require_True(t, pae != nil)
+	require_True(t, pae.buf == nil)
+
+	// Verify entry data is still intact (was copied before buf was nilled).
+	require_True(t, len(pae.entries) > 0)
+	require_True(t, len(pae.entries[0].Data) > 0)
+
+	// Now send a heartbeat to commit the entry.
+	aeHeartbeat := encode(t, &appendEntry{leader: nats0, term: 1, commit: 1, pterm: 1, pindex: 1, entries: nil})
+	n.processAppendEntry(aeHeartbeat, n.aesub)
+	require_Equal(t, n.commit, 1)
+}
+
 func TestNRGCatchupDoesNotTruncateCommittedEntriesDuringRedelivery(t *testing.T) {
 	n, cleanup := initSingleMemRaftNode(t)
 	defer cleanup()
