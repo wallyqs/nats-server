@@ -7214,13 +7214,23 @@ func (fs *fileStore) syncBlocks() {
 				fsDmapLoaded = true
 				fsDmap = fs.deleteMap()
 			}
+			// Pre-load the message block cache under fs.mu.RLock to ensure
+			// structural stability of the filestore during the load.
+			// Then release fs.mu.RLock before the actual compaction I/O
+			// (file write + rename) to avoid blocking StoreRawMsg and other
+			// writers that need fs.mu.Lock.
 			fs.mu.RLock()
 			mb.mu.Lock()
+			if mb.cache == nil || !mb.cacheAlreadyLoaded() {
+				mb.loadMsgsWithLock()
+			}
+			fs.mu.RUnlock()
+			// Now compact with only mb.mu held. The cache is loaded so
+			// compactWithFloor will skip the loadMsgsWithLock call.
 			mb.compactWithFloor(firstSeq, &fsDmap)
 			// If this compact removed all raw bytes due to tombstone cleanup, schedule to remove.
 			shouldRemove := mb.rbytes == 0
 			mb.mu.Unlock()
-			fs.mu.RUnlock()
 
 			// Check if we should remove. This will not be common, so we will re-take fs write lock here vs changing
 			//  it above which we would prefer to be a readlock such that other lookups can occur while compacting this block.
