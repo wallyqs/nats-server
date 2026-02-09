@@ -1595,6 +1595,17 @@ func (js *jetStream) monitorCluster() {
 					}
 					continue
 				}
+				if ce.NeedsLoad {
+					if entries, err := n.LoadCommittedEntry(ce.Index); err == nil {
+						ce.Entries = entries
+						ce.NeedsLoad = false
+					} else {
+						s.Warnf("Failed to load committed meta entry %d from WAL: %v", ce.Index, err)
+						n.Applied(ce.Index)
+						ce.ReturnToPool()
+						continue
+					}
+				}
 				if isRecovering, didSnap, err := js.applyMetaEntries(ce.Entries, ru); err == nil {
 					var nb uint64
 					// Some entries can fail without an error when shutting down, don't move applied forward.
@@ -2817,6 +2828,18 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 						sendSnapshot = false
 					}
 					continue
+				} else if ce.NeedsLoad {
+					// Backpressure path: entry data was not kept in the apply queue
+					// to bound memory. Load from WAL on demand.
+					if entries, err := n.LoadCommittedEntry(ce.Index); err == nil {
+						ce.Entries = entries
+						ce.NeedsLoad = false
+					} else {
+						s.Warnf("Failed to load committed entry %d from WAL: %v", ce.Index, err)
+						ne, nb = n.Applied(ce.Index)
+						ce.ReturnToPool()
+						continue
+					}
 				} else if len(ce.Entries) == 0 {
 					// If we have a partial batch, it needs to be rejected to ensure CLFS is correct.
 					if mset != nil {
@@ -5883,6 +5906,17 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 						doSnapshot(true)
 					}
 					continue
+				}
+				if ce.NeedsLoad {
+					if entries, err := n.LoadCommittedEntry(ce.Index); err == nil {
+						ce.Entries = entries
+						ce.NeedsLoad = false
+					} else {
+						s.Warnf("Failed to load committed consumer entry %d from WAL: %v", ce.Index, err)
+						n.Applied(ce.Index)
+						ce.ReturnToPool()
+						continue
+					}
 				}
 				if err := js.applyConsumerEntries(o, ce, isLeader); err == nil {
 					var ne, nb uint64

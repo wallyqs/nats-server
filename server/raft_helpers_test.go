@@ -300,6 +300,14 @@ func (a *stateAdder) applyEntry(ce *CommittedEntry) {
 		a.Unlock()
 		return
 	}
+	// If entry data was not kept in the apply queue due to backpressure,
+	// load it from the WAL on demand.
+	if ce.NeedsLoad {
+		if entries, err := a.n.LoadCommittedEntry(ce.Index); err == nil {
+			ce.Entries = entries
+			ce.NeedsLoad = false
+		}
+	}
 	for _, e := range ce.Entries {
 		if e.Type == EntryNormal {
 			delta, _ := binary.Varint(e.Data)

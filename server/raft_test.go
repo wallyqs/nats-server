@@ -4790,3 +4790,140 @@ func TestNRGMustNotResetVoteOnStepDownOrLeaderTransfer(t *testing.T) {
 	require_Equal(t, n.term, 1)
 	require_Equal(t, n.vote, nats0)
 }
+
+func TestNRGApplyQueueBackpressure(t *testing.T) {
+	n, cleanup := initSingleMemRaftNode(t)
+	defer cleanup()
+
+	nats0 := "S1Nunr6R" // "nats-0"
+
+	n.Lock()
+	n.addPeer(nats0)
+	n.Unlock()
+
+	// Create entries with random data that won't compress well.
+	// Each entry will be ~1MB to fill the 64MB queue threshold.
+	entrySize := 1024 * 1024 // 1MB per entry
+
+	// Store enough entries in the WAL to exceed maxApplyQueueSize (64MB).
+	numEntries := int(maxApplyQueueSize/uint64(entrySize)) + 10
+
+	// Store entries directly into the WAL and pae cache.
+	n.Lock()
+	for i := 0; i < numEntries; i++ {
+		// Use random data to prevent compression from shrinking entries.
+		payload := make([]byte, entrySize)
+		rand.Read(payload)
+		entries := []*Entry{newEntry(EntryNormal, payload)}
+		ae := encode(t, &appendEntry{
+			leader:  nats0,
+			term:    1,
+			commit:  0,
+			pterm:   1,
+			pindex:  uint64(i),
+			entries: entries,
+		})
+		err := n.storeToWAL(ae)
+		require_NoError(t, err)
+		n.cachePendingEntry(ae)
+	}
+
+	// Now call applyCommit directly for each entry.
+	// Nobody is consuming the apply queue, so it will accumulate and
+	// eventually trigger the backpressure path.
+	for i := 1; i <= numEntries; i++ {
+		err := n.applyCommit(uint64(i))
+		require_NoError(t, err)
+	}
+	n.Unlock()
+
+	// Check the apply queue size before popping.
+	queueSize := n.apply.size()
+	queueLen := n.apply.len()
+	t.Logf("Apply queue: size=%d bytes, len=%d entries", queueSize, queueLen)
+
+	// Pop from the apply queue to verify we get NeedsLoad entries.
+	var totalEntries, needsLoadCount, normalCount int
+	for {
+		ces := n.apply.pop()
+		if len(ces) == 0 {
+			break
+		}
+		for _, ce := range ces {
+			if ce == nil {
+				continue
+			}
+			totalEntries++
+			if ce.NeedsLoad {
+				needsLoadCount++
+
+				// Verify that LoadCommittedEntry can load the data.
+				entries, err := n.LoadCommittedEntry(ce.Index)
+				require_NoError(t, err)
+				require_True(t, len(entries) > 0)
+
+				// Return loaded entries to pool.
+				for _, e := range entries {
+					entryPool.Put(e)
+				}
+			} else {
+				normalCount++
+			}
+			ce.ReturnToPool()
+		}
+		n.apply.recycle(&ces)
+	}
+
+	t.Logf("Total entries: %d, NeedsLoad: %d, Normal: %d", totalEntries, needsLoadCount, normalCount)
+
+	// We should have some entries from both paths.
+	require_True(t, totalEntries > 0)
+	// Some entries should have gone through the backpressure path.
+	require_True(t, needsLoadCount > 0)
+	// Some entries should have been normal (fast path) before the queue filled.
+	require_True(t, normalCount > 0)
+}
+
+func TestNRGApplyQueueBackpressureEndToEnd(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	// Do many state transitions to verify correctness under load.
+	// The stateAdder handles NeedsLoad entries automatically.
+	var expectedTotal int64
+	for i := 0; i < 500; i++ {
+		delta := int64(i + 1)
+		expectedTotal += delta
+		rg.leader().(*stateAdder).proposeDelta(delta)
+	}
+
+	// Wait for all members to have the correct state.
+	// This verifies that both normal and NeedsLoad entries
+	// (if backpressure was triggered) were processed correctly.
+	rg.waitOnTotal(t, expectedTotal)
+}
+
+func TestNRGCommittedEntrySizeCalc(t *testing.T) {
+	// Verify that the size calculation works correctly.
+	// Normal entry with data.
+	ce := newCommittedEntry(1, []*Entry{
+		{Type: EntryNormal, Data: make([]byte, 100)},
+		{Type: EntryNormal, Data: make([]byte, 200)},
+	})
+	require_Equal(t, committedEntrySizeCalc(ce), 300)
+	ce.ReturnToPool()
+
+	// NeedsLoad entry should report zero size.
+	ce = newCommittedEntry(2, nil)
+	ce.NeedsLoad = true
+	require_Equal(t, committedEntrySizeCalc(ce), 0)
+	ce.ReturnToPool()
+
+	// Empty entry should report zero size.
+	ce = newCommittedEntry(3, nil)
+	require_Equal(t, committedEntrySizeCalc(ce), 0)
+	ce.ReturnToPool()
+}
