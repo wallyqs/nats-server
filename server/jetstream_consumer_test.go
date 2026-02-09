@@ -10696,3 +10696,200 @@ func TestJetStreamConsumerCheckNumPending(t *testing.T) {
 	o.mu.Unlock()
 	require_Equal(t, np, 1)
 }
+
+// https://github.com/nats-io/nats-server/issues/7779
+func TestJetStreamConsumerAllowOverlappingSubjectsIfNotSubset(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"event.>"},
+	})
+	require_NoError(t, err)
+
+	parts := []string{"foo", "bar", "baz", "oth"}
+	for _, start := range parts {
+		for _, end := range parts {
+			subj := fmt.Sprintf("event.%s.%s", start, end)
+			_, err = js.Publish(subj, nil)
+			require_NoError(t, err)
+		}
+	}
+
+	// First consumer isn't allowed, since 'event.*.foo' is a subset of 'event.>'.
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable: "OVERLAP",
+		FilterSubjects: []string{
+			"event.>",
+			"event.*.foo",
+		},
+	})
+	require_Error(t, err, NewJSConsumerOverlappingSubjectFiltersError())
+
+	// The second consumer's subjects do overlap, but they are separate sets (that partially overlap).
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable: "DURABLE",
+		FilterSubjects: []string{
+			"event.foo.*",
+			"event.*.foo",
+		},
+	})
+	require_NoError(t, err)
+
+	sub, err := js.PullSubscribe(_EMPTY_, "DURABLE", nats.BindStream("TEST"))
+	require_NoError(t, err)
+	defer sub.Drain()
+
+	// Confirm the consumer gets all messages in the expected order without duplicates.
+	batch := len(parts) * len(parts)
+	msgs, err := sub.Fetch(batch, nats.MaxWait(time.Second))
+	require_NoError(t, err)
+	var count int
+	for _, start := range parts {
+		for _, end := range parts {
+			if start != "foo" && end != "foo" {
+				continue
+			}
+			count++
+			require_True(t, len(msgs) >= count)
+			msg := msgs[count-1]
+			subj := fmt.Sprintf("event.%s.%s", start, end)
+			require_Equal(t, msg.Subject, subj)
+		}
+	}
+	require_Equal(t, count, 7)
+	require_Len(t, len(msgs), count)
+}
+
+func TestJetStreamConsumerOverlappingSubjectsThreeWay(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"event.>"},
+	})
+	require_NoError(t, err)
+
+	parts := []string{"foo", "bar", "baz", "oth"}
+	for _, a := range parts {
+		for _, b := range parts {
+			subj := fmt.Sprintf("event.%s.%s", a, b)
+			_, err = js.Publish(subj, nil)
+			require_NoError(t, err)
+		}
+	}
+
+	// Three overlapping-but-not-subset filters should be allowed.
+	// event.foo.* matches {event.foo.foo, event.foo.bar, event.foo.baz, event.foo.oth}
+	// event.*.foo matches {event.foo.foo, event.bar.foo, event.baz.foo, event.oth.foo}
+	// event.*.bar matches {event.foo.bar, event.bar.bar, event.baz.bar, event.oth.bar}
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable: "THREE_WAY",
+		FilterSubjects: []string{
+			"event.foo.*",
+			"event.*.foo",
+			"event.*.bar",
+		},
+	})
+	require_NoError(t, err)
+
+	sub, err := js.PullSubscribe(_EMPTY_, "THREE_WAY", nats.BindStream("TEST"))
+	require_NoError(t, err)
+	defer sub.Drain()
+
+	// Unique subjects matching any of the three filters:
+	// event.foo.foo, event.foo.bar, event.foo.baz, event.foo.oth  (from event.foo.*)
+	// event.bar.foo, event.baz.foo, event.oth.foo                 (new from event.*.foo)
+	// event.bar.bar, event.baz.bar, event.oth.bar                 (new from event.*.bar)
+	// Total unique: 10
+	expectedSubjects := map[string]struct{}{
+		"event.foo.foo": {},
+		"event.foo.bar": {},
+		"event.foo.baz": {},
+		"event.foo.oth": {},
+		"event.bar.foo": {},
+		"event.baz.foo": {},
+		"event.oth.foo": {},
+		"event.bar.bar": {},
+		"event.baz.bar": {},
+		"event.oth.bar": {},
+	}
+
+	msgs, err := sub.Fetch(len(parts)*len(parts), nats.MaxWait(time.Second))
+	require_NoError(t, err)
+	require_Len(t, len(msgs), len(expectedSubjects))
+
+	// Verify all messages are expected and in sequence order (no duplicates).
+	seen := make(map[string]struct{})
+	for _, msg := range msgs {
+		_, ok := expectedSubjects[msg.Subject]
+		require_True(t, ok)
+		_, dup := seen[msg.Subject]
+		require_False(t, dup)
+		seen[msg.Subject] = struct{}{}
+	}
+	require_Len(t, len(seen), len(expectedSubjects))
+}
+
+func TestJetStreamConsumerSubsetFiltersStillRejected(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{">"},
+	})
+	require_NoError(t, err)
+
+	// Cases where one filter is a subset of the other should still be rejected.
+	rejectCases := []struct {
+		name    string
+		filters []string
+	}{
+		{"fwc_contains_partial", []string{"event.>", "event.*.foo"}},
+		{"fwc_contains_fwc", []string{"event.>", "event.foo.>"}},
+		{"fwc_contains_literal", []string{"event.>", "event.foo.bar"}},
+		{"pwc_match_contains_literal", []string{"event.*.*", "event.foo.*"}},
+		{"deep_fwc_subset", []string{"foo.*.*", "foo.*.>"}},
+	}
+	for _, tc := range rejectCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := js.AddConsumer("TEST", &nats.ConsumerConfig{
+				Durable:        "C_" + tc.name,
+				FilterSubjects: tc.filters,
+			})
+			require_Error(t, err, NewJSConsumerOverlappingSubjectFiltersError())
+		})
+	}
+
+	// Cases where filters overlap but neither is a subset should be allowed.
+	allowCases := []struct {
+		name    string
+		filters []string
+	}{
+		{"cross_wildcard", []string{"event.foo.*", "event.*.foo"}},
+		{"triple_cross", []string{"event.foo.*", "event.*.foo", "event.*.bar"}},
+		{"disjoint_literals", []string{"event.foo.bar", "event.baz.qux"}},
+		{"disjoint_wildcards", []string{"event.foo.*", "event.bar.*"}},
+	}
+	for _, tc := range allowCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := js.AddConsumer("TEST", &nats.ConsumerConfig{
+				Durable:        "C_" + tc.name,
+				FilterSubjects: tc.filters,
+			})
+			require_NoError(t, err)
+		})
+	}
+}

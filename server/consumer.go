@@ -819,13 +819,13 @@ func checkConsumerCfg(
 	}
 	subjectFilters := gatherSubjectFilters(config.FilterSubject, config.FilterSubjects)
 
-	// Check subject filters do not overlap.
+	// Check that no subject filter is a subset of another.
 	for outer, subject := range subjectFilters {
 		if !IsValidSubject(subject) {
 			return NewJSStreamInvalidConfigError(ErrBadSubject)
 		}
 		for inner, ssubject := range subjectFilters {
-			if inner != outer && SubjectsCollide(subject, ssubject) {
+			if inner != outer && subjectIsSubsetMatch(subject, ssubject) {
 				return NewJSConsumerOverlappingSubjectFiltersError()
 			}
 		}
