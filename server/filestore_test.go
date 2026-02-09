@@ -7726,6 +7726,10 @@ func TestFileStoreMsgBlockShouldCompact(t *testing.T) {
 	for seq := 64; seq <= 127; seq++ {
 		fs.RemoveMsg(uint64(seq))
 	}
+
+	// Wait for async compaction to complete.
+	time.Sleep(50 * time.Millisecond)
+
 	fs.mu.RLock()
 	fblk := fs.blks[0]
 	sblk := fs.blks[1]

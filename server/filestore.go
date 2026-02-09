@@ -198,6 +198,7 @@ type fileStore struct {
 	hh          *highwayhash.Digest64
 	qch         chan struct{}
 	fsld        chan struct{}
+	cch         chan *msgBlock // Compaction channel - bounded queue for async compaction.
 	cmu         sync.RWMutex
 	cfs         []ConsumerStore
 	sips        int
@@ -431,6 +432,7 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 		oldprf: oldprf,
 		qch:    make(chan struct{}),
 		fsld:   make(chan struct{}),
+		cch:    make(chan *msgBlock, 4),
 		srv:    fcfg.srv,
 	}
 
@@ -632,6 +634,9 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 
 	// Spin up the go routine that will write out our full state stream index.
 	go fs.flushStreamStateLoop(fs.qch, fs.fsld)
+
+	// Start the async compaction worker.
+	go fs.compactionWorker(fs.cch, fs.qch)
 
 	return fs, nil
 }
@@ -5497,12 +5502,11 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 	} else if !isEmpty {
 		// Out of order delete.
 		mb.dmap.Insert(seq)
-		// Make simple check here similar to Compact(). If we can save 50% and over a certain threshold do inline.
-		// All other more thorough cleanup will happen in syncBlocks logic.
-		// Note that we do not have to store empty records for the deleted, so don't use to calculate.
-		// TODO(dlc) - This should not be inline, should kick the sync routine.
+		// Queue async compaction if conditions are met.
+		// Compaction runs in background worker to avoid blocking while holding locks.
+		// If queue is full (backpressure), syncBlocks will handle it later.
 		if !isLastBlock && mb.shouldCompactInline() {
-			mb.compact()
+			fs.kickCompaction(mb)
 		}
 	}
 
@@ -5562,6 +5566,45 @@ func (mb *msgBlock) shouldCompactInline() bool {
 // Lock should be held.
 func (mb *msgBlock) shouldCompactSync() bool {
 	return mb.bytes*2 < mb.rbytes && !mb.noCompact
+}
+
+// Processes async compaction requests from the compaction channel.
+// Runs as a goroutine, exits when qch is closed or cch is closed.
+func (fs *fileStore) compactionWorker(cch chan *msgBlock, qch chan struct{}) {
+	for {
+		select {
+		case mb := <-cch:
+			if mb == nil {
+				return
+			}
+			fs.mu.RLock()
+			if fs.closed.Load() {
+				fs.mu.RUnlock()
+				return
+			}
+			fs.mu.RUnlock()
+
+			mb.mu.Lock()
+			// Re-check conditions - state may have changed since queued.
+			if !mb.closed && mb.shouldCompactInline() {
+				mb.compact()
+			}
+			mb.mu.Unlock()
+		case <-qch:
+			return
+		}
+	}
+}
+
+// Attempts to queue a block for async compaction.
+// Non-blocking - if queue is full, returns immediately (backpressure).
+// syncBlocks will handle compaction later if skipped here.
+func (fs *fileStore) kickCompaction(mb *msgBlock) {
+	select {
+	case fs.cch <- mb:
+	default:
+		// Queue full - backpressure, syncBlocks will handle it
+	}
 }
 
 // This will compact and rewrite this block. This version will not process any tombstone cleanup.
@@ -10855,10 +10898,14 @@ func (fs *fileStore) stop(delete, writeState bool) error {
 	// so we don't end up with this function running more than once.
 	fs.closing = true
 
-	// Release the state flusher loop.
+	// Release the state flusher loop and compaction worker.
 	if fs.qch != nil {
 		close(fs.qch)
 		fs.qch = nil
+	}
+	if fs.cch != nil {
+		close(fs.cch)
+		fs.cch = nil
 	}
 
 	if writeState {
