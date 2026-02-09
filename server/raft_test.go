@@ -4906,6 +4906,107 @@ func TestNRGApplyQueueBackpressureEndToEnd(t *testing.T) {
 	rg.waitOnTotal(t, expectedTotal)
 }
 
+func TestNRGApplyQueueBackpressureMemorySavings(t *testing.T) {
+	n, cleanup := initSingleMemRaftNode(t)
+	defer cleanup()
+
+	nats0 := "S1Nunr6R" // "nats-0"
+
+	n.Lock()
+	n.addPeer(nats0)
+	n.Unlock()
+
+	// Each entry is 1MB of random (incompressible) data.
+	const entrySize = 1024 * 1024
+
+	// Commit 2x the queue threshold worth of data (128MB total).
+	// Without backpressure, the queue would hold all 128MB.
+	// With backpressure, it should cap at ~64MB.
+	numEntries := int(2 * maxApplyQueueSize / entrySize)
+
+	n.Lock()
+	for i := 0; i < numEntries; i++ {
+		payload := make([]byte, entrySize)
+		rand.Read(payload)
+		entries := []*Entry{newEntry(EntryNormal, payload)}
+		ae := encode(t, &appendEntry{
+			leader: nats0, term: 1, commit: 0,
+			pterm: 1, pindex: uint64(i),
+			entries: entries,
+		})
+		require_NoError(t, n.storeToWAL(ae))
+		n.cachePendingEntry(ae)
+	}
+	for i := 1; i <= numEntries; i++ {
+		require_NoError(t, n.applyCommit(uint64(i)))
+	}
+	n.Unlock()
+
+	// Measure what's actually in the queue.
+	queueTrackedSize := n.apply.size()
+	queueLen := n.apply.len()
+
+	// Walk the queue and measure the real data held in memory vs deferred to WAL.
+	var memoryHeldBytes, deferredBytes uint64
+	var normalCount, needsLoadCount int
+	for {
+		ces := n.apply.pop()
+		if len(ces) == 0 {
+			break
+		}
+		for _, ce := range ces {
+			if ce == nil {
+				continue
+			}
+			if ce.NeedsLoad {
+				needsLoadCount++
+				// This entry holds ~0 bytes in the queue. The data (~1MB) is
+				// deferred to WAL and will only be loaded when processed.
+				deferredBytes += entrySize
+			} else {
+				normalCount++
+				for _, e := range ce.Entries {
+					memoryHeldBytes += uint64(len(e.Data))
+				}
+			}
+			ce.ReturnToPool()
+		}
+		n.apply.recycle(&ces)
+	}
+
+	totalDataCommitted := uint64(numEntries) * entrySize
+	savedBytes := deferredBytes
+	savingsPct := float64(savedBytes) / float64(totalDataCommitted) * 100
+
+	t.Logf("=== Apply Queue Backpressure Memory Impact ===")
+	t.Logf("Total data committed:      %d MB (%d entries x %d MB)",
+		totalDataCommitted/(1024*1024), numEntries, entrySize/(1024*1024))
+	t.Logf("Queue tracked size:        %d MB (capped at %d MB threshold)",
+		queueTrackedSize/(1024*1024), maxApplyQueueSize/(1024*1024))
+	t.Logf("Queue length:              %d entries", queueLen)
+	t.Logf("Data held in memory:       %d MB (%d normal entries)",
+		memoryHeldBytes/(1024*1024), normalCount)
+	t.Logf("Data deferred to WAL:      %d MB (%d NeedsLoad entries)",
+		deferredBytes/(1024*1024), needsLoadCount)
+	t.Logf("Memory saved:              %d MB (%.0f%% of committed data)",
+		savedBytes/(1024*1024), savingsPct)
+	t.Logf("Without backpressure:      queue would hold all %d MB", totalDataCommitted/(1024*1024))
+
+	// The queue tracked size must be bounded at the threshold.
+	require_True(t, queueTrackedSize <= maxApplyQueueSize)
+
+	// All entries accounted for.
+	require_Equal(t, normalCount+needsLoadCount, numEntries)
+
+	// We must have a significant number of NeedsLoad entries.
+	// With 128MB committed and a 64MB threshold, roughly half should be deferred.
+	require_True(t, needsLoadCount > numEntries/4)
+
+	// The memory savings should be substantial — at least 25% of total committed data
+	// kept out of the queue. In practice it's ~50% since we commit 2x the threshold.
+	require_True(t, savedBytes > totalDataCommitted/4)
+}
+
 func TestNRGCommittedEntrySizeCalc(t *testing.T) {
 	// Verify that the size calculation works correctly.
 	// Normal entry with data.
