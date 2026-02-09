@@ -1464,6 +1464,7 @@ func (js *jetStream) monitorCluster() {
 			return
 		case <-aq.ch:
 			ces := aq.pop()
+			var walBytesLoaded uint64
 			for _, ce := range ces {
 				if recovering && ru == nil {
 					ru = &recoveryUpdates{
@@ -1517,9 +1518,18 @@ func (js *jetStream) monitorCluster() {
 					continue
 				}
 				if ce.NeedsLoad {
+					// Yield briefly if we've loaded too much data from WAL in this batch
+					// to allow block cache expiry timers to reclaim memory.
+					if walBytesLoaded >= maxWALLoadBatchSize {
+						time.Sleep(time.Millisecond)
+						walBytesLoaded = 0
+					}
 					if entries, err := n.LoadCommittedEntry(ce.Index); err == nil {
 						ce.Entries = entries
 						ce.NeedsLoad = false
+						for _, e := range entries {
+							walBytesLoaded += uint64(len(e.Data))
+						}
 					} else {
 						s.Warnf("Failed to load committed meta entry %d from WAL: %v", ce.Index, err)
 						n.Applied(ce.Index)
@@ -2387,7 +2397,7 @@ retry:
 		syncInterval := js.srv.opts.SyncInterval
 		js.srv.optsMu.RUnlock()
 		fs, err := newFileStoreWithCreated(
-			FileStoreConfig{StoreDir: storeDir, BlockSize: defaultMediumBlockSize, AsyncFlush: false, SyncAlways: syncAlways, SyncInterval: syncInterval, srv: s},
+			FileStoreConfig{StoreDir: storeDir, BlockSize: defaultMediumBlockSize, AsyncFlush: false, SyncAlways: syncAlways, SyncInterval: syncInterval, CacheExpire: 200 * time.Millisecond, srv: s},
 			StreamConfig{Name: rg.Name, Storage: FileStorage, Metadata: labels},
 			time.Now().UTC(),
 			s.jsKeyGen(s.getOpts().JetStreamKey, rg.Name),
@@ -2732,6 +2742,7 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 			pclfs := mset.getCLFS()
 
 			ces := aq.pop()
+			var walBytesLoaded uint64
 			for _, ce := range ces {
 				// No special processing needed for when we are caught up on restart.
 				if ce == nil {
@@ -2755,9 +2766,18 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 				} else if ce.NeedsLoad {
 					// Backpressure path: entry data was not kept in the apply queue
 					// to bound memory. Load from WAL on demand.
+					// Yield briefly if we've loaded too much data from WAL in this batch
+					// to allow block cache expiry timers to reclaim memory.
+					if walBytesLoaded >= maxWALLoadBatchSize {
+						time.Sleep(time.Millisecond)
+						walBytesLoaded = 0
+					}
 					if entries, err := n.LoadCommittedEntry(ce.Index); err == nil {
 						ce.Entries = entries
 						ce.NeedsLoad = false
+						for _, e := range entries {
+							walBytesLoaded += uint64(len(e.Data))
+						}
 					} else {
 						s.Warnf("Failed to load committed entry %d from WAL: %v", ce.Index, err)
 						ne, nb = n.Applied(ce.Index)
@@ -5682,6 +5702,7 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 			return
 		case <-aq.ch:
 			ces := aq.pop()
+			var walBytesLoaded uint64
 			for _, ce := range ces {
 				// No special processing needed for when we are caught up on restart.
 				if ce == nil {
@@ -5695,9 +5716,18 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 					continue
 				}
 				if ce.NeedsLoad {
+					// Yield briefly if we've loaded too much data from WAL in this batch
+					// to allow block cache expiry timers to reclaim memory.
+					if walBytesLoaded >= maxWALLoadBatchSize {
+						time.Sleep(time.Millisecond)
+						walBytesLoaded = 0
+					}
 					if entries, err := n.LoadCommittedEntry(ce.Index); err == nil {
 						ce.Entries = entries
 						ce.NeedsLoad = false
+						for _, e := range entries {
+							walBytesLoaded += uint64(len(e.Data))
+						}
 					} else {
 						s.Warnf("Failed to load committed consumer entry %d from WAL: %v", ce.Index, err)
 						n.Applied(ce.Index)
