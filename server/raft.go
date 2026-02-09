@@ -207,8 +207,9 @@ type raft struct {
 	sq    *sendq        // Send queue for outbound RPC messages
 	aesub *subscription // Subscription for handleAppendEntry callbacks
 
-	wtv []byte // Term and vote to be written
-	wps []byte // Peer state to be written
+	wtv    []byte // Term and vote to be written
+	wps    []byte // Peer state to be written
+	encbuf []byte // Reusable buffer for encoding append entries
 
 	catchup  *catchupState               // For when we need to catch up as a follower.
 	progress map[string]*ipQueue[uint64] // For leader or server catching up a follower.
@@ -4203,11 +4204,14 @@ func (n *raft) sendAppendEntryLocked(entries []*Entry, checkLeader bool) error {
 	ae := n.buildAppendEntry(entries)
 
 	var err error
-	var scratch [1024]byte
-	ae.buf, err = ae.encode(scratch[:])
+	ae.buf, err = ae.encode(n.encbuf)
 	if err != nil {
 		return err
 	}
+	// Save the (potentially grown) buffer for reuse on the next call.
+	// This eliminates per-call heap allocations from encode once the
+	// buffer has grown to the typical entry size.
+	n.encbuf = ae.buf
 
 	// If we have entries store this in our wal.
 	shouldStore := ae.shouldStore()
@@ -4221,6 +4225,12 @@ func (n *raft) sendAppendEntryLocked(entries []*Entry, checkLeader bool) error {
 	n.sendRPC(n.asubj, n.areply, ae.buf)
 	if !shouldStore {
 		ae.returnToPool()
+	} else {
+		// Both storeToWAL and sendRPC have copied ae.buf, and the PAE
+		// cache only uses ae.entries (not ae.buf). Nil the reference so
+		// the encode buffer isn't pinned in the PAE cache until the
+		// entry is applied. n.encbuf still holds the buffer for reuse.
+		ae.buf = nil
 	}
 	if n.csz == 1 {
 		n.tryCommit(n.pindex)
