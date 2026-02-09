@@ -4688,3 +4688,218 @@ func TestNRGMustNotResetVoteOnStepDownOrLeaderTransfer(t *testing.T) {
 	require_Equal(t, n.term, 1)
 	require_Equal(t, n.vote, nats0)
 }
+
+func TestNRGApplyQueueBackpressure(t *testing.T) {
+	n, cleanup := initSingleMemRaftNode(t)
+	defer cleanup()
+
+	nats0 := "S1Nunr6R" // "nats-0"
+
+	n.Lock()
+	n.addPeer(nats0)
+	n.Unlock()
+
+	// Each entry is 1MB of random (incompressible) data.
+	const entrySize = 1024 * 1024
+
+	// Store enough entries to exceed maxApplyQueueSize (64MB).
+	numEntries := int(maxApplyQueueSize/uint64(entrySize)) + 10
+
+	// Store entries directly into the WAL and pae cache.
+	n.Lock()
+	for i := 0; i < numEntries; i++ {
+		payload := make([]byte, entrySize)
+		rand.Read(payload)
+		entries := []*Entry{newEntry(EntryNormal, payload)}
+		ae := encode(t, &appendEntry{
+			leader: nats0, term: 1, commit: 0,
+			pterm: 1, pindex: uint64(i),
+			entries: entries,
+		})
+		require_NoError(t, n.storeToWAL(ae))
+		n.cachePendingEntry(ae)
+	}
+
+	// Call applyCommit directly for each entry.
+	// Nobody is consuming the apply queue, so it will accumulate and
+	// eventually trigger the backpressure path.
+	for i := 1; i <= numEntries; i++ {
+		require_NoError(t, n.applyCommit(uint64(i)))
+	}
+	n.Unlock()
+
+	// Pop from the apply queue to verify we get NeedsLoad entries.
+	var totalEntries, needsLoadCount, normalCount int
+	for {
+		ces := n.apply.pop()
+		if len(ces) == 0 {
+			break
+		}
+		for _, ce := range ces {
+			if ce == nil {
+				continue
+			}
+			totalEntries++
+			if ce.NeedsLoad {
+				needsLoadCount++
+
+				// Verify that LoadCommittedEntry can load the data.
+				entries, err := n.LoadCommittedEntry(ce.Index)
+				require_NoError(t, err)
+				require_True(t, len(entries) > 0)
+				for _, e := range entries {
+					e.Data = nil
+					entryPool.Put(e)
+				}
+			} else {
+				normalCount++
+			}
+			ce.ReturnToPool()
+		}
+		n.apply.recycle(&ces)
+	}
+
+	t.Logf("Total entries: %d, NeedsLoad: %d, Normal: %d", totalEntries, needsLoadCount, normalCount)
+
+	// We should have entries from both paths.
+	require_True(t, totalEntries > 0)
+	require_True(t, needsLoadCount > 0)
+	require_True(t, normalCount > 0)
+}
+
+func TestNRGApplyQueueBackpressureEndToEnd(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	// Do many state transitions to verify correctness under load.
+	var expectedTotal int64
+	for i := 0; i < 500; i++ {
+		delta := int64(i + 1)
+		expectedTotal += delta
+		rg.leader().(*stateAdder).proposeDelta(delta)
+	}
+
+	// Wait for all members to have the correct state.
+	// This verifies that both normal and NeedsLoad entries
+	// (if backpressure was triggered) were processed correctly.
+	rg.waitOnTotal(t, expectedTotal)
+}
+
+func TestNRGApplyQueueBackpressureMemorySavings(t *testing.T) {
+	n, cleanup := initSingleMemRaftNode(t)
+	defer cleanup()
+
+	nats0 := "S1Nunr6R" // "nats-0"
+
+	n.Lock()
+	n.addPeer(nats0)
+	n.Unlock()
+
+	// Each entry is 1MB of random (incompressible) data.
+	const entrySize = 1024 * 1024
+
+	// Commit 2x the queue threshold worth of data (128MB total).
+	// Without backpressure, the queue would hold all 128MB.
+	// With backpressure, it should cap at ~64MB.
+	numEntries := int(2 * maxApplyQueueSize / entrySize)
+
+	n.Lock()
+	for i := 0; i < numEntries; i++ {
+		payload := make([]byte, entrySize)
+		rand.Read(payload)
+		entries := []*Entry{newEntry(EntryNormal, payload)}
+		ae := encode(t, &appendEntry{
+			leader: nats0, term: 1, commit: 0,
+			pterm: 1, pindex: uint64(i),
+			entries: entries,
+		})
+		require_NoError(t, n.storeToWAL(ae))
+		n.cachePendingEntry(ae)
+	}
+	for i := 1; i <= numEntries; i++ {
+		require_NoError(t, n.applyCommit(uint64(i)))
+	}
+	n.Unlock()
+
+	// Measure what's actually in the queue.
+	queueTrackedSize := n.apply.size()
+
+	// Walk the queue and measure real data held in memory vs deferred to WAL.
+	var memoryHeldBytes, deferredBytes uint64
+	var normalCount, needsLoadCount int
+	for {
+		ces := n.apply.pop()
+		if len(ces) == 0 {
+			break
+		}
+		for _, ce := range ces {
+			if ce == nil {
+				continue
+			}
+			if ce.NeedsLoad {
+				needsLoadCount++
+				deferredBytes += entrySize
+			} else {
+				normalCount++
+				for _, e := range ce.Entries {
+					memoryHeldBytes += uint64(len(e.Data))
+				}
+			}
+			ce.ReturnToPool()
+		}
+		n.apply.recycle(&ces)
+	}
+
+	totalDataCommitted := uint64(numEntries) * entrySize
+	savedBytes := deferredBytes
+	savingsPct := float64(savedBytes) / float64(totalDataCommitted) * 100
+
+	t.Logf("=== Apply Queue Backpressure Memory Impact ===")
+	t.Logf("Total data committed:      %d MB (%d entries x %d MB)",
+		totalDataCommitted/(1024*1024), numEntries, entrySize/(1024*1024))
+	t.Logf("Queue tracked size:        %d MB (capped at %d MB threshold)",
+		queueTrackedSize/(1024*1024), maxApplyQueueSize/(1024*1024))
+	t.Logf("Data held in memory:       %d MB (%d normal entries)",
+		memoryHeldBytes/(1024*1024), normalCount)
+	t.Logf("Data deferred to WAL:      %d MB (%d NeedsLoad entries)",
+		deferredBytes/(1024*1024), needsLoadCount)
+	t.Logf("Memory saved:              %d MB (%.0f%% of committed data)",
+		savedBytes/(1024*1024), savingsPct)
+	t.Logf("Without backpressure:      queue would hold all %d MB", totalDataCommitted/(1024*1024))
+
+	// The queue tracked size must be bounded at the threshold.
+	require_True(t, queueTrackedSize <= maxApplyQueueSize)
+
+	// All entries accounted for.
+	require_Equal(t, normalCount+needsLoadCount, numEntries)
+
+	// We must have a significant number of NeedsLoad entries.
+	require_True(t, needsLoadCount > numEntries/4)
+
+	// The memory savings should be substantial.
+	require_True(t, savedBytes > totalDataCommitted/4)
+}
+
+func TestNRGCommittedEntrySizeCalc(t *testing.T) {
+	// Normal entry with data.
+	ce := newCommittedEntry(1, []*Entry{
+		{Type: EntryNormal, Data: make([]byte, 100)},
+		{Type: EntryNormal, Data: make([]byte, 200)},
+	})
+	require_Equal(t, committedEntrySizeCalc(ce), 300)
+	ce.ReturnToPool()
+
+	// NeedsLoad entry should report zero size.
+	ce = newCommittedEntry(2, nil)
+	ce.NeedsLoad = true
+	require_Equal(t, committedEntrySizeCalc(ce), 0)
+	ce.ReturnToPool()
+
+	// Empty entry should report zero size.
+	ce = newCommittedEntry(3, nil)
+	require_Equal(t, committedEntrySizeCalc(ce), 0)
+	ce.ReturnToPool()
+}

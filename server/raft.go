@@ -74,6 +74,7 @@ type RaftNode interface {
 	AdjustBootClusterSize(csz int) error
 	ClusterSize() int
 	ApplyQ() *ipQueue[*CommittedEntry]
+	LoadCommittedEntry(index uint64) ([]*Entry, error)
 	PauseApply() error
 	ResumeApply()
 	DrainAndReplaySnapshot() bool
@@ -432,7 +433,9 @@ func (s *Server) initRaftNode(accName string, cfg *RaftConfig, labels pprofLabel
 		prop:     newIPQueue[*proposedEntry](s, qpfx+"entry"),
 		entry:    newIPQueue[*appendEntry](s, qpfx+"appendEntry"),
 		resp:     newIPQueue[*appendEntryResponse](s, qpfx+"appendEntryResponse"),
-		apply:    newIPQueue[*CommittedEntry](s, qpfx+"committedEntry"),
+		apply: newIPQueue[*CommittedEntry](s, qpfx+"committedEntry",
+			ipqSizeCalculation[*CommittedEntry](committedEntrySizeCalc),
+		),
 		accName:  accName,
 		leadc:    make(chan bool, 32),
 		observer: cfg.Observer,
@@ -2286,6 +2289,10 @@ var cePool = sync.Pool{
 type CommittedEntry struct {
 	Index   uint64
 	Entries []*Entry
+	// NeedsLoad indicates that this entry's data was not loaded into the apply
+	// queue to bound memory usage. The consumer should call LoadCommittedEntry
+	// to load the entry data from the WAL before processing.
+	NeedsLoad bool
 }
 
 // Create a new CommittedEntry. When the returned entry is no longer needed, it
@@ -2308,8 +2315,21 @@ func (ce *CommittedEntry) ReturnToPool() {
 			entryPool.Put(e)
 		}
 	}
-	ce.Index, ce.Entries = 0, nil
+	ce.Index, ce.Entries, ce.NeedsLoad = 0, nil, false
 	cePool.Put(ce)
+}
+
+// committedEntrySizeCalc returns the approximate in-memory size of a CommittedEntry.
+// Used by the apply queue to track total queued data size.
+func committedEntrySizeCalc(ce *CommittedEntry) uint64 {
+	if ce == nil || ce.NeedsLoad {
+		return 0
+	}
+	var sz uint64
+	for _, e := range ce.Entries {
+		sz += uint64(len(e.Data))
+	}
+	return sz
 }
 
 // Pool for Entry re-use.
@@ -3164,6 +3184,39 @@ func (n *raft) loadEntry(index uint64) (*appendEntry, error) {
 	return decodeAppendEntry(sm.msg, nil, _EMPTY_)
 }
 
+// LoadCommittedEntry loads committed entry data from the WAL for an index that
+// was previously committed but stored as an index-only marker in the apply queue
+// (NeedsLoad=true) due to backpressure. Returns the entries that should be
+// passed to the upper layer for processing. Data is copied to break buffer
+// references, consistent with the normal applyCommit path.
+func (n *raft) LoadCommittedEntry(index uint64) ([]*Entry, error) {
+	if n.State() == Closed {
+		return nil, errNodeClosed
+	}
+	ae, err := n.loadEntry(index)
+	if err != nil {
+		return nil, err
+	}
+	var committed []*Entry
+	for _, e := range ae.entries {
+		switch e.Type {
+		case EntryNormal:
+			e.Data = copyBytes(e.Data)
+			committed = append(committed, e)
+		case EntryOldSnapshot:
+			data := copyBytes(e.Data)
+			committed = append(committed, newEntry(EntrySnapshot, data))
+		case EntrySnapshot:
+			e.Data = copyBytes(e.Data)
+			committed = append(committed, e)
+		case EntryAddPeer, EntryRemovePeer:
+			committed = append(committed, e)
+		}
+	}
+	ae.returnToPool()
+	return committed, nil
+}
+
 // applyCommit will update our commit index and apply the entry to the apply queue.
 // lock should be held.
 func (n *raft) applyCommit(index uint64) error {
@@ -3225,7 +3278,22 @@ func (n *raft) applyCommit(index uint64) error {
 		// which will happen if we've processed updates inline (like peer
 		// states). In which case the upper layer will just call down with
 		// Applied() with no further action.
-		n.apply.push(newCommittedEntry(index, committed))
+		//
+		// If the apply queue has grown beyond the size threshold, avoid
+		// keeping entry data in the queue to bound memory. Instead, push
+		// an index-only marker and let the consumer load from the WAL
+		// on demand when it is ready to process.
+		if n.apply.size() >= maxApplyQueueSize && len(committed) > 0 {
+			for _, e := range committed {
+				e.Data = nil
+				entryPool.Put(e)
+			}
+			ce := newCommittedEntry(index, nil)
+			ce.NeedsLoad = true
+			n.apply.push(ce)
+		} else {
+			n.apply.push(newCommittedEntry(index, committed))
+		}
 		// Place back in the pool.
 		ae.returnToPool()
 	}()
@@ -4217,6 +4285,12 @@ const (
 	paeDropThreshold = 20_000
 	paeWarnThreshold = 10_000
 	paeWarnModulo    = 5_000
+
+	// Maximum total data size (in bytes) of entries in the apply queue before
+	// switching to backpressure mode. When the queue exceeds this size, new
+	// committed entries will be stored as index-only markers (NeedsLoad=true)
+	// and the consumer will load the actual data from the WAL on demand.
+	maxApplyQueueSize = 64 * 1024 * 1024 // 64MB
 )
 
 func (n *raft) sendAppendEntry(entries []*Entry) {
