@@ -3563,12 +3563,12 @@ var jsGetNextPool = sync.Pool{
 }
 
 // Helper for the next message requests.
-func nextReqFromMsg(msg []byte) (time.Time, int, int, bool, time.Duration, time.Time, *PriorityGroup, error) {
+func nextReqFromMsg(msg []byte) (int64, int, int, bool, time.Duration, time.Time, *PriorityGroup, error) {
 	req := bytes.TrimSpace(msg)
 
 	switch {
 	case len(req) == 0:
-		return time.Time{}, 1, 0, false, 0, time.Time{}, nil, nil
+		return 0, 1, 0, false, 0, time.Time{}, nil, nil
 
 	case req[0] == '{':
 		cr := jsGetNextPool.Get().(*JSApiConsumerGetNextRequest)
@@ -3577,27 +3577,27 @@ func nextReqFromMsg(msg []byte) (time.Time, int, int, bool, time.Duration, time.
 			jsGetNextPool.Put(cr)
 		}()
 		if err := json.Unmarshal(req, &cr); err != nil {
-			return time.Time{}, -1, 0, false, 0, time.Time{}, nil, err
+			return 0, -1, 0, false, 0, time.Time{}, nil, err
 		}
 		var hbt time.Time
 		if cr.Heartbeat > 0 {
 			if cr.Heartbeat*2 > cr.Expires {
-				return time.Time{}, 1, 0, false, 0, time.Time{}, nil, errors.New("heartbeat value too large")
+				return 0, 1, 0, false, 0, time.Time{}, nil, errors.New("heartbeat value too large")
 			}
 			hbt = time.Now().Add(cr.Heartbeat)
 		}
 		priorityGroup := cr.PriorityGroup
 		if cr.Expires == time.Duration(0) {
-			return time.Time{}, cr.Batch, cr.MaxBytes, cr.NoWait, cr.Heartbeat, hbt, &priorityGroup, nil
+			return 0, cr.Batch, cr.MaxBytes, cr.NoWait, cr.Heartbeat, hbt, &priorityGroup, nil
 		}
-		return time.Now().Add(cr.Expires), cr.Batch, cr.MaxBytes, cr.NoWait, cr.Heartbeat, hbt, &priorityGroup, nil
+		return time.Now().Add(cr.Expires).UnixNano(), cr.Batch, cr.MaxBytes, cr.NoWait, cr.Heartbeat, hbt, &priorityGroup, nil
 	default:
 		if n, err := strconv.Atoi(string(req)); err == nil {
-			return time.Time{}, n, 0, false, 0, time.Time{}, nil, nil
+			return 0, n, 0, false, 0, time.Time{}, nil, nil
 		}
 	}
 
-	return time.Time{}, 1, 0, false, 0, time.Time{}, nil, nil
+	return 0, 1, 0, false, 0, time.Time{}, nil, nil
 }
 
 // Represents a request that is on the internal waiting queue
@@ -3609,7 +3609,7 @@ type waitingRequest struct {
 	n             int // For batching
 	d             int // num delivered
 	b             int // For max bytes tracking
-	expires       time.Time
+	expires       int64 // Unix nanos, 0 means no expiration. Using int64 avoids time.Time.IsZero() overhead in hot path.
 	received      time.Time
 	hb            time.Duration
 	hbt           time.Time
@@ -3986,7 +3986,7 @@ func (o *consumer) nextWaiting(sz int) *waitingRequest {
 			}
 		}
 
-		if wr.expires.IsZero() || time.Now().Before(wr.expires) {
+		if wr.expires == 0 || time.Now().UnixNano() < wr.expires {
 			if needNewPin {
 				if wr.priorityGroup.Id == _EMPTY_ {
 					o.currentPinId = nuid.Next()
@@ -4195,7 +4195,7 @@ func (o *consumer) processNextMsgRequest(reply string, msg []byte) {
 		return
 	}
 
-	if !expires.IsZero() && o.cfg.MaxRequestExpires > 0 && expires.After(time.Now().Add(o.cfg.MaxRequestExpires)) {
+	if expires != 0 && o.cfg.MaxRequestExpires > 0 && expires > time.Now().Add(o.cfg.MaxRequestExpires).UnixNano() {
 		sendErr(409, fmt.Sprintf("Exceeded MaxRequestExpires of %v", o.cfg.MaxRequestExpires))
 		return
 	}
@@ -4261,7 +4261,7 @@ func (o *consumer) processNextMsgRequest(reply string, msg []byte) {
 		msgsPending := o.numPending() + uint64(len(o.rdq))
 		// If no pending at all, decide what to do with request.
 		// If no expires was set then fail.
-		if msgsPending == 0 && expires.IsZero() {
+		if msgsPending == 0 && expires == 0 {
 			o.waiting.last = time.Now()
 			sendErr(404, "No Messages")
 			return
@@ -4547,6 +4547,7 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 
 	var expired, brp int
 	s, now := o.srv, time.Now()
+	nowNano := now.UnixNano() // Cache for fast int64 comparisons in the loop
 
 	wq := o.waiting
 	remove := func(pre, wr *waitingRequest) *waitingRequest {
@@ -4576,9 +4577,9 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 
 	var pre *waitingRequest
 	for wr := wq.head; wr != nil; {
-		// Check expiration.
-		expires := !wr.expires.IsZero() && now.After(wr.expires)
-		if (eos && wr.noWait) || expires {
+		// Check expiration using int64 comparison (avoids time.Time.IsZero overhead).
+		isExpired := wr.expires != 0 && nowNano > wr.expires
+		if (eos && wr.noWait) || isExpired {
 			rdWait := o.replicateDeliveries()
 			if rdWait {
 				// Check if we need to send the timeout after pending replicated deliveries, or can do so immediately.
@@ -4594,12 +4595,12 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 				}
 			}
 			// Normally it's a timeout.
-			if expires {
+			if isExpired {
 				hdr := fmt.Appendf(nil, "NATS/1.0 408 Request Timeout\r\n%s: %d\r\n%s: %d\r\n\r\n", JSPullRequestPendingMsgs, wr.n, JSPullRequestPendingBytes, wr.b)
 				o.outq.send(newJSPubMsg(wr.reply, _EMPTY_, _EMPTY_, hdr, nil, nil, 0))
 				wr = remove(pre, wr)
 				continue
-			} else if wr.expires.IsZero() || wr.d > 0 {
+			} else if wr.expires == 0 || wr.d > 0 {
 				// But if we're NoWait without expiry, we've reached the end of the stream, and we've not delivered any messages.
 				// Return no messages instead, which is the same as if we'd rejected the pull request initially.
 				hdr := fmt.Appendf(nil, "NATS/1.0 404 No Messages\r\n\r\n")
@@ -4654,8 +4655,11 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 				fexp = wr.hbt
 			}
 		}
-		if !wr.expires.IsZero() && (fexp.IsZero() || wr.expires.Before(fexp)) {
-			fexp = wr.expires
+		if wr.expires != 0 {
+			wrExpTime := time.Unix(0, wr.expires)
+			if fexp.IsZero() || wrExpTime.Before(fexp) {
+				fexp = wrExpTime
+			}
 		}
 		// Update pre and wr here.
 		pre = wr
