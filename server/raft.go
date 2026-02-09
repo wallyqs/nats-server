@@ -4310,10 +4310,19 @@ func (n *raft) sendAppendEntryLocked(entries []*Entry, checkLeader bool) error {
 	}
 	ae := n.buildAppendEntry(entries)
 
+	// Get a pooled buffer for encoding to reduce allocations.
+	// The buffer will be recycled after sendRPC and storeToWAL have copied the data.
+	// Calculate size inline: base header + max lterm uvarint + entries.
+	bufSize := appendEntryBaseLen + 10
+	for _, e := range ae.entries {
+		bufSize += 1 + 4 + len(e.Data)
+	}
+	poolBuf := getMsgBlockBuf(bufSize)
+
 	var err error
-	var scratch [1024]byte
-	ae.buf, err = ae.encode(scratch[:])
+	ae.buf, err = ae.encode(poolBuf)
 	if err != nil {
+		recycleMsgBlockBuf(poolBuf)
 		return err
 	}
 
@@ -4321,19 +4330,21 @@ func (n *raft) sendAppendEntryLocked(entries []*Entry, checkLeader bool) error {
 	shouldStore := ae.shouldStore()
 	if shouldStore {
 		if err := n.storeToWAL(ae); err != nil {
+			recycleMsgBlockBuf(ae.buf)
+			ae.buf = nil
 			return err
 		}
 		n.active = time.Now()
 		n.cachePendingEntry(ae)
 	}
 	n.sendRPC(n.asubj, n.areply, ae.buf)
+
+	// Recycle the encode buffer - both storeToWAL and sendRPC have copied the data.
+	recycleMsgBlockBuf(ae.buf)
+	ae.buf = nil
+
 	if !shouldStore {
 		ae.returnToPool()
-	} else {
-		// The buf is no longer needed after being stored to WAL and sent
-		// to followers. Nil it out to allow GC to reclaim the memory,
-		// otherwise pae entries retain these large serialized buffers.
-		ae.buf = nil
 	}
 	if n.csz == 1 {
 		n.tryCommit(n.pindex)
