@@ -158,6 +158,8 @@ type JSAPIOpStats struct {
 	P50   int64  `json:"p50,omitempty"`
 	P90   int64  `json:"p90,omitempty"`
 	P99   int64  `json:"p99,omitempty"`
+	P999  int64  `json:"p999,omitempty"`
+	Max   int64  `json:"max,omitempty"`
 }
 
 // JSAPITrafficStats is a map of API operation name to its statistics
@@ -206,6 +208,7 @@ type jsAPILatencyTracker struct {
 	samples [jsAPILatencySampleSize]int64 // Fixed-size array, atomically accessed
 	pos     int64                         // Current write position (atomic)
 	count   int64                         // Total samples written (atomic)
+	max     int64                         // Maximum latency observed (atomic)
 }
 
 const jsAPILatencySampleSize = 1000 // Number of samples to keep per API type
@@ -2743,16 +2746,20 @@ func (t *jsAPILatencyTracker) record(latencyMicros int64) {
 	slot := idx % jsAPILatencySampleSize
 	atomic.StoreInt64(&t.samples[slot], latencyMicros)
 	atomic.AddInt64(&t.count, 1)
+	// Update max - may occasionally miss an update under contention but acceptable for stats.
+	if latencyMicros > atomic.LoadInt64(&t.max) {
+		atomic.StoreInt64(&t.max, latencyMicros)
+	}
 }
 
-// percentiles calculates and returns p50, p90, p99 from the circular buffer.
-// Returns (0, 0, 0) if no samples exist.
+// percentiles calculates and returns p50, p90, p99, p999, and max from the circular buffer.
+// Returns zeros if no samples exist.
 // Note: This takes a snapshot of samples which may have slight inconsistency
 // during concurrent writes, but this is acceptable for approximate percentiles.
-func (t *jsAPILatencyTracker) percentiles() (p50, p90, p99 int64) {
+func (t *jsAPILatencyTracker) percentiles() (p50, p90, p99, p999, max int64) {
 	count := atomic.LoadInt64(&t.count)
 	if count == 0 {
-		return 0, 0, 0
+		return 0, 0, 0, 0, 0
 	}
 
 	// Determine how many samples we have (up to buffer size).
@@ -2768,7 +2775,13 @@ func (t *jsAPILatencyTracker) percentiles() (p50, p90, p99 int64) {
 	}
 	slices.Sort(sorted)
 
-	return sorted[n*50/100], sorted[n*90/100], sorted[n*99/100]
+	// Calculate p999 index, ensuring it doesn't exceed array bounds.
+	p999idx := n * 999 / 1000
+	if p999idx >= n {
+		p999idx = n - 1
+	}
+
+	return sorted[n*50/100], sorted[n*90/100], sorted[n*99/100], sorted[p999idx], atomic.LoadInt64(&t.max)
 }
 
 // trackAck increments the dedicated ACK traffic counter.
@@ -2833,7 +2846,7 @@ func (js *jetStream) apiStats() JSAPITrafficStats {
 
 		// Get latency percentiles if tracker exists
 		if tracker := js.apiLatency[apiType]; tracker != nil {
-			opStats.P50, opStats.P90, opStats.P99 = tracker.percentiles()
+			opStats.P50, opStats.P90, opStats.P99, opStats.P999, opStats.Max = tracker.percentiles()
 		}
 
 		stats[name] = opStats
@@ -3224,12 +3237,13 @@ func trackICBDuration(dur time.Duration) {
 
 // InternalCallbackStats holds internal subscription callback statistics.
 type InternalCallbackStats struct {
-	Total uint64  `json:"total"`         // Total callback invocations
-	P50   float64 `json:"p50,omitempty"` // 50th percentile duration (ms)
-	P75   float64 `json:"p75,omitempty"` // 75th percentile duration (ms)
-	P95   float64 `json:"p95,omitempty"` // 95th percentile duration (ms)
-	P99   float64 `json:"p99,omitempty"` // 99th percentile duration (ms)
-	Max   float64 `json:"max,omitempty"` // Maximum duration (ms)
+	Total uint64  `json:"total"`          // Total callback invocations
+	P50   float64 `json:"p50,omitempty"`  // 50th percentile duration (ms)
+	P75   float64 `json:"p75,omitempty"`  // 75th percentile duration (ms)
+	P95   float64 `json:"p95,omitempty"`  // 95th percentile duration (ms)
+	P99   float64 `json:"p99,omitempty"`  // 99th percentile duration (ms)
+	P999  float64 `json:"p999,omitempty"` // 99.9th percentile duration (ms)
+	Max   float64 `json:"max,omitempty"`  // Maximum duration (ms)
 }
 
 // icbStats returns current internal callback statistics.
@@ -3256,6 +3270,7 @@ func icbStats() *InternalCallbackStats {
 	stats.P75 = icbPercentile(counts[:], total, 0.75)
 	stats.P95 = icbPercentile(counts[:], total, 0.95)
 	stats.P99 = icbPercentile(counts[:], total, 0.99)
+	stats.P999 = icbPercentile(counts[:], total, 0.999)
 
 	return stats
 }

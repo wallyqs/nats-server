@@ -12020,12 +12020,13 @@ func diosRelease() {
 
 // DiskIOStats holds disk I/O semaphore statistics.
 type DiskIOStats struct {
-	Total uint64  `json:"total"`         // Total acquisitions
-	P50   float64 `json:"p50,omitempty"` // 50th percentile wait time (µs)
-	P75   float64 `json:"p75,omitempty"` // 75th percentile wait time (µs)
-	P95   float64 `json:"p95,omitempty"` // 95th percentile wait time (µs)
-	P99   float64 `json:"p99,omitempty"` // 99th percentile wait time (µs)
-	Max   float64 `json:"max,omitempty"` // Maximum wait time (µs)
+	Total uint64  `json:"total"`          // Total acquisitions
+	P50   float64 `json:"p50,omitempty"`  // 50th percentile wait time (µs)
+	P75   float64 `json:"p75,omitempty"`  // 75th percentile wait time (µs)
+	P95   float64 `json:"p95,omitempty"`  // 95th percentile wait time (µs)
+	P99   float64 `json:"p99,omitempty"`  // 99th percentile wait time (µs)
+	P999  float64 `json:"p999,omitempty"` // 99.9th percentile wait time (µs)
+	Max   float64 `json:"max,omitempty"`  // Maximum wait time (µs)
 }
 
 // diosStats returns current disk I/O semaphore statistics.
@@ -12052,6 +12053,7 @@ func diosStats() *DiskIOStats {
 	stats.P75 = diosPercentile(counts[:], total, 0.75)
 	stats.P95 = diosPercentile(counts[:], total, 0.95)
 	stats.P99 = diosPercentile(counts[:], total, 0.99)
+	stats.P999 = diosPercentile(counts[:], total, 0.999)
 
 	return stats
 }
