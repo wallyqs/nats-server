@@ -53,6 +53,9 @@ const (
 	slCacheSweep = 256
 	// plistMin is our lower bounds to create a fast plist for Match.
 	plistMin = 256
+	// removeBatchChunk is the max subscriptions to remove per lock hold in RemoveBatch.
+	// This allows Match() operations to proceed between chunks during large batch removals.
+	removeBatchChunk = 100
 )
 
 // SublistResult is a result structure better optimized for queue subs.
@@ -64,6 +67,7 @@ type SublistResult struct {
 // A Sublist stores and efficiently retrieves subscriptions.
 type Sublist struct {
 	sync.RWMutex
+	cacheMu   sync.Mutex // Separate lock for cache operations to reduce contention
 	genid     uint64
 	matches   uint64
 	cacheHits uint64
@@ -133,9 +137,9 @@ func NewSublistNoCache() *Sublist {
 
 // CacheEnabled returns whether or not caching is enabled for this sublist.
 func (s *Sublist) CacheEnabled() bool {
-	s.RLock()
+	s.cacheMu.Lock()
 	enabled := s.cache != nil
-	s.RUnlock()
+	s.cacheMu.Unlock()
 	return enabled
 }
 
@@ -473,9 +477,11 @@ func (r *SublistResult) addSubToResult(sub *subscription) *SublistResult {
 }
 
 // addToCache will add the new entry to the existing cache
-// entries if needed. Assumes write lock is held.
-// Assumes write lock is held.
+// entries if needed. Assumes main write lock is held.
+// Also acquires cacheMu to coordinate with match() which uses cacheMu for cache access.
 func (s *Sublist) addToCache(subject string, sub *subscription) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
 	if s.cache == nil {
 		return
 	}
@@ -494,8 +500,11 @@ func (s *Sublist) addToCache(subject string, sub *subscription) {
 }
 
 // removeFromCache will remove the sub from any active cache entries.
-// Assumes write lock is held.
+// Assumes main write lock is held.
+// Also acquires cacheMu to coordinate with match() which uses cacheMu for cache access.
 func (s *Sublist) removeFromCache(subject string) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
 	if s.cache == nil {
 		return
 	}
@@ -547,15 +556,11 @@ func (s *Sublist) matchNoLock(subject string) *SublistResult {
 func (s *Sublist) match(subject string, doLock bool, doCopyOnCache bool) *SublistResult {
 	atomic.AddUint64(&s.matches, 1)
 
-	// Check cache first.
-	if doLock {
-		s.RLock()
-	}
+	// Check cache first. Always use cacheMu for cache access since it's independent of the main RWMutex.
+	s.cacheMu.Lock()
 	cacheEnabled := s.cache != nil
 	r, ok := s.cache[subject]
-	if doLock {
-		s.RUnlock()
-	}
+	s.cacheMu.Unlock()
 	if ok {
 		atomic.AddUint64(&s.cacheHits, 1)
 		return r
@@ -581,36 +586,38 @@ func (s *Sublist) match(subject string, doLock bool, doCopyOnCache bool) *Sublis
 	// FIXME(dlc) - Make shared pool between sublist and client readLoop?
 	result := &SublistResult{}
 
-	// Get result from the main structure and place into the shared cache.
-	// Hold the read lock to avoid race between match and store.
-	var n int
-
+	// Traverse the trie with READ lock only. The trie structure is not modified
+	// during match, only during Insert/Remove which hold the write lock.
 	if doLock {
-		if cacheEnabled {
-			s.Lock()
-		} else {
-			s.RLock()
-		}
+		s.RLock()
+	}
+	matchLevel(s.root, tokens, result)
+	if doLock {
+		s.RUnlock()
 	}
 
-	matchLevel(s.root, tokens, result)
 	// Check for empty result.
 	if len(result.psubs) == 0 && len(result.qsubs) == 0 {
 		result = emptyResult
 	}
+
+	// Update cache. Always use cacheMu since it's independent of the main RWMutex.
+	var n int
 	if cacheEnabled {
 		if doCopyOnCache {
 			subject = copyString(subject)
 		}
-		s.cache[subject] = result
-		n = len(s.cache)
-	}
-	if doLock {
-		if cacheEnabled {
-			s.Unlock()
-		} else {
-			s.RUnlock()
+		s.cacheMu.Lock()
+		// Re-check cache in case another goroutine populated it while we traversed.
+		if s.cache != nil {
+			if existing, ok := s.cache[subject]; ok {
+				result = existing
+			} else {
+				s.cache[subject] = result
+			}
+			n = len(s.cache)
 		}
+		s.cacheMu.Unlock()
 	}
 
 	// Reduce the cache count if we have exceeded our set maximum.
@@ -622,10 +629,8 @@ func (s *Sublist) match(subject string, doLock bool, doCopyOnCache bool) *Sublis
 }
 
 func (s *Sublist) hasInterest(subject string, doLock bool, np, nq *int) bool {
-	// Check cache first.
-	if doLock {
-		s.RLock()
-	}
+	// Check cache first. Always use cacheMu for cache access since it's independent of the main RWMutex.
+	s.cacheMu.Lock()
 	var matched bool
 	if s.cache != nil {
 		if r, ok := s.cache[subject]; ok {
@@ -638,9 +643,7 @@ func (s *Sublist) hasInterest(subject string, doLock bool, np, nq *int) bool {
 			matched = len(r.psubs)+len(r.qsubs) > 0
 		}
 	}
-	if doLock {
-		s.RUnlock()
-	}
+	s.cacheMu.Unlock()
 	if matched {
 		atomic.AddUint64(&s.cacheHits, 1)
 		return true
@@ -663,6 +666,7 @@ func (s *Sublist) hasInterest(subject string, doLock bool, np, nq *int) bool {
 	}
 	tokens = append(tokens, subject[start:])
 
+	// Traverse trie with read lock.
 	if doLock {
 		s.RLock()
 		defer s.RUnlock()
@@ -675,14 +679,15 @@ func (s *Sublist) hasInterest(subject string, doLock bool, np, nq *int) bool {
 func (s *Sublist) reduceCacheCount() {
 	defer atomic.StoreInt32(&s.ccSweep, 0)
 	// If we are over the cache limit randomly drop until under the limit.
-	s.Lock()
+	// Use cacheMu instead of main lock to avoid blocking trie operations.
+	s.cacheMu.Lock()
 	for key := range s.cache {
 		delete(s.cache, key)
 		if len(s.cache) <= slCacheSweep {
 			break
 		}
 	}
-	s.Unlock()
+	s.cacheMu.Unlock()
 }
 
 // Helper function for auto-expanding remote qsubs.
@@ -922,30 +927,44 @@ func (s *Sublist) RemoveBatch(subs []*subscription) error {
 		return nil
 	}
 
-	s.Lock()
-	defer s.Unlock()
-
-	// TODO(dlc) - We could try to be smarter here for a client going away but the account
-	// has a large number of subscriptions compared to this client. Quick and dirty testing
-	// though said just disabling all the time best for now.
-
-	// Turn off our cache if enabled.
-	wasEnabled := s.cache != nil
-	s.cache = nil
-	// We will try to remove all subscriptions but will report the first that caused
-	// an error. In other words, we don't bail out at the first error which would
-	// possibly leave a bunch of subscriptions that could have been removed.
+	// Process removals in chunks to avoid holding the lock too long.
+	// This allows Match() operations to proceed between chunks during
+	// large batch removals (e.g., client disconnect with many subscriptions).
 	var err error
-	for _, sub := range subs {
-		if lerr := s.remove(sub, false, false); lerr != nil && err == nil {
-			err = lerr
+
+	for i := 0; i < len(subs); i += removeBatchChunk {
+		end := i + removeBatchChunk
+		if end > len(subs) {
+			end = len(subs)
 		}
+		chunk := subs[i:end]
+
+		s.Lock()
+
+		// Turn off cache for this chunk.
+		s.cacheMu.Lock()
+		wasEnabled := s.cache != nil
+		s.cache = nil
+		s.cacheMu.Unlock()
+
+		// Remove subscriptions in this chunk.
+		for _, sub := range chunk {
+			if lerr := s.remove(sub, false, false); lerr != nil && err == nil {
+				err = lerr
+			}
+		}
+
+		// Bump genid and re-enable cache.
+		atomic.AddUint64(&s.genid, 1)
+		s.cacheMu.Lock()
+		if wasEnabled {
+			s.cache = make(map[string]*SublistResult)
+		}
+		s.cacheMu.Unlock()
+
+		s.Unlock()
 	}
-	// Turn caching back on here.
-	atomic.AddUint64(&s.genid, 1)
-	if wasEnabled {
-		s.cache = make(map[string]*SublistResult)
-	}
+
 	return err
 }
 
@@ -1028,9 +1047,9 @@ func (s *Sublist) Count() uint32 {
 
 // CacheCount returns the number of result sets in the cache.
 func (s *Sublist) CacheCount() int {
-	s.RLock()
+	s.cacheMu.Lock()
 	cc := len(s.cache)
-	s.RUnlock()
+	s.cacheMu.Unlock()
 	return cc
 }
 
@@ -1077,12 +1096,15 @@ func (s *Sublist) Stats() *SublistStats {
 	st := &SublistStats{}
 
 	s.RLock()
-	cache := s.cache
-	cc := len(s.cache)
 	st.NumSubs = s.count
 	st.NumInserts = s.inserts
 	st.NumRemoves = s.removes
 	s.RUnlock()
+
+	s.cacheMu.Lock()
+	cache := s.cache
+	cc := len(s.cache)
+	s.cacheMu.Unlock()
 
 	st.NumCache = uint32(cc)
 	st.NumMatches = atomic.LoadUint64(&s.matches)
@@ -1095,7 +1117,7 @@ func (s *Sublist) Stats() *SublistStats {
 	// If this is called frequently, which it should not be, this could hurt performance.
 	if cache != nil {
 		tot, max, clen := 0, 0, 0
-		s.RLock()
+		s.cacheMu.Lock()
 		for _, r := range s.cache {
 			clen++
 			l := len(r.psubs) + len(r.qsubs)
@@ -1104,7 +1126,7 @@ func (s *Sublist) Stats() *SublistStats {
 				max = l
 			}
 		}
-		s.RUnlock()
+		s.cacheMu.Unlock()
 		st.totFanout = tot
 		st.cacheCnt = clen
 		st.MaxFanout = uint32(max)
