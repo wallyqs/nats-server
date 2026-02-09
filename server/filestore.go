@@ -772,10 +772,17 @@ func dynBlkSize(retention RetentionPolicy, maxBytes int64, encrypted bool) uint6
 		if m := blkSize % 100; m != 0 {
 			blkSize += 100 - m
 		}
+		// Determine max block size based on retention policy.
+		// WorkQueue and Interest policies use smaller blocks (4MB) since messages
+		// are removed after consumption, reducing the benefit of larger blocks.
+		maxBlkSize := FileStoreMaxBlkSize
+		if retention != LimitsPolicy {
+			maxBlkSize = defaultMediumBlockSize
+		}
 		if blkSize <= FileStoreMinBlkSize {
 			blkSize = FileStoreMinBlkSize
-		} else if blkSize >= FileStoreMaxBlkSize {
-			blkSize = FileStoreMaxBlkSize
+		} else if blkSize >= int64(maxBlkSize) {
+			blkSize = int64(maxBlkSize)
 		} else {
 			blkSize = defaultMediumBlockSize
 		}
