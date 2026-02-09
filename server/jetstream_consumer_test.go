@@ -10848,7 +10848,7 @@ func TestJetStreamConsumerSubsetFiltersStillRejected(t *testing.T) {
 
 	_, err := js.AddStream(&nats.StreamConfig{
 		Name:     "TEST",
-		Subjects: []string{">"},
+		Subjects: []string{"event.>", "foo.>"},
 	})
 	require_NoError(t, err)
 
