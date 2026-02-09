@@ -87,6 +87,9 @@ type RaftNode interface {
 	RecreateInternalSubs() error
 	IsSystemAccount() bool
 	GetTrafficAccountName() string
+	// LoadEntriesForRange loads entries from WAL for a range of indices.
+	// Used by consumers when processing lightweight committed entries.
+	LoadEntriesForRange(startIndex, endIndex uint64) ([]*Entry, error)
 }
 
 type WAL interface {
@@ -432,7 +435,10 @@ func (s *Server) initRaftNode(accName string, cfg *RaftConfig, labels pprofLabel
 		prop:     newIPQueue[*proposedEntry](s, qpfx+"entry"),
 		entry:    newIPQueue[*appendEntry](s, qpfx+"appendEntry"),
 		resp:     newIPQueue[*appendEntryResponse](s, qpfx+"appendEntryResponse"),
-		apply:    newIPQueue[*CommittedEntry](s, qpfx+"committedEntry"),
+		apply: newIPQueue[*CommittedEntry](s, qpfx+"committedEntry",
+			ipqSizeCalculation(committedEntrySize),
+			ipqLimitBySize[*CommittedEntry](defaultApplyQueueMaxSize),
+		),
 		accName:  accName,
 		leadc:    make(chan bool, 32),
 		observer: cfg.Observer,
@@ -2284,8 +2290,10 @@ var cePool = sync.Pool{
 
 // CommittedEntry is handed back to the user to apply a commit to their upper layer.
 type CommittedEntry struct {
-	Index   uint64
-	Entries []*Entry
+	Index       uint64
+	Entries     []*Entry
+	StartIndex  uint64 // For lightweight entries: start of index range
+	Lightweight bool   // If true, entries need to be loaded from WAL
 }
 
 // Create a new CommittedEntry. When the returned entry is no longer needed, it
@@ -2293,6 +2301,18 @@ type CommittedEntry struct {
 func newCommittedEntry(index uint64, entries []*Entry) *CommittedEntry {
 	ce := cePool.Get().(*CommittedEntry)
 	ce.Index, ce.Entries = index, entries
+	ce.StartIndex, ce.Lightweight = 0, false
+	return ce
+}
+
+// Create a lightweight CommittedEntry that just references a range of indices.
+// The actual entries will be loaded from WAL when processed.
+func newLightweightCommittedEntry(startIndex, endIndex uint64) *CommittedEntry {
+	ce := cePool.Get().(*CommittedEntry)
+	ce.Index = endIndex
+	ce.StartIndex = startIndex
+	ce.Entries = nil
+	ce.Lightweight = true
 	return ce
 }
 
@@ -2309,7 +2329,22 @@ func (ce *CommittedEntry) ReturnToPool() {
 		}
 	}
 	ce.Index, ce.Entries = 0, nil
+	ce.StartIndex, ce.Lightweight = 0, false
 	cePool.Put(ce)
+}
+
+// committedEntrySize calculates the size of a CommittedEntry for queue size limiting.
+func committedEntrySize(ce *CommittedEntry) uint64 {
+	if ce == nil || ce.Lightweight {
+		return 24 // Fixed overhead for lightweight entries
+	}
+	size := uint64(24) // Base struct overhead
+	for _, e := range ce.Entries {
+		if e != nil {
+			size += uint64(len(e.Data)) + 16 // Data + type + pointer overhead
+		}
+	}
+	return size
 }
 
 // Pool for Entry re-use.
@@ -3164,6 +3199,38 @@ func (n *raft) loadEntry(index uint64) (*appendEntry, error) {
 	return decodeAppendEntry(sm.msg, nil, _EMPTY_)
 }
 
+// LoadEntriesForRange loads entries from WAL for a range of indices (inclusive).
+// Used by consumers when processing lightweight committed entries.
+func (n *raft) LoadEntriesForRange(startIndex, endIndex uint64) ([]*Entry, error) {
+	n.RLock()
+	wal := n.wal
+	n.RUnlock()
+
+	if wal == nil {
+		return nil, ErrStoreClosed
+	}
+
+	var result []*Entry
+	for seq := startIndex; seq <= endIndex; seq++ {
+		ae, err := n.loadEntry(seq)
+		if err != nil {
+			// Return error if we can't load a committed entry - this would cause
+			// sequence gaps and lead to cluster resets if we continued.
+			return nil, fmt.Errorf("failed to load entry %d from WAL: %w", seq, err)
+		}
+		for _, e := range ae.entries {
+			switch e.Type {
+			case EntryNormal, EntrySnapshot, EntryAddPeer, EntryRemovePeer:
+				// Copy data to break buffer references
+				e.Data = copyBytes(e.Data)
+				result = append(result, e)
+			}
+		}
+		ae.returnToPool()
+	}
+	return result, nil
+}
+
 // applyCommit will update our commit index and apply the entry to the apply queue.
 // lock should be held.
 func (n *raft) applyCommit(index uint64) error {
@@ -3225,7 +3292,15 @@ func (n *raft) applyCommit(index uint64) error {
 		// which will happen if we've processed updates inline (like peer
 		// states). In which case the upper layer will just call down with
 		// Applied() with no further action.
-		n.apply.push(newCommittedEntry(index, committed))
+		ce := newCommittedEntry(index, committed)
+		_, err := n.apply.push(ce)
+		if err == errIPQSizeLimitReached {
+			// Queue is full - fall back to lightweight entry that references WAL
+			ce.ReturnToPool()
+			lightCe := newLightweightCommittedEntry(index, index)
+			n.apply.push(lightCe)
+			n.warn("Apply queue full, using lightweight entry for index %d", index)
+		}
 		// Place back in the pool.
 		ae.returnToPool()
 	}()
@@ -4218,6 +4293,9 @@ const (
 	paeWarnThreshold = 10_000
 	paeWarnModulo    = 5_000
 )
+
+// Default maximum size for the apply queue before falling back to lightweight entries.
+const defaultApplyQueueMaxSize = 128 * 1024 * 1024 // 128MB
 
 func (n *raft) sendAppendEntry(entries []*Entry) {
 	n.Lock()

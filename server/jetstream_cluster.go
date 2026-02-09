@@ -1516,6 +1516,21 @@ func (js *jetStream) monitorCluster() {
 					}
 					continue
 				}
+				// Handle lightweight entries by loading from WAL.
+				if ce.Lightweight {
+					entries, err := n.LoadEntriesForRange(ce.StartIndex, ce.Index)
+					if err != nil {
+						s.Errorf("Error loading meta entries from WAL range %d-%d: %v",
+							ce.StartIndex, ce.Index, err)
+						ce.ReturnToPool()
+						// For meta entries, this is critical - don't mark as applied
+						aq.recycle(&ces)
+						return
+					}
+					loadedCe := &CommittedEntry{Index: ce.Index, Entries: entries}
+					ce.ReturnToPool()
+					ce = loadedCe
+				}
 				if isRecovering, didSnap, err := js.applyMetaEntries(ce.Entries, ru); err == nil {
 					var nb uint64
 					// Some entries can fail without an error when shutting down, don't move applied forward.
@@ -2741,7 +2756,29 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 						sendSnapshot = false
 					}
 					continue
-				} else if len(ce.Entries) == 0 {
+				}
+
+				// Handle lightweight entries by loading from WAL.
+				if ce.Lightweight {
+					entries, err := n.LoadEntriesForRange(ce.StartIndex, ce.Index)
+					if err != nil {
+						s.Warnf("Error loading entries from WAL for '%s > %s' range %d-%d: %v",
+							accName, sa.Config.Name, ce.StartIndex, ce.Index, err)
+						ce.ReturnToPool()
+						// Don't mark as applied - trigger cluster reset for this serious error
+						if mset != nil && mset.resetClusteredState(err) {
+							aq.recycle(&ces)
+							return
+						}
+						continue
+					}
+					// Replace the lightweight entry with a loaded one
+					loadedCe := &CommittedEntry{Index: ce.Index, Entries: entries}
+					ce.ReturnToPool()
+					ce = loadedCe
+				}
+
+				if len(ce.Entries) == 0 {
 					// If we have a partial batch, it needs to be rejected to ensure CLFS is correct.
 					if mset != nil {
 						mset.mu.RLock()
@@ -5671,6 +5708,24 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 					}
 					continue
 				}
+
+				// Handle lightweight entries by loading from WAL.
+				if ce.Lightweight {
+					entries, err := n.LoadEntriesForRange(ce.StartIndex, ce.Index)
+					if err != nil {
+						s.Warnf("Error loading consumer entries from WAL for '%s > %s': %v",
+							ca.Client.serviceAccount(), ca.Name, err)
+						ce.ReturnToPool()
+						// Don't mark as applied - let recovery handle this
+						aq.recycle(&ces)
+						return
+					}
+					// Replace the lightweight entry with a loaded one
+					loadedCe := &CommittedEntry{Index: ce.Index, Entries: entries}
+					ce.ReturnToPool()
+					ce = loadedCe
+				}
+
 				if err := js.applyConsumerEntries(o, ce, isLeader); err == nil {
 					var ne, nb uint64
 					// We can't guarantee writes are flushed while we're shutting down. Just rely on replay during recovery.
