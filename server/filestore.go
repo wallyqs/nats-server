@@ -1476,6 +1476,7 @@ func (mb *msgBlock) convertToEncrypted() error {
 		return nil
 	}
 	buf, err := mb.loadBlock(nil)
+	defer recycleMsgBlockBuf(buf)
 	if err != nil {
 		return err
 	}
@@ -6048,6 +6049,7 @@ func (mb *msgBlock) truncate(tseq uint64, ts int64) (nmsgs, nbytes uint64, err e
 	if mb.cmp != NoCompression {
 		loadBuf, err := mb.loadBlock(nil)
 		if err != nil {
+			recycleMsgBlockBuf(loadBuf)
 			return 0, 0, fmt.Errorf("failed to load block from disk: %w", err)
 		}
 		if err = mb.encryptOrDecryptIfNeeded(loadBuf); err != nil {
@@ -6062,14 +6064,17 @@ func (mb *msgBlock) truncate(tseq uint64, ts int64) (nmsgs, nbytes uint64, err e
 		// If decompression produced a new buffer, recycle the original pool buffer.
 		if len(loadBuf) > 0 && len(buf) > 0 && &buf[0] != &loadBuf[0] {
 			recycleMsgBlockBuf(loadBuf)
+			loadBuf = nil
 		}
 		buf = buf[:eof]
 		copy(mb.lchk[0:], buf[:len(buf)-checksumSize])
 		// We did decompress but don't recompress the truncated buffer here since we're the last block
 		// and would otherwise have compressed data and allow to write uncompressed data in the same block.
 		if err = mb.atomicOverwriteFile(buf, false); err != nil {
+			recycleMsgBlockBuf(loadBuf)
 			return 0, 0, err
 		}
+		recycleMsgBlockBuf(loadBuf)
 	} else if mb.mfd != nil {
 		mb.mfd.Truncate(eof)
 		mb.mfd.Sync()
@@ -7881,6 +7886,7 @@ checkCache:
 	// We want to hold the mb lock here to avoid any changes to state.
 	buf, err := mb.loadBlock(nil)
 	if err != nil {
+		recycleMsgBlockBuf(buf)
 		mb.fs.warn("loadBlock error: %v", err)
 		if err == errNoBlkData {
 			if ld, _, err := mb.rebuildStateLocked(); err != nil && ld != nil {
@@ -7893,19 +7899,24 @@ checkCache:
 
 	// Check if we need to decrypt.
 	if err = mb.encryptOrDecryptIfNeeded(buf); err != nil {
+		recycleMsgBlockBuf(buf)
 		return err
 	}
 	// Check for compression, capture original buffer before decompressing.
 	loadBuf := buf
 	if buf, err = mb.decompressIfNeeded(buf); err != nil {
+		recycleMsgBlockBuf(loadBuf)
 		return err
 	}
 	// If decompression produced a different buffer, recycle the pool buffer.
 	if len(loadBuf) > 0 && len(buf) > 0 && &buf[0] != &loadBuf[0] {
 		recycleMsgBlockBuf(loadBuf)
+		loadBuf = nil
 	}
 
 	if err := mb.indexCacheBuf(buf); err != nil {
+		// indexCacheBuf did not store buf in cache, recycle pool buffer if still held.
+		recycleMsgBlockBuf(loadBuf)
 		if err == errCorruptState {
 			var ld *LostStreamData
 			ld, _, err = mb.rebuildStateLocked()
