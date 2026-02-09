@@ -4250,6 +4250,12 @@ const (
 	// committed entries will be stored as index-only markers (NeedsLoad=true)
 	// and the consumer will load the actual data from the WAL on demand.
 	maxApplyQueueSize = 64 * 1024 * 1024 // 64MB
+
+	// Maximum total data size (in bytes) of NeedsLoad entries that a consumer
+	// loop will load from the WAL before yielding. This prevents loading too
+	// many WAL blocks simultaneously, which would cause blkPool allocations to
+	// spike since block caches persist for CacheExpire duration.
+	maxWALLoadBatchSize = 32 * 1024 * 1024 // 32MB
 )
 
 func (n *raft) sendAppendEntry(entries []*Entry) {
