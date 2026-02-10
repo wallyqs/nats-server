@@ -8490,6 +8490,129 @@ func Benchmark_FileStoreLoadNextMsgVerySparseMsgsLargeTail(b *testing.B) {
 	}
 }
 
+// Benchmark_FileStoreFirstMatchingWildcardPrefilter measures the cost of scanning
+// through many non-matching messages with a wildcard filter. This specifically
+// exercises the byte-level pre-filtering optimization in firstMatching:
+// before the change, every message was fully decoded+copied via cacheLookup;
+// after, only the subject bytes are extracted for non-matching messages.
+func Benchmark_FileStoreFirstMatchingWildcardPrefilter(b *testing.B) {
+	fs, err := newFileStore(
+		FileStoreConfig{StoreDir: b.TempDir(), BlockSize: 4 * 1024 * 1024},
+		StreamConfig{Name: "zzz", Subjects: []string{"orders.>"}, Storage: FileStorage})
+	require_NoError(b, err)
+	defer fs.Stop()
+
+	msg := make([]byte, 128)
+
+	// Store 10K non-matching messages across many subjects, then one matching.
+	// This forces a linear scan through all non-matching messages.
+	for i := 0; i < 10_000; i++ {
+		subj := fmt.Sprintf("orders.region%d.item%d", i%10, i)
+		fs.StoreMsg(subj, nil, msg, 0)
+	}
+	fs.StoreMsg("orders.special.vip", nil, []byte("needle"), 0)
+
+	b.Run("WildcardScan", func(b *testing.B) {
+		var smv StoreMsg
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _, err := fs.LoadNextMsg("orders.special.*", true, 1, &smv)
+			require_NoError(b, err)
+		}
+	})
+
+	b.Run("LiteralScan", func(b *testing.B) {
+		var smv StoreMsg
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _, err := fs.LoadNextMsg("orders.special.vip", false, 1, &smv)
+			require_NoError(b, err)
+		}
+	})
+
+	b.Run("AllMatch", func(b *testing.B) {
+		// isAll path — should be unaffected by the change.
+		var smv StoreMsg
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _, err := fs.LoadNextMsg(">", true, 1, &smv)
+			require_NoError(b, err)
+		}
+	})
+}
+
+// Benchmark_FileStoreFirstMatchingLowMatchRate measures scan performance
+// at very low match rates (1 in 100K), which is the worst case for the
+// old code that copied every message during scan.
+func Benchmark_FileStoreFirstMatchingLowMatchRate(b *testing.B) {
+	fs, err := newFileStore(
+		FileStoreConfig{StoreDir: b.TempDir(), BlockSize: 8 * 1024 * 1024},
+		StreamConfig{Name: "zzz", Subjects: []string{"data.*.*"}, Storage: FileStorage})
+	require_NoError(b, err)
+	defer fs.Stop()
+
+	msg := make([]byte, 256)
+
+	// 100K non-matching, then 1 matching. All in one block due to large BlockSize.
+	for i := 0; i < 100_000; i++ {
+		subj := fmt.Sprintf("data.stream%d.event", i%1000)
+		fs.StoreMsg(subj, nil, msg, 0)
+	}
+	fs.StoreMsg("data.stream0.alert", nil, msg, 0)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	var smv StoreMsg
+	for i := 0; i < b.N; i++ {
+		_, _, err := fs.LoadNextMsg("data.*.alert", true, 1, &smv)
+		require_NoError(b, err)
+	}
+}
+
+// Benchmark_SubjectMatchBytesVsString compares the string-based and byte-based
+// subject matching functions directly.
+func Benchmark_SubjectMatchBytesVsString(b *testing.B) {
+	filter := "orders.*.items.>"
+	subjects := []string{
+		"orders.us-east.items.widget",
+		"orders.eu-west.products.gadget",
+		"orders.ap-south.items.thing.sub",
+		"trades.us-east.items.widget",
+	}
+
+	b.Run("StringTokenized", func(b *testing.B) {
+		_fsa := [32]string{}
+		fsa := tokenizeSubjectIntoSlice(_fsa[:0], filter)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			for _, subj := range subjects {
+				_tsa := [32]string{}
+				tsa := tokenizeSubjectIntoSlice(_tsa[:0], subj)
+				isSubsetMatchTokenized(tsa, fsa)
+			}
+		}
+	})
+
+	b.Run("ByteTokenized", func(b *testing.B) {
+		_fsa := [32]string{}
+		fsa := tokenizeSubjectIntoSlice(_fsa[:0], filter)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			for _, subj := range subjects {
+				_tba := [32][]byte{}
+				tba := tokenizeSubjectBytesIntoSlice(_tba[:0], []byte(subj))
+				isSubsetMatchTokenizedBytes(tba, fsa)
+			}
+		}
+	})
+}
+
 func Benchmark_FileStoreCreateConsumerStores(b *testing.B) {
 	for _, syncAlways := range []bool{true, false} {
 		b.Run(fmt.Sprintf("%v", syncAlways), func(b *testing.B) {
