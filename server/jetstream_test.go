@@ -349,6 +349,40 @@ func TestJetStreamAutoTuneFSConfig(t *testing.T) {
 	testBlkSize("foo", 1, 1024*1024, defaultMediumBlockSize)
 	testBlkSize("foo", 1, 8*1024*1024, defaultMediumBlockSize)
 	testBlkSize("foo_bar_baz", -1, 32*1024*1024, FileStoreMaxBlkSize)
+
+	// Test that WorkQueue retention uses 4MB blocks even with large maxBytes,
+	// since messages are consumed once then removed, enabling faster compaction.
+	// Interest streams can behave like Limits streams when consumers lag, so
+	// they benefit from larger blocks.
+	testBlkSizeWithRetention := func(name string, retention RetentionPolicy, maxBytes int64, expectedBlkSize uint64) {
+		t.Helper()
+		cfg := &StreamConfig{
+			Name:       name,
+			MaxMsgSize: maxMsgSize,
+			Storage:    FileStorage,
+			MaxBytes:   maxBytes,
+			Retention:  retention,
+		}
+		mset, err := acc.addStream(cfg)
+		if err != nil {
+			t.Fatalf("Unexpected error adding stream: %v", err)
+		}
+		defer mset.delete()
+		fsCfg, err := mset.fileStoreConfig()
+		if err != nil {
+			t.Fatalf("Unexpected error retrieving file store: %v", err)
+		}
+		if fsCfg.BlockSize != expectedBlkSize {
+			t.Fatalf("Expected block size to be %d for %s retention, got %d", expectedBlkSize, retention, fsCfg.BlockSize)
+		}
+	}
+
+	// LimitsPolicy with large maxBytes should use 8MB blocks
+	testBlkSizeWithRetention("limits_large", LimitsPolicy, 32*1024*1024, FileStoreMaxBlkSize)
+	// WorkQueuePolicy with large maxBytes should cap at 4MB blocks
+	testBlkSizeWithRetention("workqueue_large", WorkQueuePolicy, 32*1024*1024, defaultMediumBlockSize)
+	// InterestPolicy with large maxBytes should use 8MB blocks (can lag like Limits)
+	testBlkSizeWithRetention("interest_large", InterestPolicy, 32*1024*1024, FileStoreMaxBlkSize)
 }
 
 func TestJetStreamPubAck(t *testing.T) {

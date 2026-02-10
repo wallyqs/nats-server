@@ -275,15 +275,15 @@ type CounterSources map[string]map[string]string
 
 // StreamStats contains cumulative statistics for a stream.
 type StreamStats struct {
-	InMsgs         uint64  `json:"in_msgs"`                    // Total messages ever published to this stream (only increases).
-	InBytes        uint64  `json:"in_bytes"`                   // Total bytes ever published to this stream (only increases).
-	InQueueLen     int     `json:"in_queue_len"`               // Current number of messages in the ingest queue.
-	InQueueMax     int     `json:"in_queue_max"`               // Max capacity of the ingest queue.
-	InQueueSize    uint64  `json:"in_queue_size"`              // Current size in bytes of the ingest queue.
-	PendingAvg     float64 `json:"pending_avg,omitempty"`      // Rolling average of pending replication.
-	PendingAvgSize float64 `json:"pending_avg_size,omitempty"` // Rolling average of pending replication size in bytes.
-	RaftPending     uint64 `json:"raft_pending,omitempty"`      // Raft entries pending apply.
-	RaftPendingSize uint64 `json:"raft_pending_size,omitempty"` // Raft pending size in bytes.
+	InMsgs          uint64  `json:"in_msgs"`                     // Total messages ever published to this stream (only increases).
+	InBytes         uint64  `json:"in_bytes"`                    // Total bytes ever published to this stream (only increases).
+	InQueueLen      int     `json:"in_queue_len"`                // Current number of messages in the ingest queue.
+	InQueueMax      int     `json:"in_queue_max"`                // Max capacity of the ingest queue.
+	InQueueSize     uint64  `json:"in_queue_size"`               // Current size in bytes of the ingest queue.
+	PendingAvg      float64 `json:"pending_avg,omitempty"`       // Rolling average of pending replication.
+	PendingAvgSize  float64 `json:"pending_avg_size,omitempty"`  // Rolling average of pending replication size in bytes.
+	RaftPending     uint64  `json:"raft_pending,omitempty"`      // Raft entries pending apply.
+	RaftPendingSize uint64  `json:"raft_pending_size,omitempty"` // Raft pending size in bytes.
 }
 
 // StreamInfo shows config and current state for this stream.
@@ -475,20 +475,20 @@ type stream struct {
 
 	// TODO(dlc) - Hide everything below behind two pointers.
 	// Clustered mode.
-	sa              *streamAssignment // What the meta controller uses to assign streams to peers.
-	node            RaftNode          // Our RAFT node for the stream's group.
-	catchup         atomic.Bool       // Used to signal we are in catchup mode.
-	catchups        map[string]uint64 // The number of messages that need to be caught per peer.
-	syncSub         *subscription     // Internal subscription for sync messages (on "$JSC.SYNC").
-	infoSub         *subscription     // Internal subscription for stream info requests.
-	clMu            sync.Mutex        // The mutex for clseq and clfs.
-	clseq           uint64            // The current last seq being proposed to the NRG layer.
-	clfs            uint64            // The count (offset) of the number of failed NRG sequences used to compute clseq.
-	pendingAvg      int64             // Rolling average of pending replication count (scaled by 1000).
-	pendingAvgSize  int64             // Rolling average of pending replication size in bytes (scaled by 1000).
-	pendingAvgReady      bool          // True after first EMA sample has been recorded.
-	pendingAvgLastUpdate time.Time     // Time of last EMA sample.
-	lqsent          time.Time         // The time at which the last lost quorum advisory was sent. Used to rate limit.
+	sa                   *streamAssignment // What the meta controller uses to assign streams to peers.
+	node                 RaftNode          // Our RAFT node for the stream's group.
+	catchup              atomic.Bool       // Used to signal we are in catchup mode.
+	catchups             map[string]uint64 // The number of messages that need to be caught per peer.
+	syncSub              *subscription     // Internal subscription for sync messages (on "$JSC.SYNC").
+	infoSub              *subscription     // Internal subscription for stream info requests.
+	clMu                 sync.Mutex        // The mutex for clseq and clfs.
+	clseq                uint64            // The current last seq being proposed to the NRG layer.
+	clfs                 uint64            // The count (offset) of the number of failed NRG sequences used to compute clseq.
+	pendingAvg           int64             // Rolling average of pending replication count (scaled by 1000).
+	pendingAvgSize       int64             // Rolling average of pending replication size in bytes (scaled by 1000).
+	pendingAvgReady      bool              // True after first EMA sample has been recorded.
+	pendingAvgLastUpdate time.Time         // Time of last EMA sample.
+	lqsent               time.Time         // The time at which the last lost quorum advisory was sent. Used to rate limit.
 
 	// Cumulative ingest counters - these only increase and are not affected by message deletion/purge.
 	inMsgs    atomic.Uint64 // Total messages ever published to this stream.
@@ -1294,10 +1294,19 @@ func (mset *stream) autoTuneFileStorageBlockSize(fsCfg *FileStoreConfig) {
 	if m := blkSize % 100; m != 0 {
 		blkSize += 100 - m
 	}
+	// Determine max block size based on retention policy.
+	// WorkQueue streams use smaller blocks (4MB) since messages are consumed
+	// once then removed, enabling faster compaction. Interest streams can
+	// behave like Limits streams when consumers lag, so they benefit from
+	// larger blocks.
+	maxBlkSize := uint64(FileStoreMaxBlkSize)
+	if mset.cfg.Retention == WorkQueuePolicy {
+		maxBlkSize = defaultMediumBlockSize
+	}
 	if blkSize <= FileStoreMinBlkSize {
 		blkSize = FileStoreMinBlkSize
-	} else if blkSize >= FileStoreMaxBlkSize {
-		blkSize = FileStoreMaxBlkSize
+	} else if blkSize >= maxBlkSize {
+		blkSize = maxBlkSize
 	} else {
 		blkSize = defaultMediumBlockSize
 	}
