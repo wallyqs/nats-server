@@ -1273,10 +1273,17 @@ func (mset *stream) autoTuneFileStorageBlockSize(fsCfg *FileStoreConfig) {
 	if m := blkSize % 100; m != 0 {
 		blkSize += 100 - m
 	}
+	// Determine max block size based on retention policy.
+	// WorkQueue and Interest policies use smaller blocks since messages
+	// are removed after consumption, reducing the benefit of larger blocks.
+	maxBlkSize := uint64(FileStoreMaxBlkSize)
+	if mset.cfg.Retention != LimitsPolicy {
+		maxBlkSize = defaultMediumBlockSize
+	}
 	if blkSize <= FileStoreMinBlkSize {
 		blkSize = FileStoreMinBlkSize
-	} else if blkSize >= FileStoreMaxBlkSize {
-		blkSize = FileStoreMaxBlkSize
+	} else if blkSize >= maxBlkSize {
+		blkSize = maxBlkSize
 	} else {
 		blkSize = defaultMediumBlockSize
 	}
