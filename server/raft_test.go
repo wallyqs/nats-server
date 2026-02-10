@@ -4903,3 +4903,52 @@ func TestNRGCommittedEntrySizeCalc(t *testing.T) {
 	require_Equal(t, committedEntrySizeCalc(ce), 0)
 	ce.ReturnToPool()
 }
+
+// TestNRGEncBufReuse verifies that the encode buffer on the raft struct is
+// reused across calls to sendAppendEntryLocked, avoiding per-call heap
+// allocations, and that ae.buf is nil'd in the PAE cache after send.
+func TestNRGEncBufReuse(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createMemRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	leader := rg.leader()
+	n := leader.node().(*raft)
+
+	// Propose a 4KB entry to establish a known encode buffer capacity.
+	data := make([]byte, 4096)
+	_, _ = rand.Read(data)
+	err := n.ForwardProposal(data)
+	require_NoError(t, err)
+	time.Sleep(250 * time.Millisecond)
+
+	n.RLock()
+	require_True(t, n.encbuf != nil)
+	grownCap := cap(n.encbuf)
+	n.RUnlock()
+
+	// Propose another entry of the same size. The encbuf capacity should
+	// not change — it should be reused without new allocation.
+	data = make([]byte, 4096)
+	_, _ = rand.Read(data)
+	err = n.ForwardProposal(data)
+	require_NoError(t, err)
+	time.Sleep(250 * time.Millisecond)
+
+	n.RLock()
+	require_Equal(t, cap(n.encbuf), grownCap)
+	n.RUnlock()
+
+	// Verify that ae.buf is nil in the PAE cache — the encode buffer
+	// should not be pinned by cached pending append entries.
+	n.RLock()
+	for idx, ae := range n.pae {
+		if ae.buf != nil {
+			n.RUnlock()
+			t.Fatalf("PAE entry at index %d still has non-nil buf (%d bytes)", idx, len(ae.buf))
+		}
+	}
+	n.RUnlock()
+}
