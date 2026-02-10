@@ -596,6 +596,14 @@ const (
 	JSMsgRollupAll     = "all"
 )
 
+// Rollup types for zero-allocation parsing.
+const (
+	rollupNone = iota
+	rollupTypeSub
+	rollupTypeAll
+	rollupUnknown
+)
+
 // Applied limits in the Nats-Applied-Limit header.
 const (
 	JSMarkerReasonMaxAge = "MaxAge"
@@ -4806,9 +4814,10 @@ func getExpectedLastMsgId(hdr []byte) string {
 	return string(getHeader(JSExpectedLastMsgId, hdr))
 }
 
-// Fast lookup of expected stream.
-func getExpectedStream(hdr []byte) string {
-	return string(getHeader(JSExpectedStream, hdr))
+// Fast lookup of expected stream. Returns []byte to avoid allocation.
+// Use string(result) in comparisons - Go compiler optimizes this to zero allocations.
+func getExpectedStream(hdr []byte) []byte {
+	return getHeader(JSExpectedStream, hdr)
 }
 
 // Fast lookup of expected last sequence.
@@ -4820,13 +4829,20 @@ func getExpectedLastSeq(hdr []byte) (uint64, bool) {
 	return uint64(parseInt64(bseq)), true
 }
 
-// Fast lookup of rollups.
-func getRollup(hdr []byte) string {
+// Fast lookup of rollups. Returns rollup type with zero allocations.
+func getRollup(hdr []byte) int {
 	r := getHeader(JSMsgRollup, hdr)
 	if len(r) == 0 {
-		return _EMPTY_
+		return rollupNone
 	}
-	return strings.ToLower(string(r))
+	// Use bytes.EqualFold for case-insensitive comparison without allocations.
+	if len(r) == 3 && (r[0] == 's' || r[0] == 'S') && (r[1] == 'u' || r[1] == 'U') && (r[2] == 'b' || r[2] == 'B') {
+		return rollupTypeSub
+	}
+	if len(r) == 3 && (r[0] == 'a' || r[0] == 'A') && (r[1] == 'l' || r[1] == 'L') && (r[2] == 'l' || r[2] == 'L') {
+		return rollupTypeAll
+	}
+	return rollupUnknown
 }
 
 // Fast lookup of expected stream sequence per subject.
@@ -5606,8 +5622,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 				} else {
 					// Check for incompatible headers.
 					var doErr bool
-					if getRollup(hdr) != _EMPTY_ ||
-						getExpectedStream(hdr) != _EMPTY_ ||
+					if getRollup(hdr) != rollupNone ||
+						len(getExpectedStream(hdr)) > 0 ||
 						getExpectedLastMsgId(hdr) != _EMPTY_ ||
 						getExpectedLastSeqPerSubjectForSubject(hdr) != _EMPTY_ {
 						doErr = true
@@ -5631,7 +5647,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 			}
 
 			// Expected stream.
-			if sname := getExpectedStream(hdr); sname != _EMPTY_ && sname != name {
+			if sname := getExpectedStream(hdr); len(sname) > 0 && string(sname) != name {
 				if canRespond {
 					resp.PubAck = &PubAck{Stream: name}
 					resp.Error = NewJSStreamNotMatchError()
@@ -5781,9 +5797,9 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 
 					// Add a rollup sub header if it doesn't already exist.
 					// Otherwise, it must exist already as a rollup on the subject.
-					if rollup := getRollup(hdr); rollup == _EMPTY_ {
+					if rollup := getRollup(hdr); rollup == rollupNone {
 						hdr = genHeader(hdr, JSMsgRollup, JSMsgRollupSubject)
-					} else if rollup != JSMsgRollupSubject {
+					} else if rollup != rollupTypeSub {
 						apiErr := NewJSMessageSchedulesRollupInvalidError()
 						if canRespond {
 							resp.PubAck = &PubAck{Stream: name}
@@ -5835,7 +5851,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 			}
 		}
 		// Check for any rollups.
-		if rollup := getRollup(hdr); rollup != _EMPTY_ {
+		if rollup := getRollup(hdr); rollup != rollupNone {
 			if canConsistencyCheck && (!mset.cfg.AllowRollup || mset.cfg.DenyPurge) {
 				err := errors.New("rollup not permitted")
 				if canRespond {
@@ -5847,13 +5863,13 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 				return err
 			}
 			switch rollup {
-			case JSMsgRollupSubject:
+			case rollupTypeSub:
 				rollupSub = true
-			case JSMsgRollupAll:
+			case rollupTypeAll:
 				rollupAll = true
 			default:
 				if canConsistencyCheck {
-					err := fmt.Errorf("rollup value invalid: %q", rollup)
+					err := fmt.Errorf("rollup value invalid: %q", getHeader(JSMsgRollup, hdr))
 					if canRespond {
 						resp.PubAck = &PubAck{Stream: name}
 						resp.Error = NewJSStreamRollupFailedError(err)

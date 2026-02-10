@@ -269,8 +269,8 @@ func checkMsgHeadersPreClusteredProposal(
 			} else {
 				// Check for incompatible headers.
 				var doErr bool
-				if getRollup(hdr) != _EMPTY_ ||
-					getExpectedStream(hdr) != _EMPTY_ ||
+				if getRollup(hdr) != rollupNone ||
+					len(getExpectedStream(hdr)) > 0 ||
 					getExpectedLastMsgId(hdr) != _EMPTY_ ||
 					getExpectedLastSeqPerSubjectForSubject(hdr) != _EMPTY_ {
 					doErr = true
@@ -287,7 +287,7 @@ func checkMsgHeadersPreClusteredProposal(
 			}
 		}
 		// Expected stream name can also be pre-checked.
-		if sname := getExpectedStream(hdr); sname != _EMPTY_ && sname != name {
+		if sname := getExpectedStream(hdr); len(sname) > 0 && string(sname) != name {
 			return hdr, msg, 0, NewJSStreamNotMatchError(), errStreamMismatch
 		}
 		// TTL'd messages are rejected entirely if TTLs are not enabled on the stream, or if the TTL is invalid.
@@ -551,9 +551,9 @@ func checkMsgHeadersPreClusteredProposal(
 
 				// Add a rollup sub header if it doesn't already exist.
 				// Otherwise, it must exist already as a rollup on the subject.
-				if rollup := getRollup(hdr); rollup == _EMPTY_ {
+				if rollup := getRollup(hdr); rollup == rollupNone {
 					hdr = genHeader(hdr, JSMsgRollup, JSMsgRollupSubject)
-				} else if rollup != JSMsgRollupSubject {
+				} else if rollup != rollupTypeSub {
 					apiErr := NewJSMessageSchedulesRollupInvalidError()
 					return hdr, msg, 0, apiErr, apiErr
 				}
@@ -561,26 +561,26 @@ func checkMsgHeadersPreClusteredProposal(
 		}
 
 		// Check for any rollups.
-		if rollup := getRollup(hdr); rollup != _EMPTY_ {
+		if rollup := getRollup(hdr); rollup != rollupNone {
 			if !allowRollup || denyPurge {
 				err := errors.New("rollup not permitted")
 				return hdr, msg, 0, NewJSStreamRollupFailedError(err), err
 			}
 			switch rollup {
-			case JSMsgRollupSubject:
+			case rollupTypeSub:
 				// Rolling up the subject is only allowed if the first occurrence of this subject in the batch.
 				if _, ok := diff.inflight[subject]; ok {
 					err := errors.New("batch rollup sub invalid")
 					return hdr, msg, 0, NewJSStreamRollupFailedError(err), err
 				}
-			case JSMsgRollupAll:
+			case rollupTypeAll:
 				// Rolling up the whole stream is only allowed if this is the first message of the batch.
 				if len(diff.inflight) > 0 {
 					err := errors.New("batch rollup all invalid")
 					return hdr, msg, 0, NewJSStreamRollupFailedError(err), err
 				}
 			default:
-				err := fmt.Errorf("rollup value invalid: %q", rollup)
+				err := fmt.Errorf("rollup value invalid: %q", getHeader(JSMsgRollup, hdr))
 				return hdr, msg, 0, NewJSStreamRollupFailedError(err), err
 			}
 		}
