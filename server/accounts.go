@@ -1895,8 +1895,18 @@ func (a *Account) checkForReverseEntries(reply string, checkInterest, recursed b
 	tsa := [32]string{}
 	tts := tokenizeSubjectIntoSlice(tsa[:0], reply)
 
+	// Pre-compute the number of dots in the reply for quick pre-filtering.
+	// If the reply doesn't contain a full wildcard (>), then any matching
+	// entry must have the same number of tokens (dots + 1).
+	replyHasFWC := len(tts) > 0 && tts[len(tts)-1] == fwcs
+	replyDots := len(tts) - 1
+
 	rsa := [32]string{}
 	for _, r := range rs {
+		// Quick pre-filter by token count when reply has no full wildcard.
+		if !replyHasFWC && strings.Count(r, tsep) != replyDots {
+			continue
+		}
 		rts := tokenizeSubjectIntoSlice(rsa[:0], r)
 		//  isSubsetMatchTokenized is heavy so make sure we do this without the lock.
 		if isSubsetMatchTokenized(rts, tts) {

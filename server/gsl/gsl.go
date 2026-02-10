@@ -494,13 +494,13 @@ func visitLevel[T comparable](l *level[T], depth int) int {
 
 // use similar to append. meaning, the updated slice will be returned
 func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tts = append(tts, subject[start:i])
-			start = i + 1
+	for {
+		i := strings.IndexByte(subject, btsep)
+		if i < 0 {
+			tts = append(tts, subject)
+			return tts
 		}
+		tts = append(tts, subject[:i])
+		subject = subject[i+1:]
 	}
-	tts = append(tts, subject[start:])
-	return tts
 }
