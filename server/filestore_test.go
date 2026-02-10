@@ -4487,6 +4487,96 @@ func TestFileStoreFilteredFirstMatchingBug(t *testing.T) {
 	})
 }
 
+func TestFileStoreSubjectFromBuf(t *testing.T) {
+	fcfg := FileStoreConfig{StoreDir: t.TempDir()}
+	cfg := StreamConfig{Name: "zzz", Subjects: []string{">"}, Storage: FileStorage}
+	fs, err := newFileStore(fcfg, cfg)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	subjects := []string{"foo.bar", "baz.quux", "a.b.c.d.e"}
+	for _, subj := range subjects {
+		_, _, err = fs.StoreMsg(subj, nil, []byte("data"), 0)
+		require_NoError(t, err)
+	}
+
+	fs.mu.RLock()
+	mb := fs.blks[0]
+	fs.mu.RUnlock()
+
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	if mb.cacheNotLoaded() {
+		require_NoError(t, mb.loadMsgsWithLock())
+	}
+
+	for i, subj := range subjects {
+		seq := uint64(i + 1)
+		slot := int(seq - mb.cache.fseq)
+		bi, _, _, err := mb.slotInfo(slot)
+		require_NoError(t, err)
+
+		got := subjectFromBuf(mb.cache.buf[bi:])
+		if got == nil {
+			t.Fatalf("subjectFromBuf returned nil for seq %d", seq)
+		}
+		if string(got) != subj {
+			t.Fatalf("seq %d: expected subject %q, got %q", seq, subj, got)
+		}
+	}
+
+	// Test with truncated buffer — should return nil, not panic.
+	if got := subjectFromBuf(nil); got != nil {
+		t.Fatalf("Expected nil for nil buf, got %q", got)
+	}
+	if got := subjectFromBuf([]byte{1, 2, 3}); got != nil {
+		t.Fatalf("Expected nil for short buf, got %q", got)
+	}
+}
+
+func TestFileStoreFirstMatchingBytePrefilter(t *testing.T) {
+	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
+		cfg := StreamConfig{Name: "zzz", Subjects: []string{">"}, Storage: FileStorage}
+		fs, err := newFileStoreWithCreated(fcfg, cfg, time.Now(), prf(&fcfg), nil)
+		require_NoError(t, err)
+		defer fs.Stop()
+
+		// Store messages with many different subjects to force the linear scan path.
+		for i := 0; i < 50; i++ {
+			subj := fmt.Sprintf("orders.item%d", i)
+			_, _, err = fs.StoreMsg(subj, nil, []byte("data"), 0)
+			require_NoError(t, err)
+		}
+		// Store a needle at the end.
+		_, _, err = fs.StoreMsg("orders.special", nil, []byte("needle"), 0)
+		require_NoError(t, err)
+
+		// Wildcard filter — should find only matching messages.
+		sm, _, err := fs.LoadNextMsg("orders.special", false, 1, nil)
+		require_NoError(t, err)
+		if sm.subj != "orders.special" {
+			t.Fatalf("Expected subject %q, got %q", "orders.special", sm.subj)
+		}
+		if !bytes.Equal(sm.msg, []byte("needle")) {
+			t.Fatalf("Expected msg %q, got %q", "needle", sm.msg)
+		}
+
+		// Wildcard filter matching multiple subjects.
+		sm, _, err = fs.LoadNextMsg("orders.*", true, 1, nil)
+		require_NoError(t, err)
+		if sm.subj != "orders.item0" {
+			t.Fatalf("Expected first match to be %q, got %q", "orders.item0", sm.subj)
+		}
+
+		// Non-matching filter.
+		_, _, err = fs.LoadNextMsg("trades.special", false, 1, nil)
+		if err == nil {
+			t.Fatalf("Expected error for non-matching filter, got nil")
+		}
+	})
+}
+
 func TestFileStoreOutOfSpaceRebuildState(t *testing.T) {
 	testFileStoreAllPermutations(t, func(t *testing.T, fcfg FileStoreConfig) {
 		cfg := StreamConfig{Name: "zzz", Subjects: []string{"*"}, Storage: FileStorage}

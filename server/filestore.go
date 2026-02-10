@@ -2934,16 +2934,12 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 	fseq = max(fseq, atomic.LoadUint64(&mb.first.seq))
 	lseq := atomic.LoadUint64(&mb.last.seq)
 
-	// Optionally build the isMatch for wildcard filters.
-	var isMatch func(subj string) bool
-	// Decide to build.
+	// Pre-tokenize the filter for byte-level matching during the scan.
+	// This avoids per-message string allocations for wildcard filters.
+	var filterTokens []string
 	if wc {
-		_tsa, _fsa := [32]string{}, [32]string{}
-		tsa, fsa := _tsa[:0], tokenizeSubjectIntoSlice(_fsa[:0], filter)
-		isMatch = func(subj string) bool {
-			tsa = tokenizeSubjectIntoSlice(tsa[:0], subj)
-			return isSubsetMatchTokenized(tsa, fsa)
-		}
+		_fsa := [32]string{}
+		filterTokens = tokenizeSubjectIntoSlice(_fsa[:0], filter)
 	}
 
 	subjs := mb.fs.cfg.Subjects
@@ -2995,6 +2991,15 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 		sm = new(StoreMsg)
 	}
 
+	// When not isAll, use byte-level subject pre-filtering to avoid full decode
+	// and copy for non-matching messages. We extract just the subject bytes from
+	// the raw cache buffer via slotInfo + subjectFromBuf, then only do the full
+	// cacheLookup (which copies payload) when the subject matches.
+	// Note: we intentionally skip the checksum on non-matching messages here;
+	// the checksum will be verified on the matching message via cacheLookup.
+	var _tba [32][]byte
+	bfilter := stringToBytes(filter)
+
 	for seq := fseq; seq <= lseq; seq++ {
 		if mb.dmap.Exists(seq) {
 			// Optimisation to avoid calling cacheLookup which hits time.Now().
@@ -3002,6 +3007,42 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 			updateLLTS = true
 			continue
 		}
+
+		// Pre-filter: extract subject bytes directly from the cache buffer
+		// without full message decode or copy. This is safe because mb.mu
+		// is held and the cache won't be recycled during the scan.
+		if !isAll {
+			slot := int(seq - mb.cache.fseq)
+			bi, _, _, err := mb.slotInfo(slot)
+			if err != nil {
+				if err == errPartialCache || err == errNoCache {
+					return nil, false, err
+				}
+				// errDeletedMsg or other slot-level errors, skip.
+				continue
+			}
+			if int(bi) >= len(mb.cache.buf) {
+				return nil, false, errPartialCache
+			}
+			subj := subjectFromBuf(mb.cache.buf[bi:])
+			if subj == nil {
+				// Malformed record, skip.
+				continue
+			}
+			if wc {
+				tba := tokenizeSubjectBytesIntoSlice(_tba[:0], subj)
+				if !isSubsetMatchTokenizedBytes(tba, filterTokens) {
+					continue
+				}
+			} else {
+				if !bytes.Equal(subj, bfilter) {
+					continue
+				}
+			}
+		}
+
+		// Subject matched (or isAll). Do the full cacheLookup with copy
+		// so the message can safely escape to upper layers.
 		llseq := mb.llseq
 		fsm, err := mb.cacheLookup(seq, sm)
 		if err != nil {
@@ -3012,16 +3053,7 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 		}
 		updateLLTS = false // cacheLookup already updated it.
 		expireOk := seq == lseq && mb.llseq != llseq && mb.llseq == seq
-		if isAll {
-			return fsm, expireOk, nil
-		}
-		if wc && isMatch(sm.subj) {
-			return fsm, expireOk, nil
-		} else if !wc && fsm.subj == filter {
-			return fsm, expireOk, nil
-		}
-		// If we are here we did not match, so put the llseq back.
-		mb.llseq = llseq
+		return fsm, expireOk, nil
 	}
 
 	return nil, didLoad, ErrStoreMsgNotFound
@@ -8216,6 +8248,25 @@ func (fs *fileStore) msgForSeqLocked(seq uint64, sm *StoreMsg, needFSLock bool) 
 	}
 
 	return fsm, nil
+}
+
+// subjectFromBuf extracts the subject bytes from a raw message buffer without
+// performing a full decode or any allocation. Returns a slice referencing the
+// original buffer directly. Returns nil if the buffer is malformed.
+// Lock should be held.
+func subjectFromBuf(buf []byte) []byte {
+	if len(buf) < emptyRecordLen {
+		return nil
+	}
+	var le = binary.LittleEndian
+	rl := le.Uint32(buf[0:])
+	rl &^= hbit // clear header bit
+	dlen := int(rl) - msgHdrSize
+	slen := int(le.Uint16(buf[20:]))
+	if dlen < 0 || slen > (dlen-recordHashSize) || int(rl) > len(buf) || rl > rlBadThresh {
+		return nil
+	}
+	return buf[msgHdrSize : msgHdrSize+slen]
 }
 
 // Internal function to return msg parts from a raw buffer.

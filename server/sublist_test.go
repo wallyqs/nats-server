@@ -1123,6 +1123,57 @@ func TestIsSubsetMatch(t *testing.T) {
 	}
 }
 
+func TestIsSubsetMatchTokenizedBytes(t *testing.T) {
+	for _, test := range []struct {
+		subject string
+		filter  string
+		result  bool
+	}{
+		// Literal matches.
+		{"foo.bar", "foo.bar", true},
+		{"foo.bar", "foo.baz", false},
+		// Wildcard matches.
+		{"foo.bar", "foo.*", true},
+		{"foo.bar", "*.bar", true},
+		{"foo.bar", "*.*", true},
+		{"foo.bar.baz", "foo.*", false},
+		{"foo.bar", "foo.bar.baz", false},
+		// Full wildcard.
+		{"foo.bar", ">", true},
+		{"foo.bar.baz", ">", true},
+		{"foo.bar", "foo.>", true},
+		{"foo.bar.baz", "foo.>", true},
+		{"bar.baz", "foo.>", false},
+		// Edge cases.
+		{"foo", "foo", true},
+		{"foo", "bar", false},
+		{"foo", "*", true},
+		{"foo", ">", true},
+		// Empty tokens (bad subjects).
+		{"foo..bar", "foo.*", false},
+	} {
+		t.Run(test.subject+"/"+test.filter, func(t *testing.T) {
+			var _tba [32][]byte
+			var _fsa [32]string
+			tba := tokenizeSubjectBytesIntoSlice(_tba[:0], []byte(test.subject))
+			fsa := tokenizeSubjectIntoSlice(_fsa[:0], test.filter)
+			if res := isSubsetMatchTokenizedBytes(tba, fsa); res != test.result {
+				t.Fatalf("Subject %q match filter %q: expected %v, got %v",
+					test.subject, test.filter, test.result, res)
+			}
+			// Cross-check: the byte version must agree with the string version.
+			var _tsa [32]string
+			tsa := tokenizeSubjectIntoSlice(_tsa[:0], test.subject)
+			strRes := isSubsetMatchTokenized(tsa, fsa)
+			byteRes := isSubsetMatchTokenizedBytes(tba, fsa)
+			if strRes != byteRes {
+				t.Fatalf("Subject %q filter %q: string version=%v, byte version=%v",
+					test.subject, test.filter, strRes, byteRes)
+			}
+		})
+	}
+}
+
 func TestSublistRegisterInterestNotification(t *testing.T) {
 	s := NewSublistWithCache()
 	ch := make(chan bool, 1)

@@ -1500,6 +1500,58 @@ func isSubsetMatchTokenized(tokens, test []string) bool {
 	return len(tokens) == len(test)
 }
 
+// tokenizeSubjectBytesIntoSlice tokenizes a subject byte slice into tokens
+// without allocating strings. Use similar to append: the updated slice is returned.
+func tokenizeSubjectBytesIntoSlice(tts [][]byte, subject []byte) [][]byte {
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tts = append(tts, subject[start:i])
+			start = i + 1
+		}
+	}
+	tts = append(tts, subject[start:])
+	return tts
+}
+
+// isSubsetMatchTokenizedBytes tests byte token slices against string filter tokens.
+// Mirrors isSubsetMatchTokenized but operates on []byte tokens to avoid string allocation.
+func isSubsetMatchTokenizedBytes(tokens [][]byte, test []string) bool {
+	for i, t2 := range test {
+		if i >= len(tokens) {
+			return false
+		}
+		l := len(t2)
+		if l == 0 {
+			return false
+		}
+		if t2[0] == fwc && l == 1 {
+			return true
+		}
+		t1 := tokens[i]
+
+		l = len(t1)
+		if l == 0 || t1[0] == fwc && l == 1 {
+			return false
+		}
+
+		if t1[0] == pwc && len(t1) == 1 {
+			m := t2[0] == pwc && len(t2) == 1
+			if !m {
+				return false
+			}
+			if i >= len(test) {
+				return true
+			}
+			continue
+		}
+		if t2[0] != pwc && string(t1) != t2 {
+			return false
+		}
+	}
+	return len(tokens) == len(test)
+}
+
 // matchLiteral is used to test literal subjects, those that do not have any
 // wildcards, with a target subject. This is used in the cache layer.
 func matchLiteral(literal, subject string) bool {
