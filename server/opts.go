@@ -2372,20 +2372,34 @@ func getStorageSize(v any) (int64, error) {
 		return 0, nil
 	}
 
-	suffix := s[len(s)-1:]
-	prefix := s[:len(s)-1]
+	suffix := strings.ToLower(strings.TrimLeft(s, "0123456789"))
+	prefix := s[:len(s)-len(suffix)]
 	num, err := strconv.ParseInt(prefix, 10, 64)
 	if err != nil {
 		return 0, err
 	}
-
-	suffixMap := map[string]int64{"K": 10, "M": 20, "G": 30, "T": 40}
-
-	mult, ok := suffixMap[suffix]
-	if !ok {
-		return 0, fmt.Errorf("sizes defined as strings must end in K, M, G, T")
+	switch suffix {
+	case "":
+		// no suffix, return as is.
+	case "k":
+		num *= 1000
+	case "kb", "ki", "kib":
+		num *= 1024
+	case "m":
+		num *= 1000 * 1000
+	case "mb", "mi", "mib":
+		num *= 1024 * 1024
+	case "g":
+		num *= 1000 * 1000 * 1000
+	case "gb", "gi", "gib":
+		num *= 1024 * 1024 * 1024
+	case "t":
+		num *= 1000 * 1000 * 1000 * 1000
+	case "tb", "ti", "tib":
+		num *= 1024 * 1024 * 1024 * 1024
+	default:
+		return 0, fmt.Errorf("sizes defined as strings must end in K, M, G, T or with binary suffix (e.g. MiB, GiB)")
 	}
-	num *= 1 << mult
 
 	return num, nil
 }

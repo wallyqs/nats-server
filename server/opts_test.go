@@ -3290,10 +3290,21 @@ func TestGetStorageSize(t *testing.T) {
 		want  int64
 		err   bool
 	}{
-		{"1K", 1024, false},
-		{"1M", 1048576, false},
-		{"1G", 1073741824, false},
-		{"1T", 1099511627776, false},
+		// SI decimal suffixes (base 10).
+		{"1K", 1000, false},
+		{"1M", 1000 * 1000, false},
+		{"1G", 1000 * 1000 * 1000, false},
+		{"1T", 1000 * 1000 * 1000 * 1000, false},
+		// Binary suffixes (base 2).
+		{"1KB", 1024, false},
+		{"1KiB", 1024, false},
+		{"1KI", 1024, false},
+		{"128MiB", 128 * 1024 * 1024, false},
+		{"128MB", 128 * 1024 * 1024, false},
+		{"2GiB", 2 * 1024 * 1024 * 1024, false},
+		{"2GB", 2 * 1024 * 1024 * 1024, false},
+		{"1TiB", 1024 * 1024 * 1024 * 1024, false},
+		{"1TB", 1024 * 1024 * 1024 * 1024, false},
 		{"1L", 0, true},
 		{"TT", 0, true},
 		{"", 0, false},
