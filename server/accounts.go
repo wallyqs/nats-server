@@ -1896,8 +1896,22 @@ func (a *Account) checkForReverseEntries(reply string, checkInterest, recursed b
 	tsa := [32]string{}
 	tts := tokenizeSubjectIntoSlice(tsa[:0], reply)
 
+	// Compute the literal prefix of the wildcard reply for fast filtering.
+	// Any entry that doesn't share this prefix can be skipped without tokenizing.
+	prefixLen := 0
+	for _, t := range tts {
+		if len(t) == 1 && (t[0] == pwc || t[0] == fwc) {
+			break
+		}
+		prefixLen += len(t) + 1 // token length + dot separator
+	}
+	prefix := reply[:prefixLen]
+
 	rsa := [32]string{}
 	for _, r := range rs {
+		if len(prefix) > 0 && !strings.HasPrefix(r, prefix) {
+			continue
+		}
 		rts := tokenizeSubjectIntoSlice(rsa[:0], r)
 		//  isSubsetMatchTokenized is heavy so make sure we do this without the lock.
 		if isSubsetMatchTokenized(rts, tts) {
