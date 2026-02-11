@@ -2458,3 +2458,160 @@ func Benchmark_TokenizeOld_FourTokensSysPrefix(b *testing.B) {
 func Benchmark_TokenizeNew_FourTokensSysPrefix(b *testing.B) {
 	benchTokenize(b, "$SYS.REQ.SERVER.PING", tokenizeSubjectIntoSlice)
 }
+
+func isSubsetMatchOld(tokens, test []string) bool {
+	for i, t2 := range test {
+		if i >= len(tokens) {
+			return false
+		}
+		l := len(t2)
+		if l == 0 {
+			return false
+		}
+		if t2[0] == fwc && l == 1 {
+			return true
+		}
+		t1 := tokens[i]
+		l = len(t1)
+		if l == 0 || t1[0] == fwc && l == 1 {
+			return false
+		}
+		if t1[0] == pwc && len(t1) == 1 {
+			m := t2[0] == pwc && len(t2) == 1
+			if !m {
+				return false
+			}
+			if i >= len(test) {
+				return true
+			}
+			continue
+		}
+		if t2[0] != pwc && strings.Compare(t1, t2) != 0 {
+			return false
+		}
+	}
+	return len(tokens) == len(test)
+}
+
+func benchIsSubsetMatch(b *testing.B, subject, test string, fn func([]string, []string) bool) {
+	b.Helper()
+	ssa := [32]string{}
+	tsa := [32]string{}
+	stokens := tokenizeSubjectIntoSlice(ssa[:0], subject)
+	ttokens := tokenizeSubjectIntoSlice(tsa[:0], test)
+	for i := 0; i < b.N; i++ {
+		fn(stokens, ttokens)
+	}
+}
+
+func Benchmark___IsSubsetMatchOld_LiteralMatch(b *testing.B) {
+	benchIsSubsetMatch(b, "foo.bar.baz", "foo.bar.baz", isSubsetMatchOld)
+}
+
+func Benchmark___IsSubsetMatchNew_LiteralMatch(b *testing.B) {
+	benchIsSubsetMatch(b, "foo.bar.baz", "foo.bar.baz", isSubsetMatchTokenized)
+}
+
+func Benchmark___IsSubsetMatchOld_LiteralNoMatch(b *testing.B) {
+	benchIsSubsetMatch(b, "foo.bar.baz", "foo.bar.xxx", isSubsetMatchOld)
+}
+
+func Benchmark___IsSubsetMatchNew_LiteralNoMatch(b *testing.B) {
+	benchIsSubsetMatch(b, "foo.bar.baz", "foo.bar.xxx", isSubsetMatchTokenized)
+}
+
+func Benchmark_IsSubsetMatchOld_WildcardFwcMatch(b *testing.B) {
+	benchIsSubsetMatch(b, "events.user.created", "events.user.>", isSubsetMatchOld)
+}
+
+func Benchmark_IsSubsetMatchNew_WildcardFwcMatch(b *testing.B) {
+	benchIsSubsetMatch(b, "events.user.created", "events.user.>", isSubsetMatchTokenized)
+}
+
+func Benchmark_IsSubsetMatchOld_WildcardPwcMatch(b *testing.B) {
+	benchIsSubsetMatch(b, "events.user.created", "events.*.created", isSubsetMatchOld)
+}
+
+func Benchmark_IsSubsetMatchNew_WildcardPwcMatch(b *testing.B) {
+	benchIsSubsetMatch(b, "events.user.created", "events.*.created", isSubsetMatchTokenized)
+}
+
+func Benchmark_IsSubsetMatchOld_EarlyMismatch(b *testing.B) {
+	benchIsSubsetMatch(b, "foo.bar.baz.quux", "xxx.bar.baz.quux", isSubsetMatchOld)
+}
+
+func Benchmark_IsSubsetMatchNew_EarlyMismatch(b *testing.B) {
+	benchIsSubsetMatch(b, "foo.bar.baz.quux", "xxx.bar.baz.quux", isSubsetMatchTokenized)
+}
+
+// Benchmark the checkForReverseEntries hot loop pattern with and without
+// the prefix fast-path filter, simulating various rrMap sizes.
+
+func benchCheckReverseEntriesLoop(b *testing.B, pattern string, entries []string, usePrefix bool) {
+	b.Helper()
+	tsa := [32]string{}
+	tts := tokenizeSubjectIntoSlice(tsa[:0], pattern)
+
+	var prefix string
+	if usePrefix {
+		prefixLen := 0
+		for _, t := range tts {
+			if len(t) == 1 && (t[0] == pwc || t[0] == fwc) {
+				break
+			}
+			prefixLen += len(t) + 1
+		}
+		prefix = pattern[:prefixLen]
+	}
+
+	rsa := [32]string{}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, r := range entries {
+			if len(prefix) > 0 && !strings.HasPrefix(r, prefix) {
+				continue
+			}
+			rts := tokenizeSubjectIntoSlice(rsa[:0], r)
+			isSubsetMatchTokenized(rts, tts)
+		}
+	}
+}
+
+func generateReverseEntries(n int) []string {
+	entries := make([]string, n)
+	prefixes := []string{"_R_.abc123.", "_R_.def456.", "_R_.ghi789.", "_R_.jkl012.", "other.prefix."}
+	for i := 0; i < n; i++ {
+		entries[i] = prefixes[i%len(prefixes)] + strconv.Itoa(i)
+	}
+	return entries
+}
+
+func Benchmark_____ReverseEntries64_NoPrefix(b *testing.B) {
+	entries := generateReverseEntries(64)
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", entries, false)
+}
+
+func Benchmark___ReverseEntries64_WithPrefix(b *testing.B) {
+	entries := generateReverseEntries(64)
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", entries, true)
+}
+
+func Benchmark____ReverseEntries512_NoPrefix(b *testing.B) {
+	entries := generateReverseEntries(512)
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", entries, false)
+}
+
+func Benchmark__ReverseEntries512_WithPrefix(b *testing.B) {
+	entries := generateReverseEntries(512)
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", entries, true)
+}
+
+func Benchmark___ReverseEntries4096_NoPrefix(b *testing.B) {
+	entries := generateReverseEntries(4096)
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", entries, false)
+}
+
+func Benchmark_ReverseEntries4096_WithPrefix(b *testing.B) {
+	entries := generateReverseEntries(4096)
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", entries, true)
+}
