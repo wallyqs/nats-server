@@ -3287,3 +3287,126 @@ func icbPercentile(counts []uint64, total uint64, p float64) float64 {
 	}
 	return icbBucketMidpoints[len(icbBucketMidpoints)-1]
 }
+
+// Consumer cleanup (deleteNotActive) tracking state for statistics.
+var (
+	cleanupTotal     atomic.Uint64    // Total completed cleanup operations
+	cleanupPending   atomic.Int64     // Currently active cleanup goroutines (gauge)
+	cleanupRetries   atomic.Uint64    // Cumulative retry attempts
+	cleanupHistogram [6]atomic.Uint64 // Duration histogram buckets
+	cleanupMaxDur    atomic.Int64     // Maximum duration in nanoseconds
+)
+
+// Histogram bucket boundaries in nanoseconds for consumer cleanup.
+// Buckets: <100ms, 100ms-500ms, 500ms-1s, 1-5s, 5-30s, >30s
+var cleanupBuckets = [5]int64{
+	100_000_000,    // 100ms
+	500_000_000,    // 500ms
+	1_000_000_000,  // 1s
+	5_000_000_000,  // 5s
+	30_000_000_000, // 30s
+}
+
+// Bucket midpoints in milliseconds for percentile estimation.
+var cleanupBucketMidpoints = [6]float64{
+	50,    // <100ms -> 50ms
+	300,   // 100-500ms -> 300ms
+	750,   // 500ms-1s -> 750ms
+	3000,  // 1-5s -> 3s
+	17500, // 5-30s -> 17.5s
+	60000, // >30s -> 60s estimate
+}
+
+// ConsumerCleanupStats holds consumer cleanup (deleteNotActive) statistics.
+type ConsumerCleanupStats struct {
+	Total   uint64  `json:"total"`            // Completed cleanup operations
+	Pending int64   `json:"pending"`          // Currently active cleanup goroutines
+	Retries uint64  `json:"retries"`          // Cumulative retry attempts
+	P50     float64 `json:"p50,omitempty"`    // 50th percentile duration (ms)
+	P90     float64 `json:"p90,omitempty"`    // 90th percentile duration (ms)
+	P99     float64 `json:"p99,omitempty"`    // 99th percentile duration (ms)
+	P999    float64 `json:"p999,omitempty"`   // 99.9th percentile duration (ms)
+	P9999   float64 `json:"p9999,omitempty"`  // 99.99th percentile duration (ms)
+	Max     float64 `json:"max,omitempty"`    // Maximum duration (ms)
+}
+
+// trackCleanupStart increments the pending counter and returns the start time.
+// Call this at the beginning of deleteNotActive.
+func trackCleanupStart() time.Time {
+	cleanupPending.Add(1)
+	return time.Now()
+}
+
+// trackCleanupEnd decrements pending, increments total, and records duration.
+// Call this via defer at the end of deleteNotActive.
+func trackCleanupEnd(start time.Time) {
+	cleanupPending.Add(-1)
+	cleanupTotal.Add(1)
+
+	durNs := time.Since(start).Nanoseconds()
+
+	// Update histogram bucket
+	bucket := len(cleanupBuckets) // Default to last bucket
+	for i, limit := range cleanupBuckets {
+		if durNs < limit {
+			bucket = i
+			break
+		}
+	}
+	cleanupHistogram[bucket].Add(1)
+
+	// Update max duration
+	if durNs > cleanupMaxDur.Load() {
+		cleanupMaxDur.Store(durNs)
+	}
+}
+
+// trackCleanupRetry increments the retry counter.
+// Call this each time a retry attempt is made in the cluster cleanup loop.
+func trackCleanupRetry() {
+	cleanupRetries.Add(1)
+}
+
+// cleanupStats returns current consumer cleanup statistics.
+func cleanupStats() *ConsumerCleanupStats {
+	// Gather histogram counts
+	var counts [6]uint64
+	var total uint64
+	for i := range cleanupHistogram {
+		counts[i] = cleanupHistogram[i].Load()
+		total += counts[i]
+	}
+
+	stats := &ConsumerCleanupStats{
+		Total:   cleanupTotal.Load(),
+		Pending: cleanupPending.Load(),
+		Retries: cleanupRetries.Load(),
+		Max:     float64(cleanupMaxDur.Load()) / 1_000_000, // ns to ms
+	}
+
+	if total == 0 {
+		return stats
+	}
+
+	// Calculate percentiles from histogram
+	stats.P50 = cleanupPercentile(counts[:], total, 0.50)
+	stats.P90 = cleanupPercentile(counts[:], total, 0.90)
+	stats.P99 = cleanupPercentile(counts[:], total, 0.99)
+	stats.P999 = cleanupPercentile(counts[:], total, 0.999)
+	stats.P9999 = cleanupPercentile(counts[:], total, 0.9999)
+
+	return stats
+}
+
+// cleanupPercentile calculates approximate percentile from histogram.
+func cleanupPercentile(counts []uint64, total uint64, p float64) float64 {
+	target := uint64(float64(total) * p)
+	var cumulative uint64
+	for i, count := range counts {
+		cumulative += count
+		if cumulative >= target {
+			return cleanupBucketMidpoints[i]
+		}
+	}
+	return cleanupBucketMidpoints[len(cleanupBucketMidpoints)-1]
+}

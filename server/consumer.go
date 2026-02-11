@@ -1959,6 +1959,10 @@ var (
 // deleteNotActive must only be called from time.AfterFunc or in its own
 // goroutine, as it can block on clean-up.
 func (o *consumer) deleteNotActive() {
+	// Track cleanup operation for statistics.
+	cleanupStart := trackCleanupStart()
+	defer trackCleanupEnd(cleanupStart)
+
 	// Take a copy of these when the goroutine starts, mostly it avoids a
 	// race condition with tests that modify these consts, such as
 	// TestJetStreamClusterGhostEphemeralsAfterRestart.
@@ -2104,6 +2108,7 @@ func (o *consumer) deleteNotActive() {
 				// Make sure this is the same consumer assignment, and not a new consumer with the same name.
 				if nca != nil && reflect.DeepEqual(nca, ca) {
 					s.Warnf("Consumer assignment for '%s > %s > %s' not cleaned up, retrying", acc, stream, name)
+					trackCleanupRetry()
 					meta.ForwardProposal(removeEntry)
 					if interval < cnaMax {
 						interval *= 2
