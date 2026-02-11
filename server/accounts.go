@@ -1907,9 +1907,18 @@ func (a *Account) checkForReverseEntries(reply string, checkInterest, recursed b
 	}
 	prefix := reply[:prefixLen]
 
+	// Fast path: when the pattern is <literal-prefix>.> (e.g. "_INBOX.abc123.>"),
+	// any entry starting with the prefix is a guaranteed match since > matches all
+	// remaining tokens. Skip tokenization and subset matching entirely.
+	fwcFastPath := prefixLen > 0 && reply[prefixLen:] == fwcs
+
 	rsa := [32]string{}
 	for _, r := range rs {
-		if len(prefix) > 0 && !strings.HasPrefix(r, prefix) {
+		if prefixLen > 0 && !strings.HasPrefix(r, prefix) {
+			continue
+		}
+		if fwcFastPath {
+			a._checkForReverseEntry(r, nil, checkInterest, recursed)
 			continue
 		}
 		rts := tokenizeSubjectIntoSlice(rsa[:0], r)
