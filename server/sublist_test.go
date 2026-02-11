@@ -2547,13 +2547,15 @@ func Benchmark_IsSubsetMatchNew_EarlyMismatch(b *testing.B) {
 // Benchmark the checkForReverseEntries hot loop pattern with and without
 // the prefix fast-path filter, simulating various rrMap sizes.
 
-func benchCheckReverseEntriesLoop(b *testing.B, pattern string, entries []string, usePrefix bool) {
+// mode: 0 = baseline (no optimizations), 1 = prefix filter only, 2 = prefix + fwc fast-path
+func benchCheckReverseEntriesLoop(b *testing.B, pattern string, entries []string, mode int) {
 	b.Helper()
 	tsa := [32]string{}
 	tts := tokenizeSubjectIntoSlice(tsa[:0], pattern)
 
 	var prefix string
-	if usePrefix {
+	var fwcFastPath bool
+	if mode >= 1 {
 		prefixLen := 0
 		for _, t := range tts {
 			if len(t) == 1 && (t[0] == pwc || t[0] == fwc) {
@@ -2562,6 +2564,9 @@ func benchCheckReverseEntriesLoop(b *testing.B, pattern string, entries []string
 			prefixLen += len(t) + 1
 		}
 		prefix = pattern[:prefixLen]
+		if mode >= 2 {
+			fwcFastPath = prefixLen > 0 && pattern[prefixLen:] == fwcs
+		}
 	}
 
 	rsa := [32]string{}
@@ -2570,6 +2575,9 @@ func benchCheckReverseEntriesLoop(b *testing.B, pattern string, entries []string
 		for _, r := range entries {
 			if len(prefix) > 0 && !strings.HasPrefix(r, prefix) {
 				continue
+			}
+			if fwcFastPath {
+				continue // simulates guaranteed match, no tokenize needed
 			}
 			rts := tokenizeSubjectIntoSlice(rsa[:0], r)
 			isSubsetMatchTokenized(rts, tts)
@@ -2586,32 +2594,38 @@ func generateReverseEntries(n int) []string {
 	return entries
 }
 
-func Benchmark_____ReverseEntries64_NoPrefix(b *testing.B) {
-	entries := generateReverseEntries(64)
-	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", entries, false)
+func Benchmark________ReverseEntries64_Baseline(b *testing.B) {
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", generateReverseEntries(64), 0)
 }
 
-func Benchmark___ReverseEntries64_WithPrefix(b *testing.B) {
-	entries := generateReverseEntries(64)
-	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", entries, true)
+func Benchmark______ReverseEntries64_PrefixOnly(b *testing.B) {
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", generateReverseEntries(64), 1)
 }
 
-func Benchmark____ReverseEntries512_NoPrefix(b *testing.B) {
-	entries := generateReverseEntries(512)
-	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", entries, false)
+func Benchmark_ReverseEntries64_PrefixAndFwcFast(b *testing.B) {
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", generateReverseEntries(64), 2)
 }
 
-func Benchmark__ReverseEntries512_WithPrefix(b *testing.B) {
-	entries := generateReverseEntries(512)
-	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", entries, true)
+func Benchmark_______ReverseEntries512_Baseline(b *testing.B) {
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", generateReverseEntries(512), 0)
 }
 
-func Benchmark___ReverseEntries4096_NoPrefix(b *testing.B) {
-	entries := generateReverseEntries(4096)
-	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", entries, false)
+func Benchmark_____ReverseEntries512_PrefixOnly(b *testing.B) {
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", generateReverseEntries(512), 1)
 }
 
-func Benchmark_ReverseEntries4096_WithPrefix(b *testing.B) {
-	entries := generateReverseEntries(4096)
-	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", entries, true)
+func Benchmark_ReverseEntries512_PrefixAndFwcFast(b *testing.B) {
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", generateReverseEntries(512), 2)
+}
+
+func Benchmark______ReverseEntries4096_Baseline(b *testing.B) {
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", generateReverseEntries(4096), 0)
+}
+
+func Benchmark____ReverseEntries4096_PrefixOnly(b *testing.B) {
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", generateReverseEntries(4096), 1)
+}
+
+func Benchmark_ReverseEntries4096_PrefixAndFwcFast(b *testing.B) {
+	benchCheckReverseEntriesLoop(b, "_R_.abc123.>", generateReverseEntries(4096), 2)
 }
