@@ -1500,6 +1500,115 @@ func isSubsetMatchTokenized(tokens, test []string) bool {
 	return len(tokens) == len(test)
 }
 
+// tokenizeSubjectBytesIntoSlice tokenizes a subject as bytes without string allocation.
+// Use similar to append - the updated slice will be returned.
+func tokenizeSubjectBytesIntoSlice(tts [][]byte, subject []byte) [][]byte {
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tts = append(tts, subject[start:i])
+			start = i + 1
+		}
+	}
+	return append(tts, subject[start:])
+}
+
+// isSubsetMatchTokenizedBytes tests byte tokens against test tokens.
+// Both may contain wildcards.
+func isSubsetMatchTokenizedBytes(tokens, test [][]byte) bool {
+	for i, t2 := range test {
+		if i >= len(tokens) {
+			return false
+		}
+		l := len(t2)
+		if l == 0 {
+			return false
+		}
+		if t2[0] == fwc && l == 1 {
+			return true
+		}
+		t1 := tokens[i]
+		l = len(t1)
+		if l == 0 || t1[0] == fwc && l == 1 {
+			return false
+		}
+		if t1[0] == pwc && len(t1) == 1 {
+			m := t2[0] == pwc && len(t2) == 1
+			if !m {
+				return false
+			}
+			continue
+		}
+		if t2[0] != pwc && !bytes.Equal(t1, t2) {
+			return false
+		}
+	}
+	return len(tokens) == len(test)
+}
+
+// countTokens counts the number of tokens (dot-separated segments) in a subject.
+// This is faster than full tokenization when we only need the count.
+func countTokens(subject []byte) int {
+	count := 1
+	for _, b := range subject {
+		if b == btsep {
+			count++
+		}
+	}
+	return count
+}
+
+// firstToken extracts the first token from a subject without allocating a slice.
+// Returns the first token and whether there are more tokens.
+func firstToken(subject []byte) ([]byte, bool) {
+	for i, b := range subject {
+		if b == btsep {
+			return subject[:i], true
+		}
+	}
+	return subject, false
+}
+
+// subjectBytesMatchFilter checks if subject bytes match a filter.
+// For non-wildcard filters, uses direct byte comparison.
+// For wildcard filters, uses early-exit optimizations before full tokenization.
+func subjectBytesMatchFilter(subject, filter []byte, wc bool, filterTokens [][]byte) bool {
+	if !wc {
+		return bytes.Equal(subject, filter)
+	}
+
+	numFilterTokens := len(filterTokens)
+	if numFilterTokens == 0 {
+		return false
+	}
+
+	// Check if filter ends with fwc (>). If not, token counts must match.
+	lastToken := filterTokens[numFilterTokens-1]
+	hasFWC := len(lastToken) == 1 && lastToken[0] == fwc
+
+	if !hasFWC {
+		// Token counts must match exactly - do a fast dot count.
+		if countTokens(subject) != numFilterTokens {
+			return false
+		}
+	}
+
+	// Check first token for early exit (most selective in hierarchical subjects).
+	firstFilterToken := filterTokens[0]
+	// Skip first token check if it's a wildcard.
+	if !(len(firstFilterToken) == 1 && (firstFilterToken[0] == pwc || firstFilterToken[0] == fwc)) {
+		subjFirst, _ := firstToken(subject)
+		if !bytes.Equal(subjFirst, firstFilterToken) {
+			return false
+		}
+	}
+
+	// Full tokenization and match required.
+	_tsa := [32][]byte{}
+	tsa := tokenizeSubjectBytesIntoSlice(_tsa[:0], subject)
+	return isSubsetMatchTokenizedBytes(tsa, filterTokens)
+}
+
 // matchLiteral is used to test literal subjects, those that do not have any
 // wildcards, with a target subject. This is used in the cache layer.
 func matchLiteral(literal, subject string) bool {

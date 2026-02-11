@@ -2934,16 +2934,15 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 	fseq = max(fseq, atomic.LoadUint64(&mb.first.seq))
 	lseq := atomic.LoadUint64(&mb.last.seq)
 
-	// Optionally build the isMatch for wildcard filters.
-	var isMatch func(subj string) bool
-	// Decide to build.
+	// Build byte-based filter tokens once for pre-filtering without string allocation.
+	var filterBytes []byte
+	var filterTokens [][]byte
 	if wc {
-		_tsa, _fsa := [32]string{}, [32]string{}
-		tsa, fsa := _tsa[:0], tokenizeSubjectIntoSlice(_fsa[:0], filter)
-		isMatch = func(subj string) bool {
-			tsa = tokenizeSubjectIntoSlice(tsa[:0], subj)
-			return isSubsetMatchTokenized(tsa, fsa)
-		}
+		_fsa := [32][]byte{}
+		filterBytes = stringToBytes(filter)
+		filterTokens = tokenizeSubjectBytesIntoSlice(_fsa[:0], filterBytes)
+	} else {
+		filterBytes = stringToBytes(filter)
 	}
 
 	subjs := mb.fs.cfg.Subjects
@@ -3002,6 +3001,32 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 			updateLLTS = true
 			continue
 		}
+
+		// Pre-filter: extract subject bytes and match without full decode.
+		// This avoids string allocation for non-matching messages.
+		if !isAll {
+			bi, _, _, err := mb.slotInfo(int(seq - mb.cache.fseq))
+			if err != nil {
+				if err == errPartialCache || err == errNoCache {
+					return nil, false, err
+				}
+				updateLLTS = true
+				continue
+			}
+			buf := mb.cache.buf[bi:]
+			subjBytes, ok := mb.subjectFromBuf(buf)
+			if !ok {
+				updateLLTS = true
+				continue
+			}
+			if !subjectBytesMatchFilter(subjBytes, filterBytes, wc, filterTokens) {
+				// No match - skip without string allocation.
+				updateLLTS = true
+				continue
+			}
+		}
+
+		// Match found (or isAll) - do full decode.
 		llseq := mb.llseq
 		fsm, err := mb.cacheLookup(seq, sm)
 		if err != nil {
@@ -3012,16 +3037,7 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 		}
 		updateLLTS = false // cacheLookup already updated it.
 		expireOk := seq == lseq && mb.llseq != llseq && mb.llseq == seq
-		if isAll {
-			return fsm, expireOk, nil
-		}
-		if wc && isMatch(sm.subj) {
-			return fsm, expireOk, nil
-		} else if !wc && fsm.subj == filter {
-			return fsm, expireOk, nil
-		}
-		// If we are here we did not match, so put the llseq back.
-		mb.llseq = llseq
+		return fsm, expireOk, nil
 	}
 
 	return nil, didLoad, ErrStoreMsgNotFound
@@ -8216,6 +8232,21 @@ func (fs *fileStore) msgForSeqLocked(seq uint64, sm *StoreMsg, needFSLock bool) 
 	}
 
 	return fsm, nil
+}
+
+// subjectFromBuf extracts subject bytes from a raw message buffer.
+// Returns the subject bytes slice (references buf, no copy) and ok status.
+// Lock should be held.
+func (mb *msgBlock) subjectFromBuf(buf []byte) ([]byte, bool) {
+	if len(buf) < msgHdrSize+checksumSize {
+		return nil, false
+	}
+	slen := int(binary.LittleEndian.Uint16(buf[20:]))
+	end := msgHdrSize + slen
+	if end > len(buf)-checksumSize {
+		return nil, false
+	}
+	return buf[msgHdrSize:end], true
 }
 
 // Internal function to return msg parts from a raw buffer.
