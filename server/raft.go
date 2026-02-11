@@ -41,6 +41,12 @@ type RaftNode interface {
 	ProposeMulti(entries []*Entry) error
 	ForwardProposal(entry []byte) error
 	InstallSnapshot(snap []byte) error
+	InstallSnapshotAsyncReplayFunc(
+		processSnap func([]byte) error,
+		processEntry func(*appendEntry) error,
+		generateData func() ([]byte, error),
+		done func(error),
+	)
 	SendSnapshot(snap []byte) error
 	NeedSnapshot() bool
 	Applied(index uint64) (entries uint64, bytes uint64)
@@ -234,6 +240,7 @@ type raft struct {
 	initializing bool // The node is new, and "empty log" checks can be temporarily relaxed.
 	scaleUp      bool // The node is part of a scale up, puts us in observer mode until the log contains data.
 	deleted      bool // If the node was deleted.
+	snapshotting bool // Snapshot is in progress.
 }
 
 type proposedEntry struct {
@@ -241,7 +248,7 @@ type proposedEntry struct {
 	reply string // Optional, to respond once proposal handled
 }
 
-// cacthupState structure that holds our subscription, and catchup term and index
+// catchupState structure that holds our subscription, and catchup term and index
 // as well as starting term and index and how many updates we have seen.
 type catchupState struct {
 	sub    *subscription // Subscription that catchup messages will arrive on
@@ -312,6 +319,7 @@ var (
 	errNodeRemoved       = errors.New("raft: peer was removed")
 	errBadSnapName       = errors.New("raft: snapshot name could not be parsed")
 	errNoSnapAvailable   = errors.New("raft: no snapshot available")
+	errSnapInProgress    = errors.New("raft: snapshot is already in progress")
 	errCatchupsRunning   = errors.New("raft: snapshot can not be installed while catchups running")
 	errSnapshotCorrupt   = errors.New("raft: snapshot corrupt")
 	errTooManyPrefs      = errors.New("raft: stepdown requires at most one preferred new leader")
@@ -1284,6 +1292,10 @@ func (n *raft) InstallSnapshot(data []byte) error {
 	n.Lock()
 	defer n.Unlock()
 
+	if n.snapshotting {
+		return errSnapInProgress
+	}
+
 	// If a write error has occurred already then stop here.
 	if werr := n.werr; werr != nil {
 		return werr
@@ -1347,6 +1359,149 @@ func (n *raft) installSnapshot(snap *snapshot) error {
 	n.papplied = snap.lastIndex
 	n.bytes = state.Bytes
 	return nil
+}
+
+func (n *raft) InstallSnapshotAsyncReplayFunc(
+	processSnap func([]byte) error,
+	processEntry func(*appendEntry) error,
+	generateData func() ([]byte, error),
+	cb func(error),
+) {
+	if n.State() == Closed {
+		cb(errNodeClosed)
+		return
+	}
+
+	n.Lock()
+	defer n.Unlock()
+
+	if n.snapshotting {
+		cb(errSnapInProgress)
+		return
+	}
+
+	// If a write error has occurred already then stop here.
+	if werr := n.werr; werr != nil {
+		cb(werr)
+		return
+	}
+
+	// Check that a catchup isn't already taking place. If it is then we won't
+	// allow installing snapshots until it is done.
+	if len(n.progress) > 0 || n.paused {
+		cb(errCatchupsRunning)
+		return
+	}
+
+	applied := n.applied
+	if applied == 0 {
+		n.debug("Not snapshotting as there are no applied entries")
+		cb(errNoSnapAvailable)
+		return
+	}
+
+	var term uint64
+	if ae, _ := n.loadEntry(applied); ae != nil {
+		term = ae.term
+		ae.returnToPool()
+	} else {
+		n.debug("Not snapshotting as entry %d is not available", applied)
+		cb(errNoSnapAvailable)
+		return
+	}
+
+	// Snapshot the current peer state for the current applied index, we'll need it in the snapshot.
+	peerstate := encodePeerState(&peerState{n.peerNames(), n.csz, n.extSt})
+	snapDir := filepath.Join(n.sd, snapshotsDir)
+	snapFile := filepath.Join(snapDir, fmt.Sprintf(snapFileT, term, applied))
+
+	s := n.s
+	n.snapshotting = true
+	s.startGoRoutine(func() {
+		defer s.grWG.Done()
+		defer func() {
+			n.Lock()
+			n.snapshotting = false
+			n.Unlock()
+		}()
+
+		n.Lock()
+		snap, err := n.loadLastSnapshot()
+		n.Unlock()
+		if err != nil && err != errNoSnapAvailable {
+			cb(err)
+			return
+		}
+
+		first := uint64(1)
+		if snap != nil {
+			first = snap.lastIndex + 1
+			if err = processSnap(snap.data); err != nil {
+				cb(err)
+				return
+			}
+		}
+
+		for index := first; index <= applied; index++ {
+			n.Lock()
+			ae, err := n.loadEntry(index)
+			n.Unlock()
+			if err != nil {
+				cb(err)
+				return
+			}
+			err = processEntry(ae)
+			ae.returnToPool()
+			if err != nil {
+				cb(err)
+				return
+			}
+		}
+
+		data, err := generateData()
+		if err != nil {
+			cb(err)
+			return
+		}
+
+		n.Lock()
+		n.debug("Installing snapshot of %d bytes [%d:%d]", len(data), term, applied)
+		encoded := n.encodeSnapshot(&snapshot{
+			lastTerm:  term,
+			lastIndex: applied,
+			peerstate: peerstate,
+			data:      data,
+		})
+		n.Unlock()
+
+		if err = writeFileWithSync(snapFile, encoded, defaultFilePerms); err != nil {
+			cb(err)
+			return
+		}
+		n.Lock()
+		defer n.Unlock()
+		if n.State() == Closed {
+			cb(errNodeClosed)
+			return
+		}
+		// Delete our previous snapshot file if it exists.
+		if n.snapfile != _EMPTY_ && n.snapfile != snapFile {
+			os.Remove(n.snapfile)
+		}
+		// Remember our latest snapshot file.
+		n.snapfile = snapFile
+		_, err = n.wal.Compact(applied + 1)
+		if err != nil {
+			n.setWriteErrLocked(err)
+			cb(err)
+			return
+		}
+		var state StreamState
+		n.wal.FastState(&state)
+		n.papplied = applied
+		n.bytes = state.Bytes
+		cb(nil) // Signal success.
+	})
 }
 
 // NeedSnapshot returns true if it is necessary to try to install a snapshot, i.e.

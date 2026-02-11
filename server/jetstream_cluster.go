@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -1495,9 +1496,16 @@ func (js *jetStream) monitorCluster() {
 	recovering := true
 
 	// Snapshotting function.
+	var (
+		snapMu           sync.Mutex
+		snapshotting     bool
+		fallbackSnapshot bool
+	)
 	doSnapshot := func(force bool) {
 		// Suppress during recovery.
-		if recovering {
+		snapMu.Lock()
+		if recovering || snapshotting {
+			snapMu.Unlock()
 			return
 		}
 		// Look up what the threshold is for compaction. Re-reading from config here as it is reloadable.
@@ -1509,16 +1517,123 @@ func (js *jetStream) monitorCluster() {
 		byEntries, bySize := ethresh > 0, szthresh > 0
 		byNeither := !byEntries && !bySize
 		// For the meta layer we want to snapshot when over the above threshold (which could be 0 by default).
-		if ne, nsz := n.Size(); force || byNeither || (byEntries && ne > ethresh) || (bySize && nsz > szthresh) || n.NeedSnapshot() {
+		ne, nsz := n.Size()
+		createSnapshot := force || byNeither || (byEntries && ne > ethresh) || (bySize && nsz > szthresh) || n.NeedSnapshot()
+		if !createSnapshot {
+			snapMu.Unlock()
+			return
+		}
+
+		if !fallbackSnapshot {
+			if szthresh == 0 {
+				szthresh = compactSizeMin
+			}
+			if nsz >= 10*szthresh {
+				s.rateLimitFormatWarnf("JetStream cluster metalayer log size has exceeded async threshold, will fall back to blocking snapshot")
+				fallbackSnapshot = true
+			}
+		}
+
+		if fallbackSnapshot {
+			s.rateLimitFormatWarnf("Metalayer blocking snapshot starting")
+			start := time.Now()
 			snap, err := js.metaSnapshot()
 			if err != nil {
 				s.Warnf("Error generating JetStream cluster snapshot: %v", err)
 			} else if err = n.InstallSnapshot(snap); err == nil {
 				lastSnapTime = time.Now()
+				// Fallback snapshot was successful, the next one can be async again.
+				fallbackSnapshot = false
+				// Always print time taken.
+				took := time.Since(start)
+				s.rateLimitFormatWarnf("Metalayer blocking snapshot took %.3fs", took.Seconds())
 			} else if err != errNoSnapAvailable && err != errNodeClosed {
 				s.Warnf("Error snapshotting JetStream cluster state: %v", err)
 			}
+			snapMu.Unlock()
+			return
 		}
+
+		var (
+			err     error
+			streams map[string]map[string]*streamAssignment
+		)
+		ru := &recoveryUpdates{
+			removeStreams:   make(map[string]*streamAssignment),
+			removeConsumers: make(map[string]map[string]*consumerAssignment),
+			addStreams:      make(map[string]*streamAssignment),
+			updateStreams:   make(map[string]*streamAssignment),
+			updateConsumers: make(map[string]map[string]*consumerAssignment),
+		}
+		start := time.Now()
+		snapshotting = true
+		snapMu.Unlock()
+		n.InstallSnapshotAsyncReplayFunc(
+			func(data []byte) error {
+				streams, err = js.decodeMetaSnapshot(data)
+				return err
+			},
+			func(ae *appendEntry) error {
+				js.collectStreamAndConsumerChanges(ae, ru)
+				return nil
+			},
+			func() ([]byte, error) {
+				if streams == nil {
+					streams = make(map[string]map[string]*streamAssignment)
+				}
+				for _, cas := range ru.removeConsumers {
+					for _, ca := range cas {
+						if asa, ok := streams[ca.Client.serviceAccount()]; ok {
+							if sa, ok := asa[ca.Stream]; ok {
+								delete(sa.consumers, ca.Name)
+							}
+						}
+					}
+				}
+				for _, sa := range ru.removeStreams {
+					if asa, ok := streams[sa.Client.serviceAccount()]; ok {
+						delete(asa, sa.Config.Name)
+					}
+				}
+				for _, sa := range ru.addStreams {
+					as := streams[sa.Client.serviceAccount()]
+					if as == nil {
+						as = make(map[string]*streamAssignment)
+						streams[sa.Client.serviceAccount()] = as
+					}
+					as[sa.Config.Name] = sa
+				}
+				for _, cas := range ru.updateConsumers {
+					for _, ca := range cas {
+						if asa, ok := streams[ca.Client.serviceAccount()]; ok {
+							if sa, ok := asa[ca.Stream]; ok {
+								if sa.consumers == nil {
+									sa.consumers = make(map[string]*consumerAssignment)
+								}
+								sa.consumers[ca.Name] = ca
+							}
+						}
+					}
+				}
+				return js.encodeMetaSnapshot(streams)
+			},
+			func(err error) {
+				snapMu.Lock()
+				defer snapMu.Unlock()
+				snapshotting = false
+				if err != nil {
+					if err != errNoSnapAvailable && err != errNodeClosed {
+						s.Warnf("Error snapshotting JetStream cluster state: %v, will fall back to blocking snapshot", err)
+						fallbackSnapshot = true
+					}
+					return
+				}
+				lastSnapTime = time.Now()
+				if took := time.Since(start); took > time.Second {
+					s.rateLimitFormatWarnf("Metalayer async snapshot took %.3fs", took.Seconds())
+				}
+			},
+		)
 	}
 
 	var ru *recoveryUpdates
@@ -1719,115 +1834,17 @@ func (js *jetStream) clusterStreamConfig(accName, streamName string) (StreamConf
 }
 
 func (js *jetStream) metaSnapshot() ([]byte, error) {
-	start := time.Now()
 	js.mu.RLock()
-	s := js.srv
+	defer js.mu.RUnlock()
 	cc := js.cluster
-	nsa := 0
-	nca := 0
-	for _, asa := range cc.streams {
-		nsa += len(asa)
-	}
-	streams := make([]writeableStreamAssignment, 0, nsa)
-	for _, asa := range cc.streams {
-		for _, sa := range asa {
-			wsa := writeableStreamAssignment{
-				Client:     sa.Client.forAssignmentSnap(),
-				Created:    sa.Created,
-				ConfigJSON: sa.ConfigJSON,
-				Group:      sa.Group,
-				Sync:       sa.Sync,
-				Consumers:  make([]*writeableConsumerAssignment, 0, len(sa.consumers)),
-			}
-			for _, ca := range sa.consumers {
-				wca := writeableConsumerAssignment{
-					Client:     ca.Client.forAssignmentSnap(),
-					Created:    ca.Created,
-					Name:       ca.Name,
-					Stream:     ca.Stream,
-					ConfigJSON: ca.ConfigJSON,
-					Group:      ca.Group,
-					State:      ca.State,
-				}
-				wsa.Consumers = append(wsa.Consumers, &wca)
-				nca++
-			}
-			streams = append(streams, wsa)
-		}
-	}
-
-	if len(streams) == 0 {
-		js.mu.RUnlock()
-		return nil, nil
-	}
-
-	// Track how long it took to marshal the JSON
-	mstart := time.Now()
-	b, err := json.Marshal(streams)
-	mend := time.Since(mstart)
-
-	js.mu.RUnlock()
-
-	// Must not be possible for a JSON marshaling error to result
-	// in an empty snapshot.
-	if err != nil {
-		return nil, err
-	}
-
-	// Track how long it took to compress the JSON.
-	cstart := time.Now()
-	snap := s2.Encode(nil, b)
-	cend := time.Since(cstart)
-	took := time.Since(start)
-
-	if took > time.Second {
-		s.rateLimitFormatWarnf("Metalayer snapshot took %.3fs (streams: %d, consumers: %d, marshal: %.3fs, s2: %.3fs, uncompressed: %d, compressed: %d)",
-			took.Seconds(), nsa, nca, mend.Seconds(), cend.Seconds(), len(b), len(snap))
-	}
-
-	// Track in jsz monitoring as well.
-	if cc != nil {
-		atomic.StoreInt64(&cc.lastMetaSnapTime, start.UnixNano())
-		atomic.StoreInt64(&cc.lastMetaSnapDuration, int64(took))
-	}
-
-	return snap, nil
+	snap, err := js.encodeMetaSnapshot(cc.streams)
+	return snap, err
 }
 
 func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecovering bool) error {
-	var wsas []writeableStreamAssignment
-	if len(buf) > 0 {
-		jse, err := s2.Decode(nil, buf)
-		if err != nil {
-			return err
-		}
-		if err = json.Unmarshal(jse, &wsas); err != nil {
-			return err
-		}
-	}
-
-	// Build our new version here outside of js.
-	streams := make(map[string]map[string]*streamAssignment)
-	for _, wsa := range wsas {
-		as := streams[wsa.Client.serviceAccount()]
-		if as == nil {
-			as = make(map[string]*streamAssignment)
-			streams[wsa.Client.serviceAccount()] = as
-		}
-		sa := &streamAssignment{Client: wsa.Client, Created: wsa.Created, ConfigJSON: wsa.ConfigJSON, Group: wsa.Group, Sync: wsa.Sync}
-		decodeStreamAssignmentConfig(js.srv, sa)
-		if len(wsa.Consumers) > 0 {
-			sa.consumers = make(map[string]*consumerAssignment)
-			for _, wca := range wsa.Consumers {
-				if wca.Stream == _EMPTY_ {
-					wca.Stream = sa.Config.Name // Rehydrate from the stream name.
-				}
-				ca := &consumerAssignment{Client: wca.Client, Created: wca.Created, Name: wca.Name, Stream: wca.Stream, ConfigJSON: wca.ConfigJSON, Group: wca.Group, State: wca.State}
-				decodeConsumerAssignmentConfig(ca)
-				sa.consumers[ca.Name] = ca
-			}
-		}
-		as[sa.Config.Name] = sa
+	streams, err := js.decodeMetaSnapshot(buf)
+	if err != nil {
+		return err
 	}
 
 	js.mu.Lock()
@@ -1938,6 +1955,163 @@ func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecove
 	}
 
 	return nil
+}
+
+func (js *jetStream) decodeMetaSnapshot(buf []byte) (map[string]map[string]*streamAssignment, error) {
+	var wsas []writeableStreamAssignment
+	if len(buf) > 0 {
+		jse, err := s2.Decode(nil, buf)
+		if err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(jse, &wsas); err != nil {
+			return nil, err
+		}
+	}
+
+	// Build our new version here outside of js.
+	streams := make(map[string]map[string]*streamAssignment)
+	for _, wsa := range wsas {
+		as := streams[wsa.Client.serviceAccount()]
+		if as == nil {
+			as = make(map[string]*streamAssignment)
+			streams[wsa.Client.serviceAccount()] = as
+		}
+		sa := &streamAssignment{Client: wsa.Client, Created: wsa.Created, ConfigJSON: wsa.ConfigJSON, Group: wsa.Group, Sync: wsa.Sync}
+		if err := decodeStreamAssignmentConfig(js.srv, sa); err != nil {
+			return nil, err
+		}
+		if len(wsa.Consumers) > 0 {
+			sa.consumers = make(map[string]*consumerAssignment)
+			for _, wca := range wsa.Consumers {
+				if wca.Stream == _EMPTY_ {
+					wca.Stream = sa.Config.Name // Rehydrate from the stream name.
+				}
+				ca := &consumerAssignment{Client: wca.Client, Created: wca.Created, Name: wca.Name, Stream: wca.Stream, ConfigJSON: wca.ConfigJSON, Group: wca.Group, State: wca.State}
+				if err := decodeConsumerAssignmentConfig(ca); err != nil {
+					return nil, err
+				}
+				sa.consumers[ca.Name] = ca
+			}
+		}
+		as[sa.Config.Name] = sa
+	}
+	return streams, nil
+}
+
+func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAssignment) ([]byte, error) {
+	start := time.Now()
+	nsa := 0
+	nca := 0
+	for _, asa := range streams {
+		nsa += len(asa)
+	}
+	out := make([]writeableStreamAssignment, 0, nsa)
+	for _, asa := range streams {
+		for _, sa := range asa {
+			wsa := writeableStreamAssignment{
+				Client:     sa.Client.forAssignmentSnap(),
+				Created:    sa.Created,
+				ConfigJSON: sa.ConfigJSON,
+				Group:      sa.Group,
+				Sync:       sa.Sync,
+				Consumers:  make([]*writeableConsumerAssignment, 0, len(sa.consumers)),
+			}
+			for _, ca := range sa.consumers {
+				wca := writeableConsumerAssignment{
+					Client:     ca.Client.forAssignmentSnap(),
+					Created:    ca.Created,
+					Name:       ca.Name,
+					Stream:     ca.Stream,
+					ConfigJSON: ca.ConfigJSON,
+					Group:      ca.Group,
+					State:      ca.State,
+				}
+				wsa.Consumers = append(wsa.Consumers, &wca)
+				nca++
+			}
+			out = append(out, wsa)
+		}
+	}
+
+	if len(out) == 0 {
+		return nil, nil
+	}
+
+	// Track how long it took to marshal the JSON
+	mstart := time.Now()
+	b, err := json.Marshal(out)
+	mend := time.Since(mstart)
+
+	// Must not be possible for a JSON marshaling error to result
+	// in an empty snapshot.
+	if err != nil {
+		return nil, err
+	}
+
+	// Track how long it took to compress the JSON.
+	cstart := time.Now()
+	snap := s2.Encode(nil, b)
+	cend := time.Since(cstart)
+	took := time.Since(start)
+
+	if took > time.Second {
+		js.srv.rateLimitFormatWarnf("Metalayer snapshot generation took %.3fs (streams: %d, consumers: %d, marshal: %.3fs, s2: %.3fs, uncompressed: %d, compressed: %d)",
+			took.Seconds(), nsa, nca, mend.Seconds(), cend.Seconds(), len(b), len(snap))
+	}
+
+	// Track in jsz monitoring as well.
+	if cc := js.cluster; cc != nil {
+		atomic.StoreInt64(&cc.lastMetaSnapTime, start.UnixNano())
+		atomic.StoreInt64(&cc.lastMetaSnapDuration, int64(took))
+	}
+
+	return snap, nil
+}
+
+func (js *jetStream) collectStreamAndConsumerChanges(ae *appendEntry, ru *recoveryUpdates) {
+	for _, e := range ae.entries {
+		if e.Type == EntryNormal {
+			buf := e.Data
+			op := entryOp(buf[0])
+			switch op {
+			case assignStreamOp, updateStreamOp, removeStreamOp:
+				sa, err := decodeStreamAssignment(js.srv, buf[1:])
+				if err != nil {
+					js.srv.Errorf("JetStream cluster failed to decode stream assignment: %q", buf[1:])
+					panic(err)
+				}
+				if op == removeStreamOp {
+					ru.removeStream(sa)
+				} else {
+					ru.addStream(sa)
+				}
+			case assignConsumerOp:
+				ca, err := decodeConsumerAssignment(buf[1:])
+				if err != nil {
+					js.srv.Errorf("JetStream cluster failed to decode consumer assignment: %q", buf[1:])
+					panic(err)
+				}
+				ru.addOrUpdateConsumer(ca)
+			case assignCompressedConsumerOp:
+				ca, err := decodeConsumerAssignmentCompressed(buf[1:])
+				if err != nil {
+					js.srv.Errorf("JetStream cluster failed to decode compressed consumer assignment: %q", buf[1:])
+					panic(err)
+				}
+				ru.addOrUpdateConsumer(ca)
+			case removeConsumerOp:
+				ca, err := decodeConsumerAssignment(buf[1:])
+				if err != nil {
+					js.srv.Errorf("JetStream cluster failed to decode consumer assignment: %q", buf[1:])
+					panic(err)
+				}
+				ru.removeConsumer(ca)
+			default:
+				panic(fmt.Sprintf("JetStream Cluster Unknown meta entry op type: %v", entryOp(buf[0])))
+			}
+		}
+	}
 }
 
 // Called on recovery to make sure we do not process like original.
@@ -6272,12 +6446,13 @@ func (js *jetStream) processConsumerLeaderChange(o *consumer, isLeader bool) err
 	if isLeader {
 		// Only log if the consumer is replicated and/or durable.
 		// Logging about R1 ephemerals, like KV watchers, is mostly noise since the leader will always be known.
-		o.mu.RLock()
-		isReplicated, durable := o.node != nil, o.isDurable()
-		o.mu.RUnlock()
-		if isReplicated || durable {
-			s.Noticef("JetStream cluster new consumer leader for '%s > %s > %s'", ca.Client.serviceAccount(), streamName, consumerName)
-		}
+		_, _ = streamName, consumerName
+		//o.mu.RLock()
+		//isReplicated, durable := o.node != nil, o.isDurable()
+		//o.mu.RUnlock()
+		//if isReplicated || durable {
+		//	s.Noticef("JetStream cluster new consumer leader for '%s > %s > %s'", ca.Client.serviceAccount(), streamName, consumerName)
+		//}
 		s.sendConsumerLeaderElectAdvisory(o)
 	} else {
 		// We are stepping down.
@@ -8379,7 +8554,7 @@ func decodeStreamAssignmentConfig(s *Server, sa *streamAssignment) error {
 	sa.Config = &cfg
 	fixCfgMirrorWithDedupWindow(sa.Config)
 
-	if unsupported || err != nil || (sa.Config != nil && !supportsRequiredApiLevel(sa.Config.Metadata)) {
+	if unsupported || (sa.Config != nil && !supportsRequiredApiLevel(sa.Config.Metadata)) {
 		sa.unsupported = newUnsupportedStreamAssignment(s, sa, err)
 	}
 	return nil
@@ -8839,7 +9014,7 @@ func decodeConsumerAssignmentConfig(ca *consumerAssignment) error {
 		}
 	}
 	ca.Config = &cfg
-	if unsupported || err != nil || (ca.Config != nil && !supportsRequiredApiLevel(ca.Config.Metadata)) {
+	if unsupported || (ca.Config != nil && !supportsRequiredApiLevel(ca.Config.Metadata)) {
 		ca.unsupported = newUnsupportedConsumerAssignment(ca, err)
 	}
 	return nil
