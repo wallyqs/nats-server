@@ -2920,7 +2920,9 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 			continue
 		}
 		llseq := mb.llseq
-		fsm, err := mb.cacheLookup(seq, sm)
+		// Use NoCopy for the scan to avoid memmove for non-matching messages.
+		// We will re-do a copy lookup only when we find a match.
+		fsm, err := mb.cacheLookupNoCopy(seq, sm)
 		if err != nil {
 			if err == errPartialCache || err == errNoCache {
 				return nil, false, err
@@ -2929,12 +2931,14 @@ func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *Stor
 		}
 		updateLLTS = false // cacheLookup already updated it.
 		expireOk := seq == lseq && mb.llseq != llseq && mb.llseq == seq
-		if isAll {
-			return fsm, expireOk, nil
-		}
-		if wc && isMatch(sm.subj) {
-			return fsm, expireOk, nil
-		} else if !wc && fsm.subj == filter {
+		if isAll || (wc && isMatch(sm.subj)) || (!wc && fsm.subj == filter) {
+			// Found a match. Re-lookup with copy since the cache may be
+			// released after we return and the caller needs stable data.
+			sm.buf = nil // Force fresh allocation, don't append into cache memory.
+			fsm, err = mb.cacheLookup(seq, sm)
+			if err != nil {
+				return nil, false, err
+			}
 			return fsm, expireOk, nil
 		}
 		// If we are here we did not match, so put the llseq back.

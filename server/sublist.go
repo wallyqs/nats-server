@@ -1405,15 +1405,15 @@ func tokenAt(subject string, index uint8) string {
 
 // use similar to append. meaning, the updated slice will be returned
 func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tts = append(tts, subject[start:i])
-			start = i + 1
+	for {
+		if i := strings.IndexByte(subject, btsep); i >= 0 {
+			tts = append(tts, subject[:i])
+			subject = subject[i+1:]
+		} else {
+			tts = append(tts, subject)
+			return tts
 		}
 	}
-	tts = append(tts, subject[start:])
-	return tts
 }
 
 // SubjectMatchesFilter returns true if the subject matches the provided
@@ -1471,7 +1471,7 @@ func isSubsetMatchTokenized(tokens, test []string) bool {
 			}
 			continue
 		}
-		if t2[0] != pwc && strings.Compare(t1, t2) != 0 {
+		if t2[0] != pwc && t1 != t2 {
 			return false
 		}
 	}
