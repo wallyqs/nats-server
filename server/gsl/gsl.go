@@ -173,20 +173,22 @@ func (s *GenericSublist[T]) NumInterest(subject string) (np int) {
 func (s *GenericSublist[T]) match(subject string, cb func(T), doLock bool) {
 	tsa := [32]string{}
 	tokens := tsa[:0]
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			if i-start == 0 {
+	sub := subject
+	for {
+		if idx := strings.IndexByte(sub, btsep); idx >= 0 {
+			if idx == 0 {
 				return
 			}
-			tokens = append(tokens, subject[start:i])
-			start = i + 1
+			tokens = append(tokens, sub[:idx])
+			sub = sub[idx+1:]
+		} else {
+			if len(sub) == 0 {
+				return
+			}
+			tokens = append(tokens, sub)
+			break
 		}
 	}
-	if start >= len(subject) {
-		return
-	}
-	tokens = append(tokens, subject[start:])
 
 	if doLock {
 		s.RLock()
@@ -198,20 +200,22 @@ func (s *GenericSublist[T]) match(subject string, cb func(T), doLock bool) {
 func (s *GenericSublist[T]) hasInterest(subject string, doLock bool, np *int) bool {
 	tsa := [32]string{}
 	tokens := tsa[:0]
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			if i-start == 0 {
+	sub := subject
+	for {
+		if idx := strings.IndexByte(sub, btsep); idx >= 0 {
+			if idx == 0 {
 				return false
 			}
-			tokens = append(tokens, subject[start:i])
-			start = i + 1
+			tokens = append(tokens, sub[:idx])
+			sub = sub[idx+1:]
+		} else {
+			if len(sub) == 0 {
+				return false
+			}
+			tokens = append(tokens, sub)
+			break
 		}
 	}
-	if start >= len(subject) {
-		return false
-	}
-	tokens = append(tokens, subject[start:])
 
 	if doLock {
 		s.RLock()
@@ -494,13 +498,14 @@ func visitLevel[T comparable](l *level[T], depth int) int {
 
 // use similar to append. meaning, the updated slice will be returned
 func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tts = append(tts, subject[start:i])
-			start = i + 1
+	for {
+		if idx := strings.IndexByte(subject, btsep); idx >= 0 {
+			tts = append(tts, subject[:idx])
+			subject = subject[idx+1:]
+		} else {
+			tts = append(tts, subject)
+			break
 		}
 	}
-	tts = append(tts, subject[start:])
 	return tts
 }
