@@ -5107,16 +5107,17 @@ func (mset *stream) processDirectGetLastBySubjectRequest(_ *subscription, c *cli
 
 	// Extract the key.
 	var key string
-	for i, n := 0, 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			if n == 4 {
-				if start := i + 1; start < len(subject) {
-					key = subject[i+1:]
-				}
-				break
-			}
-			n++
+	remaining := subject
+	for n := 0; n < 5; n++ {
+		if idx := strings.IndexByte(remaining, btsep); idx >= 0 {
+			remaining = remaining[idx+1:]
+		} else {
+			remaining = _EMPTY_
+			break
 		}
+	}
+	if len(remaining) > 0 {
+		key = remaining
 	}
 	if len(key) == 0 {
 		hdr := []byte("NATS/1.0 408 Bad Request\r\n\r\n")
