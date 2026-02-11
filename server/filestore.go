@@ -10685,23 +10685,18 @@ func (fs *fileStore) _writeFullState(force bool) error {
 	defer fs.wfsmu.Unlock()
 
 	start := time.Now()
-	fs.mu.RLock()
+	fs.mu.Lock()
 	if fs.dirty == 0 {
-		fs.mu.RUnlock()
+		fs.mu.Unlock()
 		return nil
 	}
 
 	// Configure encryption if needed.
 	if fs.prf != nil {
-		// Re-acquire temporarily as write lock to set up AEK.
-		fs.mu.RUnlock()
-		fs.mu.Lock()
-		err := fs.setupAEK()
-		fs.mu.Unlock()
-		if err != nil {
+		if err := fs.setupAEK(); err != nil {
+			fs.mu.Unlock()
 			return err
 		}
-		fs.mu.RLock()
 	}
 
 	// For calculating size and checking time costs for non forced calls.
@@ -10719,7 +10714,7 @@ func (fs *fileStore) _writeFullState(force bool) error {
 			numDeleted = int((fs.state.LastSeq - fs.state.FirstSeq + 1) - fs.state.Msgs)
 		}
 		if numSubjects > numThreshold || numDeleted > numThreshold {
-			fs.mu.RUnlock()
+			fs.mu.Unlock()
 			return errStateTooBig
 		}
 	}
@@ -10828,10 +10823,10 @@ func (fs *fileStore) _writeFullState(force bool) error {
 	if fs.prf != nil {
 		nonce := make([]byte, fs.aek.NonceSize(), fs.aek.NonceSize()+len(buf)+fs.aek.Overhead())
 		if n, err := rand.Read(nonce); err != nil {
-			fs.mu.RUnlock()
+			fs.mu.Unlock()
 			return err
 		} else if n != len(nonce) {
-			fs.mu.RUnlock()
+			fs.mu.Unlock()
 			return fmt.Errorf("not enough nonce bytes read (%d != %d)", n, len(nonce))
 		}
 		buf = fs.aek.Seal(nonce, nonce, buf, nil)
@@ -10839,8 +10834,7 @@ func (fs *fileStore) _writeFullState(force bool) error {
 
 	fn := filepath.Join(fs.fcfg.StoreDir, msgDir, streamStreamStateFile)
 
-	// Need to have our own hasher here, as under a read lock we can't mutate the
-	// fs.hh safely.
+	// Need to have our own hasher here to avoid mutating fs.hh.
 	key := sha256.Sum256([]byte(fs.cfg.Name))
 	hh, _ := highwayhash.NewDigest64(key[:])
 	hh.Write(buf)
@@ -10851,7 +10845,7 @@ func (fs *fileStore) _writeFullState(force bool) error {
 
 	statesEqual := trackingStatesEqual(&fs.state, &mstate)
 	// Release lock.
-	fs.mu.RUnlock()
+	fs.mu.Unlock()
 
 	// Check consistency here.
 	if !statesEqual {
