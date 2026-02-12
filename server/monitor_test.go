@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -29,6 +30,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -5440,6 +5442,60 @@ func TestMonitorJsz(t *testing.T) {
 			require_Equal(t, info.API.Level, JSApiLevel)
 		}
 	})
+}
+
+func TestMonitorJszMissingConsumers(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+	port := s.getOpts().Port
+	sd := s.JetStreamConfig().StoreDir
+
+	// Create a stream and add a consumer with a high API level so it will
+	// be marked as offline/missing on restart.
+	mset, err := s.globalAccount().addStream(&StreamConfig{
+		Name:     "TEST",
+		Storage:  FileStorage,
+		Replicas: 1,
+	})
+	require_NoError(t, err)
+	_, err = mset.addConsumer(&ConsumerConfig{
+		Name:     "MISSING",
+		Metadata: map[string]string{"_nats.req.level": strconv.Itoa(math.MaxInt)},
+	})
+	require_NoError(t, err)
+
+	// Restart the server so the consumer with the high API level gets an offline reason.
+	s.Shutdown()
+	s = RunJetStreamServerOnPort(port, sd)
+	defer s.Shutdown()
+
+	// Use the Jsz API directly to check missing consumers.
+	info, err := s.Jsz(&JSzOptions{MissingConsumers: true})
+	require_NoError(t, err)
+	require_True(t, len(info.AccountDetails) > 0)
+
+	var found bool
+	for _, ad := range info.AccountDetails {
+		for _, sd := range ad.Streams {
+			if sd.Name == "TEST" {
+				found = true
+				require_Len(t, len(sd.MissingConsumers), 1)
+				require_Equal(t, sd.MissingConsumers[0], "MISSING")
+			}
+		}
+	}
+	require_True(t, found)
+
+	// Without the missing-consumers option, missing consumers should not be reported.
+	info, err = s.Jsz(&JSzOptions{Consumer: true})
+	require_NoError(t, err)
+	for _, ad := range info.AccountDetails {
+		for _, sd := range ad.Streams {
+			if sd.Name == "TEST" {
+				require_Len(t, len(sd.MissingConsumers), 0)
+			}
+		}
+	}
 }
 
 func TestMonitorJszOperatorMode(t *testing.T) {

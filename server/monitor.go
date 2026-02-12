@@ -2938,6 +2938,7 @@ type JSzOptions struct {
 	Limit            int    `json:"limit,omitempty"`
 	RaftGroups       bool   `json:"raft,omitempty"`
 	StreamLeaderOnly bool   `json:"stream_leader_only,omitempty"`
+	MissingConsumers bool   `json:"missing_consumers,omitempty"`
 }
 
 // HealthzOptions are options passed to Healthz
@@ -2981,6 +2982,7 @@ type StreamDetail struct {
 	State              StreamState         `json:"state,omitempty"`
 	Consumer           []*ConsumerInfo     `json:"consumer_detail,omitempty"`
 	DirectConsumer     []*ConsumerInfo     `json:"direct_consumer_detail,omitempty"`
+	MissingConsumers   []string            `json:"missing_consumers,omitempty"`
 	Mirror             *StreamSourceInfo   `json:"mirror,omitempty"`
 	Sources            []*StreamSourceInfo `json:"sources,omitempty"`
 	RaftGroup          string              `json:"stream_raft_group,omitempty"`
@@ -3038,7 +3040,7 @@ type JSInfo struct {
 	Total           int              `json:"total"`
 }
 
-func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optDirectConsumers, optCfg, optRaft, optStreamLeader bool) *AccountDetail {
+func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optDirectConsumers, optCfg, optRaft, optStreamLeader, optMissingConsumers bool) *AccountDetail {
 	jsa.mu.RLock()
 	acc := jsa.account
 	name := acc.GetName()
@@ -3103,6 +3105,10 @@ func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optDire
 			}
 			if optConsumers {
 				for _, consumer := range stream.getPublicConsumers() {
+					if optMissingConsumers && consumer.offlineReason != _EMPTY_ {
+						sdet.MissingConsumers = append(sdet.MissingConsumers, consumer.name)
+						continue
+					}
 					cInfo := consumer.info()
 					if cInfo == nil {
 						continue
@@ -3155,7 +3161,7 @@ func (s *Server) JszAccount(opts *JSzOptions) (*AccountDetail, error) {
 	if !ok {
 		return nil, fmt.Errorf("account %q not jetstream enabled", acc)
 	}
-	return s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.DirectConsumer, opts.Config, opts.RaftGroups, opts.StreamLeaderOnly), nil
+	return s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.DirectConsumer, opts.Config, opts.RaftGroups, opts.StreamLeaderOnly, opts.MissingConsumers), nil
 }
 
 // helper to get cluster info from node via dummy group
@@ -3187,6 +3193,9 @@ func (s *Server) Jsz(opts *JSzOptions) (*JSInfo, error) {
 	}
 	if opts.Limit == 0 {
 		opts.Limit = 1024
+	}
+	if opts.MissingConsumers {
+		opts.Consumer = true
 	}
 	if opts.Consumer {
 		opts.Streams = true
@@ -3323,7 +3332,7 @@ func (s *Server) Jsz(opts *JSzOptions) (*JSInfo, error) {
 		jsi.AccountDetails = make([]*AccountDetail, 0, len(accounts))
 
 		for _, jsa := range accounts {
-			detail := s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.DirectConsumer, opts.Config, opts.RaftGroups, opts.StreamLeaderOnly)
+			detail := s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.DirectConsumer, opts.Config, opts.RaftGroups, opts.StreamLeaderOnly, opts.MissingConsumers)
 			jsi.AccountDetails = append(jsi.AccountDetails, detail)
 		}
 	}
@@ -3378,6 +3387,11 @@ func (s *Server) HandleJsz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	missingConsumers, err := decodeBool(w, r, "missing-consumers")
+	if err != nil {
+		return
+	}
+
 	l, err := s.Jsz(&JSzOptions{
 		Account:          r.URL.Query().Get("acc"),
 		Accounts:         accounts,
@@ -3390,6 +3404,7 @@ func (s *Server) HandleJsz(w http.ResponseWriter, r *http.Request) {
 		Limit:            limit,
 		RaftGroups:       rgroups,
 		StreamLeaderOnly: sleader,
+		MissingConsumers: missingConsumers,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
