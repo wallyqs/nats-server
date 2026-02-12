@@ -2127,7 +2127,7 @@ func (js *jetStream) removePeerFromStreamLocked(sa *streamAssignment, peer strin
 			continue
 		}
 		// Ephemerals are R=1, so only auto-remap durables, or R>1.
-		if ca.Config.Durable != _EMPTY_ {
+		if ca.Config.Durable != _EMPTY_ || len(ca.Group.Peers) > 1 {
 			cca := ca.copyGroup()
 			cca.Group.Peers, cca.Group.Preferred = rg.Peers, _EMPTY_
 			cc.meta.Propose(encodeAddConsumerAssignment(cca))
