@@ -53,6 +53,9 @@ type StreamConfig struct {
 	Description  string           `json:"description,omitempty"`
 	Subjects     []string         `json:"subjects,omitempty"`
 	Retention    RetentionPolicy  `json:"retention"`
+	// MaxConsumers defines the maximum number of consumers allowed on this
+	// stream. If the account-level MaxConsumers is also set, the lower of
+	// the two is enforced. This is a per-stream limit.
 	MaxConsumers int              `json:"max_consumers"`
 	MaxMsgs      int64            `json:"max_msgs"`
 	MaxBytes     int64            `json:"max_bytes"`

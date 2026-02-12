@@ -1059,10 +1059,10 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 		return nil, NewJSConsumerDoesNotExistError()
 	}
 
-	// Check for any limits, if the config for the consumer sets a limit we check against that
-	// but if not we use the value from account limits, if account limits is more restrictive
-	// than stream config we prefer the account limits to handle cases where account limits are
-	// updated during the lifecycle of the stream
+	// Check for any limits. Note that MaxConsumers (both at the stream config level and at the
+	// account level) is a per-stream limit, not a total across all streams. We use the more
+	// restrictive of the two, preferring account limits when they are lower to handle cases
+	// where account limits are updated during the lifecycle of the stream.
 	maxc := cfg.MaxConsumers
 	if maxc <= 0 || (selectedLimits.MaxConsumers > 0 && selectedLimits.MaxConsumers < maxc) {
 		maxc = selectedLimits.MaxConsumers

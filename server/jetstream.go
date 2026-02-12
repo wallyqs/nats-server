@@ -66,6 +66,10 @@ type JetStreamAccountLimits struct {
 	MaxMemory            int64 `json:"max_memory"`
 	MaxStore             int64 `json:"max_storage"`
 	MaxStreams           int   `json:"max_streams"`
+	// MaxConsumers is the maximum number of consumers allowed per stream,
+	// not the total number of consumers across all streams in the account.
+	// If both this and StreamConfig.MaxConsumers are set, the lower of the
+	// two is enforced.
 	MaxConsumers         int   `json:"max_consumers"`
 	MaxAckPending        int   `json:"max_ack_pending"`
 	MemoryMaxStreamBytes int64 `json:"memory_max_stream_bytes"`

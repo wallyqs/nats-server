@@ -8503,6 +8503,7 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 	}
 
 	// Check for max consumers here to short circuit if possible.
+	// Note that MaxConsumers is a per-stream limit, not a total across all streams.
 	// Start with limit on a stream, but if one is defined at the level of the account
 	// and is lower, use that limit.
 	if action == ActionCreate || action == ActionCreateOrUpdate {
