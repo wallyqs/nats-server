@@ -4922,6 +4922,107 @@ func TestJetStreamClusterStreamRemovePeer(t *testing.T) {
 	}
 }
 
+func TestJetStreamClusterStreamRemovePeerNonDurableR3Consumer(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "RNS", 5)
+	defer c.shutdown()
+
+	s := c.randomServer()
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{Name: "TEST", Replicas: 3})
+	require_NoError(t, err)
+
+	// Send in some messages.
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish("TEST", []byte("hello"))
+		require_NoError(t, err)
+	}
+
+	// Create a named non-durable (ephemeral) consumer with R=3.
+	// This is the case that was broken: on peer remove, R>1 non-durable consumers
+	// were being deleted instead of remapped because the condition in
+	// removePeerFromStreamLocked only checked for Durable, not R>1.
+	ephName := "eph_r3"
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Name:              ephName,
+		Replicas:          3,
+		AckPolicy:         nats.AckExplicitPolicy,
+		InactiveThreshold: 5 * time.Minute,
+	})
+	require_NoError(t, err)
+
+	c.waitOnConsumerLeader("$G", "TEST", ephName)
+
+	// Get stream info so we know who the peers are.
+	si, err := js.StreamInfo("TEST")
+	require_NoError(t, err)
+
+	peers := []string{si.Cluster.Leader}
+	for _, p := range si.Cluster.Replicas {
+		peers = append(peers, p.Name)
+	}
+	// Pick a random peer to remove.
+	rand.Shuffle(len(peers), func(i, j int) { peers[i], peers[j] = peers[j], peers[i] })
+	toRemove := peers[0]
+
+	// Remove the peer.
+	req := &JSApiStreamRemovePeerRequest{Peer: toRemove}
+	jsreq, err := json.Marshal(req)
+	require_NoError(t, err)
+
+	resp, err := nc.Request(fmt.Sprintf(JSApiStreamRemovePeerT, "TEST"), jsreq, time.Second)
+	require_NoError(t, err)
+
+	var rpResp JSApiStreamRemovePeerResponse
+	err = json.Unmarshal(resp.Data, &rpResp)
+	require_NoError(t, err)
+	require_True(t, rpResp.Error == nil)
+	require_True(t, rpResp.Success)
+
+	// Wait for stream to settle with new peer set.
+	c.waitOnStreamLeader("$G", "TEST")
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("TEST", nats.MaxWait(time.Second))
+		if err != nil {
+			return fmt.Errorf("could not fetch stream info: %v", err)
+		}
+		if len(si.Cluster.Replicas) != 2 {
+			return fmt.Errorf("expected 2 replicas, got %d", len(si.Cluster.Replicas))
+		}
+		if si.Cluster.Leader == toRemove {
+			return fmt.Errorf("removed peer is still leader")
+		}
+		for _, p := range si.Cluster.Replicas {
+			if p.Name == toRemove {
+				return fmt.Errorf("removed peer is still a replica")
+			}
+		}
+		return nil
+	})
+
+	// The non-durable R=3 consumer should have been remapped, NOT deleted.
+	c.waitOnConsumerLeader("$G", "TEST", ephName)
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		ci, err := js.ConsumerInfo("TEST", ephName, nats.MaxWait(time.Second))
+		if err != nil {
+			return fmt.Errorf("non-durable R=3 consumer should still exist after peer removal, got: %v", err)
+		}
+		if len(ci.Cluster.Replicas) != 2 {
+			return fmt.Errorf("expected 2 replicas for consumer, got %d", len(ci.Cluster.Replicas))
+		}
+		if ci.Cluster.Leader == toRemove {
+			return fmt.Errorf("removed peer is still consumer leader")
+		}
+		for _, p := range ci.Cluster.Replicas {
+			if p.Name == toRemove {
+				return fmt.Errorf("removed peer is still a consumer replica")
+			}
+		}
+		return nil
+	})
+}
+
 func TestJetStreamClusterStreamLeaderStepDown(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "RNS", 3)
 	defer c.shutdown()
