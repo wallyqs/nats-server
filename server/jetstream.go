@@ -53,13 +53,30 @@ type JetStreamConfig struct {
 
 // Statistics about JetStream for this server.
 type JetStreamStats struct {
-	Memory         uint64            `json:"memory"`
-	Store          uint64            `json:"storage"`
-	ReservedMemory uint64            `json:"reserved_memory"`
-	ReservedStore  uint64            `json:"reserved_storage"`
-	Accounts       int               `json:"accounts"`
-	HAAssets       int               `json:"ha_assets"`
-	API            JetStreamAPIStats `json:"api"`
+	Memory         uint64                 `json:"memory"`
+	Store          uint64                 `json:"storage"`
+	ReservedMemory uint64                 `json:"reserved_memory"`
+	ReservedStore  uint64                 `json:"reserved_storage"`
+	Accounts       int                    `json:"accounts"`
+	HAAssets       int                    `json:"ha_assets"`
+	API            JetStreamAPIStats      `json:"api"`
+	Replication    *ReplicationStats      `json:"replication,omitempty"`
+}
+
+// ReplicationStats contains statistics about stream message replication encoding.
+type ReplicationStats struct {
+	EncodeCalls     uint64  `json:"encode_calls"`
+	CompressTried   uint64  `json:"compress_tried"`
+	CompressOK      uint64  `json:"compress_ok"`
+	CompressRatio   float64 `json:"compress_ratio_pct"`
+	TotalBytes      uint64  `json:"total_bytes"`
+	CompressedBytes uint64  `json:"compressed_bytes"`
+	SavedBytes      int64   `json:"saved_bytes"`
+	AvgMsgSize      uint64  `json:"avg_msg_size"`
+	MinMsgSize      uint64  `json:"min_msg_size"`
+	MaxMsgSize      uint64  `json:"max_msg_size"`
+	PoolHits        uint64  `json:"pool_hits"`
+	PoolMisses      uint64  `json:"pool_misses"`
 }
 
 type JetStreamAccountLimits struct {
@@ -2541,6 +2558,24 @@ func (js *jetStream) usageStats() *JetStreamStats {
 	}
 	stats.Store = uint64(used)
 	stats.HAAssets = s.numRaftNodes()
+
+	// Add replication encoding stats
+	encStats := GetEncodeStreamMsgStats()
+	stats.Replication = &ReplicationStats{
+		EncodeCalls:     encStats.Calls,
+		CompressTried:   encStats.CompressTriedN,
+		CompressOK:      encStats.CompressOK,
+		CompressRatio:   encStats.CompressRatio,
+		TotalBytes:      encStats.TotalBytes,
+		CompressedBytes: encStats.CompressedBytes,
+		SavedBytes:      encStats.SavedBytes,
+		AvgMsgSize:      encStats.AvgMsgSize,
+		MinMsgSize:      encStats.MinMsgSize,
+		MaxMsgSize:      encStats.MaxMsgSize,
+		PoolHits:        encStats.PoolHits,
+		PoolMisses:      encStats.PoolMisses,
+	}
+
 	return &stats
 }
 

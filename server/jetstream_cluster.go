@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -8971,6 +8972,102 @@ func encodeStreamMsgAllowCompress(subject, reply string, hdr, msg []byte, lseq u
 // TODO(dlc) - Eventually make configurable.
 const compressThreshold = 8192 // 8k
 
+// Pool for compression buffers to avoid allocations in encodeStreamMsgAllowCompressAndBatch.
+// We use a 256KB buffer which covers most message sizes. Larger messages will allocate.
+const defaultCompressBufSize = 256 * 1024
+
+var compressBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, defaultCompressBufSize)
+		return &b
+	},
+}
+
+// getCompressBuf returns a buffer for compression, at least minSize bytes.
+func getCompressBuf(minSize int) []byte {
+	if minSize <= defaultCompressBufSize {
+		return (*compressBufPool.Get().(*[]byte))[:0]
+	}
+	// For larger messages, allocate directly (won't be pooled)
+	return make([]byte, 0, minSize)
+}
+
+// putCompressBuf returns a buffer to the pool if it's the default size.
+func putCompressBuf(buf []byte) {
+	if cap(buf) == defaultCompressBufSize {
+		b := buf[:0]
+		compressBufPool.Put(&b)
+	}
+}
+
+// Debug counters for compression stats
+var (
+	encodeStreamMsgCalls        atomic.Uint64
+	encodeStreamMsgCompressN    atomic.Uint64
+	encodeStreamMsgCompressOK   atomic.Uint64
+	encodeStreamMsgTotalBytes   atomic.Uint64
+	encodeStreamMsgSavedBytes   atomic.Int64
+	encodeStreamMsgLastLog      atomic.Int64
+	encodeStreamMsgMinSize      atomic.Uint64
+	encodeStreamMsgMaxSize      atomic.Uint64
+	encodeStreamMsgPoolHits     atomic.Uint64
+	encodeStreamMsgPoolMisses   atomic.Uint64
+	encodeStreamMsgCompressedBytes atomic.Uint64
+)
+
+// EncodeStreamMsgStats returns compression statistics for debugging
+type EncodeStreamMsgStats struct {
+	Calls           uint64  `json:"calls"`
+	CompressTriedN  uint64  `json:"compress_tried"`
+	CompressOK      uint64  `json:"compress_ok"`
+	TotalBytes      uint64  `json:"total_bytes"`
+	CompressedBytes uint64  `json:"compressed_bytes"`
+	SavedBytes      int64   `json:"saved_bytes"`
+	CompressRatio   float64 `json:"compress_ratio_pct"`
+	AvgMsgSize      uint64  `json:"avg_msg_size"`
+	MinMsgSize      uint64  `json:"min_msg_size"`
+	MaxMsgSize      uint64  `json:"max_msg_size"`
+	PoolHits        uint64  `json:"pool_hits"`
+	PoolMisses      uint64  `json:"pool_misses"`
+}
+
+func GetEncodeStreamMsgStats() EncodeStreamMsgStats {
+	calls := encodeStreamMsgCalls.Load()
+	tried := encodeStreamMsgCompressN.Load()
+	ok := encodeStreamMsgCompressOK.Load()
+	totalBytes := encodeStreamMsgTotalBytes.Load()
+	var ratio float64
+	if tried > 0 {
+		ratio = float64(ok) / float64(tried) * 100
+	}
+	var avgSize uint64
+	if calls > 0 {
+		avgSize = totalBytes / calls
+	}
+	return EncodeStreamMsgStats{
+		Calls:           calls,
+		CompressTriedN:  tried,
+		CompressOK:      ok,
+		TotalBytes:      totalBytes,
+		CompressedBytes: encodeStreamMsgCompressedBytes.Load(),
+		SavedBytes:      encodeStreamMsgSavedBytes.Load(),
+		CompressRatio:   ratio,
+		AvgMsgSize:      avgSize,
+		MinMsgSize:      encodeStreamMsgMinSize.Load(),
+		MaxMsgSize:      encodeStreamMsgMaxSize.Load(),
+		PoolHits:        encodeStreamMsgPoolHits.Load(),
+		PoolMisses:      encodeStreamMsgPoolMisses.Load(),
+	}
+}
+
+func ResetEncodeStreamMsgStats() {
+	encodeStreamMsgCalls.Store(0)
+	encodeStreamMsgCompressN.Store(0)
+	encodeStreamMsgCompressOK.Store(0)
+	encodeStreamMsgTotalBytes.Store(0)
+	encodeStreamMsgSavedBytes.Store(0)
+}
+
 // If allowed and contents over the threshold we will compress.
 func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte, lseq uint64, ts int64, sourced bool, batchId string, batchSeq uint64, batchCommit bool) []byte {
 	// Clip the subject, reply, header and msgs down. Operate on
@@ -8980,6 +9077,40 @@ func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte
 	hlen := min(uint64(len(hdr)), math.MaxUint16)
 	mlen := min(uint64(len(msg)), math.MaxUint32)
 	total := slen + rlen + hlen + mlen
+
+	// Debug tracking
+	encodeStreamMsgCalls.Add(1)
+	encodeStreamMsgTotalBytes.Add(total)
+
+	// Track min/max message sizes
+	for {
+		old := encodeStreamMsgMinSize.Load()
+		if old != 0 && old <= total {
+			break
+		}
+		if encodeStreamMsgMinSize.CompareAndSwap(old, total) {
+			break
+		}
+	}
+	for {
+		old := encodeStreamMsgMaxSize.Load()
+		if old >= total {
+			break
+		}
+		if encodeStreamMsgMaxSize.CompareAndSwap(old, total) {
+			break
+		}
+	}
+
+	// Log stats every 10 seconds
+	now := time.Now().Unix()
+	if last := encodeStreamMsgLastLog.Load(); now-last >= 10 {
+		if encodeStreamMsgLastLog.CompareAndSwap(last, now) {
+			stats := GetEncodeStreamMsgStats()
+			fmt.Printf("[ENCODE_STATS] calls=%d compress_tried=%d compress_ok=%d (%.1f%%) total_bytes=%d compressed_bytes=%d saved_bytes=%d avg_size=%d min=%d max=%d pool_hits=%d pool_misses=%d\n",
+				stats.Calls, stats.CompressTriedN, stats.CompressOK, stats.CompressRatio, stats.TotalBytes, stats.CompressedBytes, stats.SavedBytes, stats.AvgMsgSize, stats.MinMsgSize, stats.MaxMsgSize, stats.PoolHits, stats.PoolMisses)
+		}
+	}
 
 	shouldCompress := total > compressThreshold
 	elen := int(1 + 8 + 8 + total)
@@ -9027,16 +9158,49 @@ func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte
 
 	// Check if we should compress.
 	if shouldCompress {
-		nbuf := make([]byte, s2.MaxEncodedLen(elen))
+		encodeStreamMsgCompressN.Add(1)
+		maxEncLen := s2.MaxEncodedLen(elen)
+
+		// Get compression buffer from pool
+		var pooled bool
+		var nbuf []byte
+		if maxEncLen <= defaultCompressBufSize {
+			nbuf = (*compressBufPool.Get().(*[]byte))[:maxEncLen]
+			pooled = true
+			encodeStreamMsgPoolHits.Add(1)
+		} else {
+			nbuf = make([]byte, maxEncLen)
+			encodeStreamMsgPoolMisses.Add(1)
+		}
+
 		if opIndex > 0 {
 			copy(nbuf[:opIndex], buf[:opIndex])
 		}
 		nbuf[opIndex] = byte(compressedStreamMsgOp)
 		ebuf := s2.Encode(nbuf[opIndex+1:], buf[opIndex+1:])
+
 		// Only pay the cost of decode on the other side if we compressed.
 		// S2 will allow us to try without major penalty for non-compressable data.
 		if len(ebuf) < len(buf) {
-			buf = nbuf[:len(ebuf)+opIndex+1]
+			encodeStreamMsgCompressOK.Add(1)
+			compressedLen := len(ebuf) + opIndex + 1
+			encodeStreamMsgSavedBytes.Add(int64(len(buf) - compressedLen))
+			encodeStreamMsgCompressedBytes.Add(uint64(compressedLen))
+
+			// Copy to a right-sized buffer and return pooled buffer
+			result := make([]byte, compressedLen)
+			copy(result, nbuf[:compressedLen])
+			if pooled {
+				b := nbuf[:defaultCompressBufSize]
+				compressBufPool.Put(&b)
+			}
+			return result
+		}
+
+		// Compression didn't help, return pooled buffer and use original
+		if pooled {
+			b := nbuf[:defaultCompressBufSize]
+			compressBufPool.Put(&b)
 		}
 	}
 
