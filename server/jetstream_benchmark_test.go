@@ -2304,18 +2304,14 @@ func BenchmarkJetStreamScanForSources(b *testing.B) {
 	})
 }
 
-// BenchmarkJetStreamWorkQueueBlockSize benchmarks publishing and consuming
-// on workqueue streams with MaxBytes set, comparing 4MB vs 8MB block sizes.
-// This measures the end-to-end performance impact of changing the default
-// block size for workqueue streams from 8MB to 4MB.
+// BenchmarkJetStreamBlockSizePublish benchmarks publishing on streams with
+// MaxBytes set, comparing 4MB vs 8MB block sizes across retention policies.
 //
-// To compare before/after, run:
+// To compare, run:
 //
-//	go test -bench='BenchmarkJetStreamWorkQueueBlockSize' -benchmem -count=6
-func BenchmarkJetStreamWorkQueueBlockSize(b *testing.B) {
+//	go test -bench='BenchmarkJetStreamBlockSizePublish' -benchmem -count=6
+func BenchmarkJetStreamBlockSizePublish(b *testing.B) {
 	const (
-		streamPrefix   = "WQ"
-		subjectPrefix  = "wq"
 		publishTimeout = 10 * time.Second
 		maxBytes       = int64(256 * 1024 * 1024) // 256MB
 	)
@@ -2334,140 +2330,211 @@ func BenchmarkJetStreamWorkQueueBlockSize(b *testing.B) {
 		{"BlkSz=8MB", 8 * 1024 * 1024},
 	}
 
-	for _, bc := range blockSizeCases {
-		b.Run(bc.name, func(b *testing.B) {
-			for _, msgSize := range messageSizeCases {
-				b.Run(fmt.Sprintf("MsgSz=%d", msgSize), func(b *testing.B) {
+	retentionCases := []struct {
+		name      string
+		retention nats.RetentionPolicy
+	}{
+		{"Retention=Limits", nats.LimitsPolicy},
+		{"Retention=WorkQueue", nats.WorkQueuePolicy},
+		{"Retention=Interest", nats.InterestPolicy},
+	}
 
-					b.Run("Publish", func(b *testing.B) {
-						s := RunBasicJetStreamServer(b)
-						defer s.Shutdown()
-						s.optsMu.Lock()
-						s.opts.SyncInterval = 5 * time.Minute
-						s.optsMu.Unlock()
+	for _, rc := range retentionCases {
+		b.Run(rc.name, func(b *testing.B) {
+			for _, bc := range blockSizeCases {
+				b.Run(bc.name, func(b *testing.B) {
+					for _, msgSize := range messageSizeCases {
+						b.Run(fmt.Sprintf("MsgSz=%d", msgSize), func(b *testing.B) {
+							s := RunBasicJetStreamServer(b)
+							defer s.Shutdown()
+							s.optsMu.Lock()
+							s.opts.SyncInterval = 5 * time.Minute
+							s.optsMu.Unlock()
 
-						nc, err := nats.Connect(s.ClientURL())
-						require_NoError(b, err)
-						defer nc.Close()
+							nc, err := nats.Connect(s.ClientURL())
+							require_NoError(b, err)
+							defer nc.Close()
 
-						js, err := nc.JetStream(nats.MaxWait(publishTimeout))
-						require_NoError(b, err)
+							js, err := nc.JetStream(nats.MaxWait(publishTimeout))
+							require_NoError(b, err)
 
-						streamName := fmt.Sprintf("%s_PUB_%d", streamPrefix, bc.blkSize)
-						_, err = js.AddStream(&nats.StreamConfig{
-							Name:      streamName,
-							Subjects:  []string{fmt.Sprintf("%s.pub.>", subjectPrefix)},
-							Retention: nats.WorkQueuePolicy,
-							Storage:   nats.FileStorage,
-							MaxBytes:  maxBytes,
+							streamName := "BENCH_PUB"
+							subject := "bench.pub.test"
+							_, err = js.AddStream(&nats.StreamConfig{
+								Name:      streamName,
+								Subjects:  []string{"bench.pub.>"},
+								Retention: rc.retention,
+								Storage:   nats.FileStorage,
+								MaxBytes:  maxBytes,
+							})
+							require_NoError(b, err)
+
+							// Override block size on the underlying filestore.
+							mset, err := s.GlobalAccount().lookupStream(streamName)
+							require_NoError(b, err)
+							mset.mu.RLock()
+							fs := mset.store.(*fileStore)
+							mset.mu.RUnlock()
+							fs.mu.Lock()
+							fs.fcfg.BlockSize = uint64(bc.blkSize)
+							fs.mu.Unlock()
+
+							// Interest retention discards messages with no
+							// consumers, so create one before publishing.
+							if rc.retention == nats.InterestPolicy {
+								_, err = js.PullSubscribe(subject, "interest-consumer",
+									nats.BindStream(streamName),
+									nats.AckExplicit(),
+								)
+								require_NoError(b, err)
+							}
+
+							msg := make([]byte, msgSize)
+							rand.New(rand.NewSource(12345)).Read(msg)
+
+							b.SetBytes(int64(msgSize))
+							b.ResetTimer()
+
+							for i := 0; i < b.N; i++ {
+								fastRandomMutation(msg, 10)
+								_, err := js.Publish(subject, msg)
+								if err != nil {
+									b.Fatalf("Publish error: %v", err)
+								}
+							}
+							b.StopTimer()
 						})
-						require_NoError(b, err)
-
-						// Override block size on the underlying filestore.
-						mset, err := s.GlobalAccount().lookupStream(streamName)
-						require_NoError(b, err)
-						mset.mu.RLock()
-						fs := mset.store.(*fileStore)
-						mset.mu.RUnlock()
-						fs.mu.Lock()
-						fs.fcfg.BlockSize = uint64(bc.blkSize)
-						fs.mu.Unlock()
-
-						msg := make([]byte, msgSize)
-						rand.New(rand.NewSource(12345)).Read(msg)
-
-						b.SetBytes(int64(msgSize))
-						b.ResetTimer()
-
-						for i := 0; i < b.N; i++ {
-							fastRandomMutation(msg, 10)
-							_, err := js.Publish(fmt.Sprintf("%s.pub.test", subjectPrefix), msg)
-							if err != nil {
-								b.Fatalf("Publish error: %v", err)
-							}
-						}
-						b.StopTimer()
-					})
-
-					b.Run("PublishAndConsume", func(b *testing.B) {
-						s := RunBasicJetStreamServer(b)
-						defer s.Shutdown()
-						s.optsMu.Lock()
-						s.opts.SyncInterval = 5 * time.Minute
-						s.optsMu.Unlock()
-
-						nc, err := nats.Connect(s.ClientURL())
-						require_NoError(b, err)
-						defer nc.Close()
-
-						js, err := nc.JetStream(nats.MaxWait(publishTimeout))
-						require_NoError(b, err)
-
-						streamName := fmt.Sprintf("%s_PC_%d", streamPrefix, bc.blkSize)
-						_, err = js.AddStream(&nats.StreamConfig{
-							Name:      streamName,
-							Subjects:  []string{fmt.Sprintf("%s.pc.>", subjectPrefix)},
-							Retention: nats.WorkQueuePolicy,
-							Storage:   nats.FileStorage,
-							MaxBytes:  maxBytes,
-						})
-						require_NoError(b, err)
-
-						// Override block size on the underlying filestore.
-						mset, err := s.GlobalAccount().lookupStream(streamName)
-						require_NoError(b, err)
-						mset.mu.RLock()
-						fs := mset.store.(*fileStore)
-						mset.mu.RUnlock()
-						fs.mu.Lock()
-						fs.fcfg.BlockSize = uint64(bc.blkSize)
-						fs.mu.Unlock()
-
-						subject := fmt.Sprintf("%s.pc.test", subjectPrefix)
-
-						// Create a pull consumer.
-						sub, err := js.PullSubscribe(subject, "bench-consumer",
-							nats.BindStream(streamName),
-							nats.AckExplicit(),
-						)
-						require_NoError(b, err)
-
-						msg := make([]byte, msgSize)
-						rand.New(rand.NewSource(12345)).Read(msg)
-
-						b.SetBytes(int64(msgSize))
-						b.ResetTimer()
-
-						// Publish then immediately consume — workqueue pattern.
-						for i := 0; i < b.N; i++ {
-							fastRandomMutation(msg, 10)
-							_, err := js.Publish(subject, msg)
-							if err != nil {
-								b.Fatalf("Publish error: %v", err)
-							}
-
-							msgs, err := sub.Fetch(1, nats.MaxWait(5*time.Second))
-							if err != nil || len(msgs) != 1 {
-								b.Fatalf("Fetch error: %v, got %d msgs", err, len(msgs))
-							}
-							if err := msgs[0].AckSync(); err != nil {
-								b.Fatalf("AckSync error: %v", err)
-							}
-						}
-						b.StopTimer()
-					})
+					}
 				})
 			}
 		})
 	}
 }
 
-// BenchmarkJetStreamWorkQueueBurstBlockSize benchmarks a burst publish
-// followed by full drain on a workqueue stream, comparing block sizes.
-// This specifically exercises the scenario where a large number of messages
-// accumulate and then are consumed — the pattern most affected by block size
-// as it determines how many blocks are active and how memory is allocated.
-func BenchmarkJetStreamWorkQueueBurstBlockSize(b *testing.B) {
+// BenchmarkJetStreamBlockSizePublishAndConsume benchmarks publishing and
+// consuming on streams with MaxBytes set, comparing 4MB vs 8MB block sizes
+// across all retention policies. Each iteration publishes one message and
+// immediately consumes it with an ack.
+//
+// For Interest streams a durable consumer is created before publishing so
+// that acking removes the message. For WorkQueue streams the pull consumer
+// triggers removal on ack. For Limits streams messages remain after ack.
+//
+// To compare, run:
+//
+//	go test -bench='BenchmarkJetStreamBlockSizePublishAndConsume' -benchmem -count=6
+func BenchmarkJetStreamBlockSizePublishAndConsume(b *testing.B) {
+	const (
+		publishTimeout = 10 * time.Second
+		maxBytes       = int64(256 * 1024 * 1024) // 256MB
+	)
+
+	messageSizeCases := []int{
+		256,      // 256B
+		1024,     // 1KB
+		8 * 1024, // 8KB
+	}
+
+	blockSizeCases := []struct {
+		name    string
+		blkSize int64
+	}{
+		{"BlkSz=4MB", 4 * 1024 * 1024},
+		{"BlkSz=8MB", 8 * 1024 * 1024},
+	}
+
+	retentionCases := []struct {
+		name      string
+		retention nats.RetentionPolicy
+	}{
+		{"Retention=Limits", nats.LimitsPolicy},
+		{"Retention=WorkQueue", nats.WorkQueuePolicy},
+		{"Retention=Interest", nats.InterestPolicy},
+	}
+
+	for _, rc := range retentionCases {
+		b.Run(rc.name, func(b *testing.B) {
+			for _, bc := range blockSizeCases {
+				b.Run(bc.name, func(b *testing.B) {
+					for _, msgSize := range messageSizeCases {
+						b.Run(fmt.Sprintf("MsgSz=%d", msgSize), func(b *testing.B) {
+							s := RunBasicJetStreamServer(b)
+							defer s.Shutdown()
+							s.optsMu.Lock()
+							s.opts.SyncInterval = 5 * time.Minute
+							s.optsMu.Unlock()
+
+							nc, err := nats.Connect(s.ClientURL())
+							require_NoError(b, err)
+							defer nc.Close()
+
+							js, err := nc.JetStream(nats.MaxWait(publishTimeout))
+							require_NoError(b, err)
+
+							streamName := "BENCH_PC"
+							subject := "bench.pc.test"
+							_, err = js.AddStream(&nats.StreamConfig{
+								Name:      streamName,
+								Subjects:  []string{"bench.pc.>"},
+								Retention: rc.retention,
+								Storage:   nats.FileStorage,
+								MaxBytes:  maxBytes,
+							})
+							require_NoError(b, err)
+
+							// Override block size on the underlying filestore.
+							mset, err := s.GlobalAccount().lookupStream(streamName)
+							require_NoError(b, err)
+							mset.mu.RLock()
+							fs := mset.store.(*fileStore)
+							mset.mu.RUnlock()
+							fs.mu.Lock()
+							fs.fcfg.BlockSize = uint64(bc.blkSize)
+							fs.mu.Unlock()
+
+							// Create a pull consumer.
+							sub, err := js.PullSubscribe(subject, "bench-consumer",
+								nats.BindStream(streamName),
+								nats.AckExplicit(),
+							)
+							require_NoError(b, err)
+
+							msg := make([]byte, msgSize)
+							rand.New(rand.NewSource(12345)).Read(msg)
+
+							b.SetBytes(int64(msgSize))
+							b.ResetTimer()
+
+							for i := 0; i < b.N; i++ {
+								fastRandomMutation(msg, 10)
+								_, err := js.Publish(subject, msg)
+								if err != nil {
+									b.Fatalf("Publish error: %v", err)
+								}
+
+								msgs, err := sub.Fetch(1, nats.MaxWait(5*time.Second))
+								if err != nil || len(msgs) != 1 {
+									b.Fatalf("Fetch error: %v, got %d msgs", err, len(msgs))
+								}
+								if err := msgs[0].AckSync(); err != nil {
+									b.Fatalf("AckSync error: %v", err)
+								}
+							}
+							b.StopTimer()
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkJetStreamBlockSizeBurstDrain benchmarks a burst publish followed
+// by a full drain across retention policies, comparing block sizes.
+// This exercises the scenario where a large number of messages accumulate
+// and then are consumed — the pattern most affected by block size as it
+// determines how many blocks are active and how memory is allocated.
+func BenchmarkJetStreamBlockSizeBurstDrain(b *testing.B) {
 	const (
 		publishTimeout = 30 * time.Second
 		maxBytes       = int64(256 * 1024 * 1024)
@@ -2484,99 +2551,126 @@ func BenchmarkJetStreamWorkQueueBurstBlockSize(b *testing.B) {
 		{"BlkSz=8MB", 8 * 1024 * 1024},
 	}
 
-	for _, bc := range blockSizeCases {
-		b.Run(bc.name, func(b *testing.B) {
-			for _, burstSize := range burstSizes {
-				b.Run(fmt.Sprintf("Burst=%d", burstSize), func(b *testing.B) {
-					for n := 0; n < b.N; n++ {
-						b.StopTimer()
+	retentionCases := []struct {
+		name      string
+		retention nats.RetentionPolicy
+	}{
+		{"Retention=Limits", nats.LimitsPolicy},
+		{"Retention=WorkQueue", nats.WorkQueuePolicy},
+		{"Retention=Interest", nats.InterestPolicy},
+	}
 
-						s := RunBasicJetStreamServer(b)
-						s.optsMu.Lock()
-						s.opts.SyncInterval = 5 * time.Minute
-						s.optsMu.Unlock()
+	for _, rc := range retentionCases {
+		b.Run(rc.name, func(b *testing.B) {
+			for _, bc := range blockSizeCases {
+				b.Run(bc.name, func(b *testing.B) {
+					for _, burstSize := range burstSizes {
+						b.Run(fmt.Sprintf("Burst=%d", burstSize), func(b *testing.B) {
+							for n := 0; n < b.N; n++ {
+								b.StopTimer()
 
-						nc, err := nats.Connect(s.ClientURL())
-						require_NoError(b, err)
+								s := RunBasicJetStreamServer(b)
+								s.optsMu.Lock()
+								s.opts.SyncInterval = 5 * time.Minute
+								s.optsMu.Unlock()
 
-						js, err := nc.JetStream(
-							nats.MaxWait(publishTimeout),
-							nats.PublishAsyncMaxPending(4000),
-						)
-						require_NoError(b, err)
+								nc, err := nats.Connect(s.ClientURL())
+								require_NoError(b, err)
 
-						streamName := "WQ_BURST"
-						_, err = js.AddStream(&nats.StreamConfig{
-							Name:      streamName,
-							Subjects:  []string{"wq.burst.>"},
-							Retention: nats.WorkQueuePolicy,
-							Storage:   nats.FileStorage,
-							MaxBytes:  maxBytes,
-						})
-						require_NoError(b, err)
+								js, err := nc.JetStream(
+									nats.MaxWait(publishTimeout),
+									nats.PublishAsyncMaxPending(4000),
+								)
+								require_NoError(b, err)
 
-						// Override block size.
-						mset, err := s.GlobalAccount().lookupStream(streamName)
-						require_NoError(b, err)
-						mset.mu.RLock()
-						fs := mset.store.(*fileStore)
-						mset.mu.RUnlock()
-						fs.mu.Lock()
-						fs.fcfg.BlockSize = uint64(bc.blkSize)
-						fs.mu.Unlock()
+								streamName := "BENCH_BURST"
+								subject := "bench.burst.test"
+								_, err = js.AddStream(&nats.StreamConfig{
+									Name:      streamName,
+									Subjects:  []string{"bench.burst.>"},
+									Retention: rc.retention,
+									Storage:   nats.FileStorage,
+									MaxBytes:  maxBytes,
+								})
+								require_NoError(b, err)
 
-						msg := make([]byte, msgSize)
-						rand.New(rand.NewSource(12345)).Read(msg)
+								// Override block size.
+								mset, err := s.GlobalAccount().lookupStream(streamName)
+								require_NoError(b, err)
+								mset.mu.RLock()
+								fs := mset.store.(*fileStore)
+								mset.mu.RUnlock()
+								fs.mu.Lock()
+								fs.fcfg.BlockSize = uint64(bc.blkSize)
+								fs.mu.Unlock()
 
-						// Publish burst (not timed).
-						for i := 0; i < burstSize; i++ {
-							fastRandomMutation(msg, 10)
-							_, err := js.PublishAsync("wq.burst.test", msg)
-							if err != nil {
-								b.Fatalf("PublishAsync error: %v", err)
-							}
-						}
-						select {
-						case <-js.PublishAsyncComplete():
-						case <-time.After(publishTimeout):
-							b.Fatalf("Publish burst timed out")
-						}
+								msg := make([]byte, msgSize)
+								rand.New(rand.NewSource(12345)).Read(msg)
 
-						// Create consumer for drain.
-						sub, err := js.PullSubscribe("wq.burst.test", "drain-consumer",
-							nats.BindStream(streamName),
-							nats.AckExplicit(),
-						)
-						require_NoError(b, err)
-
-						// Drain phase (timed).
-						b.StartTimer()
-
-						consumed := 0
-						for consumed < burstSize {
-							batchSz := burstSize - consumed
-							if batchSz > 100 {
-								batchSz = 100
-							}
-							msgs, err := sub.Fetch(batchSz, nats.MaxWait(10*time.Second))
-							if err != nil {
-								b.Fatalf("Fetch error after %d consumed: %v", consumed, err)
-							}
-							for _, m := range msgs {
-								if err := m.Ack(); err != nil {
-									b.Fatalf("Ack error: %v", err)
+								// Interest retention discards messages with no
+								// consumers, so create the consumer before publishing.
+								var sub *nats.Subscription
+								if rc.retention == nats.InterestPolicy {
+									sub, err = js.PullSubscribe(subject, "drain-consumer",
+										nats.BindStream(streamName),
+										nats.AckExplicit(),
+									)
+									require_NoError(b, err)
 								}
-								consumed++
+
+								// Publish burst (not timed).
+								for i := 0; i < burstSize; i++ {
+									fastRandomMutation(msg, 10)
+									_, err := js.PublishAsync(subject, msg)
+									if err != nil {
+										b.Fatalf("PublishAsync error: %v", err)
+									}
+								}
+								select {
+								case <-js.PublishAsyncComplete():
+								case <-time.After(publishTimeout):
+									b.Fatalf("Publish burst timed out")
+								}
+
+								// Create consumer for drain (already created above for Interest).
+								if sub == nil {
+									sub, err = js.PullSubscribe(subject, "drain-consumer",
+										nats.BindStream(streamName),
+										nats.AckExplicit(),
+									)
+									require_NoError(b, err)
+								}
+
+								// Drain phase (timed).
+								b.StartTimer()
+
+								consumed := 0
+								for consumed < burstSize {
+									batchSz := burstSize - consumed
+									if batchSz > 100 {
+										batchSz = 100
+									}
+									msgs, err := sub.Fetch(batchSz, nats.MaxWait(10*time.Second))
+									if err != nil {
+										b.Fatalf("Fetch error after %d consumed: %v", consumed, err)
+									}
+									for _, m := range msgs {
+										if err := m.Ack(); err != nil {
+											b.Fatalf("Ack error: %v", err)
+										}
+										consumed++
+									}
+								}
+
+								b.StopTimer()
+
+								nc.Close()
+								s.Shutdown()
 							}
-						}
 
-						b.StopTimer()
-
-						nc.Close()
-						s.Shutdown()
+							b.SetBytes(int64(msgSize) * int64(burstSize))
+						})
 					}
-
-					b.SetBytes(int64(msgSize) * int64(burstSize))
 				})
 			}
 		})

@@ -22,12 +22,9 @@ import (
 	"testing"
 )
 
-// Benchmark_FileStoreWorkQueueBlockSize benchmarks the core workqueue pattern
-// (store messages, load, then remove) at different block sizes.
-// This is used to evaluate the performance impact of changing the default
-// block size for workqueue streams with MaxBytes from 8MB to 4MB.
-func Benchmark_FileStoreWorkQueueBlockSize(b *testing.B) {
-	blockSizeCases := []struct {
+// Common cases shared across filestore block size benchmarks.
+var (
+	fsBlockSizeCases = []struct {
 		name    string
 		blkSize uint64
 	}{
@@ -35,6 +32,23 @@ func Benchmark_FileStoreWorkQueueBlockSize(b *testing.B) {
 		{"BlkSz=8MB", 8 * 1024 * 1024},
 	}
 
+	fsRetentionCases = []struct {
+		name      string
+		retention RetentionPolicy
+	}{
+		{"Retention=Limits", LimitsPolicy},
+		{"Retention=WorkQueue", WorkQueuePolicy},
+		{"Retention=Interest", InterestPolicy},
+	}
+)
+
+// Benchmark_FileStoreBlockSizeStoreAndRemove benchmarks the store+remove
+// pattern at different block sizes and retention policies.
+// For WorkQueue and Interest streams, messages are consumed and removed.
+// For Limits streams, old messages are eventually displaced.
+// This is used to evaluate the performance impact of changing the default
+// block size for workqueue streams with MaxBytes from 8MB to 4MB.
+func Benchmark_FileStoreBlockSizeStoreAndRemove(b *testing.B) {
 	messageSizeCases := []struct {
 		name string
 		size int
@@ -45,41 +59,45 @@ func Benchmark_FileStoreWorkQueueBlockSize(b *testing.B) {
 		{"MsgSz=64KB", 64 * 1024},
 	}
 
-	for _, bc := range blockSizeCases {
-		b.Run(bc.name, func(b *testing.B) {
-			for _, mc := range messageSizeCases {
-				b.Run(mc.name, func(b *testing.B) {
-					cfg := FileStoreConfig{
-						StoreDir:  b.TempDir(),
-						BlockSize: bc.blkSize,
-					}
-					scfg := StreamConfig{
-						Name:      "WQ",
-						Subjects:  []string{"wq.>"},
-						Storage:   FileStorage,
-						Retention: WorkQueuePolicy,
-						MaxBytes:  256 * 1024 * 1024, // 256MB
-					}
-					fs, err := newFileStore(cfg, scfg)
-					require_NoError(b, err)
-					defer fs.Stop()
+	for _, rc := range fsRetentionCases {
+		b.Run(rc.name, func(b *testing.B) {
+			for _, bc := range fsBlockSizeCases {
+				b.Run(bc.name, func(b *testing.B) {
+					for _, mc := range messageSizeCases {
+						b.Run(mc.name, func(b *testing.B) {
+							cfg := FileStoreConfig{
+								StoreDir:  b.TempDir(),
+								BlockSize: bc.blkSize,
+							}
+							scfg := StreamConfig{
+								Name:      "TEST",
+								Subjects:  []string{"test.>"},
+								Storage:   FileStorage,
+								Retention: rc.retention,
+								MaxBytes:  256 * 1024 * 1024, // 256MB
+							}
+							fs, err := newFileStore(cfg, scfg)
+							require_NoError(b, err)
+							defer fs.Stop()
 
-					msg := make([]byte, mc.size)
-					rand.Read(msg)
+							msg := make([]byte, mc.size)
+							rand.Read(msg)
 
-					b.SetBytes(int64(mc.size))
-					b.ResetTimer()
+							b.SetBytes(int64(mc.size))
+							b.ResetTimer()
 
-					// Simulate a workqueue pattern: store and then remove.
-					for i := 0; i < b.N; i++ {
-						seq, _, err := fs.StoreMsg("wq.test", nil, msg, 0)
-						if err != nil {
-							b.Fatalf("StoreMsg error: %v", err)
-						}
-						_, err = fs.RemoveMsg(seq)
-						if err != nil {
-							b.Fatalf("RemoveMsg error: %v", err)
-						}
+							// Store then remove — the core consume-and-ack pattern.
+							for i := 0; i < b.N; i++ {
+								seq, _, err := fs.StoreMsg("test.data", nil, msg, 0)
+								if err != nil {
+									b.Fatalf("StoreMsg error: %v", err)
+								}
+								_, err = fs.RemoveMsg(seq)
+								if err != nil {
+									b.Fatalf("RemoveMsg error: %v", err)
+								}
+							}
+						})
 					}
 				})
 			}
@@ -87,19 +105,11 @@ func Benchmark_FileStoreWorkQueueBlockSize(b *testing.B) {
 	}
 }
 
-// Benchmark_FileStoreWorkQueuePublishBurst benchmarks bursty publishing
-// into a workqueue-style filestore at different block sizes.
+// Benchmark_FileStoreBlockSizePublishBurst benchmarks bursty publishing
+// at different block sizes and retention policies.
 // This simulates a burst of messages arriving before consumers can drain them,
 // which is the scenario where block size most affects memory usage.
-func Benchmark_FileStoreWorkQueuePublishBurst(b *testing.B) {
-	blockSizeCases := []struct {
-		name    string
-		blkSize uint64
-	}{
-		{"BlkSz=4MB", 4 * 1024 * 1024},
-		{"BlkSz=8MB", 8 * 1024 * 1024},
-	}
-
+func Benchmark_FileStoreBlockSizePublishBurst(b *testing.B) {
 	messageSizeCases := []struct {
 		name string
 		size int
@@ -109,66 +119,61 @@ func Benchmark_FileStoreWorkQueuePublishBurst(b *testing.B) {
 		{"MsgSz=8KB", 8 * 1024},
 	}
 
-	for _, bc := range blockSizeCases {
-		b.Run(bc.name, func(b *testing.B) {
-			for _, mc := range messageSizeCases {
-				b.Run(mc.name, func(b *testing.B) {
-					cfg := FileStoreConfig{
-						StoreDir:  b.TempDir(),
-						BlockSize: bc.blkSize,
+	for _, rc := range fsRetentionCases {
+		b.Run(rc.name, func(b *testing.B) {
+			for _, bc := range fsBlockSizeCases {
+				b.Run(bc.name, func(b *testing.B) {
+					for _, mc := range messageSizeCases {
+						b.Run(mc.name, func(b *testing.B) {
+							cfg := FileStoreConfig{
+								StoreDir:  b.TempDir(),
+								BlockSize: bc.blkSize,
+							}
+							scfg := StreamConfig{
+								Name:      "TEST",
+								Subjects:  []string{"test.>"},
+								Storage:   FileStorage,
+								Retention: rc.retention,
+								MaxBytes:  256 * 1024 * 1024, // 256MB
+							}
+							fs, err := newFileStore(cfg, scfg)
+							require_NoError(b, err)
+							defer fs.Stop()
+
+							msg := make([]byte, mc.size)
+							rand.Read(msg)
+
+							b.SetBytes(int64(mc.size))
+							b.ResetTimer()
+
+							// Pure publish burst — no consumption.
+							for i := 0; i < b.N; i++ {
+								_, _, err := fs.StoreMsg("test.data", nil, msg, 0)
+								if err != nil {
+									b.Fatalf("StoreMsg error: %v", err)
+								}
+							}
+
+							b.StopTimer()
+
+							// Report memory stats to show the impact of block size.
+							var m runtime.MemStats
+							runtime.ReadMemStats(&m)
+							b.ReportMetric(float64(m.HeapInuse)/(1024*1024), "heap-MB")
+							b.ReportMetric(float64(fs.numMsgBlocks()), "blocks")
+						})
 					}
-					scfg := StreamConfig{
-						Name:      "WQ",
-						Subjects:  []string{"wq.>"},
-						Storage:   FileStorage,
-						Retention: WorkQueuePolicy,
-						MaxBytes:  256 * 1024 * 1024, // 256MB
-					}
-					fs, err := newFileStore(cfg, scfg)
-					require_NoError(b, err)
-					defer fs.Stop()
-
-					msg := make([]byte, mc.size)
-					rand.Read(msg)
-
-					b.SetBytes(int64(mc.size))
-					b.ResetTimer()
-
-					// Pure publish burst — no consumption.
-					for i := 0; i < b.N; i++ {
-						_, _, err := fs.StoreMsg("wq.test", nil, msg, 0)
-						if err != nil {
-							b.Fatalf("StoreMsg error: %v", err)
-						}
-					}
-
-					b.StopTimer()
-
-					// Report memory stats to show the impact of block size.
-					var m runtime.MemStats
-					runtime.ReadMemStats(&m)
-					b.ReportMetric(float64(m.HeapInuse)/(1024*1024), "heap-MB")
-					b.ReportMetric(float64(fs.numMsgBlocks()), "blocks")
 				})
 			}
 		})
 	}
 }
 
-// Benchmark_FileStoreWorkQueueDrainPattern benchmarks the full workqueue
-// lifecycle: fill the store with a burst, then drain all messages.
+// Benchmark_FileStoreBlockSizeDrainPattern benchmarks the full lifecycle:
+// fill the store with a burst, then drain all messages via load+remove.
 // This shows how block size affects the drain phase when blocks are
-// being reclaimed.
-func Benchmark_FileStoreWorkQueueDrainPattern(b *testing.B) {
-	blockSizeCases := []struct {
-		name    string
-		blkSize uint64
-	}{
-		{"BlkSz=4MB", 4 * 1024 * 1024},
-		{"BlkSz=8MB", 8 * 1024 * 1024},
-	}
-
-	// Fixed message size, vary number of messages in the burst.
+// being reclaimed across different retention policies.
+func Benchmark_FileStoreBlockSizeDrainPattern(b *testing.B) {
 	burstSizeCases := []struct {
 		name  string
 		count int
@@ -180,77 +185,73 @@ func Benchmark_FileStoreWorkQueueDrainPattern(b *testing.B) {
 
 	const messageSize = 1024 // 1KB messages
 
-	for _, bc := range blockSizeCases {
-		b.Run(bc.name, func(b *testing.B) {
-			for _, sc := range burstSizeCases {
-				b.Run(sc.name, func(b *testing.B) {
-					for n := 0; n < b.N; n++ {
-						b.StopTimer()
+	for _, rc := range fsRetentionCases {
+		b.Run(rc.name, func(b *testing.B) {
+			for _, bc := range fsBlockSizeCases {
+				b.Run(bc.name, func(b *testing.B) {
+					for _, sc := range burstSizeCases {
+						b.Run(sc.name, func(b *testing.B) {
+							for n := 0; n < b.N; n++ {
+								b.StopTimer()
 
-						cfg := FileStoreConfig{
-							StoreDir:  b.TempDir(),
-							BlockSize: bc.blkSize,
-						}
-						scfg := StreamConfig{
-							Name:      "WQ",
-							Subjects:  []string{"wq.>"},
-							Storage:   FileStorage,
-							Retention: WorkQueuePolicy,
-							MaxBytes:  256 * 1024 * 1024,
-						}
-						fs, err := newFileStore(cfg, scfg)
-						require_NoError(b, err)
+								cfg := FileStoreConfig{
+									StoreDir:  b.TempDir(),
+									BlockSize: bc.blkSize,
+								}
+								scfg := StreamConfig{
+									Name:      "TEST",
+									Subjects:  []string{"test.>"},
+									Storage:   FileStorage,
+									Retention: rc.retention,
+									MaxBytes:  256 * 1024 * 1024,
+								}
+								fs, err := newFileStore(cfg, scfg)
+								require_NoError(b, err)
 
-						msg := make([]byte, messageSize)
-						rand.Read(msg)
+								msg := make([]byte, messageSize)
+								rand.Read(msg)
 
-						// Fill phase (not timed).
-						for i := 0; i < sc.count; i++ {
-							_, _, err := fs.StoreMsg("wq.test", nil, msg, 0)
-							if err != nil {
-								b.Fatalf("StoreMsg error: %v", err)
+								// Fill phase (not timed).
+								for i := 0; i < sc.count; i++ {
+									_, _, err := fs.StoreMsg("test.data", nil, msg, 0)
+									if err != nil {
+										b.Fatalf("StoreMsg error: %v", err)
+									}
+								}
+
+								b.StartTimer()
+
+								// Drain phase (timed) — this is what we're benchmarking.
+								var smv StoreMsg
+								for seq := uint64(1); seq <= uint64(sc.count); seq++ {
+									_, err := fs.LoadMsg(seq, &smv)
+									if err != nil {
+										b.Fatalf("LoadMsg seq=%d error: %v", seq, err)
+									}
+									_, err = fs.RemoveMsg(seq)
+									if err != nil {
+										b.Fatalf("RemoveMsg seq=%d error: %v", seq, err)
+									}
+								}
+
+								b.StopTimer()
+								fs.Stop()
 							}
-						}
 
-						b.StartTimer()
-
-						// Drain phase (timed) — this is what we're benchmarking.
-						var smv StoreMsg
-						for seq := uint64(1); seq <= uint64(sc.count); seq++ {
-							_, err := fs.LoadMsg(seq, &smv)
-							if err != nil {
-								b.Fatalf("LoadMsg seq=%d error: %v", seq, err)
-							}
-							_, err = fs.RemoveMsg(seq)
-							if err != nil {
-								b.Fatalf("RemoveMsg seq=%d error: %v", seq, err)
-							}
-						}
-
-						b.StopTimer()
-						fs.Stop()
+							b.SetBytes(int64(messageSize) * int64(sc.count))
+						})
 					}
-
-					b.SetBytes(int64(messageSize) * int64(sc.count))
 				})
 			}
 		})
 	}
 }
 
-// Benchmark_FileStoreWorkQueueMultiSubjectBlockSize benchmarks workqueue
-// operations across many subjects with different block sizes.
+// Benchmark_FileStoreBlockSizeMultiSubject benchmarks operations across
+// many subjects with different block sizes and retention policies.
 // Workqueue streams often have many subjects routed to different consumers,
 // so this tests a realistic multi-subject pattern.
-func Benchmark_FileStoreWorkQueueMultiSubjectBlockSize(b *testing.B) {
-	blockSizeCases := []struct {
-		name    string
-		blkSize uint64
-	}{
-		{"BlkSz=4MB", 4 * 1024 * 1024},
-		{"BlkSz=8MB", 8 * 1024 * 1024},
-	}
-
+func Benchmark_FileStoreBlockSizeMultiSubject(b *testing.B) {
 	numSubjectsCases := []struct {
 		name string
 		n    int
@@ -262,47 +263,50 @@ func Benchmark_FileStoreWorkQueueMultiSubjectBlockSize(b *testing.B) {
 
 	const messageSize = 512 // 512B messages
 
-	for _, bc := range blockSizeCases {
-		b.Run(bc.name, func(b *testing.B) {
-			for _, sc := range numSubjectsCases {
-				b.Run(sc.name, func(b *testing.B) {
-					cfg := FileStoreConfig{
-						StoreDir:  b.TempDir(),
-						BlockSize: bc.blkSize,
-					}
-					scfg := StreamConfig{
-						Name:      "WQ",
-						Subjects:  []string{"wq.>"},
-						Storage:   FileStorage,
-						Retention: WorkQueuePolicy,
-						MaxBytes:  256 * 1024 * 1024,
-					}
-					fs, err := newFileStore(cfg, scfg)
-					require_NoError(b, err)
-					defer fs.Stop()
+	for _, rc := range fsRetentionCases {
+		b.Run(rc.name, func(b *testing.B) {
+			for _, bc := range fsBlockSizeCases {
+				b.Run(bc.name, func(b *testing.B) {
+					for _, sc := range numSubjectsCases {
+						b.Run(sc.name, func(b *testing.B) {
+							cfg := FileStoreConfig{
+								StoreDir:  b.TempDir(),
+								BlockSize: bc.blkSize,
+							}
+							scfg := StreamConfig{
+								Name:      "TEST",
+								Subjects:  []string{"test.>"},
+								Storage:   FileStorage,
+								Retention: rc.retention,
+								MaxBytes:  256 * 1024 * 1024,
+							}
+							fs, err := newFileStore(cfg, scfg)
+							require_NoError(b, err)
+							defer fs.Stop()
 
-					// Build subjects list.
-					subjects := make([]string, sc.n)
-					for i := 0; i < sc.n; i++ {
-						subjects[i] = fmt.Sprintf("wq.group.%d", i)
-					}
+							subjects := make([]string, sc.n)
+							for i := 0; i < sc.n; i++ {
+								subjects[i] = fmt.Sprintf("test.group.%d", i)
+							}
 
-					msg := make([]byte, messageSize)
-					rand.Read(msg)
+							msg := make([]byte, messageSize)
+							rand.Read(msg)
 
-					b.SetBytes(int64(messageSize))
-					b.ResetTimer()
+							b.SetBytes(int64(messageSize))
+							b.ResetTimer()
 
-					for i := 0; i < b.N; i++ {
-						subj := subjects[i%sc.n]
-						seq, _, err := fs.StoreMsg(subj, nil, msg, 0)
-						if err != nil {
-							b.Fatalf("StoreMsg error: %v", err)
-						}
-						_, err = fs.RemoveMsg(seq)
-						if err != nil {
-							b.Fatalf("RemoveMsg error: %v", err)
-						}
+							for i := 0; i < b.N; i++ {
+								subj := subjects[i%sc.n]
+								seq, _, err := fs.StoreMsg(subj, nil, msg, 0)
+								if err != nil {
+									b.Fatalf("StoreMsg error: %v", err)
+								}
+								_, err = fs.RemoveMsg(seq)
+								if err != nil {
+									b.Fatalf("RemoveMsg error: %v", err)
+								}
+							}
+						})
 					}
 				})
 			}
