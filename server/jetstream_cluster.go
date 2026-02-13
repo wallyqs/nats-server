@@ -8972,32 +8972,30 @@ func encodeStreamMsgAllowCompress(subject, reply string, hdr, msg []byte, lseq u
 // TODO(dlc) - Eventually make configurable.
 const compressThreshold = 8192 // 8k
 
-// Pool for compression buffers to avoid allocations in encodeStreamMsgAllowCompressAndBatch.
-// We use a 256KB buffer which covers most message sizes. Larger messages will allocate.
-const defaultCompressBufSize = 256 * 1024
-
+// Pool for compression scratch buffers to reduce GC pressure.
+// These are only needed transiently during S2 compression attempts.
 var compressBufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, defaultCompressBufSize)
-		return &b
+		return &[]byte{}
 	},
 }
 
-// getCompressBuf returns a buffer for compression, at least minSize bytes.
-func getCompressBuf(minSize int) []byte {
-	if minSize <= defaultCompressBufSize {
-		return (*compressBufPool.Get().(*[]byte))[:0]
+func getCompressBuf(sz int) []byte {
+	bp := compressBufPool.Get().(*[]byte)
+	buf := *bp
+	if cap(buf) >= sz {
+		encodeStreamMsgPoolHits.Add(1)
+		return buf[:sz]
 	}
-	// For larger messages, allocate directly (won't be pooled)
-	return make([]byte, 0, minSize)
+	// Return undersized buffer to pool, allocate a new one.
+	compressBufPool.Put(bp)
+	encodeStreamMsgPoolMisses.Add(1)
+	return make([]byte, sz)
 }
 
-// putCompressBuf returns a buffer to the pool if it's the default size.
 func putCompressBuf(buf []byte) {
-	if cap(buf) == defaultCompressBufSize {
-		b := buf[:0]
-		compressBufPool.Put(&b)
-	}
+	buf = buf[:0]
+	compressBufPool.Put(&buf)
 }
 
 // Debug counters for compression stats
@@ -9159,20 +9157,7 @@ func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte
 	// Check if we should compress.
 	if shouldCompress {
 		encodeStreamMsgCompressN.Add(1)
-		maxEncLen := s2.MaxEncodedLen(elen)
-
-		// Get compression buffer from pool
-		var pooled bool
-		var nbuf []byte
-		if maxEncLen <= defaultCompressBufSize {
-			nbuf = (*compressBufPool.Get().(*[]byte))[:maxEncLen]
-			pooled = true
-			encodeStreamMsgPoolHits.Add(1)
-		} else {
-			nbuf = make([]byte, maxEncLen)
-			encodeStreamMsgPoolMisses.Add(1)
-		}
-
+		nbuf := getCompressBuf(s2.MaxEncodedLen(elen))
 		if opIndex > 0 {
 			copy(nbuf[:opIndex], buf[:opIndex])
 		}
@@ -9187,21 +9172,15 @@ func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte
 			encodeStreamMsgSavedBytes.Add(int64(len(buf) - compressedLen))
 			encodeStreamMsgCompressedBytes.Add(uint64(compressedLen))
 
-			// Copy to a right-sized buffer and return pooled buffer
-			result := make([]byte, compressedLen)
-			copy(result, nbuf[:compressedLen])
-			if pooled {
-				b := nbuf[:defaultCompressBufSize]
-				compressBufPool.Put(&b)
-			}
-			return result
+			// Copy to a right-sized buffer and return scratch buffer to pool
+			cbuf := make([]byte, compressedLen)
+			copy(cbuf, nbuf[:compressedLen])
+			putCompressBuf(nbuf)
+			return cbuf
 		}
 
-		// Compression didn't help, return pooled buffer and use original
-		if pooled {
-			b := nbuf[:defaultCompressBufSize]
-			compressBufPool.Put(&b)
-		}
+		// Compression didn't help, return scratch buffer to pool
+		putCompressBuf(nbuf)
 	}
 
 	return buf
