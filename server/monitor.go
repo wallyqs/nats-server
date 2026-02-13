@@ -4092,6 +4092,8 @@ type RaftzGroup struct {
 	Paused        bool                      `json:"paused,omitempty"`
 	Committed     uint64                    `json:"committed"`
 	Applied       uint64                    `json:"applied"`
+	CommitRate    float64                   `json:"commit_rate"`
+	ApplyRate     float64                   `json:"apply_rate"`
 	CatchingUp    bool                      `json:"catching_up,omitempty"`
 	Leader        string                    `json:"leader,omitempty"`
 	LeaderSince   *time.Time                `json:"leader_since,omitempty"`
@@ -4233,6 +4235,8 @@ func (s *Server) Raftz(opts *RaftzOptions) *RaftzStatus {
 			info.Peers[id] = peer
 		}
 		n.RUnlock()
+		// Compute rates outside of the raft lock using the rate tracker's own lock.
+		info.CommitRate, info.ApplyRate = n.rates.sampleRates(info.Committed, info.Applied)
 		infos[n.accName][name] = info
 	}
 

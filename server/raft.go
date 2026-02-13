@@ -217,6 +217,8 @@ type raft struct {
 
 	hcommit uint64 // The commit at the time that applies were paused
 
+	rates raftRates // Rate tracking for commits and applies
+
 	prop  *ipQueue[*proposedEntry]       // Proposals
 	entry *ipQueue[*appendEntry]         // Append entries
 	resp  *ipQueue[*appendEntryResponse] // Append entries responses
@@ -234,6 +236,57 @@ type raft struct {
 	initializing bool // The node is new, and "empty log" checks can be temporarily relaxed.
 	scaleUp      bool // The node is part of a scale up, puts us in observer mode until the log contains data.
 	deleted      bool // If the node was deleted.
+}
+
+// raftRates tracks commit and apply rates for monitoring.
+// Uses a separate lock to avoid contention with the main raft mutex.
+// Rates are computed lazily when queried, so there is zero overhead
+// on the commit/apply hot paths.
+type raftRates struct {
+	sync.Mutex
+	lastCommit uint64    // Commit index at last sample
+	lastApply  uint64    // Apply index at last sample
+	sampleTime time.Time // Time of last sample
+	commitRate float64   // Commits per second
+	applyRate  float64   // Applies per second
+}
+
+// minRateSampleInterval is the minimum time between rate samples
+// to avoid noisy rates from rapid polling.
+const minRateSampleInterval = time.Second
+
+// sampleRates computes commit and apply rates from the given current
+// indices using the previously stored sample. Returns the current rates.
+func (r *raftRates) sampleRates(commit, applied uint64) (commitRate, applyRate float64) {
+	r.Lock()
+	defer r.Unlock()
+
+	now := time.Now()
+	if !r.sampleTime.IsZero() {
+		elapsed := now.Sub(r.sampleTime)
+		if elapsed >= minRateSampleInterval {
+			secs := elapsed.Seconds()
+			if commit >= r.lastCommit {
+				r.commitRate = float64(commit-r.lastCommit) / secs
+			} else {
+				r.commitRate = 0
+			}
+			if applied >= r.lastApply {
+				r.applyRate = float64(applied-r.lastApply) / secs
+			} else {
+				r.applyRate = 0
+			}
+			r.lastCommit = commit
+			r.lastApply = applied
+			r.sampleTime = now
+		}
+	} else {
+		// First sample, initialize and report zero rates.
+		r.lastCommit = commit
+		r.lastApply = applied
+		r.sampleTime = now
+	}
+	return r.commitRate, r.applyRate
 }
 
 type proposedEntry struct {
