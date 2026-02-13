@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -8970,6 +8971,31 @@ func encodeStreamMsgAllowCompress(subject, reply string, hdr, msg []byte, lseq u
 // TODO(dlc) - Eventually make configurable.
 const compressThreshold = 8192 // 8k
 
+// Pool for compression scratch buffers to reduce GC pressure.
+// These are only needed transiently during S2 compression attempts.
+var compressBufPool = sync.Pool{
+	New: func() any {
+		return &[]byte{}
+	},
+}
+
+func getCompressBuf(sz int) []byte {
+	bp := compressBufPool.Get().(*[]byte)
+	buf := *bp
+	if cap(buf) >= sz {
+		return buf[:sz]
+	}
+	// Return undersized buffer to pool, allocate a new one.
+	compressBufPool.Put(bp)
+	buf = make([]byte, sz)
+	return buf
+}
+
+func putCompressBuf(buf []byte) {
+	buf = buf[:0]
+	compressBufPool.Put(&buf)
+}
+
 // If allowed and contents over the threshold we will compress.
 func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte, lseq uint64, ts int64, sourced bool, batchId string, batchSeq uint64, batchCommit bool) []byte {
 	// Clip the subject, reply, header and msgs down. Operate on
@@ -9026,7 +9052,7 @@ func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte
 
 	// Check if we should compress.
 	if shouldCompress {
-		nbuf := make([]byte, s2.MaxEncodedLen(elen))
+		nbuf := getCompressBuf(s2.MaxEncodedLen(elen))
 		if opIndex > 0 {
 			copy(nbuf[:opIndex], buf[:opIndex])
 		}
@@ -9035,7 +9061,16 @@ func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte
 		// Only pay the cost of decode on the other side if we compressed.
 		// S2 will allow us to try without major penalty for non-compressable data.
 		if len(ebuf) < len(buf) {
-			buf = nbuf[:len(ebuf)+opIndex+1]
+			// Compression helped. Copy result to a right-sized buffer
+			// so we can return the large scratch buffer to the pool.
+			clen := len(ebuf) + opIndex + 1
+			cbuf := make([]byte, clen)
+			copy(cbuf, nbuf[:clen])
+			putCompressBuf(nbuf)
+			buf = cbuf
+		} else {
+			// Compression didn't help, return scratch buffer to pool.
+			putCompressBuf(nbuf)
 		}
 	}
 
