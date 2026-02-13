@@ -5026,8 +5026,6 @@ func TestJetStreamClusterStreamLeaderStepDown(t *testing.T) {
 }
 
 func TestJetStreamClusterRemoveServer(t *testing.T) {
-	skip(t)
-
 	c := createJetStreamClusterExplicit(t, "RNS", 5)
 	defer c.shutdown()
 
