@@ -16,6 +16,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -7308,4 +7309,190 @@ func TestJetStreamClusterMetaCompactSizeThreshold(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Test for https://github.com/nats-io/nats-server/issues/7829
+// When an R1 consumer on an R3 stream has its leader on a different node
+// than the stream leader, the snapshot will not include the consumer data.
+func TestJetStreamClusterStreamSnapshotR1ConsumerDataLoss(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Create an R3 stream.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Publish some messages.
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish("foo", []byte("OK"))
+		require_NoError(t, err)
+	}
+
+	// Create an R1 durable consumer.
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "my-consumer",
+		AckPolicy: nats.AckExplicitPolicy,
+		Replicas:  1,
+	})
+	require_NoError(t, err)
+
+	c.waitOnConsumerLeader(globalAccountName, "TEST", "my-consumer")
+
+	// Ensure stream leader and consumer leader are on different nodes.
+	// If they happen to be on the same node, step down the stream leader.
+	streamLeader := c.streamLeader(globalAccountName, "TEST")
+	consumerLeader := c.consumerLeader(globalAccountName, "TEST", "my-consumer")
+	if streamLeader == consumerLeader {
+		// Step down the stream leader so it moves to a different node.
+		_, err = nc.Request(fmt.Sprintf(JSApiStreamLeaderStepDownT, "TEST"), nil, time.Second)
+		require_NoError(t, err)
+		c.waitOnStreamLeader(globalAccountName, "TEST")
+
+		// Verify they are now on different nodes.
+		streamLeader = c.streamLeader(globalAccountName, "TEST")
+		consumerLeader = c.consumerLeader(globalAccountName, "TEST", "my-consumer")
+		// It's possible they ended up on the same node again. If so, step down once more.
+		if streamLeader == consumerLeader {
+			_, err = nc.Request(fmt.Sprintf(JSApiStreamLeaderStepDownT, "TEST"), nil, time.Second)
+			require_NoError(t, err)
+			c.waitOnStreamLeader(globalAccountName, "TEST")
+			streamLeader = c.streamLeader(globalAccountName, "TEST")
+			consumerLeader = c.consumerLeader(globalAccountName, "TEST", "my-consumer")
+		}
+		require_NotEqual(t, streamLeader, consumerLeader)
+	}
+
+	t.Logf("Stream leader: %s, Consumer leader: %s", streamLeader, consumerLeader)
+
+	// Reconnect to the stream leader so the snapshot request is handled locally.
+	nc.Close()
+	nc, js = jsClientConnect(t, streamLeader)
+	defer nc.Close()
+
+	// Verify stream info shows 1 consumer via the API.
+	si, err := js.StreamInfo("TEST")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Consumers, 1)
+
+	// Now take a snapshot.
+	sreq := &JSApiStreamSnapshotRequest{
+		DeliverSubject: nats.NewInbox(),
+		ChunkSize:      1024,
+	}
+	req, _ := json.Marshal(sreq)
+	rmsg, err := nc.Request(fmt.Sprintf(JSApiStreamSnapshotT, "TEST"), req, 5*time.Second)
+	require_NoError(t, err)
+
+	var resp JSApiStreamSnapshotResponse
+	err = json.Unmarshal(rmsg.Data, &resp)
+	require_NoError(t, err)
+	if resp.Error != nil {
+		t.Fatalf("Snapshot request error: %+v", resp.Error)
+	}
+
+	// Check the snapshot response state's consumer count.
+	// This is the count from the stream leader's local filestore.
+	t.Logf("Snapshot response consumer count: %d", resp.State.Consumers)
+
+	state := *resp.State
+	config := *resp.Config
+
+	// Collect the snapshot data.
+	var snapshot []byte
+	done := make(chan bool)
+
+	sub, _ := nc.Subscribe(sreq.DeliverSubject, func(m *nats.Msg) {
+		if len(m.Data) == 0 {
+			done <- true
+			return
+		}
+		snapshot = append(snapshot, m.Data...)
+		m.Respond(nil)
+	})
+	defer sub.Unsubscribe()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Did not receive our snapshot in time")
+	}
+
+	// Now delete the stream and restore from the snapshot.
+	err = js.DeleteStream("TEST")
+	require_NoError(t, err)
+
+	// Restore.
+	rreq := &JSApiStreamRestoreRequest{
+		Config: config,
+		State:  state,
+	}
+	req, _ = json.Marshal(rreq)
+	rmsg, err = nc.Request(fmt.Sprintf(JSApiStreamRestoreT, "TEST"), req, 5*time.Second)
+	require_NoError(t, err)
+
+	var rresp JSApiStreamRestoreResponse
+	err = json.Unmarshal(rmsg.Data, &rresp)
+	require_NoError(t, err)
+	if rresp.Error != nil {
+		t.Fatalf("Restore request error: %+v", rresp.Error)
+	}
+
+	// Send the snapshot data.
+	var chunk [1024]byte
+	for r := bytes.NewReader(snapshot); ; {
+		n, err := r.Read(chunk[:])
+		if err != nil {
+			break
+		}
+		nc.Request(rresp.DeliverSubject, chunk[:n], time.Second)
+	}
+	rmsg, err = nc.Request(rresp.DeliverSubject, nil, 2*time.Second)
+	require_NoError(t, err)
+	rresp.Error = nil
+	json.Unmarshal(rmsg.Data, &rresp)
+	if rresp.Error != nil {
+		t.Fatalf("Restore finalize error: %+v", rresp.Error)
+	}
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	// Verify that stream is restored with messages.
+	si, err = js.StreamInfo("TEST")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, 10)
+
+	// Now check if the consumer was restored.
+	// This is the key assertion: the consumer should be present after restore.
+	// Due to issue #7829, when the R1 consumer leader was on a different node
+	// than the stream leader, the consumer data is not included in the snapshot
+	// and will be missing after restore.
+
+	// First check: the snapshot response itself reported 0 consumers.
+	// The API should report the correct count (1), but the snapshot state shows 0.
+	if state.Consumers != 1 {
+		t.Errorf("Snapshot response reported %d consumers, expected 1 "+
+			"(issue #7829: consumer_count is 0 because R1 consumer's filestore is not on stream leader)",
+			state.Consumers)
+	}
+
+	// Second check: verify the consumer can be found after restore.
+	// Give a short window for the consumer leader to be elected.
+	var ci *nats.ConsumerInfo
+	checkFor(t, 5*time.Second, 250*time.Millisecond, func() error {
+		var err error
+		ci, err = js.ConsumerInfo("TEST", "my-consumer")
+		if err != nil {
+			return fmt.Errorf("consumer 'my-consumer' not found after restore: %v "+
+				"(issue #7829: R1 consumer data lost when consumer leader differs from stream leader)", err)
+		}
+		return nil
+	})
+	t.Logf("Consumer info after restore: %+v", ci)
 }
