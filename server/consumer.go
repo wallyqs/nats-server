@@ -4462,7 +4462,7 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 		return nil, 0, errMaxAckPending
 	}
 
-	if o.hasSkipListPending() {
+	for o.hasSkipListPending() {
 		seq := o.lss.seqs[0]
 		if len(o.lss.seqs) == 1 {
 			o.sseq = o.lss.resume
@@ -4477,6 +4477,13 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 		if sm == nil || err != nil {
 			pmsg.returnToPool()
 			pmsg = nil
+			// If the message was not found (stale/overwritten entry), skip it
+			// immediately rather than entering a wait state. This avoids severe
+			// throughput degradation when concurrent producers overwrite messages
+			// between skip list construction and consumption.
+			if err == ErrStoreMsgNotFound || err == errDeletedMsg {
+				continue
+			}
 		}
 		o.sseq++
 		return pmsg, 1, err
@@ -5755,34 +5762,30 @@ func (o *consumer) selectStartingSeqNo() {
 					}
 				}
 			} else if o.cfg.DeliverPolicy == DeliverLastPerSubject {
-				// If our parent stream is set to max msgs per subject of 1 this is just
-				// a normal consumer at this point. We can avoid any heavy lifting.
-				o.mset.cfgMu.RLock()
-				mmp := o.mset.cfg.MaxMsgsPer
-				o.mset.cfgMu.RUnlock()
-				if mmp == 1 {
-					o.sseq = state.FirstSeq
+				// Always build a skip list for DeliverLastPerSubject so that we
+				// iterate only over actual live messages rather than linearly
+				// scanning the full (potentially sparse) sequence range.
+				// This is important when MaxMsgsPer == 1 (e.g. KV buckets) where
+				// the sequence range can far exceed the actual message count.
+				filters := make([]string, 0, len(o.subjf))
+				if o.subjf == nil {
+					filters = append(filters, o.cfg.FilterSubject)
 				} else {
-					filters := make([]string, 0, len(o.subjf))
-					if o.subjf == nil {
-						filters = append(filters, o.cfg.FilterSubject)
-					} else {
-						for _, filter := range o.subjf {
-							filters = append(filters, filter.subject)
-						}
+					for _, filter := range o.subjf {
+						filters = append(filters, filter.subject)
 					}
-
-					lss := &lastSeqSkipList{resume: state.LastSeq}
-					lss.seqs, _ = o.mset.store.MultiLastSeqs(filters, 0, 0)
-
-					if len(lss.seqs) == 0 {
-						o.sseq = state.LastSeq
-					} else {
-						o.sseq = lss.seqs[0]
-					}
-					// Assign skip list.
-					o.lss = lss
 				}
+
+				lss := &lastSeqSkipList{resume: state.LastSeq}
+				lss.seqs, _ = o.mset.store.MultiLastSeqs(filters, 0, 0)
+
+				if len(lss.seqs) == 0 {
+					o.sseq = state.LastSeq
+				} else {
+					o.sseq = lss.seqs[0]
+				}
+				// Assign skip list.
+				o.lss = lss
 			} else if o.cfg.OptStartTime != nil {
 				// If we are here we are time based.
 				// TODO(dlc) - Once clustered can't rely on this.

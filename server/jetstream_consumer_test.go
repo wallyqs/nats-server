@@ -10764,3 +10764,164 @@ func TestJetStreamConsumerAllowOverlappingSubjectsIfNotSubset(t *testing.T) {
 	require_Equal(t, count, 7)
 	require_Len(t, len(msgs), count)
 }
+
+func TestJetStreamDeliverLastPerSubjectMaxMsgsPerSubjectOne(t *testing.T) {
+	// Test that DeliverLastPerSubject with MaxMsgsPerSubject=1 builds a skip
+	// list and efficiently delivers only live messages, rather than performing
+	// a linear scan across the full (potentially sparse) sequence range.
+	for _, st := range []nats.StorageType{nats.MemoryStorage, nats.FileStorage} {
+		t.Run(st.String(), func(t *testing.T) {
+			s := RunBasicJetStreamServer(t)
+			defer s.Shutdown()
+
+			nc, js := jsClientConnect(t, s)
+			defer nc.Close()
+
+			const numSubjects = 100
+
+			_, err := js.AddStream(&nats.StreamConfig{
+				Name:              "TEST",
+				Subjects:          []string{"kv.>"},
+				Storage:           st,
+				MaxMsgsPerSubject: 1,
+			})
+			require_NoError(t, err)
+
+			// Publish multiple rounds to the same subjects to create a sparse
+			// sequence range. With MaxMsgsPerSubject=1, old messages are purged
+			// but sequence numbers keep advancing.
+			for round := 0; round < 10; round++ {
+				for i := 0; i < numSubjects; i++ {
+					_, err = js.Publish(fmt.Sprintf("kv.key.%d", i), []byte(fmt.Sprintf("round-%d", round)))
+					require_NoError(t, err)
+				}
+			}
+
+			// At this point, the stream has 100 live messages across a sequence
+			// range of 1000 (very sparse).
+			si, err := js.StreamInfo("TEST")
+			require_NoError(t, err)
+			require_Equal(t, si.State.Msgs, uint64(numSubjects))
+			require_Equal(t, si.State.LastSeq, uint64(numSubjects*10))
+
+			// Verify that the consumer creates a skip list.
+			acc := s.GlobalAccount()
+			mset, err := acc.lookupStream("TEST")
+			require_NoError(t, err)
+
+			sub, err := js.PullSubscribe("kv.>", "dlps",
+				nats.BindStream("TEST"),
+				nats.DeliverLastPerSubject(),
+				nats.AckExplicit(),
+			)
+			require_NoError(t, err)
+
+			o := mset.lookupConsumer("dlps")
+			require_NotNil(t, o)
+
+			// Verify skip list was built (not bypassed due to MaxMsgsPerSubject=1).
+			o.mu.RLock()
+			hasSkipList := o.lss != nil
+			var skipListLen int
+			if hasSkipList {
+				skipListLen = len(o.lss.seqs)
+			}
+			o.mu.RUnlock()
+
+			require_True(t, hasSkipList)
+			require_Equal(t, skipListLen, numSubjects)
+
+			// Fetch all messages and verify we get exactly one per subject
+			// with the latest data.
+			received := make(map[string]string)
+			msgs, err := sub.Fetch(numSubjects, nats.MaxWait(2*time.Second))
+			require_NoError(t, err)
+			require_Equal(t, len(msgs), numSubjects)
+			for _, m := range msgs {
+				received[m.Subject] = string(m.Data)
+				require_NoError(t, m.Ack())
+			}
+
+			// Each subject should have the latest value.
+			for i := 0; i < numSubjects; i++ {
+				subj := fmt.Sprintf("kv.key.%d", i)
+				val, ok := received[subj]
+				require_True(t, ok)
+				require_Equal(t, val, "round-9")
+			}
+		})
+	}
+}
+
+func TestJetStreamDeliverLastPerSubjectSkipListStaleEntries(t *testing.T) {
+	// Test that stale entries in the skip list (messages overwritten between
+	// skip list construction and consumption) are skipped immediately without
+	// causing the consumer to enter a wait state.
+	// Uses MaxMsgsPer > 1 so that a skip list is always built (even without
+	// the MaxMsgsPer==1 fix), isolating the for+continue stale-entry fix.
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"kv.>"},
+		Storage:  nats.MemoryStorage,
+	})
+	require_NoError(t, err)
+
+	// Publish initial messages: one message per subject.
+	const numSubjects = 50
+	for i := 0; i < numSubjects; i++ {
+		_, err = js.Publish(fmt.Sprintf("kv.key.%d", i), []byte("v1"))
+		require_NoError(t, err)
+	}
+
+	// Create the consumer which will build a skip list with seqs [1..50].
+	ci, err := js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Name:          "dlps",
+		FilterSubject: "kv.>",
+		DeliverPolicy: nats.DeliverLastPerSubjectPolicy,
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+	require_Equal(t, ci.NumPending, uint64(numSubjects))
+
+	// Delete half the messages from the stream. This makes their skip list
+	// entries stale (LoadMsg will return ErrStoreMsgNotFound).
+	for i := 1; i <= numSubjects/2; i++ {
+		require_NoError(t, js.DeleteMsg("TEST", uint64(i)))
+	}
+
+	// Fetch remaining messages. The consumer should skip stale entries
+	// without entering a wait state or timing out.
+	sub, err := js.PullSubscribe("kv.>", "", nats.Bind("TEST", "dlps"))
+	require_NoError(t, err)
+
+	received := make(map[string]string)
+	// Use a short timeout. If stale entries cause blocking, this will fail.
+	deadline := time.Now().Add(5 * time.Second)
+	remaining := numSubjects / 2
+	for len(received) < remaining && time.Now().Before(deadline) {
+		msgs, err := sub.Fetch(remaining, nats.MaxWait(2*time.Second))
+		if err != nil {
+			continue
+		}
+		for _, m := range msgs {
+			received[m.Subject] = string(m.Data)
+			require_NoError(t, m.Ack())
+		}
+	}
+
+	require_Equal(t, len(received), remaining)
+
+	// Verify we received the surviving subjects.
+	for i := numSubjects / 2; i < numSubjects; i++ {
+		subj := fmt.Sprintf("kv.key.%d", i)
+		val, ok := received[subj]
+		require_True(t, ok)
+		require_Equal(t, val, "v1")
+	}
+}
