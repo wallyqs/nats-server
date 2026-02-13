@@ -5828,6 +5828,20 @@ func TestJetStreamClusterWorkQueueBlockSizeWithMaxBytes(t *testing.T) {
 	})
 	require_NoError(t, err)
 
+	// Interest stream with same settings should also use 8MB blocks.
+	// Unlike WorkQueue, Interest streams can accumulate messages when
+	// consumers lag, behaving more like Limits streams.
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:      "INTEREST_TEST",
+		Subjects:  []string{"int.>"},
+		Retention: nats.InterestPolicy,
+		Storage:   nats.FileStorage,
+		MaxBytes:  256 * 1024 * 1024, // 256MB
+		MaxMsgs:   1_000_000,
+		Replicas:  3,
+	})
+	require_NoError(t, err)
+
 	blkSize := func(fs *fileStore) uint64 {
 		fs.mu.RLock()
 		defer fs.mu.RUnlock()
@@ -5849,6 +5863,14 @@ func TestJetStreamClusterWorkQueueBlockSizeWithMaxBytes(t *testing.T) {
 		lset.mu.RLock()
 		fs = lset.store.(*fileStore)
 		lset.mu.RUnlock()
+		require_Equal(t, blkSize(fs), defaultLargeBlockSize)
+
+		// Interest stream should have large block size (8MB).
+		iset, err := s.GlobalAccount().lookupStream("INTEREST_TEST")
+		require_NoError(t, err)
+		iset.mu.RLock()
+		fs = iset.store.(*fileStore)
+		iset.mu.RUnlock()
 		require_Equal(t, blkSize(fs), defaultLargeBlockSize)
 	}
 }
