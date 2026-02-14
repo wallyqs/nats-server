@@ -80,6 +80,9 @@ type jetStreamCluster struct {
 	// Track last meta snapshot time and duration for monitoring.
 	lastMetaSnapTime     int64 // Unix nanoseconds
 	lastMetaSnapDuration int64 // Duration in nanoseconds
+	// Signals that this is a fresh bootstrap with no prior meta state.
+	// Used to detect standalone-to-clustered mode transitions.
+	bootstrapped bool
 }
 
 // Used to track inflight stream create/update/delete requests that have been proposed but not yet applied.
@@ -967,12 +970,13 @@ func (js *jetStream) setupMetaGroup() error {
 	js.mu.Lock()
 	defer js.mu.Unlock()
 	js.cluster = &jetStreamCluster{
-		meta:    n,
-		streams: make(map[string]map[string]*streamAssignment),
-		s:       s,
-		c:       c,
-		qch:     make(chan struct{}),
-		stopped: make(chan struct{}),
+		meta:         n,
+		streams:      make(map[string]map[string]*streamAssignment),
+		s:            s,
+		c:            c,
+		qch:          make(chan struct{}),
+		stopped:      make(chan struct{}),
+		bootstrapped: bootstrap,
 	}
 	atomic.StoreInt32(&js.clustered, 1)
 	c.registerWithAccount(sysAcc)
@@ -1372,6 +1376,8 @@ func (ru *recoveryUpdates) addOrUpdateConsumer(ca *consumerAssignment) {
 // Called after recovery of the cluster on startup to check for any orphans.
 // Streams and consumers are recovered from disk, and the meta layer's mappings
 // should clean them up, but under crash scenarios there could be orphans.
+// When the cluster was freshly bootstrapped (standalone-to-clustered transition),
+// orphaned streams are adopted into the cluster instead of being deleted.
 func (js *jetStream) checkForOrphans() {
 	// Can not hold jetstream lock while trying to delete streams or consumers.
 	js.mu.Lock()
@@ -1390,6 +1396,8 @@ func (js *jetStream) checkForOrphans() {
 		s.Debugf("JetStream cluster skipping check for orphans, not current with the meta-leader")
 		return
 	}
+
+	bootstrapped := cc.bootstrapped
 
 	var streams []*stream
 	var consumers []*consumer
@@ -1412,6 +1420,25 @@ func (js *jetStream) checkForOrphans() {
 		jsa.mu.RUnlock()
 	}
 	js.mu.Unlock()
+
+	// If this was a fresh bootstrap (standalone-to-clustered transition) and
+	// this node is the meta leader, adopt orphaned streams instead of deleting them.
+	if bootstrapped && len(streams) > 0 && meta.Leader() {
+		js.adoptLocalStreams()
+		js.mu.Lock()
+		if js.cluster != nil {
+			js.cluster.bootstrapped = false
+		}
+		js.mu.Unlock()
+		return
+	}
+
+	// If bootstrapped but not the leader, skip deletion to preserve data
+	// for possible adoption by the leader.
+	if bootstrapped && len(streams) > 0 {
+		s.Noticef("JetStream cluster bootstrapped with %d orphaned stream(s), skipping cleanup (not meta leader)", len(streams))
+		return
+	}
 
 	for _, mset := range streams {
 		mset.mu.RLock()
@@ -1440,6 +1467,107 @@ func (js *jetStream) checkForOrphans() {
 
 		if err := o.delete(); err != nil {
 			s.Warnf("Deleting consumer encountered an error: %v", err)
+		}
+	}
+}
+
+// adoptLocalStreams is called on a freshly bootstrapped cluster when the meta leader
+// detects streams that were recovered from disk (created in standalone mode) but have
+// no corresponding meta assignments. This allows seamless transition from standalone
+// to clustered mode without data loss.
+func (js *jetStream) adoptLocalStreams() {
+	js.mu.RLock()
+	s, cc := js.srv, js.cluster
+	if cc == nil || cc.meta == nil {
+		js.mu.RUnlock()
+		return
+	}
+	meta := cc.meta
+	ourID := meta.ID()
+	js.mu.RUnlock()
+
+	// Collect all streams that exist on disk but have no meta assignment.
+	var toAdopt []*stream
+
+	js.mu.RLock()
+	for accName, jsa := range js.accounts {
+		asa := cc.streams[accName]
+		jsa.mu.RLock()
+		for name, mset := range jsa.streams {
+			if asa == nil || asa[name] == nil {
+				toAdopt = append(toAdopt, mset)
+			}
+		}
+		jsa.mu.RUnlock()
+	}
+	js.mu.RUnlock()
+
+	if len(toAdopt) == 0 {
+		return
+	}
+
+	s.Noticef("JetStream adopting %d stream(s) from standalone mode into cluster", len(toAdopt))
+
+	for _, mset := range toAdopt {
+		accName := mset.accName()
+		streamName := mset.name()
+		cfg := mset.config()
+		created := mset.createdTime()
+
+		// Create an R1 raft group with ourselves as the sole peer.
+		peers := []string{ourID}
+		rg := &raftGroup{
+			Name:    groupNameForStream(peers, cfg.Storage),
+			Storage: cfg.Storage,
+			Peers:   peers,
+		}
+
+		sa := &streamAssignment{
+			Client:  &ClientInfo{Account: accName},
+			Created: created,
+			Config:  &cfg,
+			Group:   rg,
+			Sync:    syncSubjForStream(),
+		}
+
+		if err := meta.Propose(encodeAddStreamAssignment(sa)); err != nil {
+			s.Warnf("JetStream failed to propose stream adoption for '%s > %s': %v", accName, streamName, err)
+			continue
+		}
+		s.Noticef("JetStream proposed adoption of stream '%s > %s'", accName, streamName)
+
+		// Now adopt consumers for this stream.
+		for _, o := range mset.getConsumers() {
+			consumerName := o.String()
+			ocfg := o.config()
+			oCreated := o.createdTime()
+
+			// Consumer raft group.
+			cPeers := []string{ourID}
+			storage := cfg.Storage
+			if ocfg.MemoryStorage {
+				storage = MemoryStorage
+			}
+			crg := &raftGroup{
+				Name:    groupNameForConsumer(cPeers, storage),
+				Storage: storage,
+				Peers:   cPeers,
+			}
+
+			ca := &consumerAssignment{
+				Client:  &ClientInfo{Account: accName},
+				Created: oCreated,
+				Name:    consumerName,
+				Stream:  streamName,
+				Config:  &ocfg,
+				Group:   crg,
+			}
+
+			if err := meta.Propose(encodeAddConsumerAssignment(ca)); err != nil {
+				s.Warnf("JetStream failed to propose consumer adoption for '%s > %s > %s': %v", accName, streamName, consumerName, err)
+				continue
+			}
+			s.Noticef("JetStream proposed adoption of consumer '%s > %s > %s'", accName, streamName, consumerName)
 		}
 	}
 }
