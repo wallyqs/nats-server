@@ -7767,7 +7767,152 @@ func (mset *stream) snapshot(deadline time.Duration, checkMsgs, includeConsumers
 		return nil, errStreamClosed
 	}
 	store := mset.store
-	return store.Snapshot(deadline, checkMsgs, includeConsumers)
+
+	// In clustered mode with R1 consumers, the consumer's filestore may only
+	// exist on the consumer leader node, not on this (stream leader) node.
+	// We need to create temporary consumer stores for those consumers so they
+	// are included in the snapshot. See #7829.
+	var tempConsumers []ConsumerStore
+	if includeConsumers {
+		tempConsumers = mset.addMissingConsumerStoresForSnapshot()
+	}
+
+	sr, err := store.Snapshot(deadline, checkMsgs, includeConsumers)
+	if err != nil {
+		// Clean up any temporary consumer stores on error.
+		mset.cleanupTempConsumerStores(tempConsumers)
+		return nil, err
+	}
+
+	// Wrap the reader to clean up temporary consumer stores when done.
+	if len(tempConsumers) > 0 {
+		sr.Reader = &snapshotCleanupReader{
+			ReadCloser: sr.Reader,
+			mset:       mset,
+			consumers:  tempConsumers,
+		}
+	}
+
+	return sr, nil
+}
+
+// snapshotCleanupReader wraps a ReadCloser and cleans up temporary consumer
+// stores when the snapshot reader is closed.
+type snapshotCleanupReader struct {
+	io.ReadCloser
+	mset      *stream
+	consumers []ConsumerStore
+}
+
+func (r *snapshotCleanupReader) Close() error {
+	err := r.ReadCloser.Close()
+	r.mset.cleanupTempConsumerStores(r.consumers)
+	return err
+}
+
+// addMissingConsumerStoresForSnapshot checks for consumers in the cluster
+// assignments that don't have a local consumer store (e.g., R1 consumers
+// whose leader is on a different node). For each such consumer, it creates
+// a temporary consumer store and populates it with the consumer's config
+// and state (fetched from the consumer leader).
+func (mset *stream) addMissingConsumerStoresForSnapshot() []ConsumerStore {
+	mset.mu.RLock()
+	sa := mset.sa
+	srv := mset.srv
+	localConsumers := mset.consumers
+	accName := mset.acc.Name
+	streamName := mset.cfg.Name
+	mset.mu.RUnlock()
+
+	if sa == nil || srv == nil {
+		return nil
+	}
+
+	js := srv.getJetStream()
+	if js == nil {
+		return nil
+	}
+
+	// Gather consumer assignments from the cluster metadata.
+	js.mu.RLock()
+	if sa.consumers == nil || len(sa.consumers) == 0 {
+		js.mu.RUnlock()
+		return nil
+	}
+	// Collect consumer assignments for consumers not running locally.
+	type missingConsumer struct {
+		name    string
+		created time.Time
+		config  *ConsumerConfig
+	}
+	var missing []missingConsumer
+	for name, ca := range sa.consumers {
+		if _, ok := localConsumers[name]; !ok {
+			missing = append(missing, missingConsumer{
+				name:    name,
+				created: ca.Created,
+				config:  ca.Config,
+			})
+		}
+	}
+	js.mu.RUnlock()
+
+	if len(missing) == 0 {
+		return nil
+	}
+
+	store := mset.store
+	var tempStores []ConsumerStore
+	for _, mc := range missing {
+		if mc.config == nil {
+			continue
+		}
+		cs, err := store.ConsumerStore(mc.name, mc.created, mc.config)
+		if err != nil {
+			srv.Warnf("Snapshot: could not create temp consumer store for %q on stream %q: %v",
+				mc.name, streamName, err)
+			continue
+		}
+		tempStores = append(tempStores, cs)
+
+		// Try to fetch consumer state from the consumer leader.
+		ci, err := sysRequest[ConsumerInfo](srv, clusterConsumerInfoT, accName, streamName, mc.name)
+		if err != nil {
+			srv.Debugf("Snapshot: could not fetch consumer state for %q on stream %q: %v",
+				mc.name, streamName, err)
+			continue
+		}
+		if ci != nil {
+			state := &ConsumerState{
+				Delivered: SequencePair{
+					Consumer: ci.Delivered.Consumer,
+					Stream:   ci.Delivered.Stream,
+				},
+				AckFloor: SequencePair{
+					Consumer: ci.AckFloor.Consumer,
+					Stream:   ci.AckFloor.Stream,
+				},
+			}
+			if err := cs.Update(state); err != nil {
+				srv.Warnf("Snapshot: could not update temp consumer state for %q on stream %q: %v",
+					mc.name, streamName, err)
+			}
+		}
+	}
+	return tempStores
+}
+
+// cleanupTempConsumerStores removes temporary consumer stores that were
+// created for snapshot purposes.
+func (mset *stream) cleanupTempConsumerStores(consumers []ConsumerStore) {
+	if len(consumers) == 0 {
+		return
+	}
+	store := mset.store
+	for _, cs := range consumers {
+		store.RemoveConsumer(cs)
+		cs.Delete()
+	}
 }
 
 const snapsDir = "__snapshots__"
