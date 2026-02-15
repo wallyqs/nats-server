@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"iter"
 	"math"
 	"math/rand"
 	"net"
@@ -41,12 +42,7 @@ type RaftNode interface {
 	ProposeMulti(entries []*Entry) error
 	ForwardProposal(entry []byte) error
 	InstallSnapshot(snap []byte) error
-	InstallSnapshotAsyncReplayFunc(
-		processSnap func([]byte) error,
-		processEntry func(*appendEntry) error,
-		generateData func() ([]byte, error),
-		done func(error),
-	)
+	CreateSnapshotCheckpoint(force bool) (RaftNodeCheckpoint, error)
 	SendSnapshot(snap []byte) error
 	NeedSnapshot() bool
 	Applied(index uint64) (entries uint64, bytes uint64)
@@ -93,6 +89,17 @@ type RaftNode interface {
 	RecreateInternalSubs() error
 	IsSystemAccount() bool
 	GetTrafficAccountName() string
+}
+
+// RaftNodeCheckpoint is used as an alternative to a direct InstallSnapshot.
+// A checkpoint is created from CreateSnapshotCheckpoint and allows installing snapshots asynchronously,
+// as well as loading the last snapshot or entries between the last snapshot and the one we're about to create.
+// Abort can be called to cancel the snapshot installation at any time, or InstallSnapshot to install it.
+type RaftNodeCheckpoint interface {
+	LoadLastSnapshot() (snap []byte, err error)
+	IterAppendEntrySeq() iter.Seq2[*appendEntry, error]
+	Abort()
+	InstallSnapshot(data []byte) (uint64, error)
 }
 
 type WAL interface {
@@ -257,6 +264,7 @@ type catchupState struct {
 	pterm  uint64        // Starting term
 	pindex uint64        // Starting index
 	active time.Time     // Last time we received a message for this catchup
+	signal bool          // Whether the EntryCatchup signal was sent.
 }
 
 // lps holds peer state of last time and last index replicated.
@@ -320,6 +328,7 @@ var (
 	errBadSnapName       = errors.New("raft: snapshot name could not be parsed")
 	errNoSnapAvailable   = errors.New("raft: no snapshot available")
 	errSnapInProgress    = errors.New("raft: snapshot is already in progress")
+	errSnapAborted       = errors.New("raft: snapshot was aborted")
 	errCatchupsRunning   = errors.New("raft: snapshot can not be installed while catchups running")
 	errSnapshotCorrupt   = errors.New("raft: snapshot corrupt")
 	errTooManyPrefs      = errors.New("raft: stepdown requires at most one preferred new leader")
@@ -1285,54 +1294,34 @@ func (n *raft) SendSnapshot(data []byte) error {
 // all of the log entries up to and including index. This should not be called with
 // entries that have been applied to the FSM but have not been applied to the raft state.
 func (n *raft) InstallSnapshot(data []byte) error {
-	if n.State() == Closed {
-		return errNodeClosed
-	}
-
 	n.Lock()
 	defer n.Unlock()
 
-	if n.snapshotting {
-		return errSnapInProgress
+	c, err := n.createSnapshotCheckpointLocked(false)
+	if err != nil {
+		return err
 	}
-
-	// If a write error has occurred already then stop here.
-	if werr := n.werr; werr != nil {
-		return werr
-	}
-
-	// Check that a catchup isn't already taking place. If it is then we won't
-	// allow installing snapshots until it is done.
-	if len(n.progress) > 0 || n.paused {
-		return errCatchupsRunning
-	}
-
-	if n.applied == 0 {
-		n.debug("Not snapshotting as there are no applied entries")
-		return errNoSnapAvailable
-	}
-
-	var term uint64
-	if ae, _ := n.loadEntry(n.applied); ae != nil {
-		term = ae.term
-	} else {
-		n.debug("Not snapshotting as entry %d is not available", n.applied)
-		return errNoSnapAvailable
-	}
-
-	n.debug("Installing snapshot of %d bytes [%d:%d]", len(data), term, n.applied)
-
-	return n.installSnapshot(&snapshot{
-		lastTerm:  term,
-		lastIndex: n.applied,
-		peerstate: encodePeerState(&peerState{n.peerNames(), n.csz, n.extSt}),
+	c.n.debug("Installing snapshot of %d bytes [%d:%d]", len(data), c.term, c.applied)
+	snap := &snapshot{
+		lastTerm:  c.term,
+		lastIndex: c.applied,
+		peerstate: c.peerstate,
 		data:      data,
-	})
+	}
+	return c.n.installSnapshot(snap)
 }
 
 // Install the snapshot.
 // Lock should be held.
 func (n *raft) installSnapshot(snap *snapshot) error {
+	// Always reset, albeit on success or error.
+	// This is done even though this doesn't come from a checkpoint. We do this so we can
+	// interrupt/abort an asynchronously running snapshot (if it exists). Ensures the upper layer
+	// can't overwrite a snapshot that we installed here with an old asynchronously created one.
+	defer func() {
+		n.snapshotting = false
+	}()
+
 	snapDir := filepath.Join(n.sd, snapshotsDir)
 	sn := fmt.Sprintf(snapFileT, snap.lastTerm, snap.lastIndex)
 	sfile := filepath.Join(snapDir, sn)
@@ -1361,147 +1350,193 @@ func (n *raft) installSnapshot(snap *snapshot) error {
 	return nil
 }
 
-func (n *raft) InstallSnapshotAsyncReplayFunc(
-	processSnap func([]byte) error,
-	processEntry func(*appendEntry) error,
-	generateData func() ([]byte, error),
-	cb func(error),
-) {
-	if n.State() == Closed {
-		cb(errNodeClosed)
-		return
-	}
-
+func (n *raft) CreateSnapshotCheckpoint(force bool) (RaftNodeCheckpoint, error) {
 	n.Lock()
 	defer n.Unlock()
+	return n.createSnapshotCheckpointLocked(force)
+}
 
+func (n *raft) createSnapshotCheckpointLocked(force bool) (*checkpoint, error) {
+	if n.State() == Closed {
+		return nil, errNodeClosed
+	}
 	if n.snapshotting {
-		cb(errSnapInProgress)
-		return
+		return nil, errSnapInProgress
 	}
 
 	// If a write error has occurred already then stop here.
 	if werr := n.werr; werr != nil {
-		cb(werr)
-		return
+		return nil, werr
 	}
 
 	// Check that a catchup isn't already taking place. If it is then we won't
 	// allow installing snapshots until it is done.
-	if len(n.progress) > 0 || n.paused {
-		cb(errCatchupsRunning)
-		return
+	if !force && len(n.progress) > 0 {
+		return nil, errCatchupsRunning
 	}
 
-	applied := n.applied
-	if applied == 0 {
+	if n.applied == 0 {
 		n.debug("Not snapshotting as there are no applied entries")
-		cb(errNoSnapAvailable)
-		return
+		return nil, errNoSnapAvailable
 	}
 
 	var term uint64
-	if ae, _ := n.loadEntry(applied); ae != nil {
+	if ae, _ := n.loadEntry(n.applied); ae != nil {
 		term = ae.term
 		ae.returnToPool()
 	} else {
-		n.debug("Not snapshotting as entry %d is not available", applied)
-		cb(errNoSnapAvailable)
-		return
+		n.debug("Not snapshotting as entry %d is not available", n.applied)
+		return nil, errNoSnapAvailable
 	}
 
 	// Snapshot the current peer state for the current applied index, we'll need it in the snapshot.
 	peerstate := encodePeerState(&peerState{n.peerNames(), n.csz, n.extSt})
 	snapDir := filepath.Join(n.sd, snapshotsDir)
-	snapFile := filepath.Join(snapDir, fmt.Sprintf(snapFileT, term, applied))
+	snapFile := filepath.Join(snapDir, fmt.Sprintf(snapFileT, term, n.applied))
 
-	s := n.s
 	n.snapshotting = true
-	s.startGoRoutine(func() {
-		defer s.grWG.Done()
-		defer func() {
-			n.Lock()
-			n.snapshotting = false
-			n.Unlock()
-		}()
+	c := &checkpoint{
+		n:         n,
+		term:      term,
+		applied:   n.applied,
+		papplied:  n.papplied,
+		snapFile:  snapFile,
+		peerstate: peerstate,
+	}
+	return c, nil
+}
 
-		n.Lock()
-		snap, err := n.loadLastSnapshot()
-		n.Unlock()
-		if err != nil && err != errNoSnapAvailable {
-			cb(err)
-			return
-		}
+type checkpoint struct {
+	n         *raft  // Reference to the RaftNode.
+	term      uint64 // The term of the entry at applied.
+	applied   uint64 // What applied value the snapshot will represent and what the log can be compacted to.
+	papplied  uint64 // Previous applied value of the previous snapshot.
+	snapFile  string // Where the snapshot should be installed.
+	peerstate []byte // Encoded peerstate generated when creating this checkpoint.
+}
 
-		first := uint64(1)
-		if snap != nil {
-			first = snap.lastIndex + 1
-			if err = processSnap(snap.data); err != nil {
-				cb(err)
+// LoadLastSnapshot loads the last snapshot from disk when using a RaftNodeCheckpoint.
+func (c *checkpoint) LoadLastSnapshot() ([]byte, error) {
+	c.n.Lock()
+	defer c.n.Unlock()
+	if !c.n.snapshotting {
+		// The checkpoint can be aborted at any time, don't continue if that happened.
+		return nil, errSnapAborted
+	}
+	snap, err := c.n.loadLastSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	if snap.lastIndex != c.papplied {
+		return nil, errors.New("snapshot index mismatch")
+	}
+	return snap.data, nil
+}
+
+// IterAppendEntrySeq allows iterating over entries that can be compacted as part of a snapshot.
+func (c *checkpoint) IterAppendEntrySeq() iter.Seq2[*appendEntry, error] {
+	return func(yield func(*appendEntry, error) bool) {
+		for index := c.papplied + 1; index <= c.applied; index++ {
+			c.n.Lock()
+			if !c.n.snapshotting {
+				c.n.Unlock()
+				// The checkpoint can be aborted at any time, don't continue if that happened.
+				yield(nil, errSnapAborted)
 				return
 			}
-		}
-
-		for index := first; index <= applied; index++ {
-			n.Lock()
-			ae, err := n.loadEntry(index)
-			n.Unlock()
+			// Load entry and yield to the caller while unlocked.
+			ae, err := c.n.loadEntry(index)
+			c.n.Unlock()
 			if err != nil {
-				cb(err)
+				yield(nil, err)
 				return
 			}
-			err = processEntry(ae)
+			yield(ae, nil)
 			ae.returnToPool()
-			if err != nil {
-				cb(err)
-				return
-			}
 		}
+	}
+}
 
-		data, err := generateData()
-		if err != nil {
-			cb(err)
-			return
-		}
+// Abort can be called to cancel the snapshot installation at any time.
+func (c *checkpoint) Abort() {
+	c.n.Lock()
+	defer c.n.Unlock()
+	c.n.snapshotting = false
+}
 
-		n.Lock()
-		n.debug("Installing snapshot of %d bytes [%d:%d]", len(data), term, applied)
-		encoded := n.encodeSnapshot(&snapshot{
-			lastTerm:  term,
-			lastIndex: applied,
-			peerstate: peerstate,
-			data:      data,
-		})
-		n.Unlock()
+// InstallSnapshot allows asynchronous installation of a snapshot by unlocking when
+// performing operations that don't strictly need to be locked. When the lock is re-acquired
+// n.snapshotting will be checked to ensure we're still meant to.
+// Async snapshots can only be used when using CreateSnapshotCheckpoint.
+// Lock should be held.
+func (c *checkpoint) InstallSnapshot(data []byte) (uint64, error) {
+	n := c.n
+	n.Lock()
+	defer n.Unlock()
+	// Always reset, albeit on success or error.
+	defer func() {
+		n.snapshotting = false
+	}()
 
-		if err = writeFileWithSync(snapFile, encoded, defaultFilePerms); err != nil {
-			cb(err)
-			return
-		}
-		n.Lock()
-		defer n.Unlock()
-		if n.State() == Closed {
-			cb(errNodeClosed)
-			return
-		}
-		// Delete our previous snapshot file if it exists.
-		if n.snapfile != _EMPTY_ && n.snapfile != snapFile {
-			os.Remove(n.snapfile)
-		}
-		// Remember our latest snapshot file.
-		n.snapfile = snapFile
-		_, err = n.wal.Compact(applied + 1)
-		if err != nil {
-			n.setWriteErrLocked(err)
-			cb(err)
-			return
-		}
-		var state StreamState
-		n.wal.FastState(&state)
-		n.papplied = applied
-		n.bytes = state.Bytes
-		cb(nil) // Signal success.
-	})
+	if !n.snapshotting {
+		// The checkpoint can be aborted at any time, don't continue if that happened.
+		return 0, errSnapAborted
+	}
+
+	n.debug("Installing snapshot of %d bytes [%d:%d]", len(data), c.term, c.applied)
+	snap := &snapshot{
+		lastTerm:  c.term,
+		lastIndex: c.applied,
+		peerstate: c.peerstate,
+		data:      data,
+	}
+	encoded := n.encodeSnapshot(snap)
+
+	// Unlock while writing.
+	n.Unlock()
+	err := writeFileWithSync(c.snapFile, encoded, defaultFilePerms)
+	n.Lock()
+	if err != nil {
+		// We could set write err here, but if this is a temporary situation, too many open files etc.
+		// we want to retry and snapshots are not fatal.
+		return 0, err
+	} else if !n.snapshotting {
+		// The checkpoint can be aborted at any time, don't continue if that happened.
+		return 0, errSnapAborted
+	}
+
+	// Delete our previous snapshot file if it exists.
+	if n.snapfile != _EMPTY_ && n.snapfile != c.snapFile {
+		os.Remove(n.snapfile)
+	}
+	// Remember our latest snapshot file.
+	n.snapfile = c.snapFile
+
+	// Unlock while compacting.
+	n.Unlock()
+	_, err = n.wal.Compact(snap.lastIndex + 1)
+	n.Lock()
+	if err != nil {
+		n.setWriteErrLocked(err)
+		return 0, err
+	} else if !n.snapshotting {
+		// The checkpoint can be aborted at any time, don't continue if that happened.
+		return 0, errSnapAborted
+	}
+
+	compacted := n.bytes
+	var state StreamState
+	n.wal.FastState(&state)
+	n.papplied = snap.lastIndex
+	n.bytes = state.Bytes
+
+	// Expose compacted size.
+	if n.bytes > compacted {
+		compacted = 0
+	} else {
+		compacted -= n.bytes
+	}
+	return compacted, nil
 }
 
 // NeedSnapshot returns true if it is necessary to try to install a snapshot, i.e.
@@ -3642,9 +3677,8 @@ func (n *raft) cancelCatchup() {
 
 	if n.catchup != nil && n.catchup.sub != nil {
 		n.unsubscribe(n.catchup.sub)
-		// Send nil entry to signal the upper layers we are done catching up.
-		n.apply.push(nil)
 	}
+	n.cancelCatchupSignal()
 	n.catchup = nil
 }
 
@@ -3671,9 +3705,6 @@ func (n *raft) createCatchup(ae *appendEntry) string {
 	// Cleanup any old ones.
 	if n.catchup != nil && n.catchup.sub != nil {
 		n.unsubscribe(n.catchup.sub)
-	} else {
-		// Signal to the upper layer that the following entries are catchup entries, up until the nil guard.
-		n.apply.push(newCommittedEntry(0, []*Entry{{EntryCatchup, nil}}))
 	}
 	// Snapshot term and index.
 	n.catchup = &catchupState{
@@ -3686,8 +3717,26 @@ func (n *raft) createCatchup(ae *appendEntry) string {
 	inbox := n.newCatchupInbox()
 	sub, _ := n.subscribe(inbox, n.handleAppendEntry)
 	n.catchup.sub = sub
-
 	return inbox
+}
+
+// Lock should be held.
+func (n *raft) sendCatchupSignal() {
+	if n.catchup == nil || n.catchup.signal {
+		return
+	}
+	n.catchup.signal = true
+	// Signal to the upper layer that the following entries are catchup entries, up until the nil guard.
+	n.apply.push(newCommittedEntry(0, []*Entry{{EntryCatchup, nil}}))
+}
+
+// Lock should be held.
+func (n *raft) cancelCatchupSignal() {
+	if n.catchup == nil || !n.catchup.signal {
+		return
+	}
+	// Send nil entry to signal the upper layers we are done catching up.
+	n.apply.push(nil)
 }
 
 // Truncate our WAL and reset.
@@ -4045,6 +4094,7 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 			}
 
 			// Inherit state from appendEntry with the leader's snapshot.
+			hadPreviousSnapshot := n.snapfile != _EMPTY_
 			n.pindex = ae.pindex
 			n.pterm = ae.pterm
 			n.commit = ae.pindex
@@ -4063,8 +4113,18 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 			}
 			n.resetInitializing()
 
+			if !hadPreviousSnapshot {
+				// If the first snapshot we install is received from another server, then we immediately signal
+				// to the upper-layer it can coalesce catchup entries.
+				n.sendCatchupSignal()
+			}
 			// Now send snapshot to upper levels. Only send the snapshot, not the peerstate entry.
 			n.apply.push(newCommittedEntry(n.commit, ae.entries[:1]))
+			if hadPreviousSnapshot {
+				// Signal catchup only after we've sent the snapshot. That ensures the upper-layer processes the snapshot
+				// as-is and can only coalesce other catchup entries after this one.
+				n.sendCatchupSignal()
+			}
 			n.Unlock()
 			return
 		}
@@ -4144,6 +4204,10 @@ CONTINUE:
 
 	// Apply anything we need here.
 	if aeCommit > n.commit {
+		// If we're catching up, we might need to signal that it's okay to potentially coalesce entries from here.
+		if catchingUp {
+			n.sendCatchupSignal()
+		}
 		if n.paused {
 			n.hcommit = aeCommit
 			n.debug("Paused, not applying %d", aeCommit)

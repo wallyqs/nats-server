@@ -145,6 +145,8 @@ const (
 	// Batch stream ops.
 	batchMsgOp
 	batchCommitMsgOp
+	// Consumer rest to specific starting sequence.
+	resetSeqOp
 )
 
 // raftGroups are controlled by the metagroup controller.
@@ -440,7 +442,7 @@ func (s *Server) JetStreamSnapshotMeta() error {
 		return errNotLeader
 	}
 
-	snap, err := js.metaSnapshot()
+	snap, _, _, err := js.metaSnapshot()
 	if err != nil {
 		return err
 	}
@@ -1497,14 +1499,24 @@ func (js *jetStream) monitorCluster() {
 
 	// Snapshotting function.
 	var (
-		snapMu           sync.Mutex
-		snapshotting     bool
-		fallbackSnapshot bool
+		snapMu       sync.Mutex
+		snapshotting bool
+		// The first snapshot we do after recovery should clean up most of the log.
+		fallbackSnapshot = true
+		// Suppress non-forced snapshots after an error. Timer-based snapshots will become forced.
+		// If failures continue, we force a snapshot even if we were catching up others
+		// (otherwise we might indefinitely stall and grow log size).
+		failedSnapshots atomic.Uint32
 	)
 	doSnapshot := func(force bool) {
 		// Suppress during recovery.
+		// If snapshots have failed, and we're not forced to, we'll wait for the timer since it'll now be forced.
+		if recovering || (!force && failedSnapshots.Load() > 0) {
+			return
+		}
+		// Suppress if an async snapshot is already in progress.
 		snapMu.Lock()
-		if recovering || snapshotting {
+		if snapshotting {
 			snapMu.Unlock()
 			return
 		}
@@ -1524,6 +1536,21 @@ func (js *jetStream) monitorCluster() {
 			return
 		}
 
+		// Start a checkpoint, we can either install the snapshot sync or async from here.
+		// If we had a significant number of failed snapshots, start relaxing Raft-layer checks to force it through.
+		forceSnapshot := failedSnapshots.Load() > 10
+		c, err := n.CreateSnapshotCheckpoint(forceSnapshot)
+		if err != nil {
+			if err != errNoSnapAvailable && err != errNodeClosed {
+				s.Warnf("Error snapshotting JetStream cluster state: %v", err)
+				failedSnapshots.Add(1)
+			}
+			snapMu.Unlock()
+			return
+		}
+
+		// If we're meant to install an async snapshot, check if the underlying log has grown way too large.
+		// In that case, we fall back to a synchronous/blocking snapshot after all.
 		if !fallbackSnapshot {
 			if szthresh == 0 {
 				szthresh = compactSizeMin
@@ -1534,106 +1561,77 @@ func (js *jetStream) monitorCluster() {
 			}
 		}
 
+		// Check if we should fall back to a blocking snapshot, either due to failures or extreme log size.
 		if fallbackSnapshot {
 			s.rateLimitFormatWarnf("Metalayer blocking snapshot starting")
 			start := time.Now()
-			snap, err := js.metaSnapshot()
+			snap, nsa, nca, err := js.metaSnapshot()
 			if err != nil {
 				s.Warnf("Error generating JetStream cluster snapshot: %v", err)
-			} else if err = n.InstallSnapshot(snap); err == nil {
+			} else if csz, err := c.InstallSnapshot(snap); err == nil {
 				lastSnapTime = time.Now()
+				failedSnapshots.Store(0)
 				// Fallback snapshot was successful, the next one can be async again.
 				fallbackSnapshot = false
 				// Always print time taken.
 				took := time.Since(start)
-				s.rateLimitFormatWarnf("Metalayer blocking snapshot took %.3fs", took.Seconds())
-			} else if err != errNoSnapAvailable && err != errNodeClosed {
+				s.rateLimitFormatWarnf("Metalayer blocking snapshot took %.3fs (streams: %d, consumers: %d, compacted: %s)",
+					took.Seconds(), nsa, nca, friendlyBytes(csz))
+			} else if err != errNoSnapAvailable && err != errNodeClosed && err != errSnapAborted {
 				s.Warnf("Error snapshotting JetStream cluster state: %v", err)
+				failedSnapshots.Add(1)
 			}
 			snapMu.Unlock()
 			return
 		}
 
-		var (
-			err     error
-			streams map[string]map[string]*streamAssignment
-		)
-		ru := &recoveryUpdates{
-			removeStreams:   make(map[string]*streamAssignment),
-			removeConsumers: make(map[string]map[string]*consumerAssignment),
-			addStreams:      make(map[string]*streamAssignment),
-			updateStreams:   make(map[string]*streamAssignment),
-			updateConsumers: make(map[string]map[string]*consumerAssignment),
-		}
+		// Perform the snapshot asynchronously.
 		start := time.Now()
 		snapshotting = true
 		snapMu.Unlock()
-		n.InstallSnapshotAsyncReplayFunc(
-			func(data []byte) error {
-				streams, err = js.decodeMetaSnapshot(data)
-				return err
-			},
-			func(ae *appendEntry) error {
-				js.collectStreamAndConsumerChanges(ae, ru)
-				return nil
-			},
-			func() ([]byte, error) {
-				if streams == nil {
-					streams = make(map[string]map[string]*streamAssignment)
-				}
-				for _, cas := range ru.removeConsumers {
-					for _, ca := range cas {
-						if asa, ok := streams[ca.Client.serviceAccount()]; ok {
-							if sa, ok := asa[ca.Stream]; ok {
-								delete(sa.consumers, ca.Name)
-							}
-						}
-					}
-				}
-				for _, sa := range ru.removeStreams {
-					if asa, ok := streams[sa.Client.serviceAccount()]; ok {
-						delete(asa, sa.Config.Name)
-					}
-				}
-				for _, sa := range ru.addStreams {
-					as := streams[sa.Client.serviceAccount()]
-					if as == nil {
-						as = make(map[string]*streamAssignment)
-						streams[sa.Client.serviceAccount()] = as
-					}
-					as[sa.Config.Name] = sa
-				}
-				for _, cas := range ru.updateConsumers {
-					for _, ca := range cas {
-						if asa, ok := streams[ca.Client.serviceAccount()]; ok {
-							if sa, ok := asa[ca.Stream]; ok {
-								if sa.consumers == nil {
-									sa.consumers = make(map[string]*consumerAssignment)
-								}
-								sa.consumers[ca.Name] = ca
-							}
-						}
-					}
-				}
-				return js.encodeMetaSnapshot(streams)
-			},
-			func(err error) {
+		s.startGoRoutine(func() {
+			defer s.grWG.Done()
+
+			abort := func(err error) {
 				snapMu.Lock()
-				defer snapMu.Unlock()
+				c.Abort()
+				if err != errNoSnapAvailable && err != errNodeClosed && err != errSnapAborted {
+					s.Warnf("Error snapshotting JetStream cluster state: %v, will fall back to blocking snapshot", err)
+					fallbackSnapshot = true
+					failedSnapshots.Add(1)
+				}
 				snapshotting = false
-				if err != nil {
-					if err != errNoSnapAvailable && err != errNodeClosed {
-						s.Warnf("Error snapshotting JetStream cluster state: %v, will fall back to blocking snapshot", err)
-						fallbackSnapshot = true
-					}
-					return
-				}
+				snapMu.Unlock()
+			}
+
+			// The strategy of asynchronous snapshotting:
+			// - Not holding any locks. Only minimal for the Raft node itself, importantly not the JS lock.
+			// - Load the last snapshot.
+			// - Replay stream/consumer changes through the assignment state machine.
+			// - Encode and install as the new snapshot.
+			if data, err := c.LoadLastSnapshot(); err != nil && err != errNoSnapAvailable {
+				abort(err)
+			} else if streams, err := js.decodeMetaSnapshot(data); err != nil {
+				abort(err)
+			} else if err = js.collectStreamAndConsumerChanges(c, streams); err != nil {
+				abort(err)
+			} else if snap, nsa, nca, err := js.encodeMetaSnapshot(streams); err != nil {
+				abort(err)
+			} else if csz, err := c.InstallSnapshot(snap); err != nil {
+				abort(err)
+			} else {
+				// Successful snapshot.
 				lastSnapTime = time.Now()
-				if took := time.Since(start); took > time.Second {
-					s.rateLimitFormatWarnf("Metalayer async snapshot took %.3fs", took.Seconds())
+				failedSnapshots.Store(0)
+				if took := time.Since(start); took > 2*time.Second {
+					s.rateLimitFormatWarnf("Metalayer async snapshot took %.3fs (streams: %d, consumers: %d, compacted: %s)",
+						took.Seconds(), nsa, nca, friendlyBytes(csz))
 				}
-			},
-		)
+				snapMu.Lock()
+				snapshotting = false
+				snapMu.Unlock()
+			}
+		})
 	}
 
 	var ru *recoveryUpdates
@@ -1647,6 +1645,9 @@ func (js *jetStream) monitorCluster() {
 		select {
 		case <-s.quitCh:
 			// Server shutting down, but we might receive this before qch, so try to snapshot.
+			snapMu.Lock()
+			fallbackSnapshot = true
+			snapMu.Unlock()
 			doSnapshot(false)
 			return
 		case <-rqch:
@@ -1654,6 +1655,9 @@ func (js *jetStream) monitorCluster() {
 			return
 		case <-qch:
 			// Clean signal from shutdown routine so do best effort attempt to snapshot meta layer.
+			snapMu.Lock()
+			fallbackSnapshot = true
+			snapMu.Unlock()
 			doSnapshot(false)
 			return
 		case <-aq.ch:
@@ -1740,7 +1744,9 @@ func (js *jetStream) monitorCluster() {
 			}
 
 		case <-t.C:
-			doSnapshot(false)
+			// Start forcing snapshots if they failed previously.
+			forceIfFailed := failedSnapshots.Load() > 0
+			doSnapshot(forceIfFailed)
 			// Periodically check the cluster size.
 			if n.Leader() {
 				js.checkClusterSize()
@@ -1833,12 +1839,11 @@ func (js *jetStream) clusterStreamConfig(accName, streamName string) (StreamConf
 	return StreamConfig{}, false
 }
 
-func (js *jetStream) metaSnapshot() ([]byte, error) {
+func (js *jetStream) metaSnapshot() ([]byte, int, int, error) {
 	js.mu.RLock()
 	defer js.mu.RUnlock()
 	cc := js.cluster
-	snap, err := js.encodeMetaSnapshot(cc.streams)
-	return snap, err
+	return js.encodeMetaSnapshot(cc.streams)
 }
 
 func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecovering bool) error {
@@ -1954,9 +1959,52 @@ func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecove
 		}
 	}
 
+	// If we're not recovering, we need to check if we have any left-over streams or consumers that aren't
+	// tracked in our assignments. This could happen if we've restarted and recovered streams or consumers
+	// from disk, but then got sent a snapshot to catch up from the meta-leader.
+	if !isRecovering {
+		var deleteStreams []*stream
+		var deleteConsumers []*consumer
+		js.mu.RLock()
+		js.srv.accounts.Range(func(k, v any) bool {
+			a := v.(*Account)
+			a.mu.RLock()
+			jsa := a.js
+			a.mu.RUnlock()
+			if jsa == nil {
+				return true
+			}
+			accStreams := cc.streams[a.Name]
+			jsa.mu.RLock()
+			for _, mset := range jsa.streams {
+				stream := accStreams[mset.name()]
+				if stream == nil {
+					deleteStreams = append(deleteStreams, mset)
+					continue
+				}
+				for _, o := range mset.getPublicConsumers() {
+					if stream.consumers[o.name] == nil {
+						deleteConsumers = append(deleteConsumers, o)
+					}
+				}
+			}
+			jsa.mu.RUnlock()
+			return true
+		})
+		js.mu.RUnlock()
+
+		// Now delete all streams and consumers that we're not supposed to have based on the snapshot.
+		for _, mset := range deleteStreams {
+			mset.stop(true, false)
+		}
+		for _, o := range deleteConsumers {
+			o.deleteWithoutAdvisory()
+		}
+	}
 	return nil
 }
 
+// Decode the meta snapshot from buf into the relevant stream and consumer assignments.
 func (js *jetStream) decodeMetaSnapshot(buf []byte) (map[string]map[string]*streamAssignment, error) {
 	var wsas []writeableStreamAssignment
 	if len(buf) > 0 {
@@ -1999,7 +2047,9 @@ func (js *jetStream) decodeMetaSnapshot(buf []byte) (map[string]map[string]*stre
 	return streams, nil
 }
 
-func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAssignment) ([]byte, error) {
+// Encode the meta assignments into an encoded and compressed buffer.
+// Returns the snapshot itself, and the amount of streams and consumers.
+func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAssignment) ([]byte, int, int, error) {
 	start := time.Now()
 	nsa := 0
 	nca := 0
@@ -2035,7 +2085,7 @@ func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAss
 	}
 
 	if len(out) == 0 {
-		return nil, nil
+		return nil, nsa, nca, nil
 	}
 
 	// Track how long it took to marshal the JSON
@@ -2046,7 +2096,7 @@ func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAss
 	// Must not be possible for a JSON marshaling error to result
 	// in an empty snapshot.
 	if err != nil {
-		return nil, err
+		return nil, nsa, nca, err
 	}
 
 	// Track how long it took to compress the JSON.
@@ -2055,9 +2105,9 @@ func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAss
 	cend := time.Since(cstart)
 	took := time.Since(start)
 
-	if took > time.Second {
-		js.srv.rateLimitFormatWarnf("Metalayer snapshot generation took %.3fs (streams: %d, consumers: %d, marshal: %.3fs, s2: %.3fs, uncompressed: %d, compressed: %d)",
-			took.Seconds(), nsa, nca, mend.Seconds(), cend.Seconds(), len(b), len(snap))
+	if took > 2*time.Second {
+		js.srv.rateLimitFormatWarnf("Metalayer snapshot generation took %.3fs (streams: %d, consumers: %d, marshal: %.3fs, s2: %.3fs, uncompressed: %s, compressed: %s)",
+			took.Seconds(), nsa, nca, mend.Seconds(), cend.Seconds(), friendlyBytes(len(b)), friendlyBytes(len(snap)))
 	}
 
 	// Track in jsz monitoring as well.
@@ -2066,52 +2116,102 @@ func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAss
 		atomic.StoreInt64(&cc.lastMetaSnapDuration, int64(took))
 	}
 
-	return snap, nil
+	return snap, nsa, nca, nil
 }
 
-func (js *jetStream) collectStreamAndConsumerChanges(ae *appendEntry, ru *recoveryUpdates) {
-	for _, e := range ae.entries {
-		if e.Type == EntryNormal {
-			buf := e.Data
-			op := entryOp(buf[0])
-			switch op {
-			case assignStreamOp, updateStreamOp, removeStreamOp:
-				sa, err := decodeStreamAssignment(js.srv, buf[1:])
-				if err != nil {
-					js.srv.Errorf("JetStream cluster failed to decode stream assignment: %q", buf[1:])
-					panic(err)
+// Given a checkpoint, collects all relevant append entries that can be snapshotted.
+func (js *jetStream) collectStreamAndConsumerChanges(c RaftNodeCheckpoint, streams map[string]map[string]*streamAssignment) error {
+	ru := &recoveryUpdates{
+		removeStreams:   make(map[string]*streamAssignment),
+		removeConsumers: make(map[string]map[string]*consumerAssignment),
+		addStreams:      make(map[string]*streamAssignment),
+		updateStreams:   make(map[string]*streamAssignment),
+		updateConsumers: make(map[string]map[string]*consumerAssignment),
+	}
+	for ae, err := range c.IterAppendEntrySeq() {
+		if err != nil {
+			return err
+		}
+		for _, e := range ae.entries {
+			if e.Type == EntryNormal {
+				buf := e.Data
+				op := entryOp(buf[0])
+				switch op {
+				case assignStreamOp, updateStreamOp, removeStreamOp:
+					sa, err := decodeStreamAssignment(js.srv, buf[1:])
+					if err != nil {
+						js.srv.Errorf("JetStream cluster failed to decode stream assignment: %q", buf[1:])
+						panic(err)
+					}
+					if op == removeStreamOp {
+						ru.removeStream(sa)
+					} else {
+						ru.addStream(sa)
+					}
+				case assignConsumerOp:
+					ca, err := decodeConsumerAssignment(buf[1:])
+					if err != nil {
+						js.srv.Errorf("JetStream cluster failed to decode consumer assignment: %q", buf[1:])
+						panic(err)
+					}
+					ru.addOrUpdateConsumer(ca)
+				case assignCompressedConsumerOp:
+					ca, err := decodeConsumerAssignmentCompressed(buf[1:])
+					if err != nil {
+						js.srv.Errorf("JetStream cluster failed to decode compressed consumer assignment: %q", buf[1:])
+						panic(err)
+					}
+					ru.addOrUpdateConsumer(ca)
+				case removeConsumerOp:
+					ca, err := decodeConsumerAssignment(buf[1:])
+					if err != nil {
+						js.srv.Errorf("JetStream cluster failed to decode consumer assignment: %q", buf[1:])
+						panic(err)
+					}
+					ru.removeConsumer(ca)
+				default:
+					panic(fmt.Sprintf("JetStream Cluster Unknown meta entry op type: %v", entryOp(buf[0])))
 				}
-				if op == removeStreamOp {
-					ru.removeStream(sa)
-				} else {
-					ru.addStream(sa)
-				}
-			case assignConsumerOp:
-				ca, err := decodeConsumerAssignment(buf[1:])
-				if err != nil {
-					js.srv.Errorf("JetStream cluster failed to decode consumer assignment: %q", buf[1:])
-					panic(err)
-				}
-				ru.addOrUpdateConsumer(ca)
-			case assignCompressedConsumerOp:
-				ca, err := decodeConsumerAssignmentCompressed(buf[1:])
-				if err != nil {
-					js.srv.Errorf("JetStream cluster failed to decode compressed consumer assignment: %q", buf[1:])
-					panic(err)
-				}
-				ru.addOrUpdateConsumer(ca)
-			case removeConsumerOp:
-				ca, err := decodeConsumerAssignment(buf[1:])
-				if err != nil {
-					js.srv.Errorf("JetStream cluster failed to decode consumer assignment: %q", buf[1:])
-					panic(err)
-				}
-				ru.removeConsumer(ca)
-			default:
-				panic(fmt.Sprintf("JetStream Cluster Unknown meta entry op type: %v", entryOp(buf[0])))
 			}
 		}
 	}
+
+	// With our recovery structure, apply the stream/consumer diff.
+	for _, cas := range ru.removeConsumers {
+		for _, ca := range cas {
+			if asa, ok := streams[ca.Client.serviceAccount()]; ok {
+				if sa, ok := asa[ca.Stream]; ok {
+					delete(sa.consumers, ca.Name)
+				}
+			}
+		}
+	}
+	for _, sa := range ru.removeStreams {
+		if asa, ok := streams[sa.Client.serviceAccount()]; ok {
+			delete(asa, sa.Config.Name)
+		}
+	}
+	for _, sa := range ru.addStreams {
+		as := streams[sa.Client.serviceAccount()]
+		if as == nil {
+			as = make(map[string]*streamAssignment)
+			streams[sa.Client.serviceAccount()] = as
+		}
+		as[sa.Config.Name] = sa
+	}
+	for _, cas := range ru.updateConsumers {
+		for _, ca := range cas {
+			if asa, ok := streams[ca.Client.serviceAccount()]; ok {
+				if sa, ok := asa[ca.Stream]; ok {
+					if sa.consumers == nil {
+						sa.consumers = make(map[string]*consumerAssignment)
+					}
+					sa.consumers[ca.Name] = ca
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // Called on recovery to make sure we do not process like original.
@@ -4672,6 +4772,8 @@ func (js *jetStream) processClusterUpdateStream(acc *Account, osa, sa *streamAss
 			s.Warnf("JetStream cluster detected stream remapping for '%s > %s' from %q to %q",
 				acc, cfg.Name, osa.Group.Name, sa.Group.Name)
 			mset.removeNode()
+			mset.signalMonitorQuit()
+			mset.monitorWg.Wait()
 			alreadyRunning, needsNode = false, true
 			// Make sure to clear from original.
 			js.mu.Lock()
@@ -4709,6 +4811,8 @@ func (js *jetStream) processClusterUpdateStream(acc *Account, osa, sa *streamAss
 		} else if numReplicas == 1 && alreadyRunning {
 			// We downgraded to R1. Make sure we cleanup the raft node and the stream monitor.
 			mset.removeNode()
+			mset.signalMonitorQuit()
+			mset.monitorWg.Wait()
 			// In case we need to shutdown the cluster specific subs, etc.
 			mset.mu.Lock()
 			// Stop responding to sync requests.
@@ -6301,6 +6405,39 @@ func (js *jetStream) applyConsumerEntries(o *consumer, ce *CommittedEntry, isLea
 					o.store.UpdateStarting(sseq - 1)
 				}
 				o.mu.Unlock()
+			case resetSeqOp:
+				o.mu.Lock()
+				var le = binary.LittleEndian
+				sseq := le.Uint64(buf[1:9])
+				reply := string(buf[9:])
+				o.resetLocalStartingSeq(sseq)
+				if o.store != nil {
+					o.store.Reset(sseq - 1)
+				}
+				// Cleanup messages that lost interest.
+				if o.retention == InterestPolicy {
+					if mset := o.mset; mset != nil {
+						o.mu.Unlock()
+						ss := mset.state()
+						o.checkStateForInterestStream(&ss)
+						o.mu.Lock()
+					}
+				}
+				// Recalculate pending, and re-trigger message delivery.
+				if !o.isLeader() {
+					o.mu.Unlock()
+				} else {
+					o.streamNumPending()
+					o.signalNewMessages()
+					s, a := o.srv, o.acc
+					o.mu.Unlock()
+					if reply != _EMPTY_ {
+						var resp = JSApiConsumerResetResponse{ApiResponse: ApiResponse{Type: JSApiConsumerResetResponseType}}
+						resp.ConsumerInfo = setDynamicConsumerInfoMetadata(o.info())
+						resp.ResetSeq = sseq
+						s.sendInternalAccountMsg(a, reply, s.jsonResponse(&resp))
+					}
+				}
 			case addPendingRequest:
 				o.mu.Lock()
 				if !o.isLeader() {
@@ -6446,13 +6583,12 @@ func (js *jetStream) processConsumerLeaderChange(o *consumer, isLeader bool) err
 	if isLeader {
 		// Only log if the consumer is replicated and/or durable.
 		// Logging about R1 ephemerals, like KV watchers, is mostly noise since the leader will always be known.
-		_, _ = streamName, consumerName
-		//o.mu.RLock()
-		//isReplicated, durable := o.node != nil, o.isDurable()
-		//o.mu.RUnlock()
-		//if isReplicated || durable {
-		//	s.Noticef("JetStream cluster new consumer leader for '%s > %s > %s'", ca.Client.serviceAccount(), streamName, consumerName)
-		//}
+		o.mu.RLock()
+		isReplicated, durable := o.node != nil, o.isDurable()
+		o.mu.RUnlock()
+		if isReplicated || durable {
+			s.Noticef("JetStream cluster new consumer leader for '%s > %s > %s'", ca.Client.serviceAccount(), streamName, consumerName)
+		}
 		s.sendConsumerLeaderElectAdvisory(o)
 	} else {
 		// We are stepping down.
