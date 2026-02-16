@@ -2262,6 +2262,196 @@ func TestJetStreamClusterMetaSyncOrphanCleanup(t *testing.T) {
 	}
 }
 
+// Test that streams deleted while a server was down (with missing meta) are
+// properly cleaned up as orphans when the server restarts and catches up.
+func TestJetStreamClusterMetaSyncOrphanStreamCleanup(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	s := c.serverByName("S-1")
+	require_True(t, s != nil)
+
+	nc, js := jsClientConnect(t, c.serverByName("S-2"))
+	defer nc.Close()
+
+	// Create R3 streams. All 3 servers will have replicas.
+	for i := 0; i < 5; i++ {
+		_, err := js.AddStream(&nats.StreamConfig{
+			Name:     fmt.Sprintf("KEEP-%d", i),
+			Subjects: []string{fmt.Sprintf("KEEP.%d", i)},
+			Replicas: 3,
+			Storage:  nats.FileStorage,
+		})
+		require_NoError(t, err)
+		_, err = js.Publish(fmt.Sprintf("KEEP.%d", i), []byte("data"))
+		require_NoError(t, err)
+	}
+	for i := 0; i < 3; i++ {
+		_, err := js.AddStream(&nats.StreamConfig{
+			Name:     fmt.Sprintf("DELETE-%d", i),
+			Subjects: []string{fmt.Sprintf("DELETE.%d", i)},
+			Replicas: 3,
+			Storage:  nats.FileStorage,
+		})
+		require_NoError(t, err)
+		_, err = js.Publish(fmt.Sprintf("DELETE.%d", i), []byte("data"))
+		require_NoError(t, err)
+	}
+
+	// Wait for all streams to be replicated.
+	c.waitOnAllCurrent()
+
+	// Shutdown S-1 and remove its meta directory to simulate lost meta state.
+	sd := s.JetStreamConfig().StoreDir
+	nd := filepath.Join(sd, "$SYS", "_js_", "_meta_")
+	s.Shutdown()
+	s.WaitForShutdown()
+	os.RemoveAll(nd)
+
+	// Wait for a new meta leader and reconnect after S-1 shutdown.
+	c.waitOnLeader()
+	nc.Close()
+	nc, js = jsClientConnect(t, c.serverByName("S-2"))
+	defer nc.Close()
+
+	// While S-1 is down, delete some streams. The remaining 2 servers process
+	// the deletes. S-1's meta is gone so it won't have WAL entries for them.
+	for i := 0; i < 3; i++ {
+		require_NoError(t, js.DeleteStream(fmt.Sprintf("DELETE-%d", i)))
+	}
+
+	// Restart S-1. It recovers streams from disk (including deleted ones),
+	// catches up meta via snapshot (which won't include deleted streams).
+	// checkForOrphans should clean up the orphaned streams.
+	s = c.restartServer(s)
+	c.waitOnServerCurrent(s)
+
+	// Wait for the orphan check to fire (30s timer + some buffer).
+	checkFor(t, 40*time.Second, 500*time.Millisecond, func() error {
+		jsz, err := s.Jsz(nil)
+		if err != nil {
+			return err
+		}
+		if jsz.Streams != 5 {
+			return fmt.Errorf("expected 5 streams, got %d", jsz.Streams)
+		}
+		return nil
+	})
+
+	// Verify the kept streams have their data.
+	acc := s.GlobalAccount()
+	var state StreamState
+	for i := 0; i < 5; i++ {
+		mset, err := acc.lookupStream(fmt.Sprintf("KEEP-%d", i))
+		require_NoError(t, err)
+		mset.store.FastState(&state)
+		require_Equal(t, state.Msgs, 1)
+	}
+
+	// Verify the deleted streams are truly gone.
+	for i := 0; i < 3; i++ {
+		_, err := acc.lookupStream(fmt.Sprintf("DELETE-%d", i))
+		require_Error(t, err)
+	}
+}
+
+// Test that consumers deleted while a server was down (with missing meta) are
+// properly cleaned up as orphans when the server restarts and catches up.
+func TestJetStreamClusterMetaSyncOrphanConsumerCleanup(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	s := c.serverByName("S-1")
+	require_True(t, s != nil)
+
+	nc, js := jsClientConnect(t, c.serverByName("S-2"))
+	defer nc.Close()
+
+	// Create a R3 stream with several consumers.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"TEST.>"},
+		Replicas: 3,
+		Storage:  nats.FileStorage,
+	})
+	require_NoError(t, err)
+
+	_, err = js.Publish("TEST.1", []byte("data"))
+	require_NoError(t, err)
+
+	// Create consumers: some will be kept, some will be deleted.
+	for i := 0; i < 3; i++ {
+		_, err := js.AddConsumer("TEST", &nats.ConsumerConfig{
+			Durable:   fmt.Sprintf("KEEP-%d", i),
+			AckPolicy: nats.AckExplicitPolicy,
+		})
+		require_NoError(t, err)
+	}
+	for i := 0; i < 2; i++ {
+		_, err := js.AddConsumer("TEST", &nats.ConsumerConfig{
+			Durable:   fmt.Sprintf("DELETE-%d", i),
+			AckPolicy: nats.AckExplicitPolicy,
+		})
+		require_NoError(t, err)
+	}
+
+	// Wait for all to be replicated.
+	c.waitOnAllCurrent()
+
+	// Shutdown S-1 and remove its meta directory.
+	sd := s.JetStreamConfig().StoreDir
+	nd := filepath.Join(sd, "$SYS", "_js_", "_meta_")
+	s.Shutdown()
+	s.WaitForShutdown()
+	os.RemoveAll(nd)
+
+	// Wait for a new meta leader and reconnect after S-1 shutdown.
+	c.waitOnLeader()
+	nc.Close()
+	nc, js = jsClientConnect(t, c.serverByName("S-2"))
+	defer nc.Close()
+
+	// Wait for the stream leader to be elected on the remaining servers.
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	// While S-1 is down, delete some consumers.
+	for i := 0; i < 2; i++ {
+		require_NoError(t, js.DeleteConsumer("TEST", fmt.Sprintf("DELETE-%d", i)))
+	}
+
+	// Restart S-1. It recovers consumers from disk (including deleted ones),
+	// catches up via snapshot, and checkForOrphans should clean up.
+	s = c.restartServer(s)
+	c.waitOnServerCurrent(s)
+
+	// Wait for orphan check (30s timer + buffer).
+	checkFor(t, 40*time.Second, 500*time.Millisecond, func() error {
+		jsz, err := s.Jsz(nil)
+		if err != nil {
+			return err
+		}
+		if jsz.Consumers != 3 {
+			return fmt.Errorf("expected 3 consumers, got %d", jsz.Consumers)
+		}
+		return nil
+	})
+
+	// Verify the kept consumers still exist.
+	acc := s.GlobalAccount()
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+	for i := 0; i < 3; i++ {
+		o := mset.lookupConsumer(fmt.Sprintf("KEEP-%d", i))
+		require_True(t, o != nil)
+	}
+
+	// Verify deleted consumers are gone.
+	for i := 0; i < 2; i++ {
+		o := mset.lookupConsumer(fmt.Sprintf("DELETE-%d", i))
+		require_True(t, o == nil)
+	}
+}
+
 func TestJetStreamClusterKeyValueDesyncAfterHardKill(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3F", 3)
 	defer c.shutdown()
