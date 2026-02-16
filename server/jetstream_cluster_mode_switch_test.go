@@ -355,7 +355,8 @@ func TestJetStreamStandaloneToClusteredNonLeaderAdoption(t *testing.T) {
 
 // TestJetStreamStandaloneToClusteredDuplicateStreamName tests that when a standalone
 // server has a stream with the same name as one already in the cluster, the cluster
-// stream takes precedence and the standalone stream is not adopted.
+// stream takes precedence and the standalone stream is not adopted, but the standalone
+// stream data is preserved on disk so the operator can recover it.
 func TestJetStreamStandaloneToClusteredDuplicateStreamName(t *testing.T) {
 	// Phase 1: Create standalone server with a stream named "EVENTS".
 	storeDir := t.TempDir()
@@ -446,7 +447,6 @@ func TestJetStreamStandaloneToClusteredDuplicateStreamName(t *testing.T) {
 	c.checkClusterFormed()
 
 	// Wait for the new server to sync with the cluster.
-	// The checkForOrphans on the new server should detect the duplicate and skip adoption.
 	time.Sleep(35 * time.Second)
 
 	// Verify the cluster stream "EVENTS" is intact with its original config.
@@ -475,8 +475,63 @@ func TestJetStreamStandaloneToClusteredDuplicateStreamName(t *testing.T) {
 		t.Fatalf("Expected cluster subjects [cluster.>], got %v", siResp.Config.Subjects)
 	}
 
-	// The standalone data should still exist on the new server's disk (not deleted),
-	// but should NOT be part of the cluster metadata.
+	// Verify the standalone stream data is preserved on disk (not deleted).
+	streamDir := filepath.Join(storeDir, JetStreamStoreDir, "$G", "streams", "EVENTS")
+	if _, err := os.Stat(streamDir); err != nil {
+		t.Fatalf("Expected standalone stream data preserved at %s, got error: %v", streamDir, err)
+	}
+	// Check that message blocks still exist.
+	blkFiles, _ := filepath.Glob(filepath.Join(streamDir, "msgs", "*.blk"))
+	if len(blkFiles) == 0 {
+		t.Fatalf("Expected message block files in %s/msgs/, but none found", streamDir)
+	}
+
+	// Verify the ptc marker is preserved because of the unresolved name conflict.
+	sysAcc := srvNew.SystemAccount()
+	require_NotNil(t, sysAcc)
+	metaDir := filepath.Join(storeDir, JetStreamStoreDir, sysAcc.Name, defaultStoreDirName, defaultMetaGroupName)
+	markerPath := filepath.Join(metaDir, ptcMarkerFile)
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("Expected ptc marker to be preserved at %s due to name conflict, got error: %v", markerPath, err)
+	}
+
+	// Phase 4: Restart the promoted server and verify data survives across restarts.
+	srvNew.Shutdown()
+	srvNew.WaitForShutdown()
+	c.servers = c.servers[:len(c.servers)-1]
+	c.opts = c.opts[:len(c.opts)-1]
+
+	srvNew = RunServer(newOpts)
+	c.servers = append(c.servers, srvNew)
+	c.opts = append(c.opts, newOpts)
+	c.checkClusterFormed()
+
+	time.Sleep(35 * time.Second)
+
+	// After restart, standalone stream data should still be on disk.
+	if _, err := os.Stat(streamDir); err != nil {
+		t.Fatalf("After restart, expected standalone stream data at %s, got error: %v", streamDir, err)
+	}
+	blkFiles, _ = filepath.Glob(filepath.Join(streamDir, "msgs", "*.blk"))
+	if len(blkFiles) == 0 {
+		t.Fatalf("After restart, expected message block files but none found")
+	}
+
+	// Cluster stream should still be accessible and intact.
+	nc4, err := nats.Connect(leader.ClientURL())
+	require_NoError(t, err)
+	defer nc4.Close()
+
+	rmsg, err = nc4.Request(fmt.Sprintf(JSApiStreamInfoT, "EVENTS"), nil, 5*time.Second)
+	require_NoError(t, err)
+	var siResp2 JSApiStreamInfoResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &siResp2))
+	if siResp2.Error != nil {
+		t.Fatalf("After restart, stream info error: %+v", siResp2.Error)
+	}
+	if siResp2.State.Msgs != 20 {
+		t.Fatalf("After restart, expected 20 cluster messages, got %d", siResp2.State.Msgs)
+	}
 }
 
 // TestJetStreamStandaloneToClusteredPTCMarkerLifecycle tests the promoted-to-cluster

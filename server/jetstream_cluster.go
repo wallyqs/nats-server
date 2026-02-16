@@ -83,6 +83,10 @@ type jetStreamCluster struct {
 	// Signals that this node was promoted from standalone to clustered mode
 	// with no prior meta state. Used to detect standalone-to-clustered transitions.
 	ptc bool
+	// Tracks streams that were preserved (not deleted) due to name conflicts
+	// with existing cluster assignments during ptc promotion. This prevents
+	// the ptc marker from being cleaned up while unresolved conflicts remain.
+	ptcConflicts int
 	// System level request to adopt a stream from a standalone node.
 	adoptStream *subscription
 }
@@ -1434,6 +1438,7 @@ func (js *jetStream) checkForOrphans() {
 	}
 
 	ptc := cc.ptc // promoted to cluster
+	ptcConflicts := cc.ptcConflicts
 
 	var streams []*stream
 	var consumers []*consumer
@@ -1476,8 +1481,17 @@ func (js *jetStream) checkForOrphans() {
 		return
 	}
 
-	// If ptc but no orphan streams remain, all were adopted. Clean up the marker.
-	if ptc {
+	// If ptc but no orphan streams remain, check for unresolved name conflicts.
+	if ptc && ptcConflicts > 0 {
+		// There are streams whose data was preserved on disk due to name conflicts.
+		// Persist the marker so the data survives server restarts.
+		if storeDir := js.metaStoreDir(); storeDir != _EMPTY_ {
+			if err := writePTCMarker(storeDir); err != nil {
+				s.Warnf("Failed to write ptc marker: %v", err)
+			}
+		}
+	} else if ptc {
+		// No orphans and no conflicts — all streams were adopted. Clean up the marker.
 		if storeDir := js.metaStoreDir(); storeDir != _EMPTY_ {
 			if err := removePTCMarker(storeDir); err != nil {
 				s.Warnf("Failed to remove ptc marker: %v", err)
@@ -4550,6 +4564,7 @@ func (js *jetStream) processStreamAssignment(sa *streamAssignment) {
 	if sa.Group != nil && ourID != _EMPTY_ {
 		isMember = sa.Group.isMember(ourID)
 	}
+	ptc := !noMeta && cc.ptc
 
 	if s == nil || noMeta {
 		js.mu.Unlock()
@@ -4633,8 +4648,21 @@ func (js *jetStream) processStreamAssignment(sa *streamAssignment) {
 	if isMember {
 		js.processClusterCreateStream(acc, sa)
 	} else if mset, _ := acc.lookupStream(sa.Config.Name); mset != nil {
-		// We have one here even though we are not a member. This can happen on re-assignment.
-		s.removeStream(mset, sa)
+		if ptc {
+			// On a node promoted from standalone to clustered, do not delete
+			// conflicting streams. Stop the stream to free resources but preserve
+			// data on disk so the operator can recover it (e.g. revert to standalone,
+			// rename the stream, and re-promote).
+			s.Warnf("JetStream preserving local stream '%s > %s' data on disk: conflicts with existing cluster assignment",
+				accName, sa.Config.Name)
+			mset.stop(false, false)
+			js.mu.Lock()
+			cc.ptcConflicts++
+			js.mu.Unlock()
+		} else {
+			// We have one here even though we are not a member. This can happen on re-assignment.
+			s.removeStream(mset, sa)
+		}
 	}
 
 	// If this stream assignment does not have a sync subject (bug) set that the meta-leader should check when elected.
