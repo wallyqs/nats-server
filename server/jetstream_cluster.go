@@ -82,7 +82,7 @@ type jetStreamCluster struct {
 	lastMetaSnapDuration int64 // Duration in nanoseconds
 	// Signals that this node was promoted from standalone to clustered mode
 	// with no prior meta state. Used to detect standalone-to-clustered transitions.
-	promotedToCluster bool
+	ptc bool
 	// Subscription for stream adoption requests from non-leader nodes (leader only).
 	adoptSub *subscription
 }
@@ -962,7 +962,7 @@ func (js *jetStream) setupMetaGroup() error {
 		return err
 	}
 
-	// If promoted to cluster with no state, start campaign early.
+	// If we are bootstrapped with no state, start campaign early.
 	if bootstrap {
 		n.Campaign()
 	}
@@ -978,7 +978,7 @@ func (js *jetStream) setupMetaGroup() error {
 		c:            c,
 		qch:          make(chan struct{}),
 		stopped:      make(chan struct{}),
-		promotedToCluster: bootstrap,
+		ptc: bootstrap,
 	}
 	atomic.StoreInt32(&js.clustered, 1)
 	c.registerWithAccount(sysAcc)
@@ -1399,7 +1399,7 @@ func (js *jetStream) checkForOrphans() {
 		return
 	}
 
-	ptc := cc.promotedToCluster // promoted to cluster
+	ptc := cc.ptc // promoted to cluster
 
 	var streams []*stream
 	var consumers []*consumer
@@ -1429,7 +1429,7 @@ func (js *jetStream) checkForOrphans() {
 		js.adoptLocalStreams()
 		js.mu.Lock()
 		if js.cluster != nil {
-			js.cluster.promotedToCluster = false
+			js.cluster.ptc = false
 		}
 		js.mu.Unlock()
 		return
@@ -1440,7 +1440,7 @@ func (js *jetStream) checkForOrphans() {
 		js.requestAdoptionFromLeader(streams)
 		js.mu.Lock()
 		if js.cluster != nil {
-			js.cluster.promotedToCluster = false
+			js.cluster.ptc = false
 		}
 		js.mu.Unlock()
 		return
