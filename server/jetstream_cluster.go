@@ -1423,26 +1423,16 @@ func (js *jetStream) checkForOrphans() {
 	}
 	js.mu.Unlock()
 
-	// If this node was promoted to cluster and is the meta leader,
-	// adopt orphaned streams instead of deleting them.
-	if ptc && len(streams) > 0 && meta.Leader() {
-		js.adoptLocalStreams()
-		js.mu.Lock()
-		if js.cluster != nil {
-			js.cluster.ptc = false
-		}
-		js.mu.Unlock()
-		return
-	}
-
-	// If promoted to cluster but not the leader, request adoption from the meta leader.
+	// If this node was promoted to cluster, attempt adoption and never delete
+	// via orphan sweep. Streams should only be removed by explicit meta layer
+	// assignment removal. This protects unadopted streams (e.g. duplicate names)
+	// so the operator can revert to standalone mode to backup or restore.
 	if ptc && len(streams) > 0 {
-		js.requestAdoptionFromLeader(streams)
-		js.mu.Lock()
-		if js.cluster != nil {
-			js.cluster.ptc = false
+		if meta.Leader() {
+			js.adoptLocalStreams()
+		} else {
+			js.requestAdoptionFromLeader(streams)
 		}
-		js.mu.Unlock()
 		return
 	}
 
