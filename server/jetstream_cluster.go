@@ -2712,11 +2712,19 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 	// For migration tracking.
 	var mmt *time.Ticker
 	var mmtc <-chan time.Time
+	// Track stall detection for migrations.
+	var migrationStarted time.Time
+	var lastMigrationProgress time.Time
+	var lastMigrationCurrentCount int
 
 	startMigrationMonitoring := func() {
 		if mmt == nil {
 			mmt = time.NewTicker(500 * time.Millisecond)
 			mmtc = mmt.C
+			now := time.Now()
+			migrationStarted = now
+			lastMigrationProgress = now
+			lastMigrationCurrentCount = 0
 		}
 	}
 
@@ -2724,6 +2732,9 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 		if mmt != nil {
 			mmt.Stop()
 			mmt, mmtc = nil, nil
+			migrationStarted = time.Time{}
+			lastMigrationProgress = time.Time{}
+			lastMigrationCurrentCount = 0
 		}
 	}
 	defer stopMigrationMonitoring()
@@ -3019,12 +3030,33 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 
 			newPeers, _, newPeerSet, oldPeerSet := genPeerInfo(rg.Peers, len(rg.Peers)-replicas)
 
+			// Count how many new peers are current for stall detection.
+			currentNewPeers := 0
+			for _, r := range ci.Replicas {
+				if r.Current && newPeerSet[r.Peer] {
+					currentNewPeers++
+				}
+			}
+
+			// Detect stalls: if progress (current peer count) has not changed, warn periodically.
+			if currentNewPeers > lastMigrationCurrentCount {
+				lastMigrationCurrentCount = currentNewPeers
+				lastMigrationProgress = time.Now()
+			} else if time.Since(lastMigrationProgress) > 30*time.Second {
+				s.Warnf("Stream move for '%s > %s' appears stalled: %d/%d new peers current, "+
+					"move started %s ago", accName, sa.Config.Name, currentNewPeers, replicas,
+					time.Since(migrationStarted).Round(time.Second))
+				// Reset so we don't warn every 500ms, but every 30s.
+				lastMigrationProgress = time.Now()
+			}
+
 			// If we are part of the new peerset and we have been passed the baton.
 			// We will handle scale down.
 			if newPeerSet[ourPeerId] {
 				// First need to check on any consumers and make sure they have moved properly before scaling down ourselves.
 				js.mu.RLock()
 				var needToWait bool
+				var blockingConsumers []string
 				for name, c := range sa.consumers {
 					if c.unsupported != nil {
 						continue
@@ -3032,17 +3064,18 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 					for _, peer := range c.Group.Peers {
 						// If we have peers still in the old set block.
 						if oldPeerSet[peer] {
-							s.Debugf("Scale down of '%s > %s' blocked by consumer '%s'", accName, sa.Config.Name, name)
+							blockingConsumers = append(blockingConsumers, name)
 							needToWait = true
 							break
 						}
 					}
-					if needToWait {
-						break
-					}
 				}
 				js.mu.RUnlock()
 				if needToWait {
+					if time.Since(lastMigrationProgress) > 10*time.Second {
+						s.Warnf("Stream move scale down of '%s > %s' blocked by %d consumer(s): %v",
+							accName, sa.Config.Name, len(blockingConsumers), blockingConsumers)
+					}
 					continue
 				}
 				// We are good to go, can scale down here.
@@ -3052,11 +3085,14 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 				csa.Group.Peers = newPeers
 				csa.Group.Preferred = ourPeerId
 				csa.Group.Cluster = s.cachedClusterName()
-				cc.meta.ForwardProposal(encodeUpdateStreamAssignment(csa))
+				if err := cc.meta.ForwardProposal(encodeUpdateStreamAssignment(csa)); err != nil {
+					s.Warnf("Stream move scale down proposal for '%s > %s' failed: %v", accName, sa.Config.Name, err)
+				}
 				s.Noticef("Scaling down '%s > %s' to %+v", accName, sa.Config.Name, s.peerSetToNames(newPeers))
 			} else {
 				// We are the old leader here, from the original peer set.
 				// We are simply waiting on the new peerset to be caught up so we can transfer leadership.
+				// Only consider peers in the new set as candidates for leadership transfer.
 				var newLeaderPeer, newLeader string
 				neededCurrent, current := replicas/2+1, 0
 
@@ -3068,10 +3104,12 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 						}
 					}
 				}
-				// Check if we have a quorom.
+				// Check if we have a quorum.
 				if current >= neededCurrent {
 					s.Noticef("Transfer of stream leader for '%s > %s' to '%s'", accName, sa.Config.Name, newLeader)
 					n.ProposeKnownPeers(newPeers)
+					// Explicitly step down to a peer in the new set only. This prevents
+					// StepDown from falling back to an old peer if the preferred is slow.
 					n.StepDown(newLeaderPeer)
 				}
 			}
@@ -5834,11 +5872,19 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 	// For migration tracking.
 	var mmt *time.Ticker
 	var mmtc <-chan time.Time
+	// Track stall detection for consumer migrations.
+	var consMigrationStarted time.Time
+	var lastConsMigrationProgress time.Time
+	var lastConsMigrationCurrentCount int
 
 	startMigrationMonitoring := func() {
 		if mmt == nil {
 			mmt = time.NewTicker(500 * time.Millisecond)
 			mmtc = mmt.C
+			now := time.Now()
+			consMigrationStarted = now
+			lastConsMigrationProgress = now
+			lastConsMigrationCurrentCount = 0
 		}
 	}
 
@@ -5846,6 +5892,9 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 		if mmt != nil {
 			mmt.Stop()
 			mmt, mmtc = nil, nil
+			consMigrationStarted = time.Time{}
+			lastConsMigrationProgress = time.Time{}
+			lastConsMigrationCurrentCount = 0
 		}
 	}
 	defer stopMigrationMonitoring()
@@ -5968,6 +6017,25 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 			}
 			newPeers, _, newPeerSet, _ := genPeerInfo(rg.Peers, len(rg.Peers)-replicas)
 
+			// Count how many new peers are current for stall detection.
+			consCurrentNewPeers := 0
+			for _, r := range ci.Replicas {
+				if r.Current && newPeerSet[r.Peer] {
+					consCurrentNewPeers++
+				}
+			}
+
+			// Detect stalls for consumer migration.
+			if consCurrentNewPeers > lastConsMigrationCurrentCount {
+				lastConsMigrationCurrentCount = consCurrentNewPeers
+				lastConsMigrationProgress = time.Now()
+			} else if time.Since(lastConsMigrationProgress) > 30*time.Second {
+				s.Warnf("Consumer move for '%s > %s > %s' appears stalled: %d/%d new peers current, "+
+					"move started %s ago", ca.Client.serviceAccount(), ca.Stream, ca.Name,
+					consCurrentNewPeers, replicas, time.Since(consMigrationStarted).Round(time.Second))
+				lastConsMigrationProgress = time.Now()
+			}
+
 			// If we are part of the new peerset and we have been passed the baton.
 			// We will handle scale down.
 			if newPeerSet[ourPeerId] {
@@ -5975,22 +6043,26 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 				cca := ca.copyGroup()
 				cca.Group.Peers = newPeers
 				cca.Group.Cluster = s.cachedClusterName()
-				meta.ForwardProposal(encodeAddConsumerAssignment(cca))
+				if err := meta.ForwardProposal(encodeAddConsumerAssignment(cca)); err != nil {
+					s.Warnf("Consumer move scale down proposal for '%s > %s > %s' failed: %v",
+						ca.Client.serviceAccount(), ca.Stream, ca.Name, err)
+				}
 				s.Noticef("Scaling down '%s > %s > %s' to %+v", ca.Client.serviceAccount(), ca.Stream, ca.Name, s.peerSetToNames(newPeers))
 
 			} else {
-				var newLeaderPeer, newLeader, newCluster string
+				// Only consider peers in the new set as candidates for leadership transfer.
+				var newLeaderPeer, newLeader string
 				neededCurrent, current := replicas/2+1, 0
 				for _, r := range ci.Replicas {
 					if r.Current && newPeerSet[r.Peer] {
 						current++
-						if newCluster == _EMPTY_ {
-							newLeaderPeer, newLeader, newCluster = r.Peer, r.Name, r.cluster
+						if newLeader == _EMPTY_ {
+							newLeaderPeer, newLeader = r.Peer, r.Name
 						}
 					}
 				}
 
-				// Check if we have a quorom
+				// Check if we have a quorum.
 				if current >= neededCurrent {
 					s.Noticef("Transfer of consumer leader for '%s > %s > %s' to '%s'", ca.Client.serviceAccount(), ca.Stream, ca.Name, newLeader)
 					n.StepDown(newLeaderPeer)
