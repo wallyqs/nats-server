@@ -16,6 +16,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -24,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/minio/highwayhash"
 	"github.com/nats-io/nats.go"
 )
 
@@ -617,5 +620,226 @@ func TestJetStreamStandaloneToClusteredPTCMarkerPersistence(t *testing.T) {
 	}
 	if len(siResp.Config.Subjects) != 1 || siResp.Config.Subjects[0] != "cluster.>" {
 		t.Fatalf("Expected cluster subjects [cluster.>], got %v", siResp.Config.Subjects)
+	}
+}
+
+// renameStreamOnDisk renames a stream's directory and updates the meta.inf
+// and meta.sum files so the server loads it under the new name. The server
+// must be stopped before calling this. Only works for unencrypted streams.
+//
+// storeDir is the JetStream store directory (e.g. from opts.StoreDir).
+// account is the account name (e.g. "$G" for the global account).
+// oldName is the current stream name, newName is the desired name.
+func renameStreamOnDisk(t *testing.T, storeDir, account, oldName, newName string) {
+	t.Helper()
+
+	oldDir := filepath.Join(storeDir, account, "streams", oldName)
+	newDir := filepath.Join(storeDir, account, "streams", newName)
+
+	// Read existing meta.inf.
+	metaFile := filepath.Join(oldDir, JetStreamMetaFile)
+	buf, err := os.ReadFile(metaFile)
+	require_NoError(t, err)
+
+	// Decode the config, change the name, re-encode.
+	var cfg FileStreamInfo
+	require_NoError(t, json.Unmarshal(buf, &cfg))
+	cfg.Name = newName
+	newBuf, err := json.Marshal(cfg)
+	require_NoError(t, err)
+
+	// Write updated meta.inf back.
+	require_NoError(t, os.WriteFile(metaFile, newBuf, defaultFilePerms))
+
+	// Recompute the highwayhash checksum.
+	// The key is sha256 of the directory base name (which will be newName
+	// after rename). The recovery code in jetstream.go uses fi.Name()
+	// (the directory entry name) as the hash key.
+	key := sha256.Sum256([]byte(newName))
+	hh, err := highwayhash.NewDigest64(key[:])
+	require_NoError(t, err)
+	hh.Write(newBuf)
+	var hb [highwayhash.Size64]byte
+	checksum := hex.EncodeToString(hh.Sum(hb[:0]))
+
+	sumFile := filepath.Join(oldDir, JetStreamMetaFileSum)
+	require_NoError(t, os.WriteFile(sumFile, []byte(checksum), defaultFilePerms))
+
+	// Rename the directory.
+	require_NoError(t, os.Rename(oldDir, newDir))
+}
+
+// TestJetStreamStandaloneRenameStreamThenPromote tests that an operator can
+// rename a stream on disk while the server is stopped, then promote the
+// standalone node to a cluster, and the stream appears under the new name.
+func TestJetStreamStandaloneRenameStreamThenPromote(t *testing.T) {
+	// Phase 1: Create standalone server with stream "ORDERS".
+	storeDir := t.TempDir()
+
+	opts := DefaultTestOptions
+	opts.Port = -1
+	opts.JetStream = true
+	opts.StoreDir = storeDir
+	opts.ServerName = "S1"
+	s := RunServer(&opts)
+
+	nc, err := nats.Connect(s.ClientURL())
+	require_NoError(t, err)
+
+	// Create the stream and a durable consumer.
+	req, _ := json.Marshal(&StreamConfig{
+		Name:     "ORDERS",
+		Subjects: []string{"orders.>"},
+		Storage:  FileStorage,
+	})
+	rmsg, err := nc.Request(fmt.Sprintf(JSApiStreamCreateT, "ORDERS"), req, 5*time.Second)
+	require_NoError(t, err)
+	var resp JSApiStreamCreateResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &resp))
+	if resp.Error != nil {
+		t.Fatalf("Unexpected error creating stream: %+v", resp.Error)
+	}
+
+	numMessages := 50
+	for i := 0; i < numMessages; i++ {
+		_, err := nc.Request(fmt.Sprintf("orders.%d", i), []byte(fmt.Sprintf("order-%d", i)), 2*time.Second)
+		require_NoError(t, err)
+	}
+
+	consReq, _ := json.Marshal(&CreateConsumerRequest{
+		Stream: "ORDERS",
+		Config: ConsumerConfig{
+			Durable:       "processor",
+			AckPolicy:     AckExplicit,
+			DeliverPolicy: DeliverAll,
+		},
+	})
+	rmsg, err = nc.Request(fmt.Sprintf(JSApiDurableCreateT, "ORDERS", "processor"), consReq, 5*time.Second)
+	require_NoError(t, err)
+	var consResp JSApiConsumerCreateResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &consResp))
+	if consResp.Error != nil {
+		t.Fatalf("Unexpected error creating consumer: %+v", consResp.Error)
+	}
+
+	nc.Close()
+	s.Shutdown()
+	s.WaitForShutdown()
+
+	// Phase 2: Rename the stream on disk from "ORDERS" to "ORDERS_V2".
+	renameStreamOnDisk(t, storeDir, "$G", "ORDERS", "ORDERS_V2")
+
+	// Verify the old directory no longer exists and the new one does.
+	oldDir := filepath.Join(storeDir, "$G", "streams", "ORDERS")
+	newDir := filepath.Join(storeDir, "$G", "streams", "ORDERS_V2")
+	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+		t.Fatalf("Old stream directory should not exist: %v", err)
+	}
+	if _, err := os.Stat(newDir); err != nil {
+		t.Fatalf("New stream directory should exist: %v", err)
+	}
+
+	// Phase 3: Promote to a 3-node cluster.
+	modify := func(serverName, clusterName, autoStoreDir, conf string) string {
+		if serverName == "S-1" {
+			return strings.Replace(conf, autoStoreDir, storeDir, 1)
+		}
+		return conf
+	}
+	c := createJetStreamClusterWithTemplateAndModHook(t, jsClusterTempl, "RN", 3, modify)
+	defer c.shutdown()
+
+	c.waitOnLeader()
+
+	// Ensure S-1 becomes meta leader for adoption.
+	var s1 *Server
+	for _, srv := range c.servers {
+		if srv.Name() == "S-1" {
+			s1 = srv
+			break
+		}
+	}
+	require_NotNil(t, s1)
+
+	checkFor(t, 20*time.Second, 500*time.Millisecond, func() error {
+		if s1.JetStreamIsLeader() {
+			return nil
+		}
+		leader := c.leader()
+		if leader != nil && leader != s1 {
+			nc2, err := nats.Connect(leader.ClientURL(), nats.UserInfo("admin", "s3cr3t!"))
+			if err != nil {
+				return err
+			}
+			defer nc2.Close()
+			nc2.Request(JSApiLeaderStepDown, nil, 2*time.Second)
+		}
+		return fmt.Errorf("waiting for S-1 to become meta leader")
+	})
+
+	// Wait for adoption.
+	checkFor(t, 60*time.Second, 500*time.Millisecond, func() error {
+		nc2, err := nats.Connect(s1.ClientURL())
+		if err != nil {
+			return err
+		}
+		defer nc2.Close()
+
+		// The stream should be visible under the NEW name.
+		rmsg, err := nc2.Request(fmt.Sprintf(JSApiStreamInfoT, "ORDERS_V2"), nil, 5*time.Second)
+		if err != nil {
+			return err
+		}
+		var siResp JSApiStreamInfoResponse
+		if err := json.Unmarshal(rmsg.Data, &siResp); err != nil {
+			return err
+		}
+		if siResp.Error != nil {
+			return fmt.Errorf("stream info error: %+v", siResp.Error)
+		}
+		if siResp.State.Msgs != uint64(numMessages) {
+			return fmt.Errorf("expected %d messages, got %d", numMessages, siResp.State.Msgs)
+		}
+		return nil
+	})
+
+	// Verify the old name does NOT exist in the cluster.
+	nc2, err := nats.Connect(s1.ClientURL())
+	require_NoError(t, err)
+	defer nc2.Close()
+
+	rmsg, err = nc2.Request(fmt.Sprintf(JSApiStreamInfoT, "ORDERS"), nil, 5*time.Second)
+	require_NoError(t, err)
+	var oldResp JSApiStreamInfoResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &oldResp))
+	if oldResp.Error == nil {
+		t.Fatalf("Expected error for old stream name ORDERS, but got none")
+	}
+
+	// Verify the consumer was adopted under the renamed stream.
+	rmsg, err = nc2.Request(fmt.Sprintf(JSApiConsumerInfoT, "ORDERS_V2", "processor"), nil, 5*time.Second)
+	require_NoError(t, err)
+	var ciResp JSApiConsumerInfoResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &ciResp))
+	if ciResp.Error != nil {
+		t.Fatalf("Consumer info error: %+v", ciResp.Error)
+	}
+	if ciResp.Config.Durable != "processor" {
+		t.Fatalf("Expected durable name %q, got %q", "processor", ciResp.Config.Durable)
+	}
+
+	// Verify new publishes work on the renamed stream's subjects.
+	_, err = nc2.Request("orders.new", []byte("new-order"), 2*time.Second)
+	require_NoError(t, err)
+
+	rmsg, err = nc2.Request(fmt.Sprintf(JSApiStreamInfoT, "ORDERS_V2"), nil, 5*time.Second)
+	require_NoError(t, err)
+	var siResp2 JSApiStreamInfoResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &siResp2))
+	if siResp2.Error != nil {
+		t.Fatalf("Stream info error: %+v", siResp2.Error)
+	}
+	if siResp2.State.Msgs != uint64(numMessages+1) {
+		t.Fatalf("Expected %d messages after publish, got %d", numMessages+1, siResp2.State.Msgs)
 	}
 }
