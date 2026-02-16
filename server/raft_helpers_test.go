@@ -396,6 +396,37 @@ func (a *stateAdder) snapshot(t *testing.T) {
 	require_NoError(t, rn.InstallSnapshot(snap))
 }
 
+// snapshotCheckpoint exercises the full RaftNodeCheckpoint lifecycle:
+// CreateSnapshotCheckpoint -> LoadLastSnapshot -> IterAppendEntrySeq -> InstallSnapshot.
+func (a *stateAdder) snapshotCheckpoint(t *testing.T) {
+	t.Helper()
+	a.Lock()
+	rn := a.n
+	a.Unlock()
+
+	c, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+
+	// Replay: load last snapshot if available, then iterate entries.
+	var sum int64
+	if data, err := c.LoadLastSnapshot(); err == nil {
+		sum, _ = binary.Varint(data)
+	}
+	for ae, err := range c.IterAppendEntrySeq() {
+		require_NoError(t, err)
+		for _, e := range ae.entries {
+			if e.Type == EntryNormal {
+				delta, _ := binary.Varint(e.Data)
+				sum += delta
+			}
+		}
+	}
+	data := make([]byte, binary.MaxVarintLen64)
+	n := binary.PutVarint(data, sum)
+	_, err = c.InstallSnapshot(data[:n])
+	require_NoError(t, err)
+}
+
 // Helper to wait for a certain state.
 func (rg smGroup) waitOnTotal(t *testing.T, expected int64) {
 	t.Helper()

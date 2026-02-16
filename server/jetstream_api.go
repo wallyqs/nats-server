@@ -705,6 +705,14 @@ type JSApiConsumerDeleteResponse struct {
 
 const JSApiConsumerDeleteResponseType = "io.nats.jetstream.api.v1.consumer_delete_response"
 
+type JSApiConsumerResetResponse struct {
+	ApiResponse
+	*ConsumerInfo
+	ResetSeq uint64 `json:"reset_seq,omitempty"`
+}
+
+const JSApiConsumerResetResponseType = "io.nats.jetstream.api.v1.consumer_reset_response"
+
 type JSApiConsumerPauseRequest struct {
 	PauseUntil time.Time `json:"pause_until,omitempty"`
 }

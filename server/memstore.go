@@ -2396,6 +2396,16 @@ func (o *consumerMemStore) UpdateStarting(sseq uint64) {
 	}
 }
 
+func (o *consumerMemStore) Reset(sseq uint64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	o.state.Delivered.Stream = sseq
+	o.state.AckFloor.Stream = sseq
+	o.state.Pending = nil
+	o.state.Redelivered = nil
+}
+
 // HasState returns if this store has a recorded state.
 func (o *consumerMemStore) HasState() bool {
 	o.mu.Lock()

@@ -78,6 +78,311 @@ func TestNRGSnapshotAndRestart(t *testing.T) {
 	rg.waitOnTotal(t, expectedTotal)
 }
 
+func TestNRGCheckpointBasic(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	leader := rg.leader().(*stateAdder)
+	var expectedTotal int64
+	for i := 0; i < 100; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+
+	// Checkpoint on the leader using the full async path.
+	leader.snapshotCheckpoint(t)
+
+	// Propose more and verify everything still works.
+	for i := 0; i < 50; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+
+	// Restart a follower and verify it recovers correctly.
+	sm := rg.nonLeader().(*stateAdder)
+	sm.stop()
+	sm.restart()
+	rg.waitOnTotal(t, expectedTotal)
+}
+
+func TestNRGCheckpointWithPriorSnapshot(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	leader := rg.leader().(*stateAdder)
+	var firstSum int64
+	for i := 0; i < 50; i++ {
+		delta := rand.Int63n(100) + 1
+		firstSum += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, firstSum)
+
+	// Install a regular snapshot so there's a prior snapshot on disk.
+	leader.snapshot(t)
+
+	// Propose more deltas.
+	var secondSum int64
+	for i := 0; i < 50; i++ {
+		delta := rand.Int63n(100) + 1
+		secondSum += delta
+		leader.proposeDelta(delta)
+	}
+	expectedTotal := firstSum + secondSum
+	rg.waitOnTotal(t, expectedTotal)
+
+	// Now create a checkpoint and verify LoadLastSnapshot returns the prior snapshot.
+	leader.Lock()
+	rn := leader.n
+	leader.Unlock()
+
+	cp, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+
+	snapData, err := cp.LoadLastSnapshot()
+	require_NoError(t, err)
+
+	snappedSum, _ := binary.Varint(snapData)
+	require_Equal(t, snappedSum, firstSum)
+
+	// Iterate entries - should only be the post-snapshot entries.
+	var iteratedSum int64
+	var entryCount int
+	for ae, err := range cp.IterAppendEntrySeq() {
+		require_NoError(t, err)
+		for _, e := range ae.entries {
+			if e.Type == EntryNormal {
+				delta, _ := binary.Varint(e.Data)
+				iteratedSum += delta
+				entryCount++
+			}
+		}
+	}
+
+	// The iterated deltas should account for the second batch.
+	require_Equal(t, iteratedSum, secondSum)
+
+	// Install the checkpoint snapshot with accumulated state.
+	totalSum := snappedSum + iteratedSum
+	data := make([]byte, binary.MaxVarintLen64)
+	n := binary.PutVarint(data, totalSum)
+	_, err = cp.InstallSnapshot(data[:n])
+	require_NoError(t, err)
+
+	// Verify cluster state is still correct.
+	rg.waitOnTotal(t, expectedTotal)
+}
+
+func TestNRGCheckpointAbort(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	leader := rg.leader().(*stateAdder)
+	var expectedTotal int64
+	for i := 0; i < 50; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+
+	leader.Lock()
+	rn := leader.n
+	leader.Unlock()
+
+	// Create a checkpoint and abort it.
+	cp, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+	cp.Abort()
+
+	// Should be able to create another checkpoint after abort.
+	cp2, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+	cp2.Abort()
+
+	// Sync InstallSnapshot should also work after abort.
+	leader.snapshot(t)
+
+	// Cluster should still be consistent.
+	rg.waitOnTotal(t, expectedTotal)
+}
+
+func TestNRGCheckpointRejectsOverlap(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	leader := rg.leader().(*stateAdder)
+	for i := 0; i < 50; i++ {
+		leader.proposeDelta(rand.Int63n(100) + 1)
+	}
+	rg.waitOnTotal(t, leader.total())
+
+	leader.Lock()
+	rn := leader.n
+	leader.Unlock()
+
+	// First checkpoint should succeed.
+	cp, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+
+	// Second checkpoint should be rejected while first is active.
+	_, err = rn.CreateSnapshotCheckpoint(false)
+	require_Error(t, err, errSnapInProgress)
+
+	// Sync InstallSnapshot should also be rejected (it goes through createSnapshotCheckpointLocked).
+	err = rn.InstallSnapshot([]byte{0})
+	require_Error(t, err, errSnapInProgress)
+
+	// Abort the first checkpoint.
+	cp.Abort()
+
+	// Now a new checkpoint should succeed.
+	cp2, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+	cp2.Abort()
+}
+
+func TestNRGCheckpointAbortedByInternalSnapshot(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	leader := rg.leader().(*stateAdder)
+	var expectedTotal int64
+	for i := 0; i < 50; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+
+	leader.Lock()
+	rn := leader.n
+	leader.Unlock()
+
+	n := rn.(*raft)
+
+	// Create a checkpoint.
+	cp, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+
+	// Simulate an internal snapshot install (as would happen during catchup).
+	// This resets n.snapshotting = false, aborting the active checkpoint.
+	n.Lock()
+	snap := &snapshot{
+		lastTerm:  n.term,
+		lastIndex: n.applied,
+		peerstate: encodePeerState(&peerState{n.peerNames(), n.csz, n.extSt}),
+		data:      make([]byte, binary.MaxVarintLen64),
+	}
+	binary.PutVarint(snap.data, expectedTotal)
+	err = n.installSnapshot(snap)
+	n.Unlock()
+	require_NoError(t, err)
+
+	// The checkpoint's InstallSnapshot should now return errSnapAborted.
+	data := make([]byte, binary.MaxVarintLen64)
+	binary.PutVarint(data, expectedTotal)
+	_, err = cp.InstallSnapshot(data)
+	require_Error(t, err, errSnapAborted)
+
+	// Also verify that LoadLastSnapshot and IterAppendEntrySeq detect the abort.
+	// Create a new checkpoint, abort it via installSnapshot, then check the iterator.
+	for i := 0; i < 10; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+
+	cp2, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+
+	// Abort via internal snapshot.
+	n.Lock()
+	snap2 := &snapshot{
+		lastTerm:  n.term,
+		lastIndex: n.applied,
+		peerstate: encodePeerState(&peerState{n.peerNames(), n.csz, n.extSt}),
+		data:      make([]byte, binary.MaxVarintLen64),
+	}
+	binary.PutVarint(snap2.data, expectedTotal)
+	err = n.installSnapshot(snap2)
+	n.Unlock()
+	require_NoError(t, err)
+
+	// LoadLastSnapshot should return errSnapAborted.
+	_, err = cp2.LoadLastSnapshot()
+	require_Error(t, err, errSnapAborted)
+
+	// IterAppendEntrySeq should also yield errSnapAborted.
+	for _, err := range cp2.IterAppendEntrySeq() {
+		require_Error(t, err, errSnapAborted)
+		break
+	}
+}
+
+func TestNRGCheckpointIterEntryError(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	leader := rg.leader().(*stateAdder)
+	for i := 0; i < 50; i++ {
+		leader.proposeDelta(rand.Int63n(100) + 1)
+	}
+	rg.waitOnTotal(t, leader.total())
+
+	leader.Lock()
+	rn := leader.n
+	leader.Unlock()
+
+	n := rn.(*raft)
+
+	// Create a checkpoint.
+	cp, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+
+	// Compact the WAL past the entries the checkpoint wants to iterate.
+	n.Lock()
+	_, err = n.wal.Compact(n.applied + 1)
+	n.Unlock()
+	require_NoError(t, err)
+
+	// Iterating should return an error (entries have been removed).
+	var gotError bool
+	for _, err := range cp.IterAppendEntrySeq() {
+		if err != nil {
+			gotError = true
+			break
+		}
+	}
+	require_True(t, gotError)
+
+	// Abort the checkpoint to clean up.
+	cp.Abort()
+}
+
 func TestNRGAppendEntryEncode(t *testing.T) {
 	ae := &appendEntry{
 		term:   1,

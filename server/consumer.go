@@ -5840,6 +5840,13 @@ func (o *consumer) selectStartingSeqNo() {
 	}
 }
 
+// resetLocalStartingSeq resets the consumer's starting sequence.
+// Lock should be held.
+func (o *consumer) resetLocalStartingSeq(sseq uint64) {
+	o.sseq = sseq
+	o.asflr = sseq - 1
+}
+
 // Test whether a config represents a durable subscriber.
 func isDurableConsumer(config *ConsumerConfig) bool {
 	return config != nil && config.Durable != _EMPTY_
