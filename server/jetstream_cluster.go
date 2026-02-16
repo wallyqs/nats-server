@@ -83,8 +83,8 @@ type jetStreamCluster struct {
 	// Signals that this node was promoted from standalone to clustered mode
 	// with no prior meta state. Used to detect standalone-to-clustered transitions.
 	ptc bool
-	// Subscription for stream adoption requests from non-leader nodes (leader only).
-	adoptSub *subscription
+	// System level request to adopt a stream from a standalone node.
+	adoptStream *subscription
 }
 
 // Used to track inflight stream create/update/delete requests that have been proposed but not yet applied.
@@ -6855,8 +6855,8 @@ func (js *jetStream) startUpdatesSub() {
 	if js.accountPurge == nil {
 		js.accountPurge, _ = s.systemSubscribe(JSApiAccountPurge, _EMPTY_, false, c, s.jsLeaderAccountPurgeRequest)
 	}
-	if cc.adoptSub == nil {
-		cc.adoptSub, _ = s.systemSubscribe(jsAdoptStreamRequestSubj, _EMPTY_, false, c, js.handleAdoptStreamRequest)
+	if cc.adoptStream == nil {
+		cc.adoptStream, _ = s.systemSubscribe(jsAdoptStreamRequestSubj, _EMPTY_, false, c, js.handleAdoptStreamRequest)
 	}
 }
 
@@ -6887,9 +6887,9 @@ func (js *jetStream) stopUpdatesSub() {
 		cc.s.sysUnsubscribe(cc.peerStreamCancelMove)
 		cc.peerStreamCancelMove = nil
 	}
-	if cc.adoptSub != nil {
-		cc.s.sysUnsubscribe(cc.adoptSub)
-		cc.adoptSub = nil
+	if cc.adoptStream != nil {
+		cc.s.sysUnsubscribe(cc.adoptStream)
+		cc.adoptStream = nil
 	}
 	if js.accountPurge != nil {
 		cc.s.sysUnsubscribe(js.accountPurge)
