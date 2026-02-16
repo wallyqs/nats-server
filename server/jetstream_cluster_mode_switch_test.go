@@ -190,3 +190,285 @@ func TestJetStreamStandaloneToClusteredModeSwitch(t *testing.T) {
 		t.Fatalf("Expected %d messages after publish, got %d", numMessages+1, siResp2.State.Msgs)
 	}
 }
+
+// TestJetStreamStandaloneToClusteredNonLeaderAdoption tests that when a server with
+// standalone data joins a cluster and is NOT the meta leader, the streams are still
+// adopted via internal messaging to the leader.
+func TestJetStreamStandaloneToClusteredNonLeaderAdoption(t *testing.T) {
+	// Phase 1: Create standalone server with data.
+	storeDir := t.TempDir()
+
+	opts := DefaultTestOptions
+	opts.Port = -1
+	opts.JetStream = true
+	opts.StoreDir = storeDir
+	opts.ServerName = "S1"
+	s := RunServer(&opts)
+
+	nc, err := nats.Connect(s.ClientURL())
+	require_NoError(t, err)
+
+	req, _ := json.Marshal(&StreamConfig{
+		Name:     "ORDERS",
+		Subjects: []string{"orders.>"},
+		Storage:  FileStorage,
+	})
+	rmsg, err := nc.Request(fmt.Sprintf(JSApiStreamCreateT, "ORDERS"), req, 5*time.Second)
+	require_NoError(t, err)
+	var resp JSApiStreamCreateResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &resp))
+	if resp.Error != nil {
+		t.Fatalf("Unexpected error creating stream: %+v", resp.Error)
+	}
+
+	numMessages := 50
+	for i := 0; i < numMessages; i++ {
+		_, err := nc.Request(fmt.Sprintf("orders.%d", i), []byte(fmt.Sprintf("order-%d", i)), 2*time.Second)
+		require_NoError(t, err)
+	}
+
+	consReq, _ := json.Marshal(&CreateConsumerRequest{
+		Stream: "ORDERS",
+		Config: ConsumerConfig{
+			Durable:       "processor",
+			AckPolicy:     AckExplicit,
+			DeliverPolicy: DeliverAll,
+		},
+	})
+	rmsg, err = nc.Request(fmt.Sprintf(JSApiDurableCreateT, "ORDERS", "processor"), consReq, 5*time.Second)
+	require_NoError(t, err)
+	var consResp JSApiConsumerCreateResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &consResp))
+	if consResp.Error != nil {
+		t.Fatalf("Unexpected error creating consumer: %+v", consResp.Error)
+	}
+
+	nc.Close()
+	s.Shutdown()
+	s.WaitForShutdown()
+
+	// Phase 2: Start a 3-node cluster where S-3 has the standalone data.
+	// S-1 or S-2 will likely become leader, so S-3 must use the non-leader
+	// adoption path (requestAdoptionFromLeader).
+	modify := func(serverName, clusterName, autoStoreDir, conf string) string {
+		if serverName == "S-3" {
+			return strings.Replace(conf, autoStoreDir, storeDir, 1)
+		}
+		return conf
+	}
+	c := createJetStreamClusterWithTemplateAndModHook(t, jsClusterTempl, "NL", 3, modify)
+	defer c.shutdown()
+
+	c.waitOnLeader()
+
+	// Ensure S-3 is NOT the leader. If it is, step it down so we test the non-leader path.
+	var s3 *Server
+	for _, srv := range c.servers {
+		if srv.Name() == "S-3" {
+			s3 = srv
+			break
+		}
+	}
+	require_NotNil(t, s3)
+
+	if s3.JetStreamIsLeader() {
+		nc2, err := nats.Connect(s3.ClientURL(), nats.UserInfo("admin", "s3cr3t!"))
+		require_NoError(t, err)
+		nc2.Request(JSApiLeaderStepDown, nil, 2*time.Second)
+		nc2.Close()
+		c.waitOnLeader()
+		// Wait for a different leader.
+		checkFor(t, 10*time.Second, 250*time.Millisecond, func() error {
+			if s3.JetStreamIsLeader() {
+				return fmt.Errorf("S-3 is still leader")
+			}
+			return nil
+		})
+	}
+
+	// Wait for the adoption to complete via internal messaging.
+	// checkForOrphans fires ~30s after recovery, then S-3 sends adoption request to the leader.
+	leader := c.leader()
+	require_NotNil(t, leader)
+
+	checkFor(t, 60*time.Second, 500*time.Millisecond, func() error {
+		nc2, err := nats.Connect(leader.ClientURL())
+		if err != nil {
+			return err
+		}
+		defer nc2.Close()
+
+		rmsg, err := nc2.Request(fmt.Sprintf(JSApiStreamInfoT, "ORDERS"), nil, 5*time.Second)
+		if err != nil {
+			return err
+		}
+		var siResp JSApiStreamInfoResponse
+		if err := json.Unmarshal(rmsg.Data, &siResp); err != nil {
+			return err
+		}
+		if siResp.Error != nil {
+			return fmt.Errorf("stream info error: %+v", siResp.Error)
+		}
+		if siResp.State.Msgs != uint64(numMessages) {
+			return fmt.Errorf("expected %d messages, got %d", numMessages, siResp.State.Msgs)
+		}
+		return nil
+	})
+
+	// Verify consumer was adopted too.
+	nc2, err := nats.Connect(leader.ClientURL())
+	require_NoError(t, err)
+	defer nc2.Close()
+
+	rmsg, err = nc2.Request(fmt.Sprintf(JSApiConsumerInfoT, "ORDERS", "processor"), nil, 5*time.Second)
+	require_NoError(t, err)
+	var ciResp JSApiConsumerInfoResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &ciResp))
+	if ciResp.Error != nil {
+		t.Fatalf("Consumer info error: %+v", ciResp.Error)
+	}
+	if ciResp.Config.Durable != "processor" {
+		t.Fatalf("Expected durable name %q, got %q", "processor", ciResp.Config.Durable)
+	}
+
+	// Verify new publishes work.
+	_, err = nc2.Request("orders.new", []byte("new-order"), 2*time.Second)
+	require_NoError(t, err)
+
+	rmsg, err = nc2.Request(fmt.Sprintf(JSApiStreamInfoT, "ORDERS"), nil, 5*time.Second)
+	require_NoError(t, err)
+	var siResp2 JSApiStreamInfoResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &siResp2))
+	if siResp2.Error != nil {
+		t.Fatalf("Stream info error: %+v", siResp2.Error)
+	}
+	if siResp2.State.Msgs != uint64(numMessages+1) {
+		t.Fatalf("Expected %d messages after publish, got %d", numMessages+1, siResp2.State.Msgs)
+	}
+}
+
+// TestJetStreamStandaloneToClusteredDuplicateStreamName tests that when a standalone
+// server has a stream with the same name as one already in the cluster, the cluster
+// stream takes precedence and the standalone stream is not adopted.
+func TestJetStreamStandaloneToClusteredDuplicateStreamName(t *testing.T) {
+	// Phase 1: Create standalone server with a stream named "EVENTS".
+	storeDir := t.TempDir()
+
+	opts := DefaultTestOptions
+	opts.Port = -1
+	opts.JetStream = true
+	opts.StoreDir = storeDir
+	opts.ServerName = "S1"
+	s := RunServer(&opts)
+
+	nc, err := nats.Connect(s.ClientURL())
+	require_NoError(t, err)
+
+	// Create stream with subjects "standalone.>"
+	req, _ := json.Marshal(&StreamConfig{
+		Name:     "EVENTS",
+		Subjects: []string{"standalone.>"},
+		Storage:  FileStorage,
+	})
+	rmsg, err := nc.Request(fmt.Sprintf(JSApiStreamCreateT, "EVENTS"), req, 5*time.Second)
+	require_NoError(t, err)
+	var resp JSApiStreamCreateResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &resp))
+	if resp.Error != nil {
+		t.Fatalf("Unexpected error creating stream: %+v", resp.Error)
+	}
+
+	// Publish some messages.
+	for i := 0; i < 10; i++ {
+		_, err := nc.Request(fmt.Sprintf("standalone.%d", i), []byte("data"), 2*time.Second)
+		require_NoError(t, err)
+	}
+
+	nc.Close()
+	s.Shutdown()
+	s.WaitForShutdown()
+
+	// Phase 2: Start a 3-node cluster and create a DIFFERENT stream also named "EVENTS".
+	c := createJetStreamCluster(t, jsClusterTempl, "DUP", _EMPTY_, 3, 22_033, true)
+	defer c.shutdown()
+
+	c.waitOnLeader()
+	leader := c.leader()
+
+	nc2, err := nats.Connect(leader.ClientURL())
+	require_NoError(t, err)
+	defer nc2.Close()
+
+	// Create cluster stream "EVENTS" with different subjects.
+	clusterReq, _ := json.Marshal(&StreamConfig{
+		Name:     "EVENTS",
+		Subjects: []string{"cluster.>"},
+		Storage:  FileStorage,
+		Replicas: 3,
+	})
+	rmsg, err = nc2.Request(fmt.Sprintf(JSApiStreamCreateT, "EVENTS"), clusterReq, 5*time.Second)
+	require_NoError(t, err)
+	var clusterResp JSApiStreamCreateResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &clusterResp))
+	if clusterResp.Error != nil {
+		t.Fatalf("Unexpected error creating cluster stream: %+v", clusterResp.Error)
+	}
+
+	// Publish messages to the cluster stream.
+	for i := 0; i < 20; i++ {
+		_, err := nc2.Request(fmt.Sprintf("cluster.%d", i), []byte("cluster-data"), 2*time.Second)
+		require_NoError(t, err)
+	}
+	nc2.Close()
+
+	// Phase 3: Now add a 4th server that uses the standalone store dir.
+	// This simulates adding a standalone server to an existing cluster.
+	srvNew := c.addInNewServer()
+	// Swap store dir: shutdown the new server, restart with standalone storeDir.
+	newOpts := srvNew.getOpts().Clone()
+	srvNew.Shutdown()
+	srvNew.WaitForShutdown()
+	// Remove the last server from the cluster list since we'll replace it.
+	c.servers = c.servers[:len(c.servers)-1]
+	c.opts = c.opts[:len(c.opts)-1]
+
+	newOpts.StoreDir = storeDir
+	newOpts.Port = -1
+	srvNew = RunServer(newOpts)
+	c.servers = append(c.servers, srvNew)
+	c.opts = append(c.opts, newOpts)
+	c.checkClusterFormed()
+
+	// Wait for the new server to sync with the cluster.
+	// The checkForOrphans on the new server should detect the duplicate and skip adoption.
+	time.Sleep(35 * time.Second)
+
+	// Verify the cluster stream "EVENTS" is intact with its original config.
+	leader = c.leader()
+	require_NotNil(t, leader)
+
+	nc3, err := nats.Connect(leader.ClientURL())
+	require_NoError(t, err)
+	defer nc3.Close()
+
+	rmsg, err = nc3.Request(fmt.Sprintf(JSApiStreamInfoT, "EVENTS"), nil, 5*time.Second)
+	require_NoError(t, err)
+	var siResp JSApiStreamInfoResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &siResp))
+	if siResp.Error != nil {
+		t.Fatalf("Stream info error: %+v", siResp.Error)
+	}
+
+	// Should have the 20 cluster messages, NOT the 10 standalone ones.
+	if siResp.State.Msgs != 20 {
+		t.Fatalf("Expected 20 cluster messages, got %d", siResp.State.Msgs)
+	}
+
+	// Verify the stream subjects are from the cluster version, not standalone.
+	if len(siResp.Config.Subjects) != 1 || siResp.Config.Subjects[0] != "cluster.>" {
+		t.Fatalf("Expected cluster subjects [cluster.>], got %v", siResp.Config.Subjects)
+	}
+
+	// The standalone data should still exist on the new server's disk (not deleted),
+	// but should NOT be part of the cluster metadata.
+}

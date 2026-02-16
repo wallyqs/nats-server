@@ -83,6 +83,8 @@ type jetStreamCluster struct {
 	// Signals that this is a fresh bootstrap with no prior meta state.
 	// Used to detect standalone-to-clustered mode transitions.
 	bootstrapped bool
+	// Subscription for stream adoption requests from non-leader nodes (leader only).
+	adoptSub *subscription
 }
 
 // Used to track inflight stream create/update/delete requests that have been proposed but not yet applied.
@@ -1433,10 +1435,14 @@ func (js *jetStream) checkForOrphans() {
 		return
 	}
 
-	// If bootstrapped but not the leader, skip deletion to preserve data
-	// for possible adoption by the leader.
+	// If bootstrapped but not the leader, request adoption from the meta leader.
 	if bootstrapped && len(streams) > 0 {
-		s.Noticef("JetStream cluster bootstrapped with %d orphaned stream(s), skipping cleanup (not meta leader)", len(streams))
+		js.requestAdoptionFromLeader(streams)
+		js.mu.Lock()
+		if js.cluster != nil {
+			js.cluster.bootstrapped = false
+		}
+		js.mu.Unlock()
 		return
 	}
 
@@ -1494,9 +1500,11 @@ func (js *jetStream) adoptLocalStreams() {
 		asa := cc.streams[accName]
 		jsa.mu.RLock()
 		for name, mset := range jsa.streams {
-			if asa == nil || asa[name] == nil {
-				toAdopt = append(toAdopt, mset)
+			if asa != nil && asa[name] != nil {
+				s.Noticef("JetStream skipping adoption of '%s > %s': stream already exists in cluster", accName, name)
+				continue
 			}
+			toAdopt = append(toAdopt, mset)
 		}
 		jsa.mu.RUnlock()
 	}
@@ -1509,66 +1517,210 @@ func (js *jetStream) adoptLocalStreams() {
 	s.Noticef("JetStream adopting %d stream(s) from standalone mode into cluster", len(toAdopt))
 
 	for _, mset := range toAdopt {
+		js.proposeStreamAdoption(meta, mset, ourID)
+	}
+}
+
+// proposeStreamAdoption proposes a stream and its consumers for adoption into the cluster.
+// The nodeID identifies the peer that holds the stream data.
+func (js *jetStream) proposeStreamAdoption(meta RaftNode, mset *stream, nodeID string) {
+	s := js.srv
+	accName := mset.accName()
+	streamName := mset.name()
+	cfg := mset.config()
+	created := mset.createdTime()
+
+	// Normalize replica count to 1 to match the single-peer group.
+	// The operator can scale up replicas later via stream update.
+	cfg.Replicas = 1
+
+	peers := []string{nodeID}
+	rg := &raftGroup{
+		Name:    groupNameForStream(peers, cfg.Storage),
+		Storage: cfg.Storage,
+		Peers:   peers,
+	}
+
+	sa := &streamAssignment{
+		Client:  &ClientInfo{Account: accName},
+		Created: created,
+		Config:  &cfg,
+		Group:   rg,
+		Sync:    syncSubjForStream(),
+	}
+
+	if err := meta.Propose(encodeAddStreamAssignment(sa)); err != nil {
+		s.Warnf("JetStream failed to propose stream adoption for '%s > %s': %v", accName, streamName, err)
+		return
+	}
+	s.Noticef("JetStream proposed adoption of stream '%s > %s'", accName, streamName)
+
+	// Now adopt consumers for this stream.
+	for _, o := range mset.getConsumers() {
+		consumerName := o.String()
+		ocfg := o.config()
+		oCreated := o.createdTime()
+
+		cPeers := []string{nodeID}
+		storage := cfg.Storage
+		if ocfg.MemoryStorage {
+			storage = MemoryStorage
+		}
+		crg := &raftGroup{
+			Name:    groupNameForConsumer(cPeers, storage),
+			Storage: storage,
+			Peers:   cPeers,
+		}
+
+		ca := &consumerAssignment{
+			Client:  &ClientInfo{Account: accName},
+			Created: oCreated,
+			Name:    consumerName,
+			Stream:  streamName,
+			Config:  &ocfg,
+			Group:   crg,
+		}
+
+		if err := meta.Propose(encodeAddConsumerAssignment(ca)); err != nil {
+			s.Warnf("JetStream failed to propose consumer adoption for '%s > %s > %s': %v", accName, streamName, consumerName, err)
+			continue
+		}
+		s.Noticef("JetStream proposed adoption of consumer '%s > %s > %s'", accName, streamName, consumerName)
+	}
+}
+
+// handleAdoptStreamRequest is called on the meta leader when a non-leader bootstrapped
+// node requests adoption of a locally recovered standalone stream.
+func (js *jetStream) handleAdoptStreamRequest(sub *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
+	s := js.srv
+	ci, acc, _, msg, err := s.getRequestInfo(c, rmsg)
+	if err != nil || ci == nil || acc == nil {
+		return
+	}
+
+	js.mu.RLock()
+	cc := js.cluster
+	if cc == nil || cc.meta == nil || !cc.meta.Leader() {
+		js.mu.RUnlock()
+		return
+	}
+	meta := cc.meta
+	js.mu.RUnlock()
+
+	var req jsAdoptionRequest
+	if err := json.Unmarshal(msg, &req); err != nil {
+		s.Warnf("JetStream adoption request decode error: %v", err)
+		return
+	}
+
+	// Check if stream already exists in the cluster metadata.
+	js.mu.RLock()
+	asa := cc.streams[req.Account]
+	exists := asa != nil && asa[req.Config.Name] != nil
+	js.mu.RUnlock()
+	if exists {
+		s.Noticef("JetStream skipping remote adoption of '%s > %s': stream already exists in cluster", req.Account, req.Config.Name)
+		return
+	}
+
+	// Normalize replica count to 1.
+	req.Config.Replicas = 1
+
+	peers := []string{req.NodeID}
+	rg := &raftGroup{
+		Name:    groupNameForStream(peers, req.Config.Storage),
+		Storage: req.Config.Storage,
+		Peers:   peers,
+	}
+
+	sa := &streamAssignment{
+		Client:  &ClientInfo{Account: req.Account},
+		Created: req.Created,
+		Config:  &req.Config,
+		Group:   rg,
+		Sync:    syncSubjForStream(),
+	}
+
+	if err := meta.Propose(encodeAddStreamAssignment(sa)); err != nil {
+		s.Warnf("JetStream failed to propose remote stream adoption for '%s > %s': %v", req.Account, req.Config.Name, err)
+		return
+	}
+	s.Noticef("JetStream proposed remote adoption of stream '%s > %s' on node %s", req.Account, req.Config.Name, req.NodeID)
+
+	// Propose consumer adoptions.
+	for _, ci := range req.Consumers {
+		cPeers := []string{req.NodeID}
+		storage := req.Config.Storage
+		if ci.Config.MemoryStorage {
+			storage = MemoryStorage
+		}
+		crg := &raftGroup{
+			Name:    groupNameForConsumer(cPeers, storage),
+			Storage: storage,
+			Peers:   cPeers,
+		}
+
+		ca := &consumerAssignment{
+			Client:  &ClientInfo{Account: req.Account},
+			Created: ci.Created,
+			Name:    ci.Name,
+			Stream:  req.Config.Name,
+			Config:  &ci.Config,
+			Group:   crg,
+		}
+
+		if err := meta.Propose(encodeAddConsumerAssignment(ca)); err != nil {
+			s.Warnf("JetStream failed to propose remote consumer adoption for '%s > %s > %s': %v", req.Account, req.Config.Name, ci.Name, err)
+			continue
+		}
+		s.Noticef("JetStream proposed remote adoption of consumer '%s > %s > %s'", req.Account, req.Config.Name, ci.Name)
+	}
+}
+
+// requestAdoptionFromLeader sends adoption requests for the given orphaned streams
+// to the meta leader via internal messaging.
+func (js *jetStream) requestAdoptionFromLeader(streams []*stream) {
+	js.mu.RLock()
+	s, cc := js.srv, js.cluster
+	if cc == nil || cc.meta == nil {
+		js.mu.RUnlock()
+		return
+	}
+	nodeID := cc.meta.ID()
+	js.mu.RUnlock()
+
+	s.Noticef("JetStream requesting adoption of %d stream(s) from meta leader", len(streams))
+
+	for _, mset := range streams {
 		accName := mset.accName()
 		streamName := mset.name()
 		cfg := mset.config()
 		created := mset.createdTime()
 
-		// Create an R1 raft group with ourselves as the sole peer.
-		peers := []string{ourID}
-		rg := &raftGroup{
-			Name:    groupNameForStream(peers, cfg.Storage),
-			Storage: cfg.Storage,
-			Peers:   peers,
+		var consumers []jsAdoptConsumerInfo
+		for _, o := range mset.getConsumers() {
+			consumers = append(consumers, jsAdoptConsumerInfo{
+				Name:    o.String(),
+				Config:  o.config(),
+				Created: o.createdTime(),
+			})
 		}
 
-		sa := &streamAssignment{
-			Client:  &ClientInfo{Account: accName},
-			Created: created,
-			Config:  &cfg,
-			Group:   rg,
-			Sync:    syncSubjForStream(),
+		req := &jsAdoptionRequest{
+			Account:   accName,
+			Config:    cfg,
+			Created:   created,
+			NodeID:    nodeID,
+			Consumers: consumers,
 		}
 
-		if err := meta.Propose(encodeAddStreamAssignment(sa)); err != nil {
-			s.Warnf("JetStream failed to propose stream adoption for '%s > %s': %v", accName, streamName, err)
+		b, err := json.Marshal(req)
+		if err != nil {
+			s.Warnf("JetStream failed to encode adoption request for '%s > %s': %v", accName, streamName, err)
 			continue
 		}
-		s.Noticef("JetStream proposed adoption of stream '%s > %s'", accName, streamName)
-
-		// Now adopt consumers for this stream.
-		for _, o := range mset.getConsumers() {
-			consumerName := o.String()
-			ocfg := o.config()
-			oCreated := o.createdTime()
-
-			// Consumer raft group.
-			cPeers := []string{ourID}
-			storage := cfg.Storage
-			if ocfg.MemoryStorage {
-				storage = MemoryStorage
-			}
-			crg := &raftGroup{
-				Name:    groupNameForConsumer(cPeers, storage),
-				Storage: storage,
-				Peers:   cPeers,
-			}
-
-			ca := &consumerAssignment{
-				Client:  &ClientInfo{Account: accName},
-				Created: oCreated,
-				Name:    consumerName,
-				Stream:  streamName,
-				Config:  &ocfg,
-				Group:   crg,
-			}
-
-			if err := meta.Propose(encodeAddConsumerAssignment(ca)); err != nil {
-				s.Warnf("JetStream failed to propose consumer adoption for '%s > %s > %s': %v", accName, streamName, consumerName, err)
-				continue
-			}
-			s.Noticef("JetStream proposed adoption of consumer '%s > %s > %s'", accName, streamName, consumerName)
-		}
+		s.sendInternalMsgLocked(jsAdoptStreamRequestSubj, _EMPTY_, nil, b)
+		s.Noticef("JetStream sent adoption request for stream '%s > %s'", accName, streamName)
 	}
 }
 
@@ -6658,7 +6810,26 @@ func (js *jetStream) processConsumerAssignmentResults(sub *subscription, c *clie
 const (
 	streamAssignmentSubj   = "$SYS.JSC.STREAM.ASSIGNMENT.RESULT"
 	consumerAssignmentSubj = "$SYS.JSC.CONSUMER.ASSIGNMENT.RESULT"
+	// Subject used by non-leader nodes to request stream adoption from the meta leader.
+	jsAdoptStreamRequestSubj = "$SYS.JSC.STREAM.ADOPT"
 )
+
+// jsAdoptionRequest is sent by bootstrapped non-leader nodes to the meta leader
+// to request adoption of locally recovered standalone streams into the cluster.
+type jsAdoptionRequest struct {
+	Account   string                `json:"account"`
+	Config    StreamConfig          `json:"config"`
+	Created   time.Time             `json:"created"`
+	NodeID    string                `json:"node_id"`
+	Consumers []jsAdoptConsumerInfo `json:"consumers,omitempty"`
+}
+
+// jsAdoptConsumerInfo describes a consumer to be adopted along with its stream.
+type jsAdoptConsumerInfo struct {
+	Name    string         `json:"name"`
+	Config  ConsumerConfig `json:"config"`
+	Created time.Time      `json:"created"`
+}
 
 // Lock should be held.
 func (js *jetStream) startUpdatesSub() {
@@ -6683,6 +6854,9 @@ func (js *jetStream) startUpdatesSub() {
 	}
 	if js.accountPurge == nil {
 		js.accountPurge, _ = s.systemSubscribe(JSApiAccountPurge, _EMPTY_, false, c, s.jsLeaderAccountPurgeRequest)
+	}
+	if cc.adoptSub == nil {
+		cc.adoptSub, _ = s.systemSubscribe(jsAdoptStreamRequestSubj, _EMPTY_, false, c, js.handleAdoptStreamRequest)
 	}
 }
 
@@ -6712,6 +6886,10 @@ func (js *jetStream) stopUpdatesSub() {
 	if cc.peerStreamCancelMove != nil {
 		cc.s.sysUnsubscribe(cc.peerStreamCancelMove)
 		cc.peerStreamCancelMove = nil
+	}
+	if cc.adoptSub != nil {
+		cc.s.sysUnsubscribe(cc.adoptSub)
+		cc.adoptSub = nil
 	}
 	if js.accountPurge != nil {
 		cc.s.sysUnsubscribe(js.accountPurge)
