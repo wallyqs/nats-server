@@ -80,9 +80,9 @@ type jetStreamCluster struct {
 	// Track last meta snapshot time and duration for monitoring.
 	lastMetaSnapTime     int64 // Unix nanoseconds
 	lastMetaSnapDuration int64 // Duration in nanoseconds
-	// Signals that this is a fresh bootstrap with no prior meta state.
-	// Used to detect standalone-to-clustered mode transitions.
-	bootstrapped bool
+	// Signals that this node was promoted from standalone to clustered mode
+	// with no prior meta state. Used to detect standalone-to-clustered transitions.
+	promotedToCluster bool
 	// Subscription for stream adoption requests from non-leader nodes (leader only).
 	adoptSub *subscription
 }
@@ -962,7 +962,7 @@ func (js *jetStream) setupMetaGroup() error {
 		return err
 	}
 
-	// If we are bootstrapped with no state, start campaign early.
+	// If promoted to cluster with no state, start campaign early.
 	if bootstrap {
 		n.Campaign()
 	}
@@ -978,7 +978,7 @@ func (js *jetStream) setupMetaGroup() error {
 		c:            c,
 		qch:          make(chan struct{}),
 		stopped:      make(chan struct{}),
-		bootstrapped: bootstrap,
+		promotedToCluster: bootstrap,
 	}
 	atomic.StoreInt32(&js.clustered, 1)
 	c.registerWithAccount(sysAcc)
@@ -1378,7 +1378,7 @@ func (ru *recoveryUpdates) addOrUpdateConsumer(ca *consumerAssignment) {
 // Called after recovery of the cluster on startup to check for any orphans.
 // Streams and consumers are recovered from disk, and the meta layer's mappings
 // should clean them up, but under crash scenarios there could be orphans.
-// When the cluster was freshly bootstrapped (standalone-to-clustered transition),
+// When the node was promoted from standalone to clustered mode,
 // orphaned streams are adopted into the cluster instead of being deleted.
 func (js *jetStream) checkForOrphans() {
 	// Can not hold jetstream lock while trying to delete streams or consumers.
@@ -1399,7 +1399,7 @@ func (js *jetStream) checkForOrphans() {
 		return
 	}
 
-	bootstrapped := cc.bootstrapped
+	ptc := cc.promotedToCluster // promoted to cluster
 
 	var streams []*stream
 	var consumers []*consumer
@@ -1423,24 +1423,24 @@ func (js *jetStream) checkForOrphans() {
 	}
 	js.mu.Unlock()
 
-	// If this was a fresh bootstrap (standalone-to-clustered transition) and
-	// this node is the meta leader, adopt orphaned streams instead of deleting them.
-	if bootstrapped && len(streams) > 0 && meta.Leader() {
+	// If this node was promoted to cluster and is the meta leader,
+	// adopt orphaned streams instead of deleting them.
+	if ptc && len(streams) > 0 && meta.Leader() {
 		js.adoptLocalStreams()
 		js.mu.Lock()
 		if js.cluster != nil {
-			js.cluster.bootstrapped = false
+			js.cluster.promotedToCluster = false
 		}
 		js.mu.Unlock()
 		return
 	}
 
-	// If bootstrapped but not the leader, request adoption from the meta leader.
-	if bootstrapped && len(streams) > 0 {
+	// If promoted to cluster but not the leader, request adoption from the meta leader.
+	if ptc && len(streams) > 0 {
 		js.requestAdoptionFromLeader(streams)
 		js.mu.Lock()
 		if js.cluster != nil {
-			js.cluster.bootstrapped = false
+			js.cluster.promotedToCluster = false
 		}
 		js.mu.Unlock()
 		return
@@ -1477,8 +1477,8 @@ func (js *jetStream) checkForOrphans() {
 	}
 }
 
-// adoptLocalStreams is called on a freshly bootstrapped cluster when the meta leader
-// detects streams that were recovered from disk (created in standalone mode) but have
+// adoptLocalStreams is called when a node promoted to cluster is the meta leader
+// and detects streams that were recovered from disk (created in standalone mode) but have
 // no corresponding meta assignments. This allows seamless transition from standalone
 // to clustered mode without data loss.
 func (js *jetStream) adoptLocalStreams() {
@@ -1589,8 +1589,8 @@ func (js *jetStream) proposeStreamAdoption(meta RaftNode, mset *stream, nodeID s
 	}
 }
 
-// handleAdoptStreamRequest is called on the meta leader when a non-leader bootstrapped
-// node requests adoption of a locally recovered standalone stream.
+// handleAdoptStreamRequest is called on the meta leader when a non-leader node
+// promoted to cluster requests adoption of a locally recovered standalone stream.
 func (js *jetStream) handleAdoptStreamRequest(sub *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
 	s := js.srv
 	ci, acc, _, msg, err := s.getRequestInfo(c, rmsg)
@@ -6814,7 +6814,7 @@ const (
 	jsAdoptStreamRequestSubj = "$SYS.JSC.STREAM.ADOPT"
 )
 
-// jsAdoptionRequest is sent by bootstrapped non-leader nodes to the meta leader
+// jsAdoptionRequest is sent by non-leader nodes promoted to cluster to the meta leader
 // to request adoption of locally recovered standalone streams into the cluster.
 type jsAdoptionRequest struct {
 	Account   string                `json:"account"`
