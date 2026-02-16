@@ -366,6 +366,11 @@ const (
 	defaultMetaGroupName = "_meta_"
 	defaultMetaFSBlkSize = 1024 * 1024
 	jsExcludePlacement   = "!jetstream"
+	// Marker file written to the meta store dir when a standalone node is
+	// promoted to clustered mode and has unadopted streams. Persists the
+	// ptc state across server restarts so orphan sweeps never delete those
+	// streams. Removed once all streams are adopted or no orphans remain.
+	ptcMarkerFile = ".ptc"
 )
 
 // Returns information useful in mixed mode.
@@ -978,7 +983,7 @@ func (js *jetStream) setupMetaGroup() error {
 		c:            c,
 		qch:          make(chan struct{}),
 		stopped:      make(chan struct{}),
-		ptc: bootstrap,
+		ptc: bootstrap || hasPTCMarker(storeDir),
 	}
 	atomic.StoreInt32(&js.clustered, 1)
 	c.registerWithAccount(sysAcc)
@@ -1375,6 +1380,35 @@ func (ru *recoveryUpdates) addOrUpdateConsumer(ca *consumerAssignment) {
 	ru.updateConsumers[skey][key] = ca
 }
 
+// metaStoreDir returns the path to the meta RAFT group's store directory.
+func (js *jetStream) metaStoreDir() string {
+	sysAcc := js.srv.SystemAccount()
+	if sysAcc == nil {
+		return _EMPTY_
+	}
+	return filepath.Join(js.config.StoreDir, sysAcc.Name, defaultStoreDirName, defaultMetaGroupName)
+}
+
+// writePTCMarker writes the promoted-to-cluster marker file to the meta store dir.
+func writePTCMarker(storeDir string) error {
+	return os.WriteFile(filepath.Join(storeDir, ptcMarkerFile), nil, defaultFilePerms)
+}
+
+// removePTCMarker removes the promoted-to-cluster marker file from the meta store dir.
+func removePTCMarker(storeDir string) error {
+	err := os.Remove(filepath.Join(storeDir, ptcMarkerFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// hasPTCMarker returns true if the promoted-to-cluster marker file exists in the meta store dir.
+func hasPTCMarker(storeDir string) bool {
+	_, err := os.Stat(filepath.Join(storeDir, ptcMarkerFile))
+	return err == nil
+}
+
 // Called after recovery of the cluster on startup to check for any orphans.
 // Streams and consumers are recovered from disk, and the meta layer's mappings
 // should clean them up, but under crash scenarios there could be orphans.
@@ -1433,7 +1467,22 @@ func (js *jetStream) checkForOrphans() {
 		} else {
 			js.requestAdoptionFromLeader(streams)
 		}
+		// Persist the ptc marker so unadopted streams survive server restarts.
+		if storeDir := js.metaStoreDir(); storeDir != _EMPTY_ {
+			if err := writePTCMarker(storeDir); err != nil {
+				s.Warnf("Failed to write ptc marker: %v", err)
+			}
+		}
 		return
+	}
+
+	// If ptc but no orphan streams remain, all were adopted. Clean up the marker.
+	if ptc {
+		if storeDir := js.metaStoreDir(); storeDir != _EMPTY_ {
+			if err := removePTCMarker(storeDir); err != nil {
+				s.Warnf("Failed to remove ptc marker: %v", err)
+			}
+		}
 	}
 
 	for _, mset := range streams {

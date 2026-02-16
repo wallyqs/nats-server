@@ -18,6 +18,8 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -471,4 +473,149 @@ func TestJetStreamStandaloneToClusteredDuplicateStreamName(t *testing.T) {
 
 	// The standalone data should still exist on the new server's disk (not deleted),
 	// but should NOT be part of the cluster metadata.
+}
+
+// TestJetStreamStandaloneToClusteredPTCMarkerPersistence tests that the ptc marker
+// file protects unadopted streams across server restarts. When a standalone stream
+// cannot be adopted (e.g. duplicate name), the server writes a .ptc marker so the
+// orphan sweep does not delete the stream data even after a restart.
+func TestJetStreamStandaloneToClusteredPTCMarkerPersistence(t *testing.T) {
+	// Phase 1: Create standalone server with a stream named "EVENTS".
+	storeDir := t.TempDir()
+
+	opts := DefaultTestOptions
+	opts.Port = -1
+	opts.JetStream = true
+	opts.StoreDir = storeDir
+	opts.ServerName = "S1"
+	s := RunServer(&opts)
+
+	nc, err := nats.Connect(s.ClientURL())
+	require_NoError(t, err)
+
+	req, _ := json.Marshal(&StreamConfig{
+		Name:     "EVENTS",
+		Subjects: []string{"standalone.>"},
+		Storage:  FileStorage,
+	})
+	rmsg, err := nc.Request(fmt.Sprintf(JSApiStreamCreateT, "EVENTS"), req, 5*time.Second)
+	require_NoError(t, err)
+	var resp JSApiStreamCreateResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &resp))
+	if resp.Error != nil {
+		t.Fatalf("Unexpected error creating stream: %+v", resp.Error)
+	}
+
+	numMessages := 10
+	for i := 0; i < numMessages; i++ {
+		_, err := nc.Request(fmt.Sprintf("standalone.%d", i), []byte("data"), 2*time.Second)
+		require_NoError(t, err)
+	}
+
+	nc.Close()
+	s.Shutdown()
+	s.WaitForShutdown()
+
+	// Phase 2: Start a 3-node cluster with a stream also named "EVENTS".
+	c := createJetStreamCluster(t, jsClusterTempl, "PTC", _EMPTY_, 3, 22_133, true)
+	defer c.shutdown()
+
+	c.waitOnLeader()
+	leader := c.leader()
+
+	nc2, err := nats.Connect(leader.ClientURL())
+	require_NoError(t, err)
+
+	clusterReq, _ := json.Marshal(&StreamConfig{
+		Name:     "EVENTS",
+		Subjects: []string{"cluster.>"},
+		Storage:  FileStorage,
+		Replicas: 3,
+	})
+	rmsg, err = nc2.Request(fmt.Sprintf(JSApiStreamCreateT, "EVENTS"), clusterReq, 5*time.Second)
+	require_NoError(t, err)
+	var clusterResp JSApiStreamCreateResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &clusterResp))
+	if clusterResp.Error != nil {
+		t.Fatalf("Unexpected error creating cluster stream: %+v", clusterResp.Error)
+	}
+	nc2.Close()
+
+	// Phase 3: Add a 4th server using the standalone store dir.
+	srvNew := c.addInNewServer()
+	newOpts := srvNew.getOpts().Clone()
+	newConfigFile := newOpts.ConfigFile
+	srvNew.Shutdown()
+	srvNew.WaitForShutdown()
+	c.servers = c.servers[:len(c.servers)-1]
+	c.opts = c.opts[:len(c.opts)-1]
+
+	newOpts.StoreDir = storeDir
+	newOpts.Port = -1
+	srvNew = RunServer(newOpts)
+	c.servers = append(c.servers, srvNew)
+	c.opts = append(c.opts, newOpts)
+	c.checkClusterFormed()
+
+	// Wait for checkForOrphans to fire and attempt adoption (~30s).
+	// The duplicate EVENTS stream will be skipped, and a .ptc marker written.
+	time.Sleep(35 * time.Second)
+
+	// Verify the .ptc marker file was created.
+	sysAcc := srvNew.SystemAccount()
+	require_NotNil(t, sysAcc)
+	markerPath := filepath.Join(storeDir, sysAcc.Name, defaultStoreDirName, defaultMetaGroupName, ptcMarkerFile)
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("Expected ptc marker file at %s, got error: %v", markerPath, err)
+	}
+
+	// Verify the standalone stream data still exists on disk.
+	streamDir := filepath.Join(storeDir, "$G", "streams", "EVENTS")
+	if _, err := os.Stat(streamDir); err != nil {
+		t.Fatalf("Expected standalone stream data at %s, got error: %v", streamDir, err)
+	}
+
+	// Phase 4: Restart the new server (simulates server restart).
+	// Without the ptc marker, the orphan sweep would delete the stream data.
+	srvNew.Shutdown()
+	srvNew.WaitForShutdown()
+	c.servers = c.servers[:len(c.servers)-1]
+	c.opts = c.opts[:len(c.opts)-1]
+
+	// Restart using the config file but with our standalone storeDir.
+	// Rewrite the config to use the standalone storeDir.
+	newOpts.ConfigFile = newConfigFile
+	newOpts.StoreDir = storeDir
+	newOpts.Port = -1
+	srvNew = RunServer(newOpts)
+	c.servers = append(c.servers, srvNew)
+	c.opts = append(c.opts, newOpts)
+	c.checkClusterFormed()
+
+	// Wait for checkForOrphans to fire again after restart.
+	time.Sleep(35 * time.Second)
+
+	// Verify the standalone stream data is still on disk (not deleted by orphan sweep).
+	if _, err := os.Stat(streamDir); err != nil {
+		t.Fatalf("Stream data was deleted after restart despite ptc marker! Path: %s, Error: %v", streamDir, err)
+	}
+
+	// Verify the cluster stream is still intact.
+	leader = c.leader()
+	require_NotNil(t, leader)
+
+	nc3, err := nats.Connect(leader.ClientURL())
+	require_NoError(t, err)
+	defer nc3.Close()
+
+	rmsg, err = nc3.Request(fmt.Sprintf(JSApiStreamInfoT, "EVENTS"), nil, 5*time.Second)
+	require_NoError(t, err)
+	var siResp JSApiStreamInfoResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &siResp))
+	if siResp.Error != nil {
+		t.Fatalf("Stream info error: %+v", siResp.Error)
+	}
+	if len(siResp.Config.Subjects) != 1 || siResp.Config.Subjects[0] != "cluster.>" {
+		t.Fatalf("Expected cluster subjects [cluster.>], got %v", siResp.Config.Subjects)
+	}
 }
