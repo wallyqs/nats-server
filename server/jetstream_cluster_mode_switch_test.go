@@ -843,3 +843,218 @@ func TestJetStreamStandaloneRenameStreamThenPromote(t *testing.T) {
 		t.Fatalf("Expected %d messages after publish, got %d", numMessages+1, siResp2.State.Msgs)
 	}
 }
+
+// TestJetStreamStandaloneRenameStreamConsumerState tests that consumers created
+// under the old stream name work correctly after an on-disk rename and promotion
+// to cluster. Specifically verifies that:
+//   - Durable consumers are adopted under the renamed stream
+//   - Consumer delivery state (acked messages) is preserved
+//   - Consumers can fetch and ack new messages after adoption
+//   - Multiple consumers on the same renamed stream all work
+func TestJetStreamStandaloneRenameStreamConsumerState(t *testing.T) {
+	// Phase 1: Create standalone server with stream and multiple consumers.
+	storeDir := t.TempDir()
+
+	opts := DefaultTestOptions
+	opts.Port = -1
+	opts.JetStream = true
+	opts.StoreDir = storeDir
+	opts.ServerName = "S1"
+	s := RunServer(&opts)
+
+	nc, err := nats.Connect(s.ClientURL())
+	require_NoError(t, err)
+
+	js, err := nc.JetStream()
+	require_NoError(t, err)
+
+	// Create stream.
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "TASKS",
+		Subjects: []string{"tasks.>"},
+		Storage:  nats.FileStorage,
+	})
+	require_NoError(t, err)
+
+	// Publish messages.
+	numMessages := 20
+	for i := 0; i < numMessages; i++ {
+		_, err := js.Publish(fmt.Sprintf("tasks.%d", i), []byte(fmt.Sprintf("task-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Create first consumer "worker" and ack some messages.
+	_, err = js.AddConsumer("TASKS", &nats.ConsumerConfig{
+		Durable:       "worker",
+		AckPolicy:     nats.AckExplicitPolicy,
+		DeliverPolicy: nats.DeliverAllPolicy,
+	})
+	require_NoError(t, err)
+
+	// Fetch and ack 5 messages from "worker".
+	sub1, err := js.PullSubscribe("tasks.>", "worker", nats.BindStream("TASKS"))
+	require_NoError(t, err)
+	msgs, err := sub1.Fetch(5, nats.MaxWait(5*time.Second))
+	require_NoError(t, err)
+	if len(msgs) != 5 {
+		t.Fatalf("Expected 5 messages, got %d", len(msgs))
+	}
+	for _, m := range msgs {
+		require_NoError(t, m.Ack())
+	}
+	// Allow acks to be processed.
+	time.Sleep(500 * time.Millisecond)
+
+	// Create second consumer "auditor" with no acks (fresh).
+	_, err = js.AddConsumer("TASKS", &nats.ConsumerConfig{
+		Durable:       "auditor",
+		AckPolicy:     nats.AckExplicitPolicy,
+		DeliverPolicy: nats.DeliverAllPolicy,
+	})
+	require_NoError(t, err)
+
+	nc.Close()
+	s.Shutdown()
+	s.WaitForShutdown()
+
+	// Phase 2: Rename stream on disk.
+	renameStreamOnDisk(t, storeDir, "$G", "TASKS", "JOBS")
+
+	// Phase 3: Promote to cluster.
+	modify := func(serverName, clusterName, autoStoreDir, conf string) string {
+		if serverName == "S-1" {
+			return strings.Replace(conf, autoStoreDir, storeDir, 1)
+		}
+		return conf
+	}
+	c := createJetStreamClusterWithTemplateAndModHook(t, jsClusterTempl, "CS", 3, modify)
+	defer c.shutdown()
+
+	c.waitOnLeader()
+
+	// Make S-1 the meta leader for adoption.
+	var s1 *Server
+	for _, srv := range c.servers {
+		if srv.Name() == "S-1" {
+			s1 = srv
+			break
+		}
+	}
+	require_NotNil(t, s1)
+
+	checkFor(t, 20*time.Second, 500*time.Millisecond, func() error {
+		if s1.JetStreamIsLeader() {
+			return nil
+		}
+		leader := c.leader()
+		if leader != nil && leader != s1 {
+			nc2, err := nats.Connect(leader.ClientURL(), nats.UserInfo("admin", "s3cr3t!"))
+			if err != nil {
+				return err
+			}
+			defer nc2.Close()
+			nc2.Request(JSApiLeaderStepDown, nil, 2*time.Second)
+		}
+		return fmt.Errorf("waiting for S-1 to become meta leader")
+	})
+
+	// Wait for adoption to complete.
+	checkFor(t, 60*time.Second, 500*time.Millisecond, func() error {
+		nc2, err := nats.Connect(s1.ClientURL())
+		if err != nil {
+			return err
+		}
+		defer nc2.Close()
+
+		rmsg, err := nc2.Request(fmt.Sprintf(JSApiStreamInfoT, "JOBS"), nil, 5*time.Second)
+		if err != nil {
+			return err
+		}
+		var siResp JSApiStreamInfoResponse
+		if err := json.Unmarshal(rmsg.Data, &siResp); err != nil {
+			return err
+		}
+		if siResp.Error != nil {
+			return fmt.Errorf("stream info error: %+v", siResp.Error)
+		}
+		if siResp.State.Msgs != uint64(numMessages) {
+			return fmt.Errorf("expected %d messages, got %d", numMessages, siResp.State.Msgs)
+		}
+		return nil
+	})
+
+	// Verify both consumers exist under the new stream name.
+	nc2, err := nats.Connect(s1.ClientURL())
+	require_NoError(t, err)
+	defer nc2.Close()
+
+	js2, err := nc2.JetStream()
+	require_NoError(t, err)
+
+	// Check "worker" consumer: should have 5 acked messages (AckFloor.Consumer = 5).
+	rmsg, err := nc2.Request(fmt.Sprintf(JSApiConsumerInfoT, "JOBS", "worker"), nil, 5*time.Second)
+	require_NoError(t, err)
+	var workerInfo JSApiConsumerInfoResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &workerInfo))
+	if workerInfo.Error != nil {
+		t.Fatalf("Worker consumer info error: %+v", workerInfo.Error)
+	}
+	if workerInfo.AckFloor.Consumer != 5 {
+		t.Fatalf("Expected worker ack floor consumer seq 5, got %d", workerInfo.AckFloor.Consumer)
+	}
+	if workerInfo.NumPending != uint64(numMessages-5) {
+		t.Fatalf("Expected worker %d pending, got %d", numMessages-5, workerInfo.NumPending)
+	}
+
+	// Check "auditor" consumer: should have 0 acked messages, all pending.
+	rmsg, err = nc2.Request(fmt.Sprintf(JSApiConsumerInfoT, "JOBS", "auditor"), nil, 5*time.Second)
+	require_NoError(t, err)
+	var auditorInfo JSApiConsumerInfoResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &auditorInfo))
+	if auditorInfo.Error != nil {
+		t.Fatalf("Auditor consumer info error: %+v", auditorInfo.Error)
+	}
+	if auditorInfo.AckFloor.Consumer != 0 {
+		t.Fatalf("Expected auditor ack floor 0, got %d", auditorInfo.AckFloor.Consumer)
+	}
+	if auditorInfo.NumPending != uint64(numMessages) {
+		t.Fatalf("Expected auditor %d pending, got %d", numMessages, auditorInfo.NumPending)
+	}
+
+	// Fetch remaining messages from "worker" under the new stream name.
+	sub2, err := js2.PullSubscribe("tasks.>", "worker", nats.BindStream("JOBS"))
+	require_NoError(t, err)
+	msgs, err = sub2.Fetch(15, nats.MaxWait(5*time.Second))
+	require_NoError(t, err)
+	if len(msgs) != 15 {
+		t.Fatalf("Expected 15 remaining messages for worker, got %d", len(msgs))
+	}
+	// Verify they start at the right sequence (message 6 onwards).
+	if string(msgs[0].Data) != "task-5" {
+		t.Fatalf("Expected first remaining message to be 'task-5', got %q", string(msgs[0].Data))
+	}
+	for _, m := range msgs {
+		require_NoError(t, m.Ack())
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify worker is now fully caught up.
+	rmsg, err = nc2.Request(fmt.Sprintf(JSApiConsumerInfoT, "JOBS", "worker"), nil, 5*time.Second)
+	require_NoError(t, err)
+	require_NoError(t, json.Unmarshal(rmsg.Data, &workerInfo))
+	if workerInfo.Error != nil {
+		t.Fatalf("Worker consumer info error: %+v", workerInfo.Error)
+	}
+	if workerInfo.NumPending != 0 {
+		t.Fatalf("Expected worker 0 pending after consuming all, got %d", workerInfo.NumPending)
+	}
+
+	// Old stream name should not exist.
+	rmsg, err = nc2.Request(fmt.Sprintf(JSApiStreamInfoT, "TASKS"), nil, 5*time.Second)
+	require_NoError(t, err)
+	var oldResp JSApiStreamInfoResponse
+	require_NoError(t, json.Unmarshal(rmsg.Data, &oldResp))
+	if oldResp.Error == nil {
+		t.Fatalf("Expected error for old stream name TASKS, but got none")
+	}
+}
