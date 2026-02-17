@@ -5067,3 +5067,305 @@ func TestNRGInstallSnapshotFromCheckpoint(t *testing.T) {
 	_, err = c.LoadLastSnapshot()
 	require_Error(t, err, errors.New("snapshot index mismatch"))
 }
+
+func TestNRGCheckpointBasic(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	lsm := rg.waitOnLeader()
+	require_NotNil(t, lsm)
+	leader := lsm.(*stateAdder)
+
+	// Propose some deltas and track the expected total.
+	var expectedTotal int64
+	for i := 0; i < 100; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+
+	// Take a snapshot using the checkpoint API on the leader.
+	leader.snapshotCheckpoint(t)
+
+	// Propose more deltas.
+	for i := 0; i < 100; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+
+	// Stop a follower, restart it, and verify it recovers to the correct total.
+	follower := rg.nonLeader().(*stateAdder)
+	follower.stop()
+	follower.restart()
+	rg.waitOnTotal(t, expectedTotal)
+}
+
+func TestNRGCheckpointWithPriorSnapshot(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	lsm := rg.waitOnLeader()
+	require_NotNil(t, lsm)
+	leader := lsm.(*stateAdder)
+
+	// Propose first batch and install a regular (sync) snapshot.
+	var expectedTotal int64
+	for i := 0; i < 50; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+	firstSum := expectedTotal
+	leader.snapshot(t)
+
+	// Propose second batch.
+	for i := 0; i < 50; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+
+	// Create a checkpoint manually to verify LoadLastSnapshot and iteration.
+	rn := leader.node()
+	cp, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+
+	// LoadLastSnapshot should return the first snapshot containing firstSum.
+	buf, err := cp.LoadLastSnapshot()
+	require_NoError(t, err)
+	snapSum, _ := binary.Varint(buf)
+	require_Equal(t, snapSum, firstSum)
+
+	// Iterate entries — should be the post-snapshot entries only.
+	var iterSum int64
+	var count int
+	for ae, err := range cp.IterAppendEntrySeq() {
+		require_NoError(t, err)
+		for _, e := range ae.entries {
+			if e.Type == EntryNormal {
+				delta, _ := binary.Varint(e.Data)
+				iterSum += delta
+			}
+		}
+		count++
+	}
+	require_True(t, count > 0)
+	// The sum from the snapshot plus the iterated deltas should equal the expected total.
+	require_Equal(t, firstSum+iterSum, expectedTotal)
+
+	// Install the checkpoint snapshot.
+	data := make([]byte, binary.MaxVarintLen64)
+	n := binary.PutVarint(data, firstSum+iterSum)
+	_, err = cp.InstallSnapshot(data[:n])
+	require_NoError(t, err)
+
+	// Verify cluster consistency.
+	rg.waitOnTotal(t, expectedTotal)
+}
+
+func TestNRGCheckpointAbort(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	lsm := rg.waitOnLeader()
+	require_NotNil(t, lsm)
+	leader := lsm.(*stateAdder)
+
+	// Propose some deltas.
+	var expectedTotal int64
+	for i := 0; i < 50; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+
+	rn := leader.node()
+
+	// Create a checkpoint and abort it without installing.
+	cp, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+	cp.Abort()
+
+	// After abort, all checkpoint operations should fail.
+	_, err = cp.LoadLastSnapshot()
+	require_Error(t, err, errSnapAborted)
+	for _, err := range cp.IterAppendEntrySeq() {
+		require_Error(t, err, errSnapAborted)
+	}
+	_, err = cp.InstallSnapshot(nil)
+	require_Error(t, err, errSnapAborted)
+
+	// A new checkpoint should succeed (snapshotting was reset).
+	cp2, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+	cp2.Abort()
+
+	// A regular sync InstallSnapshot should also succeed.
+	leader.snapshot(t)
+
+	// Cluster state should be unaffected.
+	rg.waitOnTotal(t, expectedTotal)
+}
+
+func TestNRGCheckpointRejectsOverlap(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	lsm := rg.waitOnLeader()
+	require_NotNil(t, lsm)
+	leader := lsm.(*stateAdder)
+
+	// Propose some deltas so we have something to snapshot.
+	var expectedTotal int64
+	for i := 0; i < 50; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+
+	rn := leader.node()
+
+	// First checkpoint succeeds.
+	cp, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+
+	// Second checkpoint must fail.
+	_, err = rn.CreateSnapshotCheckpoint(false)
+	require_Error(t, err, errSnapInProgress)
+
+	// Sync InstallSnapshot (public API) must also fail.
+	require_Error(t, rn.InstallSnapshot(nil), errSnapInProgress)
+
+	// Abort the first, then a new one should succeed.
+	cp.Abort()
+	cp2, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+	cp2.Abort()
+}
+
+func TestNRGCheckpointAbortedByInternalSnapshot(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	lsm := rg.waitOnLeader()
+	require_NotNil(t, lsm)
+	leader := lsm.(*stateAdder)
+
+	// Phase 1: Propose initial deltas and snapshot.
+	var expectedTotal int64
+	for i := 0; i < 50; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+	leader.snapshot(t)
+
+	// Phase 2: Propose more deltas so n.applied advances beyond the compacted WAL.
+	// This is necessary because CreateSnapshotCheckpoint needs loadEntry(n.applied) to succeed.
+	for i := 0; i < 10; i++ {
+		delta := rand.Int63n(100) + 1
+		expectedTotal += delta
+		leader.proposeDelta(delta)
+	}
+	rg.waitOnTotal(t, expectedTotal)
+
+	rn := leader.node().(*raft)
+
+	// Create a checkpoint and verify LoadLastSnapshot works.
+	cp, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+
+	buf, err := cp.LoadLastSnapshot()
+	require_NoError(t, err)
+	require_True(t, len(buf) > 0)
+
+	// Simulate an internal snapshot arriving from catchup.
+	// The internal installSnapshot (raft.go:1316) has defer func() { n.snapshotting = false }()
+	// which aborts any active checkpoint. We replicate that effect directly.
+	rn.Lock()
+	rn.snapshotting = false
+	rn.Unlock()
+
+	// All checkpoint operations should now return errSnapAborted.
+	_, err = cp.LoadLastSnapshot()
+	require_Error(t, err, errSnapAborted)
+
+	for _, err := range cp.IterAppendEntrySeq() {
+		require_Error(t, err, errSnapAborted)
+	}
+
+	_, err = cp.InstallSnapshot([]byte("should fail"))
+	require_Error(t, err, errSnapAborted)
+
+	// A new checkpoint should be possible after snapshotting was reset.
+	cp2, err := rn.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+	cp2.Abort()
+}
+
+func TestNRGCheckpointIterEntryError(t *testing.T) {
+	n, cleanup := initSingleMemRaftNode(t)
+	defer cleanup()
+
+	// Create a sample entry.
+	esm := encodeStreamMsgAllowCompress("foo", "_INBOX.foo", nil, nil, 0, 0, true)
+	entries := []*Entry{newEntry(EntryNormal, esm)}
+
+	nats0 := "S1Nunr6R" // "nats-0"
+
+	// Build a timeline: two entries committed and applied.
+	aeMsg1 := encode(t, &appendEntry{leader: nats0, term: 1, commit: 0, pterm: 0, pindex: 0, entries: entries})
+	aeMsg2 := encode(t, &appendEntry{leader: nats0, term: 1, commit: 1, pterm: 1, pindex: 1, entries: entries})
+	aeMsg3 := encode(t, &appendEntry{leader: nats0, term: 1, commit: 2, pterm: 1, pindex: 2, entries: entries})
+
+	n.processAppendEntry(aeMsg1, n.aesub)
+	n.processAppendEntry(aeMsg2, n.aesub)
+	n.Applied(1)
+	n.processAppendEntry(aeMsg3, n.aesub)
+	n.Applied(2)
+
+	// Install a first snapshot to set papplied.
+	err := n.InstallSnapshot([]byte("snap1"))
+	require_NoError(t, err)
+
+	// Apply one more entry so there's something beyond the snapshot.
+	aeMsg4 := encode(t, &appendEntry{leader: nats0, term: 1, commit: 3, pterm: 1, pindex: 3, entries: entries})
+	aeMsg5 := encode(t, &appendEntry{leader: nats0, term: 1, commit: 4, pterm: 1, pindex: 4, entries: nil}) // heartbeat to advance commit
+	n.processAppendEntry(aeMsg4, n.aesub)
+	n.processAppendEntry(aeMsg5, n.aesub)
+	n.Applied(4)
+
+	// Create a checkpoint. This should iterate entries between papplied (2) and applied (4).
+	cp, err := n.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+
+	// Compact the WAL underneath the checkpoint to remove entries it needs.
+	n.Lock()
+	_, err = n.wal.Compact(n.applied + 1)
+	n.Unlock()
+	require_NoError(t, err)
+
+	// Iteration should return an error (entry not found) rather than panicking.
+	var iterErr error
+	for _, err := range cp.IterAppendEntrySeq() {
+		if err != nil {
+			iterErr = err
+			break
+		}
+	}
+	require_True(t, iterErr != nil)
+	cp.Abort()
+}
