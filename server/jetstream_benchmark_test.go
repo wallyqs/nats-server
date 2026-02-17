@@ -2844,17 +2844,23 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 											go func(idx int) {
 												defer wg.Done()
 												consumed := 0
+												consecutiveErrors := 0
 												for consumed < msgsPerConsumer {
 													batchSz := msgsPerConsumer - consumed
 													if batchSz > 100 {
 														batchSz = 100
 													}
-													msgs, err := subs[idx].Fetch(batchSz, nats.MaxWait(2*time.Minute))
+													msgs, err := subs[idx].Fetch(batchSz, nats.MaxWait(15*time.Second))
 													if err != nil {
 														fetchErrors.Add(1)
-														b.Logf("Fetch error on cons_%d after %d: %v", idx+1, consumed, err)
-														return
+														consecutiveErrors++
+														if consecutiveErrors >= 3 {
+															b.Logf("cons_%d giving up after %d msgs, %d consecutive errors: %v", idx+1, consumed, consecutiveErrors, err)
+															return
+														}
+														continue
 													}
+													consecutiveErrors = 0
 													for _, m := range msgs {
 														m.Ack()
 														consumed++
