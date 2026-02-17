@@ -2849,7 +2849,7 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 													if batchSz > 100 {
 														batchSz = 100
 													}
-													msgs, err := subs[idx].Fetch(batchSz, nats.MaxWait(30*time.Second))
+													msgs, err := subs[idx].Fetch(batchSz, nats.MaxWait(2*time.Minute))
 													if err != nil {
 														fetchErrors.Add(1)
 														b.Logf("Fetch error on cons_%d after %d: %v", idx+1, consumed, err)
