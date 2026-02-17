@@ -2430,9 +2430,10 @@ func BenchmarkJetStreamBlockSizePublishAndConsume(b *testing.B) {
 	)
 
 	messageSizeCases := []int{
-		256,      // 256B
-		1024,     // 1KB
-		8 * 1024, // 8KB
+		256,       // 256B
+		1024,      // 1KB
+		8 * 1024,  // 8KB
+		64 * 1024, // 64KB
 	}
 
 	blockSizeCases := []struct {
