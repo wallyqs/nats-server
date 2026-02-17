@@ -3374,6 +3374,59 @@ func TestSetHeaderOrderingSuffix(t *testing.T) {
 	}
 }
 
+// TestSetHeaderMsgPartsNoCorruptionWithMsgTrace verifies that calling
+// setHeader on header slices obtained from msgParts does not corrupt the
+// message body. This was the root cause of issue #7842 where JetStream
+// consumers in clustered deployments received corrupted messages containing
+// route protocol metadata (RMSG/HMSG frames) in the payload.
+func TestSetHeaderMsgPartsNoCorruptionWithMsgTrace(t *testing.T) {
+	// Simulate the exact code path from processInboundJetStreamMsg:
+	//   hdr, msg := c.msgParts(copyBytes(rmsg))
+	//   hdr = setHeader(MsgTraceDest, MsgTraceDestDisabled, hdr)
+	// Before the fix, setHeader could expand hdr into msg's territory.
+	c := &client{}
+	hdrContent := "NATS/1.0\r\nNats-Msg-Id: test-123\r\n\r\n"
+	// Use a large message body to ensure we detect any corruption.
+	msgBody := strings.Repeat("A", 1024) + "\r\n"
+	raw := []byte(hdrContent + msgBody)
+	c.pa.hdr = len(hdrContent)
+	c.pa.size = len(raw) - LEN_CR_LF
+
+	// copyBytes + msgParts, same as processInboundJetStreamMsg
+	copied := copyBytes(raw)
+	hdr, msg := c.msgParts(copied)
+
+	require_Equal(t, string(hdr), hdrContent)
+	require_Equal(t, string(msg), msgBody)
+
+	// Simulate setting the trace destination header (new key, requires growing hdr).
+	hdr = setHeader(MsgTraceDest, MsgTraceDestDisabled, hdr)
+	// The message body must remain intact.
+	require_Equal(t, string(msg), msgBody)
+
+	// Also test with an existing key that results in a larger value.
+	hdr2Content := "NATS/1.0\r\nNats-Msg-Id: x\r\n\r\n"
+	msgBody2 := strings.Repeat("B", 512) + "\r\n"
+	raw2 := []byte(hdr2Content + msgBody2)
+	c.pa.hdr = len(hdr2Content)
+	copied2 := copyBytes(raw2)
+	hdr2, msg2 := c.msgParts(copied2)
+	// Replace with a much longer value.
+	hdr2 = setHeader("Nats-Msg-Id", "a-much-longer-message-id-value-that-exceeds-the-original", hdr2)
+	require_Equal(t, string(msg2), msgBody2)
+
+	// And test with a value that shrinks (in-place modification).
+	hdr3Content := "NATS/1.0\r\nNats-Msg-Id: original-long-value\r\n\r\n"
+	msgBody3 := strings.Repeat("C", 256) + "\r\n"
+	raw3 := []byte(hdr3Content + msgBody3)
+	c.pa.hdr = len(hdr3Content)
+	copied3 := copyBytes(raw3)
+	hdr3, msg3 := c.msgParts(copied3)
+	hdr3 = setHeader("Nats-Msg-Id", "short", hdr3)
+	_ = hdr3
+	require_Equal(t, string(msg3), msgBody3)
+}
+
 func TestInProcessAllowedConnectionType(t *testing.T) {
 	tmpl := `
 		listen: "127.0.0.1:-1"

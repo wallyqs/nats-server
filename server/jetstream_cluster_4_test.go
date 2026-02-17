@@ -7309,3 +7309,90 @@ func TestJetStreamClusterMetaCompactSizeThreshold(t *testing.T) {
 		})
 	}
 }
+
+// TestJetStreamClusterRoutedMsgNoDataCorruption verifies that messages with
+// headers published through routes in a JetStream cluster are not corrupted
+// when delivered to consumers. This is a regression test for #7842 where
+// the setHeader/msgParts bug caused route protocol metadata (RMSG/HMSG
+// frames) to appear in consumer message payloads.
+func TestJetStreamClusterRoutedMsgNoDataCorruption(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	// Create stream on the cluster.
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "MSGTEST",
+		Subjects: []string{"test.>"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Create a push consumer.
+	sub, err := js.SubscribeSync("test.>", nats.Durable("consumer"))
+	require_NoError(t, err)
+
+	// Find the stream leader and connect the publisher to a NON-leader
+	// server so the messages must travel over routes.
+	leader := c.streamLeader(globalAccountName, "MSGTEST")
+	var pubServer *Server
+	for _, s := range c.servers {
+		if s != leader {
+			pubServer = s
+			break
+		}
+	}
+	require_True(t, pubServer != nil)
+
+	ncPub, jsPub := jsClientConnect(t, pubServer)
+	defer ncPub.Close()
+
+	// Publish messages with various header and payload sizes.
+	// Use random data so any corruption is immediately detectable.
+	numMsgs := 100
+	type published struct {
+		hdrVal string
+		data   []byte
+	}
+	sent := make([]published, numMsgs)
+
+	for i := 0; i < numMsgs; i++ {
+		// Vary payload sizes to exercise different buffer paths.
+		dataSize := 64 + (i * 37 % 512)
+		hexData := []byte(strings.Repeat(fmt.Sprintf("data-%04d-", i), (dataSize/10)+1)[:dataSize])
+
+		msgId := fmt.Sprintf("msg-%d-%s", i, nuid.Next())
+		m := nats.NewMsg(fmt.Sprintf("test.subject.%d", i%10))
+		m.Header.Set("Nats-Msg-Id", msgId)
+		m.Header.Set("X-Custom-Header", fmt.Sprintf("value-%d", i))
+		m.Data = hexData
+
+		sent[i] = published{hdrVal: msgId, data: hexData}
+
+		_, err := jsPub.PublishMsg(m)
+		require_NoError(t, err)
+	}
+
+	// Consume all messages and verify they are not corrupted.
+	for i := 0; i < numMsgs; i++ {
+		m, err := sub.NextMsg(5 * time.Second)
+		require_NoError(t, err)
+
+		// The message data must exactly match what was published.
+		require_Equal(t, string(m.Data), string(sent[i].data))
+
+		// The message ID header must be intact.
+		gotMsgId := m.Header.Get("Nats-Msg-Id")
+		require_Equal(t, gotMsgId, sent[i].hdrVal)
+
+		// The data must NOT contain any route protocol fragments.
+		dataStr := string(m.Data)
+		if strings.Contains(dataStr, "RMSG ") || strings.Contains(dataStr, "HMSG ") {
+			t.Fatalf("Message %d data contains route protocol metadata: %.100s...", i, dataStr)
+		}
+
+		require_NoError(t, m.Ack())
+	}
+}
