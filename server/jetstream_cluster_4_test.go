@@ -7525,3 +7525,269 @@ func TestJetStreamClusterMsgTraceCorruptionRegression(t *testing.T) {
 	// Drain trace events (not critical, just cleanup).
 	traceSub.Drain()
 }
+
+// TestJetStreamClusterDirectGetBatchPoolCorruption exercises the direct-get
+// batch path where newJSPubMsg is called with an uncopied sm.msg reference.
+// In the old code (pre-0152afe1), the msg parameter was NOT copied into
+// the jsPubMsg's buf, so if the store buffer was reused, the jsPubMsg
+// would see corrupted data.
+//
+// Additionally, this test uses 105-character subjects and traceparent
+// headers to match the conditions reported in issue #7842.
+func TestJetStreamClusterDirectGetBatchPoolCorruption(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Create a stream with direct-get enabled and long subjects.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:              "DIRECTTEST",
+		Subjects:          []string{"a.b.c-d.e.f.*.g-h"},
+		Replicas:          3,
+		AllowDirect:       true,
+		MirrorDirect:      false,
+		MaxMsgsPerSubject: 10,
+	})
+	require_NoError(t, err)
+
+	// Build 105-char subjects matching the pattern a.b.c-d.e.f.<uuid>.g-h
+	makeSubj := func(i int) string {
+		// Create a subject exactly 105 characters long.
+		// "a.b.c-d.e.f." = 12 chars, ".g-h" = 4 chars, middle = 89 chars
+		middle := fmt.Sprintf("a06f57d1-9f99-4990-9f55-6fcfeac2d1ab-%04d-padding-to-fill-eighty-nine-characters-xx%04d", i, i)
+		if len(middle) > 89 {
+			middle = middle[:89]
+		}
+		for len(middle) < 89 {
+			middle += "x"
+		}
+		subj := "a.b.c-d.e.f." + middle + ".g-h"
+		if len(subj) != 105 {
+			t.Fatalf("Expected 105 char subject, got %d: %q", len(subj), subj)
+		}
+		return subj
+	}
+
+	// Publish messages with traceparent header to trigger trace processing.
+	numSubjects := 20
+	numMsgsPerSubject := 5
+	type published struct {
+		subj string
+		body string
+	}
+	var sent []published
+
+	// Use a separate connection to a non-leader server.
+	leader := c.streamLeader(globalAccountName, "DIRECTTEST")
+	var pubServer *Server
+	for _, s := range c.servers {
+		if s != leader {
+			pubServer = s
+			break
+		}
+	}
+	require_True(t, pubServer != nil)
+	ncPub, _ := jsClientConnect(t, pubServer)
+	defer ncPub.Close()
+
+	for i := 0; i < numSubjects; i++ {
+		subj := makeSubj(i)
+		for j := 0; j < numMsgsPerSubject; j++ {
+			body := fmt.Sprintf("payload-%04d-%04d-%s", i, j, strings.Repeat("D", 128))
+			m := nats.NewMsg(subj)
+			// Add traceparent header (W3C tracing, common in production).
+			m.Header.Set("traceparent", fmt.Sprintf("00-abcdef1234567890abcdef1234567890-abcdef1234567890-%02x", 0x01))
+			m.Data = []byte(body)
+			_, err := js.PublishMsg(m)
+			require_NoError(t, err)
+			sent = append(sent, published{subj: subj, body: body})
+		}
+	}
+
+	// Wait for all messages to be stored.
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DIRECTTEST")
+		if err != nil {
+			return err
+		}
+		want := uint64(numSubjects * numMsgsPerSubject)
+		if si.State.Msgs != want {
+			return fmt.Errorf("expected %d messages, got %d", want, si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Now do direct-get to retrieve messages. This exercises the newJSPubMsg
+	// path with sm.msg that was not copied in the old code.
+	// Connect to the leader for direct gets.
+	ncDirect, _ := jsClientConnect(t, leader)
+	defer ncDirect.Close()
+
+	inbox := nats.NewInbox()
+	directSub, err := ncDirect.SubscribeSync(inbox)
+	require_NoError(t, err)
+
+	// Request multiple messages via direct get batch for different subjects.
+	for i := 0; i < numSubjects; i++ {
+		subj := makeSubj(i)
+		// Direct get last for each subject.
+		req := fmt.Sprintf(`{"last_by_subj": "%s"}`, subj)
+		err := ncDirect.PublishRequest("$JS.API.DIRECT.GET.DIRECTTEST", inbox, []byte(req))
+		require_NoError(t, err)
+	}
+	ncDirect.Flush()
+
+	// Collect and verify responses.
+	for i := 0; i < numSubjects; i++ {
+		m, err := directSub.NextMsg(5 * time.Second)
+		require_NoError(t, err)
+
+		body := string(m.Data)
+		// Verify the body doesn't contain RMSG/HMSG protocol metadata.
+		if strings.Contains(body, "RMSG ") || strings.Contains(body, "HMSG ") {
+			t.Fatalf("Direct-get message %d body contains route protocol metadata:\n  body: %q", i, body)
+		}
+		// Verify the body starts with "payload-" prefix.
+		if !strings.HasPrefix(body, "payload-") {
+			t.Fatalf("Direct-get message %d body corrupted (missing prefix):\n  body: %q", i, body)
+		}
+	}
+
+	// Also verify consumer delivery doesn't corrupt messages.
+	sub, err := js.SubscribeSync("a.b.c-d.e.f.*.g-h", nats.OrderedConsumer())
+	require_NoError(t, err)
+
+	for i := 0; i < len(sent); i++ {
+		m, err := sub.NextMsg(5 * time.Second)
+		require_NoError(t, err)
+
+		got := string(m.Data)
+		// Check for protocol metadata contamination.
+		if strings.Contains(got, "RMSG ") || strings.Contains(got, "HMSG ") {
+			t.Fatalf("Consumer message %d body contains route protocol metadata:\n  want prefix: %q\n  got: %q",
+				i, "payload-", got)
+		}
+		if !strings.HasPrefix(got, "payload-") {
+			t.Fatalf("Consumer message %d body corrupted:\n  got: %q", i, got)
+		}
+	}
+}
+
+// TestJetStreamClusterConsumerDeliveryPoolReuseCorruption verifies that the
+// jsPubMsg pool reuse in the consumer delivery path doesn't cause corruption.
+// This specifically tests the scenario where a pooled jsPubMsg is returned
+// and then reused, and the consumer code doesn't properly nil the pmsg after
+// returnToPool (the bug fixed in commit 0152afe1).
+func TestJetStreamClusterConsumerDeliveryPoolReuseCorruption(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Create stream with R3 replication.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "POOLTEST",
+		Subjects: []string{"pool.>"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Build 105-char subjects.
+	makeSubj := func(i int) string {
+		middle := fmt.Sprintf("a06f57d1-9f99-4990-9f55-6fcfeac2d1ab-%04d-padding-to-fill-eighty-nine-characters-xx%04d", i%100, i%100)
+		if len(middle) > 93 {
+			middle = middle[:93]
+		}
+		for len(middle) < 93 {
+			middle += "x"
+		}
+		return "pool.test." + middle
+	}
+
+	leader := c.streamLeader(globalAccountName, "POOLTEST")
+	var pubServer *Server
+	for _, s := range c.servers {
+		if s != leader {
+			pubServer = s
+			break
+		}
+	}
+	require_True(t, pubServer != nil)
+
+	// Connect publisher to non-leader, consumer to another non-leader.
+	ncPub, _ := jsClientConnect(t, pubServer)
+	defer ncPub.Close()
+
+	var consServer *Server
+	for _, s := range c.servers {
+		if s != leader && s != pubServer {
+			consServer = s
+			break
+		}
+	}
+	if consServer == nil {
+		consServer = pubServer
+	}
+	ncCons, jsCons := jsClientConnect(t, consServer)
+	defer ncCons.Close()
+
+	// Publish many messages concurrently with traceparent headers.
+	numMsgs := 200
+	type published struct {
+		subj string
+		body string
+	}
+	sent := make([]published, numMsgs)
+
+	for i := 0; i < numMsgs; i++ {
+		subj := makeSubj(i)
+		body := fmt.Sprintf("msg-%04d-%s", i, strings.Repeat("P", 64))
+		m := nats.NewMsg(subj)
+		m.Header.Set("traceparent", "00-abcdef1234567890abcdef1234567890-abcdef1234567890-01")
+		m.Data = []byte(body)
+		sent[i] = published{subj: subj, body: body}
+		err := ncPub.PublishMsg(m)
+		require_NoError(t, err)
+	}
+	ncPub.Flush()
+
+	// Wait for all messages to be stored.
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("POOLTEST")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(numMsgs) {
+			return fmt.Errorf("expected %d messages, got %d", numMsgs, si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Create a push consumer on a different server from the leader.
+	sub, err := jsCons.SubscribeSync("pool.>", nats.Durable("poolconsumer"))
+	require_NoError(t, err)
+
+	// Consume all messages and verify integrity.
+	for i := 0; i < numMsgs; i++ {
+		m, err := sub.NextMsg(10 * time.Second)
+		require_NoError(t, err)
+
+		got := string(m.Data)
+
+		// Check for RMSG/HMSG protocol metadata contamination.
+		if strings.Contains(got, "RMSG ") || strings.Contains(got, "HMSG ") ||
+			strings.Contains(got, "MSG ") || strings.Contains(got, "LMSG ") {
+			t.Fatalf("Message %d body contains protocol metadata:\n  got: %q", i, got)
+		}
+
+		// Verify body starts with expected prefix.
+		if !strings.HasPrefix(got, "msg-") {
+			t.Fatalf("Message %d body corrupted:\n  got: %q", i, got)
+		}
+
+		require_NoError(t, m.Ack())
+	}
+}
