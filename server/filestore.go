@@ -195,6 +195,8 @@ type fileStore struct {
 	wfsmu       sync.Mutex   // Only one writeFullState at a time to protect from overwrites.
 	wfsrun      atomic.Int64 // Is writeFullState already running? For timer check only
 	wfsadml     int          // writeFullState average dmap length, protected by wfsmu.
+	whh         *highwayhash.Digest64 // Dedicated hasher for writeFullState, protected by wfsmu.
+	wfsBuf      []byte                // Reusable serialization buffer for writeFullState, protected by wfsmu.
 	hh          *highwayhash.Digest64
 	qch         chan struct{}
 	fsld        chan struct{}
@@ -472,6 +474,9 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 	if err != nil {
 		return nil, fmt.Errorf("could not create hash: %v", err)
 	}
+	// Create a dedicated hasher for writeFullState so we don't need to recompute
+	// the SHA-256 key or allocate a new hasher on every periodic write.
+	fs.whh, _ = highwayhash.NewDigest64(key[:])
 
 	keyFile := filepath.Join(fs.fcfg.StoreDir, JetStreamMetaFileKey)
 	_, err = os.Stat(keyFile)
@@ -10672,15 +10677,15 @@ func (fs *fileStore) _writeFullState(force bool) error {
 		len(fs.blks)*((binary.MaxVarintLen64*8)+avgDmapLen) + // msg blocks, avgDmapLen is est for dmaps
 		binary.MaxVarintLen64 + 8 + 8 // last index + record checksum + full state checksum
 
-	// Do 4k on stack if possible.
-	const ssz = 4 * 1024
+	// Reuse buffer from previous writeFullState call if it has enough capacity.
+	// This is safe because wfsmu serializes access to _writeFullState.
 	var buf []byte
-
-	if sz <= ssz {
-		var _buf [ssz]byte
-		buf, sz = _buf[0:hdrLen:ssz], ssz
+	initialCap := cap(fs.wfsBuf)
+	if initialCap >= sz {
+		buf = fs.wfsBuf[:hdrLen]
 	} else {
 		buf = make([]byte, hdrLen, sz)
+		initialCap = sz
 	}
 
 	buf[0], buf[1] = fullStateMagic, fullStateVersion
@@ -10756,6 +10761,10 @@ func (fs *fileStore) _writeFullState(force bool) error {
 	buf = binary.AppendUvarint(buf, uint64(lbi))
 	buf = append(buf, lchk[:]...)
 
+	// Save the serialization buffer for reuse before encryption may replace it
+	// with a different allocation. Protected by wfsmu.
+	fs.wfsBuf = buf
+
 	// Encrypt if needed.
 	if fs.prf != nil {
 		nonce := make([]byte, fs.aek.NonceSize(), fs.aek.NonceSize()+len(buf)+fs.aek.Overhead())
@@ -10771,12 +10780,11 @@ func (fs *fileStore) _writeFullState(force bool) error {
 
 	fn := filepath.Join(fs.fcfg.StoreDir, msgDir, streamStreamStateFile)
 
-	// Need to have our own hasher here, as under a read lock we can't mutate the
-	// fs.hh safely.
-	key := sha256.Sum256([]byte(fs.cfg.Name))
-	hh, _ := highwayhash.NewDigest64(key[:])
-	hh.Write(buf)
-	buf = hh.Sum(buf)
+	// Use the dedicated writeFullState hasher (fs.whh), which is protected by
+	// wfsmu rather than fs.mu, so it's safe to mutate under a read lock.
+	fs.whh.Reset()
+	fs.whh.Write(buf)
+	buf = fs.whh.Sum(buf)
 
 	// Snapshot prior dirty count.
 	priorDirty := fs.dirty
@@ -10793,8 +10801,8 @@ func (fs *fileStore) _writeFullState(force bool) error {
 		return errCorruptState
 	}
 
-	if cap(buf) > sz {
-		fs.debug("WriteFullState reallocated from %d to %d", sz, cap(buf))
+	if cap(buf) > initialCap {
+		fs.debug("WriteFullState reallocated from %d to %d", initialCap, cap(buf))
 	}
 
 	// Only warn about construction time since file write not holding any locks.
