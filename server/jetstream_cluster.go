@@ -2062,20 +2062,18 @@ func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAss
 	nca := 0
 	for _, asa := range streams {
 		nsa += len(asa)
+		for _, sa := range asa {
+			nca += len(sa.consumers)
+		}
 	}
+	// Pre-allocate a flat slice for all consumers to avoid per-consumer heap allocations.
+	allConsumers := make([]writeableConsumerAssignment, 0, nca)
 	out := make([]writeableStreamAssignment, 0, nsa)
 	for _, asa := range streams {
 		for _, sa := range asa {
-			wsa := writeableStreamAssignment{
-				Client:     sa.Client.forAssignmentSnap(),
-				Created:    sa.Created,
-				ConfigJSON: sa.ConfigJSON,
-				Group:      sa.Group,
-				Sync:       sa.Sync,
-				Consumers:  make([]*writeableConsumerAssignment, 0, len(sa.consumers)),
-			}
+			cStart := len(allConsumers)
 			for _, ca := range sa.consumers {
-				wca := writeableConsumerAssignment{
+				allConsumers = append(allConsumers, writeableConsumerAssignment{
 					Client:     ca.Client.forAssignmentSnap(),
 					Created:    ca.Created,
 					Name:       ca.Name,
@@ -2083,11 +2081,21 @@ func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAss
 					ConfigJSON: ca.ConfigJSON,
 					Group:      ca.Group,
 					State:      ca.State,
-				}
-				wsa.Consumers = append(wsa.Consumers, &wca)
-				nca++
+				})
 			}
-			out = append(out, wsa)
+			// Build pointer slice into the flat allocation.
+			consumers := make([]*writeableConsumerAssignment, len(allConsumers)-cStart)
+			for i := range consumers {
+				consumers[i] = &allConsumers[cStart+i]
+			}
+			out = append(out, writeableStreamAssignment{
+				Client:     sa.Client.forAssignmentSnap(),
+				Created:    sa.Created,
+				ConfigJSON: sa.ConfigJSON,
+				Group:      sa.Group,
+				Sync:       sa.Sync,
+				Consumers:  consumers,
+			})
 		}
 	}
 
