@@ -2716,8 +2716,10 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 		name    string
 		blkSize int64
 	}{
+		{"BlkSz=2MB", 2 * 1024 * 1024},
 		{"BlkSz=4MB", 4 * 1024 * 1024},
 		{"BlkSz=8MB", 8 * 1024 * 1024},
+		{"BlkSz=16MB", 16 * 1024 * 1024},
 	}
 
 	// InitData: percentage of MaxBytes to pre-fill before the timed drain.
