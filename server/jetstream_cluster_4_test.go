@@ -7315,6 +7315,10 @@ func TestJetStreamClusterMetaCompactSizeThreshold(t *testing.T) {
 // when delivered to consumers. This is a regression test for #7842 where
 // the setHeader/msgParts bug caused route protocol metadata (RMSG/HMSG
 // frames) to appear in consumer message payloads.
+//
+// The bug was triggered when message tracing was enabled: processInboundJetStreamMsg
+// called setHeader() on header slices from msgParts() that shared the same
+// underlying buffer as the message body, causing the body to be overwritten.
 func TestJetStreamClusterRoutedMsgNoDataCorruption(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -7329,6 +7333,11 @@ func TestJetStreamClusterRoutedMsgNoDataCorruption(t *testing.T) {
 		Replicas: 3,
 	})
 	require_NoError(t, err)
+
+	// Subscribe to receive trace events (we don't need to inspect them,
+	// but the subscription must exist for the trace destination to be valid).
+	traceSub := natsSubSync(t, nc, "trace.dest")
+	defer traceSub.Unsubscribe()
 
 	// Create a push consumer.
 	sub, err := js.SubscribeSync("test.>", nats.Durable("consumer"))
@@ -7350,11 +7359,10 @@ func TestJetStreamClusterRoutedMsgNoDataCorruption(t *testing.T) {
 	defer ncPub.Close()
 
 	// Publish messages with various header and payload sizes.
-	// Use random data so any corruption is immediately detectable.
 	numMsgs := 100
 	type published struct {
-		hdrVal string
-		data   []byte
+		msgId string
+		data  []byte
 	}
 	sent := make([]published, numMsgs)
 
@@ -7367,9 +7375,14 @@ func TestJetStreamClusterRoutedMsgNoDataCorruption(t *testing.T) {
 		m := nats.NewMsg(fmt.Sprintf("test.subject.%d", i%10))
 		m.Header.Set("Nats-Msg-Id", msgId)
 		m.Header.Set("X-Custom-Header", fmt.Sprintf("value-%d", i))
+		// Enable message tracing. This is the key: when the message arrives
+		// at the stream leader via a route, processInboundJetStreamMsg will
+		// call setHeader(MsgTraceDest, MsgTraceDestDisabled, hdr) which was
+		// the code path that caused the corruption in #7842.
+		m.Header.Set(MsgTraceDest, traceSub.Subject)
 		m.Data = hexData
 
-		sent[i] = published{hdrVal: msgId, data: hexData}
+		sent[i] = published{msgId: msgId, data: hexData}
 
 		_, err := jsPub.PublishMsg(m)
 		require_NoError(t, err)
@@ -7385,7 +7398,7 @@ func TestJetStreamClusterRoutedMsgNoDataCorruption(t *testing.T) {
 
 		// The message ID header must be intact.
 		gotMsgId := m.Header.Get("Nats-Msg-Id")
-		require_Equal(t, gotMsgId, sent[i].hdrVal)
+		require_Equal(t, gotMsgId, sent[i].msgId)
 
 		// The data must NOT contain any route protocol fragments.
 		dataStr := string(m.Data)
