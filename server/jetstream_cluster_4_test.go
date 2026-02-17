@@ -7363,3 +7363,171 @@ func TestJetStreamClusterMetaCompactSizeThreshold(t *testing.T) {
 		})
 	}
 }
+
+// TestJetStreamClusterMalformedAckParseErrors tests that sending various types
+// of malformed ACK messages from a client does not cause parse errors that
+// disrupt route connections in a cluster. Relates to:
+// https://github.com/nats-io/nats-server/issues/7842
+func TestJetStreamClusterMalformedAckParseErrors(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Create R3 stream and a pull consumer.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"events.>"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "CONSUMER",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Publish some messages.
+	for i := 0; i < 5; i++ {
+		_, err = js.Publish(fmt.Sprintf("events.%d", i), []byte("hello"))
+		require_NoError(t, err)
+	}
+
+	// Fetch messages to obtain valid ACK reply subjects.
+	sub, err := js.PullSubscribe("events.>", "CONSUMER")
+	require_NoError(t, err)
+
+	msgs, err := sub.Fetch(5, nats.MaxWait(5*time.Second))
+	require_NoError(t, err)
+	require_True(t, len(msgs) == 5)
+
+	// Collect valid reply subjects from the fetched messages.
+	var ackSubjects []string
+	for _, m := range msgs {
+		if m.Reply != "" {
+			ackSubjects = append(ackSubjects, m.Reply)
+		}
+	}
+	require_True(t, len(ackSubjects) > 0)
+
+	// Verify routes are fully formed before sending malformed ACKs.
+	c.checkClusterFormed()
+
+	// Now send various malformed ACK publishes from the client.
+	// These simulate the kinds of errors seen in the issue.
+
+	// Use a separate connection for sending malformed messages so that if the
+	// server closes it we can detect that without affecting the test infra.
+	ncBad, err := nats.Connect(c.randomServer().ClientURL())
+	require_NoError(t, err)
+	defer ncBad.Close()
+
+	validAck := ackSubjects[0]
+
+	// Type 1: Publish an ACK with empty payload (valid, should be treated as +ACK).
+	err = ncBad.Publish(validAck, nil)
+	require_NoError(t, err)
+
+	// Type 2: Publish an ACK with a valid payload.
+	err = ncBad.Publish(validAck, []byte("+ACK"))
+	require_NoError(t, err)
+
+	// Type 3: Publish with a malformed/truncated ACK subject (too few tokens).
+	err = ncBad.Publish("$JS.ACK.TEST.CONSUMER", []byte("+ACK"))
+	require_NoError(t, err)
+
+	// Type 4: Publish with a completely bogus ACK subject.
+	err = ncBad.Publish("$JS.ACK.BOGUS", []byte("+ACK"))
+	require_NoError(t, err)
+
+	// Type 5: Publish a NAK to a valid ACK subject.
+	err = ncBad.Publish(ackSubjects[1], []byte("-NAK"))
+	require_NoError(t, err)
+
+	// Type 6: Publish TERM to a valid ACK subject.
+	err = ncBad.Publish(ackSubjects[2], []byte("+TERM"))
+	require_NoError(t, err)
+
+	// Type 7: Publish +NXT (next) to a valid ACK subject.
+	err = ncBad.Publish(ackSubjects[3], []byte("+NXT"))
+	require_NoError(t, err)
+
+	// Type 8: Publish +WPI (work in progress) to a valid ACK subject.
+	err = ncBad.Publish(ackSubjects[4], []byte("+WPI"))
+	require_NoError(t, err)
+
+	// Type 9: Publish with a non-standard/garbage payload on a valid ACK subject.
+	err = ncBad.Publish(validAck, []byte("GARBAGE_PAYLOAD"))
+	require_NoError(t, err)
+
+	// Type 10: Publish with a very large payload on a valid ACK subject.
+	err = ncBad.Publish(validAck, []byte(strings.Repeat("X", 4096)))
+	require_NoError(t, err)
+
+	// Type 11: Publish to an ACK subject with extra tokens/dots.
+	err = ncBad.Publish(validAck+".extra.tokens.here", []byte("+ACK"))
+	require_NoError(t, err)
+
+	// Type 12: Publish to ACK subject with non-numeric sequence fields.
+	err = ncBad.Publish("$JS.ACK.TEST.CONSUMER.abc.def.ghi.jkl.mno", []byte("+ACK"))
+	require_NoError(t, err)
+
+	// Type 13: Publish to ACK subject with negative sequence numbers.
+	err = ncBad.Publish("$JS.ACK.TEST.CONSUMER.-1.-2.-3.-4.-5", []byte("+ACK"))
+	require_NoError(t, err)
+
+	// Type 14: Publish to ACK subject with very large sequence numbers (overflow).
+	err = ncBad.Publish("$JS.ACK.TEST.CONSUMER.999999999999.999999999999.999999999999.999999999999.999999999999", []byte("+ACK"))
+	require_NoError(t, err)
+
+	// Type 15: Publish to an ACK subject with an embedded @ (like a remapped reply).
+	err = ncBad.Publish(validAck+"@events.0", []byte("+ACK"))
+	require_NoError(t, err)
+
+	// Type 16: Publish with headers on a valid ACK subject.
+	msg := nats.NewMsg(validAck)
+	msg.Header.Set("Nats-Expected-Stream", "TEST")
+	msg.Data = []byte("+ACK")
+	err = ncBad.PublishMsg(msg)
+	require_NoError(t, err)
+
+	// Type 17: Publish with headers and empty body on ACK subject.
+	msg = nats.NewMsg(validAck)
+	msg.Header.Set("X-Custom", "value")
+	err = ncBad.PublishMsg(msg)
+	require_NoError(t, err)
+
+	// Flush to make sure all messages are sent.
+	err = ncBad.Flush()
+	require_NoError(t, err)
+
+	// Allow time for messages to propagate through the cluster.
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify route connections are still intact - cluster must still be fully formed.
+	c.checkClusterFormed()
+
+	// Verify the bad client connection is still alive (server didn't kick it).
+	require_True(t, ncBad.IsConnected())
+
+	// Verify normal JetStream operations still work after malformed ACKs.
+	// Publish a new message and verify the stream accepted it.
+	_, err = js.Publish("events.after", []byte("still working"))
+	require_NoError(t, err)
+
+	// Verify stream info is consistent across the cluster (5 original + 1 new).
+	si, err := js.StreamInfo("TEST")
+	require_NoError(t, err)
+	require_True(t, si.State.Msgs == 6)
+
+	// Create a new consumer to verify we can still fetch and ACK cleanly.
+	sub2, err := js.PullSubscribe("events.after", "VERIFY")
+	require_NoError(t, err)
+	msgs, err = sub2.Fetch(1, nats.MaxWait(5*time.Second))
+	require_NoError(t, err)
+	require_True(t, len(msgs) == 1)
+	require_Equal(t, string(msgs[0].Data), "still working")
+	require_NoError(t, msgs[0].AckSync())
+}
