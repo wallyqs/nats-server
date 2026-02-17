@@ -2022,6 +2022,9 @@ func (js *jetStream) decodeMetaSnapshot(buf []byte) (map[string]map[string]*stre
 		if err = json.Unmarshal(jse, &wsas); err != nil {
 			return nil, err
 		}
+		// Allow GC to reclaim the decompressed JSON buffer (~100MB at scale)
+		// while we build the assignment maps below.
+		jse = nil //nolint:ineffassign
 	}
 
 	// Build our new version here outside of js.
