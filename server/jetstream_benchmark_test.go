@@ -2695,7 +2695,7 @@ func BenchmarkJetStreamBlockSizeBurstDrain(b *testing.B) {
 func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 	const (
 		publishTimeout = 30 * time.Second
-		numSubjects    = 10
+		numSubjects    = 40
 	)
 
 	messageSizeCases := []int{
@@ -2813,7 +2813,7 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 
 										msgsPerConsumer := totalPublished / numSubjects
 
-										// Create 10 pull consumers, one per subject.
+										// Create pull consumers, one per subject.
 										subs := make([]*nats.Subscription, numSubjects)
 										for i := 0; i < numSubjects; i++ {
 											subs[i], err = js.PullSubscribe(
@@ -2832,7 +2832,7 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 
 										b.StartTimer()
 
-										// All 10 consumers drain concurrently.
+										// All consumers drain concurrently.
 										var wg sync.WaitGroup
 										var peakHeap atomic.Uint64
 										var fetchErrors atomic.Int64
