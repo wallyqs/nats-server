@@ -109,7 +109,7 @@ The tests are well-structured:
 
 ## Minor nits
 
-1. Missing period after "A match was found" (`memstore.go`, comment in `nextWildcardMatchLocked`):
+1. Missing comma after "A match was found" (`memstore.go`, comment in `nextWildcardMatchLocked`):
    ```
    // A match was found adjust the bounds accordingly
    ```
@@ -130,6 +130,19 @@ The tests are well-structured:
    // Simpler:
    return first > start
    ```
+
+3. **Unnecessary `string(subj)` allocation in `nextWildcardMatchLocked`**: The `MatchUntil` callback unconditionally calls `ms.recalculateForSubj(string(subj), ss)`, which converts `[]byte → string` on every visited subject. The old code guarded this with `ss.firstNeedsUpdate || ss.lastNeedsUpdate` and used an already-allocated string. In steady state (no recent deletions), these flags are typically false, so the allocation is wasted. Consider:
+   ```go
+   if ss.firstNeedsUpdate || ss.lastNeedsUpdate {
+       ms.recalculateForSubj(string(subj), ss)
+   }
+   ```
+
+4. **`Match` wrapper closure**: The existing `Match` method now wraps its callback in a `func(...) bool { cb(...); return true }` closure on every call. There are 20+ `Match` callers across `memstore.go` and `filestore.go` (NumPending, numFilteredPending, etc.). This adds a small per-call heap allocation + indirect function call overhead. Unlikely to be measurable, but worth noting since some of these are hot paths. An alternative would be to keep a non-returning `matchAll` variant, but the maintenance cost of two `match` functions probably isn't worth it.
+
+5. **Benchmark stream config mismatch**: The benchmark uses `Subjects: []string{"foo.*"}` but stores 3-token subjects like `"foo.baz.0"`. The memstore doesn't enforce subject validation at the storage layer (that's done by JetStream routing), so it works, but `Subjects: []string{"foo.>"}` would be more realistic.
+
+6. **FileStore parallel opportunity**: The `fileStore.LoadNextMsg` (`filestore.go:8508`) has its own skip-ahead logic with a notably higher wildcard threshold (`wcMaxSizeToCheck = 64 * 1024` vs memstore's `linearScanMaxFSS = 256`). The `MatchUntil` pattern could eventually benefit `fileStore` too, but that's a separate effort.
 
 ## Benchmark Results (with `start`/`count` reset fix applied)
 
