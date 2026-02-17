@@ -2850,11 +2850,11 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 													if batchSz > 100 {
 														batchSz = 100
 													}
-													msgs, err := subs[idx].Fetch(batchSz, nats.MaxWait(15*time.Second))
+													msgs, err := subs[idx].Fetch(batchSz, nats.MaxWait(5*time.Second))
 													if err != nil {
 														fetchErrors.Add(1)
 														consecutiveErrors++
-														if consecutiveErrors >= 3 {
+														if consecutiveErrors >= 5 {
 															b.Logf("cons_%d giving up after %d msgs, %d consecutive errors: %v", idx+1, consumed, consecutiveErrors, err)
 															return
 														}
