@@ -1507,6 +1507,8 @@ func (js *jetStream) monitorCluster() {
 		// If failures continue, we force a snapshot even if we were catching up others
 		// (otherwise we might indefinitely stall and grow log size).
 		failedSnapshots atomic.Uint32
+		// Reusable S2 buffers for async snapshots, avoids re-allocating ~120MB per cycle.
+		s2Bufs s2Buffers
 	)
 	doSnapshot := func(force bool) {
 		// Suppress during recovery.
@@ -1613,11 +1615,11 @@ func (js *jetStream) monitorCluster() {
 			// - Encode and install as the new snapshot.
 			if data, err := c.LoadLastSnapshot(); err != nil && err != errNoSnapAvailable {
 				abort(err)
-			} else if streams, err := js.decodeMetaSnapshot(data); err != nil {
+			} else if streams, err := js.decodeMetaSnapshot(data, &s2Bufs); err != nil {
 				abort(err)
 			} else if err = js.collectStreamAndConsumerChanges(c, streams); err != nil {
 				abort(err)
-			} else if snap, nsa, nca, err := js.encodeMetaSnapshot(streams); err != nil {
+			} else if snap, nsa, nca, err := js.encodeMetaSnapshot(streams, &s2Bufs); err != nil {
 				abort(err)
 			} else if csz, err := c.InstallSnapshot(snap); err != nil {
 				abort(err)
@@ -1828,6 +1830,14 @@ func (js *jetStream) checkClusterSize() {
 }
 
 // Represents our stable meta state that we can write out.
+// s2Buffers holds reusable buffers for S2 encode/decode operations.
+// Passed through the async snapshot pipeline to avoid re-allocating
+// large buffers (~100MB decode, ~20MB encode) on each snapshot cycle.
+type s2Buffers struct {
+	decode []byte // Reusable buffer for s2.Decode (decompressed output).
+	encode []byte // Reusable buffer for s2.Encode (compressed output).
+}
+
 type writeableStreamAssignment struct {
 	Client     *ClientInfo     `json:"client,omitempty"`
 	Created    time.Time       `json:"created"`
@@ -1850,11 +1860,11 @@ func (js *jetStream) metaSnapshot() ([]byte, int, int, error) {
 	js.mu.RLock()
 	defer js.mu.RUnlock()
 	cc := js.cluster
-	return js.encodeMetaSnapshot(cc.streams)
+	return js.encodeMetaSnapshot(cc.streams, nil)
 }
 
 func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecovering bool) error {
-	streams, err := js.decodeMetaSnapshot(buf)
+	streams, err := js.decodeMetaSnapshot(buf, nil)
 	if err != nil {
 		return err
 	}
@@ -2012,18 +2022,26 @@ func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecove
 }
 
 // Decode the meta snapshot from buf into the relevant stream and consumer assignments.
-func (js *jetStream) decodeMetaSnapshot(buf []byte) (map[string]map[string]*streamAssignment, error) {
+// If bufs is non-nil, its decode buffer will be reused for S2 decompression.
+func (js *jetStream) decodeMetaSnapshot(buf []byte, bufs *s2Buffers) (map[string]map[string]*streamAssignment, error) {
 	var wsas []writeableStreamAssignment
 	if len(buf) > 0 {
-		jse, err := s2.Decode(nil, buf)
+		var dst []byte
+		if bufs != nil {
+			dst = bufs.decode[:0]
+		}
+		jse, err := s2.Decode(dst, buf)
 		if err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal(jse, &wsas); err != nil {
 			return nil, err
 		}
-		// Allow GC to reclaim the decompressed JSON buffer (~100MB at scale)
-		// while we build the assignment maps below.
+		// Retain the buffer for future reuse before allowing GC to reclaim
+		// the decompressed JSON content (~100MB at scale).
+		if bufs != nil {
+			bufs.decode = jse
+		}
 		jse = nil //nolint:ineffassign
 	}
 
@@ -2059,7 +2077,8 @@ func (js *jetStream) decodeMetaSnapshot(buf []byte) (map[string]map[string]*stre
 
 // Encode the meta assignments into an encoded and compressed buffer.
 // Returns the snapshot itself, and the amount of streams and consumers.
-func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAssignment) ([]byte, int, int, error) {
+// If bufs is non-nil, its encode buffer will be reused for S2 compression.
+func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAssignment, bufs *s2Buffers) ([]byte, int, int, error) {
 	start := time.Now()
 	nsa := 0
 	nca := 0
@@ -2119,7 +2138,14 @@ func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAss
 
 	// Track how long it took to compress the JSON.
 	cstart := time.Now()
-	snap := s2.Encode(nil, b)
+	var dst []byte
+	if bufs != nil {
+		dst = bufs.encode[:0]
+	}
+	snap := s2.Encode(dst, b)
+	if bufs != nil {
+		bufs.encode = snap
+	}
 	cend := time.Since(cstart)
 	took := time.Since(start)
 
