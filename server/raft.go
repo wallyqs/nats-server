@@ -1279,6 +1279,66 @@ func (n *raft) encodeSnapshot(snap *snapshot) []byte {
 	return buf[:wi]
 }
 
+// writeSnapshotFile writes the snapshot directly to a file using a streaming
+// hash, avoiding the allocation of a single large buffer for the entire
+// encoded snapshot. The file is written atomically (write to .tmp, rename).
+// Lock should be held (for n.hh access).
+func (n *raft) writeSnapshotFile(snap *snapshot, name string) error {
+	if snap == nil {
+		return errNoSnapAvailable
+	}
+
+	var le = binary.LittleEndian
+	// Build the header: term(8) + index(8) + peerstate_len(4).
+	var hdr [20]byte
+	le.PutUint64(hdr[0:], snap.lastTerm)
+	le.PutUint64(hdr[8:], snap.lastIndex)
+	le.PutUint32(hdr[16:], uint32(len(snap.peerstate)))
+
+	// Compute checksum over header + peerstate + data using streaming hash.
+	n.hh.Reset()
+	n.hh.Write(hdr[:])
+	n.hh.Write(snap.peerstate)
+	n.hh.Write(snap.data)
+	var hb [highwayhash.Size64]byte
+	checksum := n.hh.Sum(hb[:0])
+
+	return writeSnapshotFileParts(name, hdr[:], snap.peerstate, snap.data, checksum)
+}
+
+// writeSnapshotFileParts writes snapshot components directly to a file,
+// avoiding a single large buffer allocation. Written atomically via .tmp + rename.
+func writeSnapshotFileParts(name string, hdr, peerstate, data, checksum []byte) error {
+	tmp := name + ".tmp"
+	<-dios
+	defer func() { dios <- struct{}{} }()
+
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_SYNC, defaultFilePerms)
+	if err != nil {
+		return err
+	}
+	// Write header, peerstate, data, checksum sequentially.
+	if _, err = f.Write(hdr); err == nil {
+		if _, err = f.Write(peerstate); err == nil {
+			if _, err = f.Write(data); err == nil {
+				_, err = f.Write(checksum)
+			}
+		}
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, name); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 // SendSnapshot will send the latest snapshot as a normal AE.
 // Should only be used when the upper layers know this is most recent.
 // Used when restoring streams, moving a stream from R1 to R>1, etc.
@@ -1326,7 +1386,7 @@ func (n *raft) installSnapshot(snap *snapshot) error {
 	sn := fmt.Sprintf(snapFileT, snap.lastTerm, snap.lastIndex)
 	sfile := filepath.Join(snapDir, sn)
 
-	if err := writeFileWithSync(sfile, n.encodeSnapshot(snap), defaultFilePerms); err != nil {
+	if err := n.writeSnapshotFile(snap, sfile); err != nil {
 		// We could set write err here, but if this is a temporary situation, too many open files etc.
 		// we want to retry and snapshots are not fatal.
 		return err
@@ -1497,11 +1557,22 @@ func (c *checkpoint) InstallSnapshot(data []byte) (uint64, error) {
 		peerstate: c.peerstate,
 		data:      data,
 	}
-	encoded := n.encodeSnapshot(snap)
+	// Compute hash under the lock (n.hh is not safe for concurrent use),
+	// then write to file with the lock released.
+	n.hh.Reset()
+	var le = binary.LittleEndian
+	var hdr [20]byte
+	le.PutUint64(hdr[0:], snap.lastTerm)
+	le.PutUint64(hdr[8:], snap.lastIndex)
+	le.PutUint32(hdr[16:], uint32(len(snap.peerstate)))
+	n.hh.Write(hdr[:])
+	n.hh.Write(snap.peerstate)
+	n.hh.Write(snap.data)
+	var hb [highwayhash.Size64]byte
+	checksum := n.hh.Sum(hb[:0])
 
-	// Unlock while writing.
 	n.Unlock()
-	err := writeFileWithSync(c.snapFile, encoded, defaultFilePerms)
+	err := writeSnapshotFileParts(c.snapFile, hdr[:], snap.peerstate, snap.data, checksum)
 	n.Lock()
 	if err != nil {
 		// We could set write err here, but if this is a temporary situation, too many open files etc.
