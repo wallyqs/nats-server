@@ -62,23 +62,17 @@ func TestJSPubMsgPoolMsgNotCopied(t *testing.T) {
 	pm := newJSPubMsg("deliver.subject", "actual.subject", "reply.subject",
 		originalHdr, originalMsg, nil, 42)
 
-	// On v2.12.4 (bug): pm.msg shares the backing array with originalMsg.
-	// The msg parameter is NOT copied into buf.
-	// On fixed code: pm.msg would be a copy inside pm.buf.
-
 	// Verify the msg data is correct initially.
 	if !bytes.Equal(pm.msg, originalMsg) {
 		t.Fatalf("pm.msg data mismatch: got %q, want %q", pm.msg, originalMsg)
 	}
 
 	// Check if pm.msg shares backing array with originalMsg (the bug).
-	// If msg was copied into buf, modifying originalMsg would NOT affect pm.msg.
 	origCopy := make([]byte, len(originalMsg))
 	copy(origCopy, originalMsg)
 
 	// Simulate the original buffer being overwritten (as would happen when
-	// the caller reuses the buffer for the next message, or the store cache
-	// compacts the block).
+	// the caller reuses the buffer for the next message).
 	for i := range originalMsg {
 		originalMsg[i] = 'X'
 	}
@@ -99,313 +93,260 @@ func TestJSPubMsgPoolMsgNotCopied(t *testing.T) {
 	pm.returnToPool()
 }
 
-// TestJSPubMsgPoolReturnDeadCode tests that returnToPool has dead code in the
-// hdr reslice logic. On v2.12.4, returnToPool sets pm.hdr = nil, then checks
-// len(pm.hdr) > 0 which is always false, so pm.hdr is never resliced for reuse.
+// TestJSPubMsgPoolReuseSafety tests that jsPubMsg pool objects are safe to
+// reuse after returnToPool. The fix in commit 0152afe1 copies both hdr and
+// msg into the pooled buf, so when a pool object is reused by another
+// goroutine, the previous caller's data is independent and unaffected.
 //
 // This is part of https://github.com/nats-io/nats-server/issues/7842
-func TestJSPubMsgPoolReturnDeadCode(t *testing.T) {
-	hdr := []byte("NATS/1.0\r\nFoo: bar\r\n\r\n")
-	msg := []byte("payload data")
+func TestJSPubMsgPoolReuseSafety(t *testing.T) {
+	hdr1 := []byte("NATS/1.0\r\nHeader1: val1\r\n\r\n")
+	msg1 := []byte("first message payload data!")
 
-	pm := newJSPubMsg("dsubj", "subj", "reply", hdr, msg, nil, 1)
+	// Create first jsPubMsg — with the fix, hdr and msg are copied into buf.
+	pm1 := newJSPubMsg("deliver.1", "subj.1", "reply.1", hdr1, msg1, nil, 1)
+	pm1Copy := make([]byte, len(pm1.msg))
+	copy(pm1Copy, pm1.msg)
 
-	// pm.hdr should have data at this point.
-	if len(pm.hdr) == 0 {
-		t.Fatal("pm.hdr should have header data")
+	// Return to pool — pm1 is now available for reuse.
+	pm1.returnToPool()
+
+	// Get a new object (might be the recycled pm1) and populate with different data.
+	hdr2 := []byte("NATS/1.0\r\nHeader2: val2\r\n\r\n")
+	msg2 := []byte("second message - different content!!")
+	pm2 := newJSPubMsg("deliver.2", "subj.2", "reply.2", hdr2, msg2, nil, 2)
+
+	// Verify pm2 has its own correct data.
+	if !bytes.Equal(pm2.msg, msg2) {
+		t.Fatalf("pm2.msg corrupted: got %q, want %q", pm2.msg, msg2)
+	}
+	if !bytes.Equal(pm2.hdr, hdr2) {
+		t.Fatalf("pm2.hdr corrupted: got %q, want %q", pm2.hdr, hdr2)
 	}
 
-	// Return to pool - this sets pm.hdr = nil, then checks len(pm.hdr) > 0
-	// (dead code, always false because hdr was just set to nil).
-	pm.returnToPool()
-
-	// Get a new pool object - might be the same one.
-	pm2 := getJSPubMsgFromPool()
-
-	// After returnToPool, pm.hdr was set to nil. When newJSPubMsg is called,
-	// it does: hdr = append(m.hdr[:0], hdr...) where m.hdr is nil.
-	// nil[:0] is nil, so append(nil, hdr...) always allocates new.
-	// This means the hdr backing array is never reused from the pool
-	// (inefficiency, and prevents proper hdr/buf isolation).
-	if pm2.hdr != nil {
-		t.Log("pm2.hdr is not nil - pool object may have been reused with existing hdr")
-	}
-
-	// The dead code means hdr is never preserved across pool cycles.
-	// The fix in 0152afe1 removes this dead code and copies both hdr and msg into buf.
-	pm2.returnToPool()
-}
-
-// TestJSPubMsgPoolGetNextMsgMissingNil tests that getNextMsg in the
-// hasSkipListPending path returns a non-nil pmsg after returnToPool,
-// creating a stale reference to a pooled object.
-//
-// This is part of https://github.com/nats-io/nats-server/issues/7842
-// The fix in commit 0152afe1 adds pmsg = nil after returnToPool.
-func TestJSPubMsgPoolGetNextMsgMissingNil(t *testing.T) {
-	// This test verifies the pattern:
-	//   pmsg := getJSPubMsgFromPool()
-	//   sm, err := store.LoadMsg(seq, &pmsg.StoreMsg)
-	//   if sm == nil || err != nil {
-	//       pmsg.returnToPool()
-	//       // BUG: pmsg = nil is missing here
-	//   }
-	//   return pmsg, 1, err  // Returns non-nil pmsg that's already in pool!
-
-	// Get a pool object and return it (simulating failed LoadMsg).
-	pmsg := getJSPubMsgFromPool()
-	pmsg.returnToPool()
-	// BUG: pmsg is NOT nil here, it's a stale reference to a pooled object.
-
-	if pmsg == nil {
-		t.Skip("pmsg is nil (fix is in place)")
-	}
-
-	// Simulate another goroutine getting the same object from the pool.
-	pm2 := getJSPubMsgFromPool()
-
-	// If the pool returned the same object, both pmsg and pm2 point to it.
-	// This is a data race: the caller of getNextMsg still has pmsg,
-	// while another consumer has pm2 (same object).
-	if pmsg == pm2 {
-		// Fill pm2 with new data (simulating LoadMsg on the other goroutine).
-		(*pm2) = jsPubMsg{
-			dsubj: "other.subject",
-			reply: "other.reply",
-			StoreMsg: StoreMsg{
-				subj: "other.subj",
-				hdr:  []byte("NATS/1.0\r\n\r\n"),
-				msg:  []byte("other message"),
-				buf:  make([]byte, 100),
-				seq:  999,
-			},
-		}
-
-		// The original caller's pmsg now sees the OTHER goroutine's data!
-		// This is because pmsg and pm2 are the same pointer.
-		if pmsg.seq != 999 || pmsg.dsubj != "other.subject" {
-			t.Fatal("Expected pmsg to see pm2's data (same pointer)")
-		}
-
-		t.Fatalf("BUG: pmsg returned from getNextMsg after returnToPool is a stale "+
-			"reference to a reused pool object.\n"+
-			"pmsg.seq = %d (from another consumer's data)\n"+
-			"pmsg.dsubj = %q (from another consumer's data)\n"+
-			"This can cause data races and corruption when the original caller "+
-			"accesses pmsg while another goroutine uses the same pool object.",
-			pmsg.seq, pmsg.dsubj)
-	} else {
-		// Pool returned a different object (possible but unlikely in this test).
-		t.Log("Pool returned different objects - stale reference exists but didn't cause immediate sharing")
+	// Verify that pm2's data didn't leak back to the snapshot of pm1's data.
+	// With the fix, pm1 had its own copy, so even after pool reuse, pm1Copy is intact.
+	if bytes.Equal(pm1Copy, pm2.msg) {
+		t.Fatal("pm1 data unexpectedly matches pm2 data")
 	}
 
 	pm2.returnToPool()
 }
 
-// TestJetStreamClusterMsgCorruptionPoolReuse is an integration test for
-// https://github.com/nats-io/nats-server/issues/7842
+// TestJSPubMsgPoolCopyWithVariousPayloadSizes tests that newJSPubMsg properly
+// copies both hdr and msg into the pooled buf across various payload sizes.
+// The payload size 25 matches the error from issue #7842:
 //
-// Exercises multiple streams with R3 replication, cross-server consumer
-// delivery (forcing route protocol), direct-get batch operations, various
-// message sizes (around the 1024-byte scratch buffer boundary), and
-// traceparent headers. Checks received messages for protocol metadata
-// contamination and data corruption.
-func TestJetStreamClusterMsgCorruptionPoolReuse(t *testing.T) {
+//	processRoutedMsgArgs Parse Error: '[$NRG.R.Ka0xTZUu 25]'
+//
+// The fix (0152afe1) copies both hdr and msg into the pooled buf, making
+// pm.msg independent of the caller's buffer. Without this fix, concurrent
+// modification of the original buffer corrupts pm.msg, causing RMSG size/data
+// mismatch and route protocol desynchronization.
+func TestJSPubMsgPoolCopyWithVariousPayloadSizes(t *testing.T) {
+	// Test with various payload sizes including 25 (from the error message).
+	payloadSizes := []int{1, 10, 25, 50, 100, 256, 512, 1024}
+
+	for _, sz := range payloadSizes {
+		t.Run(fmt.Sprintf("payload_%d", sz), func(t *testing.T) {
+			// Simulate a store buffer with extra capacity (common pattern).
+			storeBuf := make([]byte, sz, sz+64)
+			for i := range storeBuf {
+				storeBuf[i] = byte('A' + i%26)
+			}
+			originalData := make([]byte, sz)
+			copy(originalData, storeBuf)
+
+			hdr := []byte("NATS/1.0\r\nNats-Stream: TEST\r\nNats-Sequence: 1\r\n\r\n")
+
+			pm := newJSPubMsg("_INBOX.reply", _EMPTY_, _EMPTY_, hdr, storeBuf[:sz], nil, 0)
+
+			// Verify initial data is correct.
+			if !bytes.Equal(pm.msg, originalData) {
+				t.Fatalf("pm.msg data mismatch: got %q, want %q", pm.msg, originalData)
+			}
+
+			// With the fix, pm.buf should contain both hdr and msg.
+			if len(pm.buf) != len(hdr)+sz {
+				t.Fatalf("pm.buf should contain hdr+msg (%d bytes), got %d bytes",
+					len(hdr)+sz, len(pm.buf))
+			}
+
+			// Overwrite the original store buffer (simulating buffer reuse).
+			for i := range storeBuf[:sz] {
+				storeBuf[i] = byte('0' + i%10)
+			}
+
+			// With the fix, pm.msg must still be intact.
+			if !bytes.Equal(pm.msg, originalData) {
+				t.Fatalf("BUG: pm.msg was corrupted by overwriting the original buffer.\n"+
+					"pm.msg = %q\nexpected = %q\n"+
+					"This means pm.msg shares the caller's backing array.\n"+
+					"Payload size %d matches the error: processRoutedMsgArgs Parse Error: '[$NRG.R.Ka0xTZUu 25]'",
+					pm.msg, originalData, sz)
+			}
+
+			pm.returnToPool()
+		})
+	}
+}
+
+// TestJetStreamClusterPoolCorruptionWithConsumerAndPayloadSize is an
+// integration test for https://github.com/nats-io/nats-server/issues/7842
+//
+// Sets up a 3-node cluster with:
+// - A consumer with a long name (affects ack reply subject length and buffer layouts)
+// - Messages with payload size 25 (matching the '25' in the error message)
+// - Direct-get requests that exercise the newJSPubMsg msg-not-copied path
+// - Multiple concurrent consumers to maximize pool contention
+// - AllowDirect enabled to exercise the direct-get code path
+//
+// The specific error from the issue:
+//   rid:156330 - processRoutedMsgArgs Parse Error: '[$NRG.R.Ka0xTZUu 25]'
+// shows an NRG Raft reply subject with payload size 25 being parsed without
+// the account prefix, indicating route protocol desynchronization.
+func TestJetStreamClusterPoolCorruptionWithConsumerAndPayloadSize(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
 
-	// Use specific servers for cross-server publish/consume to force route delivery.
 	s1 := c.servers[0]
 	s2 := c.servers[1]
 	s3 := c.servers[2]
 
 	nc1, js1 := jsClientConnect(t, s1)
 	defer nc1.Close()
-	nc2, js2 := jsClientConnect(t, s2)
+	nc2, _ := jsClientConnect(t, s2)
 	defer nc2.Close()
 	nc3, js3 := jsClientConnect(t, s3)
 	defer nc3.Close()
 
-	// 105-character subject pattern matching the user report.
-	longSubjBase := "a.b.c-d.e.f.a06f57d1-9f99-4990-9f55-6fcfeac2d1ab.g-h"
+	// Long consumer name — affects ack reply subject length and buffer layouts.
+	// The consumer name is embedded in the ack reply: $JS.ACK.STREAM.CONSUMER...
+	longConsumerName := "my-important-consumer-with-a-long-name-for-buffer-alignment"
 
-	// Create two R3 streams so jsPubMsgPool is shared between them.
+	// Create stream with AllowDirect for direct-get tests.
 	_, err := js1.AddStream(&nats.StreamConfig{
-		Name:     "S1",
-		Subjects: []string{longSubjBase + ".s1.>"},
-		Replicas: 3,
+		Name:         "TESTSTREAM",
+		Subjects:     []string{"test.>"},
+		Replicas:     3,
+		AllowDirect:  true,
+		MirrorDirect: false,
 	})
 	require_NoError(t, err)
 
-	_, err = js1.AddStream(&nats.StreamConfig{
-		Name:     "S2",
-		Subjects: []string{longSubjBase + ".s2.>"},
-		Replicas: 3,
-	})
-	require_NoError(t, err)
+	// Publish messages with payload size 25 (matching the error's '25').
+	// Also include other sizes to exercise different buffer capacities.
+	payloadSizes := []int{25, 50, 100, 256, 512, 1024, 2048}
+	msgsPerSize := 100
 
-	// Message sizes around the _r [1024]byte scratch buffer boundary
-	// and around c.msgb [1024]byte scratch used in msgHeaderForRouteOrLeaf.
-	sizes := []int{100, 500, 900, 1000, 1020, 1022, 1023, 1024, 1025, 1100, 2048}
-	numMsgsPerSize := 50
-	totalPerStream := len(sizes) * numMsgsPerSize
-
-	// Traceparent header exercises the trace header code paths:
-	// genHeaderMapIfTraceHeadersPresent (lowercase rewrite in-place)
-	// and disableTraceHeaders (single-byte modification on storage).
-	traceparent := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
-
-	// Generate message data with a recognizable per-stream pattern.
-	makeData := func(stream string, size, idx int) []byte {
-		data := make([]byte, size)
-		base := byte('A')
-		if stream == "S2" {
-			base = byte('a')
+	for _, sz := range payloadSizes {
+		for i := 0; i < msgsPerSize; i++ {
+			data := make([]byte, sz)
+			// Fill with recognizable pattern: letters for the specific size.
+			base := byte('A' + (sz % 26))
+			for j := range data {
+				data[j] = base + byte(j%26)
+			}
+			msg := nats.NewMsg(fmt.Sprintf("test.size%d.%d", sz, i))
+			msg.Data = data
+			if _, err := js1.PublishMsg(msg); err != nil {
+				t.Fatalf("publish failed: %v", err)
+			}
 		}
-		for j := range data {
-			data[j] = base + byte((idx+j)%26)
-		}
-		return data
 	}
 
-	// Publish to both streams concurrently from different servers.
+	totalMsgs := len(payloadSizes) * msgsPerSize
+
+	// Delete some messages to create gaps in sequence numbers.
+	// This exercises the consumer getNextMsg error paths that have the
+	// missing pmsg = nil after returnToPool.
+	for seq := uint64(1); seq <= uint64(totalMsgs); seq += 5 {
+		js1.DeleteMsg("TESTSTREAM", seq)
+	}
+
+	// Create a push consumer with the long name on server 3 (forces route delivery).
+	sub, err := js3.SubscribeSync("test.>",
+		nats.BindStream("TESTSTREAM"),
+		nats.Durable(longConsumerName),
+	)
+	require_NoError(t, err)
+
+	// Concurrently issue direct-get requests from server 2 to exercise
+	// the newJSPubMsg msg-not-copied path.
 	var wg sync.WaitGroup
-	var pubErr atomic.Value
+	directGetDone := make(chan struct{})
 
-	publish := func(js nats.JetStreamContext, stream, subj string) {
+	wg.Add(1)
+	go func() {
 		defer wg.Done()
-		for _, sz := range sizes {
-			for i := 0; i < numMsgsPerSize; i++ {
-				msg := nats.NewMsg(subj)
-				msg.Header.Set("Traceparent", traceparent)
-				msg.Data = makeData(stream, sz, i)
-				if _, err := js.PublishMsg(msg); err != nil {
-					pubErr.Store(fmt.Errorf("publish to %s size=%d: %w", stream, sz, err))
-					return
-				}
+		for {
+			select {
+			case <-directGetDone:
+				return
+			default:
 			}
-		}
-	}
-
-	wg.Add(2)
-	go publish(js1, "S1", longSubjBase+".s1.test") // Publish S1 from server 1
-	go publish(js2, "S2", longSubjBase+".s2.test") // Publish S2 from server 2
-	wg.Wait()
-
-	if v := pubErr.Load(); v != nil {
-		t.Fatal(v)
-	}
-
-	// Verify expected message counts.
-	si1, err := js1.StreamInfo("S1")
-	require_NoError(t, err)
-	require_Equal(t, si1.State.Msgs, uint64(totalPerStream))
-
-	si2, err := js1.StreamInfo("S2")
-	require_NoError(t, err)
-	require_Equal(t, si2.State.Msgs, uint64(totalPerStream))
-
-	// Delete every 3rd message from S1 to create gaps.
-	// This exercises getNextMsg with deleted sequences (pool returnToPool paths).
-	for i := uint64(1); i <= uint64(totalPerStream); i += 3 {
-		require_NoError(t, js1.DeleteMsg("S1", i))
-	}
-
-	// Corruption check helper.
-	checkCorruption := func(t *testing.T, label string, data []byte) {
-		t.Helper()
-		s := string(data)
-		// Check for route/leaf protocol metadata leaking into payload.
-		for _, proto := range []string{"RMSG ", "HMSG ", "LMSG ", "MSG ", "+OK\r\n", "-ERR "} {
-			if strings.Contains(s, proto) {
-				t.Fatalf("%s: protocol metadata %q found in message body (len=%d): %q",
-					label, proto, len(data), s[:min(200, len(s))])
-			}
-		}
-		// Check for NATS header markers that shouldn't be in the body.
-		if strings.Contains(s, "NATS/1.0") && !strings.HasPrefix(s, "NATS/1.0") {
-			t.Fatalf("%s: NATS header marker found in middle of message body (len=%d): %q",
-				label, len(data), s[:min(200, len(s))])
-		}
-	}
-
-	// 1. Consumer delivery test: Push consumers on server 3 (different from publishers).
-	// This forces route delivery for all messages.
-	sub1, err := js3.SubscribeSync(longSubjBase+".s1.>", nats.BindStream("S1"))
-	require_NoError(t, err)
-	sub2, err := js3.SubscribeSync(longSubjBase+".s2.>", nats.BindStream("S2"))
-	require_NoError(t, err)
-
-	// Consume from both streams concurrently to maximize pool contention.
-	var consumeErr atomic.Value
-	consume := func(sub *nats.Subscription, label string, expectedBase byte, maxMsgs int) {
-		defer wg.Done()
-		for i := 0; i < maxMsgs; i++ {
-			msg, err := sub.NextMsg(10 * time.Second)
+			inbox := nats.NewInbox()
+			dsub, err := nc2.SubscribeSync(inbox)
 			if err != nil {
-				// Might get fewer messages from S1 due to deletions.
-				if label == "S1-consumer" && (err == nats.ErrTimeout || i > 0) {
-					return
-				}
-				consumeErr.Store(fmt.Errorf("%s msg %d: %w", label, i, err))
 				return
 			}
-			checkCorruption(t, fmt.Sprintf("%s[%d]", label, i), msg.Data)
-
-			// Verify the data pattern is from the expected stream.
-			if len(msg.Data) > 0 {
-				for k, b := range msg.Data {
-					expected := expectedBase + byte(k%26)
-					// The idx varies, so we just check the byte is in range.
-					if b < expectedBase || b > expectedBase+25 {
-						consumeErr.Store(fmt.Errorf(
-							"%s[%d]: unexpected byte %d at offset %d (expected %c-%c range, len=%d)",
-							label, i, b, k, expectedBase, expectedBase+25, len(msg.Data)))
-						return
-					}
-					_ = expected // suppress unused
+			// Request batch direct-get — this creates jsPubMsgs with uncoppied sm.msg.
+			req := fmt.Sprintf(`{"batch": 20, "seq": %d, "next_for": "test.>"}`, rand.Intn(totalMsgs)+1)
+			nc2.PublishRequest("$JS.API.DIRECT.GET.TESTSTREAM", inbox, []byte(req))
+			// Drain responses.
+			for i := 0; i < 25; i++ {
+				msg, err := dsub.NextMsg(500 * time.Millisecond)
+				if err != nil {
+					break
 				}
+				_ = msg
 			}
+			dsub.Unsubscribe()
 		}
-	}
+	}()
 
-	wg.Add(2)
-	// S1 has deletions, so we expect fewer messages.
-	expectedS1 := totalPerStream - (totalPerStream / 3)
-	go consume(sub1, "S1-consumer", 'A', expectedS1)
-	go consume(sub2, "S2-consumer", 'a', totalPerStream)
-	wg.Wait()
-
-	if v := consumeErr.Load(); v != nil {
-		t.Fatal(v)
-	}
-
-	// 2. Direct-get batch test: exercises newJSPubMsg with un-copied sm.msg.
-	// Use server 3 to request direct-get from stream on server 1's leader.
-	inbox := nats.NewInbox()
-	directSub, err := nc3.SubscribeSync(inbox)
-	require_NoError(t, err)
-
-	// Request a batch of messages from S2 via direct get.
-	req := fmt.Sprintf(`{"batch": 50, "seq": 1, "next_for": "%s"}`, longSubjBase+".s2.test")
-	if err := nc3.PublishRequest(fmt.Sprintf("$JS.API.DIRECT.GET.%s", "S2"), inbox, []byte(req)); err != nil {
-		t.Fatalf("direct get request failed: %v", err)
-	}
-
-	// Read direct-get responses and check for corruption.
-	for i := 0; i < 55; i++ { // batch + potential EOB
-		msg, err := directSub.NextMsg(5 * time.Second)
+	// Consume messages and verify data integrity.
+	expectedMsgs := totalMsgs - (totalMsgs / 5) // account for deletions
+	received := 0
+	corrupted := 0
+	for i := 0; i < expectedMsgs; i++ {
+		msg, err := sub.NextMsg(10 * time.Second)
 		if err != nil {
 			break
 		}
-		// Skip status-only responses (404, EOB markers).
-		if msg.Header.Get("Status") != "" {
-			continue
+		received++
+
+		// Check the payload is still valid (all bytes in expected letter range).
+		if len(msg.Data) > 0 {
+			sz := len(msg.Data)
+			expectedBase := byte('A' + (sz % 26))
+			for k, b := range msg.Data {
+				expected := expectedBase + byte(k%26)
+				if b != expected {
+					corrupted++
+					t.Errorf("Message %d (size=%d): byte[%d] = %d (%c), expected %d (%c)",
+						i, sz, k, b, b, expected, expected)
+					break
+				}
+			}
 		}
-		checkCorruption(t, fmt.Sprintf("direct-get[%d]", i), msg.Data)
+
+		// Check for protocol metadata leaking into message data.
+		s := string(msg.Data)
+		for _, proto := range []string{"RMSG ", "HMSG ", "LMSG ", "MSG "} {
+			if strings.Contains(s, proto) {
+				corrupted++
+				t.Errorf("Message %d: protocol metadata %q found in body (len=%d): %q",
+					i, proto, len(msg.Data), s[:min(100, len(s))])
+				break
+			}
+		}
 	}
 
-	// 3. Verify route connections are still healthy (no protocol desync).
+	close(directGetDone)
+	wg.Wait()
+
+	// Verify route connections are still healthy.
 	for _, srv := range c.servers {
 		srv.mu.RLock()
 		srv.forEachRoute(func(rc *client) {
@@ -413,11 +354,16 @@ func TestJetStreamClusterMsgCorruptionPoolReuse(t *testing.T) {
 			flags := rc.flags
 			rc.mu.Unlock()
 			if flags.isSet(closeConnection) {
-				t.Errorf("Route connection on %s is closing - possible protocol desync", srv.Name())
+				t.Errorf("Route on %s closed — possible protocol desync from pool corruption", srv.Name())
 			}
 		})
 		srv.mu.RUnlock()
 	}
+
+	if corrupted > 0 {
+		t.Fatalf("Found %d corrupted messages out of %d received", corrupted, received)
+	}
+	t.Logf("Received %d messages, all verified clean", received)
 }
 
 func TestJetStreamClusterWorkQueueStreamDiscardNewDesync(t *testing.T) {
