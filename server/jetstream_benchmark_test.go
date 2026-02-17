@@ -2678,6 +2678,120 @@ func BenchmarkJetStreamBlockSizeBurstDrain(b *testing.B) {
 	}
 }
 
+// BenchmarkJetStreamBlockSizeMultiConsumer benchmarks a WorkQueue stream
+// listening on foo.> with 10 subjects (foo.1 .. foo.10) and 10 pull
+// consumers, one per subject. Each iteration publishes a message to a
+// subject in round-robin order and the matching consumer fetches and acks it.
+//
+// This exercises a realistic fan-out pattern where block size affects how
+// much memory is loaded when multiple consumers are active on different
+// parts of the stream simultaneously.
+//
+// To compare, run:
+//
+//	go test -bench='BenchmarkJetStreamBlockSizeMultiConsumer' -benchmem -count=6
+func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
+	const (
+		publishTimeout = 10 * time.Second
+		maxBytes       = int64(256 * 1024 * 1024) // 256MB
+		numSubjects    = 10
+	)
+
+	messageSizeCases := []int{
+		256,        // 256B
+		2 * 1024,   // 2KB
+		16 * 1024,  // 16KB
+		64 * 1024,  // 64KB
+	}
+
+	blockSizeCases := []struct {
+		name    string
+		blkSize int64
+	}{
+		{"BlkSz=4MB", 4 * 1024 * 1024},
+		{"BlkSz=8MB", 8 * 1024 * 1024},
+	}
+
+	for _, bc := range blockSizeCases {
+		b.Run(bc.name, func(b *testing.B) {
+			for _, msgSize := range messageSizeCases {
+				b.Run(fmt.Sprintf("MsgSz=%d", msgSize), func(b *testing.B) {
+					s := RunBasicJetStreamServer(b)
+					defer s.Shutdown()
+					s.optsMu.Lock()
+					s.opts.SyncInterval = 5 * time.Minute
+					s.optsMu.Unlock()
+
+					nc, err := nats.Connect(s.ClientURL())
+					require_NoError(b, err)
+					defer nc.Close()
+
+					js, err := nc.JetStream(nats.MaxWait(publishTimeout))
+					require_NoError(b, err)
+
+					streamName := "BENCH_MC"
+					_, err = js.AddStream(&nats.StreamConfig{
+						Name:      streamName,
+						Subjects:  []string{"foo.>"},
+						Retention: nats.WorkQueuePolicy,
+						Storage:   nats.FileStorage,
+						MaxBytes:  maxBytes,
+					})
+					require_NoError(b, err)
+
+					// Override block size on the underlying filestore.
+					mset, err := s.GlobalAccount().lookupStream(streamName)
+					require_NoError(b, err)
+					mset.mu.RLock()
+					fs := mset.store.(*fileStore)
+					mset.mu.RUnlock()
+					fs.mu.Lock()
+					fs.fcfg.BlockSize = uint64(bc.blkSize)
+					fs.mu.Unlock()
+
+					// Create 10 pull consumers, one per subject.
+					subjects := make([]string, numSubjects)
+					subs := make([]*nats.Subscription, numSubjects)
+					for i := 0; i < numSubjects; i++ {
+						subjects[i] = fmt.Sprintf("foo.%d", i+1)
+						subs[i], err = js.PullSubscribe(
+							subjects[i],
+							fmt.Sprintf("cons_%d", i+1),
+							nats.BindStream(streamName),
+							nats.AckExplicit(),
+						)
+						require_NoError(b, err)
+					}
+
+					msg := make([]byte, msgSize)
+					rand.New(rand.NewSource(12345)).Read(msg)
+
+					b.SetBytes(int64(msgSize))
+					b.ResetTimer()
+
+					for i := 0; i < b.N; i++ {
+						idx := i % numSubjects
+						fastRandomMutation(msg, 10)
+						_, err := js.Publish(subjects[idx], msg)
+						if err != nil {
+							b.Fatalf("Publish error on %s: %v", subjects[idx], err)
+						}
+
+						msgs, err := subs[idx].Fetch(1, nats.MaxWait(5*time.Second))
+						if err != nil || len(msgs) != 1 {
+							b.Fatalf("Fetch error on cons_%d: %v, got %d msgs", idx+1, err, len(msgs))
+						}
+						if err := msgs[0].AckSync(); err != nil {
+							b.Fatalf("AckSync error on cons_%d: %v", idx+1, err)
+						}
+					}
+					b.StopTimer()
+				})
+			}
+		})
+	}
+}
+
 // Helper function to stand up a JS-enabled single server or cluster
 func startJSClusterAndConnect(b *testing.B, clusterSize int) (c *cluster, s *Server, shutdown func(), nc *nats.Conn, js nats.JetStreamContext) {
 	b.Helper()
