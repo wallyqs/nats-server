@@ -2184,8 +2184,7 @@ func (js *jetStream) collectStreamAndConsumerChanges(c RaftNodeCheckpoint, strea
 				case assignStreamOp, updateStreamOp, removeStreamOp:
 					sa, err := decodeStreamAssignment(js.srv, buf[1:])
 					if err != nil {
-						js.srv.Errorf("JetStream cluster failed to decode stream assignment: %q", buf[1:])
-						panic(err)
+						return fmt.Errorf("JetStream cluster failed to decode stream assignment: %w", err)
 					}
 					if op == removeStreamOp {
 						ru.removeStream(sa)
@@ -2195,26 +2194,23 @@ func (js *jetStream) collectStreamAndConsumerChanges(c RaftNodeCheckpoint, strea
 				case assignConsumerOp:
 					ca, err := decodeConsumerAssignment(buf[1:])
 					if err != nil {
-						js.srv.Errorf("JetStream cluster failed to decode consumer assignment: %q", buf[1:])
-						panic(err)
+						return fmt.Errorf("JetStream cluster failed to decode consumer assignment: %w", err)
 					}
 					ru.addOrUpdateConsumer(ca)
 				case assignCompressedConsumerOp:
 					ca, err := decodeConsumerAssignmentCompressed(buf[1:])
 					if err != nil {
-						js.srv.Errorf("JetStream cluster failed to decode compressed consumer assignment: %q", buf[1:])
-						panic(err)
+						return fmt.Errorf("JetStream cluster failed to decode compressed consumer assignment: %w", err)
 					}
 					ru.addOrUpdateConsumer(ca)
 				case removeConsumerOp:
 					ca, err := decodeConsumerAssignment(buf[1:])
 					if err != nil {
-						js.srv.Errorf("JetStream cluster failed to decode consumer assignment: %q", buf[1:])
-						panic(err)
+						return fmt.Errorf("JetStream cluster failed to decode consumer assignment: %w", err)
 					}
 					ru.removeConsumer(ca)
 				default:
-					panic(fmt.Sprintf("JetStream Cluster Unknown meta entry op type: %v", entryOp(buf[0])))
+					return fmt.Errorf("JetStream cluster unknown meta entry op type: %v", op)
 				}
 			}
 		}
