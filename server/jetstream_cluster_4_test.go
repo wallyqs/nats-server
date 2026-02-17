@@ -7409,3 +7409,119 @@ func TestJetStreamClusterRoutedMsgNoDataCorruption(t *testing.T) {
 		require_NoError(t, m.Ack())
 	}
 }
+
+// TestJetStreamClusterMsgTraceCorruptionRegression is the actual reproduction
+// for issue #7842. The bug was that publishing a message with a short
+// Nats-Trace-Dest header (without Nats-Trace-Only) to a JetStream stream
+// caused processInboundJetStreamMsg to call setHeader() to replace the trace
+// destination with "trace disabled". When the new value was longer than the
+// original, the old setHeader() used append on the uncapped msgParts() header
+// slice, overflowing into the message body and corrupting it.
+//
+// This test publishes messages with Nats-Trace-Dest: t (1 char, replaced by
+// "trace disabled" = 14 chars, causing 13 bytes of body corruption) and
+// verifies the consumed message bodies are intact.
+func TestJetStreamClusterMsgTraceCorruptionRegression(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TRACETEST",
+		Subjects: []string{"trace.>"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Subscribe to trace events so the server doesn't log errors about
+	// undeliverable trace events.
+	traceSub, err := nc.SubscribeSync("my.trace.dest")
+	require_NoError(t, err)
+
+	// Create a push consumer to receive messages.
+	sub, err := js.SubscribeSync("trace.>", nats.Durable("traceconsumer"))
+	require_NoError(t, err)
+
+	// Find a non-leader server to publish from, forcing route delivery.
+	leader := c.streamLeader(globalAccountName, "TRACETEST")
+	var pubServer *Server
+	for _, s := range c.servers {
+		if s != leader {
+			pubServer = s
+			break
+		}
+	}
+	require_True(t, pubServer != nil)
+
+	ncPub, _ := jsClientConnect(t, pubServer)
+	defer ncPub.Close()
+
+	// Publish messages WITH the Nats-Trace-Dest header set to a short
+	// value. The server will replace this with "trace disabled" (14 chars)
+	// in processInboundJetStreamMsg. Before the fix, this caused
+	// setHeader() to overflow the header into the message body, corrupting
+	// the first (14 - len(original_value)) bytes.
+	numMsgs := 50
+	type published struct {
+		body string
+	}
+	sent := make([]published, numMsgs)
+
+	for i := 0; i < numMsgs; i++ {
+		// Use a deterministic body that makes corruption obvious.
+		body := fmt.Sprintf("msg-%04d-%s", i, strings.Repeat("X", 64))
+
+		m := nats.NewMsg(fmt.Sprintf("trace.subj.%d", i%5))
+		// Short trace destination - the key trigger. "t" is 1 char,
+		// "trace disabled" is 14 chars, so 13 bytes of body get overwritten.
+		m.Header.Set(MsgTraceDest, "t")
+		m.Header.Set("Nats-Msg-Id", fmt.Sprintf("trace-msg-%d", i))
+		m.Data = []byte(body)
+
+		sent[i] = published{body: body}
+
+		// Use raw publish since we have trace headers that the JetStream
+		// publish helper might interfere with.
+		err = ncPub.PublishMsg(m)
+		require_NoError(t, err)
+	}
+	ncPub.Flush()
+
+	// Wait for messages to be stored.
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("TRACETEST")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(numMsgs) {
+			return fmt.Errorf("expected %d messages, got %d", numMsgs, si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Consume all messages and verify bodies are intact.
+	for i := 0; i < numMsgs; i++ {
+		m, err := sub.NextMsg(5 * time.Second)
+		require_NoError(t, err)
+
+		got := string(m.Data)
+		want := sent[i].body
+		if got != want {
+			t.Fatalf("Message %d body corrupted:\n  want: %q\n  got:  %q", i, want, got)
+		}
+
+		// The Nats-Trace-Dest header should now be "trace disabled"
+		// (set by processInboundJetStreamMsg).
+		traceDest := m.Header.Get(MsgTraceDest)
+		if traceDest != _EMPTY_ && traceDest != MsgTraceDestDisabled {
+			t.Fatalf("Message %d unexpected trace dest: %q", i, traceDest)
+		}
+
+		require_NoError(t, m.Ack())
+	}
+
+	// Drain trace events (not critical, just cleanup).
+	traceSub.Drain()
+}
