@@ -51,6 +51,12 @@ func (s *Server) processClientOrLeafCallout(c *client, opts *Options, proxyRequi
 		acc = c.acc
 	}
 
+	if acc == nil {
+		errStr = fmt.Sprintf("%s not mapped to a callout account", c.kindString())
+		s.Warnf(errStr)
+		return false, errStr
+	}
+
 	// Check if we have been requested to encrypt.
 	var xkp nkeys.KeyPair
 	var xkey string
