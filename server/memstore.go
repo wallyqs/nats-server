@@ -1811,14 +1811,16 @@ func (ms *memStore) nextWildcardMatchLocked(filter string, start uint64) (uint64
 	found := false
 	first, last := ms.state.LastSeq, uint64(0)
 	ms.fss.MatchUntil(stringToBytes(filter), func(subj []byte, ss *SimpleState) bool {
-		ms.recalculateForSubj(string(subj), ss)
+		if ss.firstNeedsUpdate || ss.lastNeedsUpdate {
+			ms.recalculateForSubj(string(subj), ss)
+		}
 
-		// Skip matches that are below our starting sequence
+		// Skip matches that are below our starting sequence.
 		if start > ss.Last {
 			return true
 		}
 
-		// A match was found adjust the bounds accordingly
+		// A match was found, adjust the bounds accordingly.
 		found = true
 		if ss.First < first {
 			first = ss.First
@@ -1827,18 +1829,13 @@ func (ms *memStore) nextWildcardMatchLocked(filter string, start uint64) (uint64
 			last = ss.Last
 		}
 
-		if first <= start {
-			// There is a match between start and last, break.
-			return false
-		} else {
-			// There may be more matches somewhere between
-			// start and first, keep going.
-			// This could be further optimized: if first and start
-			// are "close", we could just extend the linear search,
-			// especially if we know that the remaining ms.fss to
-			// explore is large.
-			return true
-		}
+		// If first <= start there is a match between start and last, break.
+		// Otherwise there may be more matches somewhere between start and
+		// first, keep going.
+		// This could be further optimized: if first and start are "close",
+		// we could just extend the linear search, especially if we know
+		// that the remaining ms.fss to explore is large.
+		return first > start
 	})
 	if !found {
 		return 0, 0, false
