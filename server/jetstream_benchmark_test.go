@@ -2695,16 +2695,21 @@ func BenchmarkJetStreamBlockSizeBurstDrain(b *testing.B) {
 func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 	const (
 		publishTimeout = 30 * time.Second
-		maxBytes       = int64(256 * 1024 * 1024) // 256MB
 		numSubjects    = 10
 	)
 
 	messageSizeCases := []int{
-		256,        // 256B
-		2 * 1024,   // 2KB
-		8 * 1024,   // 8KB
-		16 * 1024,  // 16KB
-		64 * 1024,  // 64KB
+		1024,      // 1KB
+		8 * 1024,  // 8KB
+		64 * 1024, // 64KB
+	}
+
+	maxBytesCases := []struct {
+		name     string
+		maxBytes int64
+	}{
+		{"MaxBytes=256MB", 256 * 1024 * 1024},
+		{"MaxBytes=2GB", 2 * 1024 * 1024 * 1024},
 	}
 
 	blockSizeCases := []struct {
@@ -2718,7 +2723,7 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 	// InitData: percentage of MaxBytes to pre-fill before the timed drain.
 	initDataCases := []struct {
 		name    string
-		percent float64 // fraction of maxBytes to fill
+		percent float64
 	}{
 		{"InitData=25pct", 0.25},
 		{"InitData=75pct", 0.75},
@@ -2726,153 +2731,165 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 
 	for _, bc := range blockSizeCases {
 		b.Run(bc.name, func(b *testing.B) {
-			for _, ic := range initDataCases {
-				b.Run(ic.name, func(b *testing.B) {
-					for _, msgSize := range messageSizeCases {
-						b.Run(fmt.Sprintf("MsgSz=%d", msgSize), func(b *testing.B) {
-							for n := 0; n < b.N; n++ {
-								b.StopTimer()
+			for _, mc := range maxBytesCases {
+				b.Run(mc.name, func(b *testing.B) {
+					for _, ic := range initDataCases {
+						b.Run(ic.name, func(b *testing.B) {
+							for _, msgSize := range messageSizeCases {
+								b.Run(fmt.Sprintf("MsgSz=%d", msgSize), func(b *testing.B) {
+									for n := 0; n < b.N; n++ {
+										b.StopTimer()
 
-								s := RunBasicJetStreamServer(b)
-								s.optsMu.Lock()
-								s.opts.SyncInterval = 5 * time.Minute
-								s.optsMu.Unlock()
+										s := RunBasicJetStreamServer(b)
+										s.optsMu.Lock()
+										s.opts.SyncInterval = 5 * time.Minute
+										s.optsMu.Unlock()
 
-								nc, err := nats.Connect(s.ClientURL())
-								require_NoError(b, err)
+										nc, err := nats.Connect(s.ClientURL())
+										require_NoError(b, err)
 
-								js, err := nc.JetStream(
-									nats.MaxWait(publishTimeout),
-									nats.PublishAsyncMaxPending(4096),
-								)
-								require_NoError(b, err)
+										js, err := nc.JetStream(
+											nats.MaxWait(publishTimeout),
+											nats.PublishAsyncMaxPending(16384),
+										)
+										require_NoError(b, err)
 
-								streamName := "BENCH_MC"
-								_, err = js.AddStream(&nats.StreamConfig{
-									Name:      streamName,
-									Subjects:  []string{"foo.>"},
-									Retention: nats.WorkQueuePolicy,
-									Storage:   nats.FileStorage,
-									MaxBytes:  maxBytes,
-								})
-								require_NoError(b, err)
+										streamName := "BENCH_MC"
+										_, err = js.AddStream(&nats.StreamConfig{
+											Name:      streamName,
+											Subjects:  []string{"foo.>"},
+											Retention: nats.WorkQueuePolicy,
+											Storage:   nats.FileStorage,
+											MaxBytes:  mc.maxBytes,
+										})
+										require_NoError(b, err)
 
-								// Override block size on the underlying filestore.
-								mset, err := s.GlobalAccount().lookupStream(streamName)
-								require_NoError(b, err)
-								mset.mu.RLock()
-								fs := mset.store.(*fileStore)
-								mset.mu.RUnlock()
-								fs.mu.Lock()
-								fs.fcfg.BlockSize = uint64(bc.blkSize)
-								fs.mu.Unlock()
+										// Override block size on the underlying filestore.
+										mset, err := s.GlobalAccount().lookupStream(streamName)
+										require_NoError(b, err)
+										mset.mu.RLock()
+										fs := mset.store.(*fileStore)
+										mset.mu.RUnlock()
+										fs.mu.Lock()
+										fs.fcfg.BlockSize = uint64(bc.blkSize)
+										fs.mu.Unlock()
 
-								// Build subjects list.
-								subjects := make([]string, numSubjects)
-								for i := 0; i < numSubjects; i++ {
-									subjects[i] = fmt.Sprintf("foo.%d", i+1)
-								}
+										// Build subjects list.
+										subjects := make([]string, numSubjects)
+										for i := 0; i < numSubjects; i++ {
+											subjects[i] = fmt.Sprintf("foo.%d", i+1)
+										}
 
-								// Pre-fill the stream up to the target percentage of MaxBytes.
-								msg := make([]byte, msgSize)
-								rand.New(rand.NewSource(12345)).Read(msg)
+										// Pre-fill the stream up to the target percentage of MaxBytes.
+										msg := make([]byte, msgSize)
+										rand.New(rand.NewSource(12345)).Read(msg)
 
-								targetBytes := int64(float64(maxBytes) * ic.percent)
-								totalPublished := 0
-								for int64(totalPublished*msgSize) < targetBytes {
-									idx := totalPublished % numSubjects
-									fastRandomMutation(msg, 10)
-									_, err := js.PublishAsync(subjects[idx], msg)
-									if err != nil {
-										b.Fatalf("Pre-fill publish error: %v", err)
-									}
-									totalPublished++
-								}
-								select {
-								case <-js.PublishAsyncComplete():
-								case <-time.After(publishTimeout):
-									b.Fatalf("Pre-fill publish timed out")
-								}
-
-								msgsPerConsumer := totalPublished / numSubjects
-
-								// Create 10 pull consumers, one per subject.
-								subs := make([]*nats.Subscription, numSubjects)
-								for i := 0; i < numSubjects; i++ {
-									subs[i], err = js.PullSubscribe(
-										subjects[i],
-										fmt.Sprintf("cons_%d", i+1),
-										nats.BindStream(streamName),
-										nats.AckExplicit(),
-									)
-									require_NoError(b, err)
-								}
-
-								// Force GC and capture baseline heap.
-								runtime.GC()
-								var mBefore runtime.MemStats
-								runtime.ReadMemStats(&mBefore)
-
-								b.SetBytes(int64(totalPublished) * int64(msgSize))
-								b.StartTimer()
-
-								// All 10 consumers drain concurrently.
-								var wg sync.WaitGroup
-								var peakHeap atomic.Uint64
-								peakHeap.Store(mBefore.HeapInuse)
-
-								for c := 0; c < numSubjects; c++ {
-									wg.Add(1)
-									go func(idx int) {
-										defer wg.Done()
-										consumed := 0
-										for consumed < msgsPerConsumer {
-											batchSz := msgsPerConsumer - consumed
-											if batchSz > 100 {
-												batchSz = 100
-											}
-											msgs, err := subs[idx].Fetch(batchSz, nats.MaxWait(10*time.Second))
+										targetBytes := int64(float64(mc.maxBytes) * ic.percent)
+										totalPublished := 0
+										for int64(totalPublished*msgSize) < targetBytes {
+											idx := totalPublished % numSubjects
+											fastRandomMutation(msg, 10)
+											_, err := js.PublishAsync(subjects[idx], msg)
 											if err != nil {
-												b.Errorf("Fetch error on cons_%d after %d: %v", idx+1, consumed, err)
-												return
+												b.Fatalf("Pre-fill publish error: %v", err)
 											}
-											for _, m := range msgs {
-												m.Ack()
-												consumed++
-											}
-											// Sample heap periodically.
-											if consumed%200 == 0 {
-												var m runtime.MemStats
-												runtime.ReadMemStats(&m)
-												for {
-													old := peakHeap.Load()
-													if m.HeapInuse <= old || peakHeap.CompareAndSwap(old, m.HeapInuse) {
-														break
-													}
+											totalPublished++
+											// Drain async acks periodically to avoid stalling.
+											if totalPublished%10000 == 0 {
+												select {
+												case <-js.PublishAsyncComplete():
+												case <-time.After(publishTimeout):
+													b.Fatalf("Pre-fill publish timed out at %d msgs", totalPublished)
 												}
 											}
 										}
-									}(c)
-								}
-								wg.Wait()
+										select {
+										case <-js.PublishAsyncComplete():
+										case <-time.After(publishTimeout):
+											b.Fatalf("Pre-fill publish timed out")
+										}
 
-								b.StopTimer()
+										msgsPerConsumer := totalPublished / numSubjects
 
-								// Final heap snapshot.
-								var mAfter runtime.MemStats
-								runtime.ReadMemStats(&mAfter)
-								peak := peakHeap.Load()
-								if mAfter.HeapInuse > peak {
-									peak = mAfter.HeapInuse
-								}
+										// Create 10 pull consumers, one per subject.
+										subs := make([]*nats.Subscription, numSubjects)
+										for i := 0; i < numSubjects; i++ {
+											subs[i], err = js.PullSubscribe(
+												subjects[i],
+												fmt.Sprintf("cons_%d", i+1),
+												nats.BindStream(streamName),
+												nats.AckExplicit(),
+											)
+											require_NoError(b, err)
+										}
 
-								b.ReportMetric(float64(mBefore.HeapInuse)/(1024*1024), "baseline-heap-MB")
-								b.ReportMetric(float64(peak)/(1024*1024), "peak-heap-MB")
-								b.ReportMetric(float64(peak-mBefore.HeapInuse)/(1024*1024), "heap-delta-MB")
-								b.ReportMetric(float64(totalPublished), "msgs")
+										// Force GC and capture baseline heap.
+										runtime.GC()
+										var mBefore runtime.MemStats
+										runtime.ReadMemStats(&mBefore)
 
-								nc.Close()
-								s.Shutdown()
+										b.SetBytes(int64(totalPublished) * int64(msgSize))
+										b.StartTimer()
+
+										// All 10 consumers drain concurrently.
+										var wg sync.WaitGroup
+										var peakHeap atomic.Uint64
+										peakHeap.Store(mBefore.HeapInuse)
+
+										for c := 0; c < numSubjects; c++ {
+											wg.Add(1)
+											go func(idx int) {
+												defer wg.Done()
+												consumed := 0
+												for consumed < msgsPerConsumer {
+													batchSz := msgsPerConsumer - consumed
+													if batchSz > 100 {
+														batchSz = 100
+													}
+													msgs, err := subs[idx].Fetch(batchSz, nats.MaxWait(30*time.Second))
+													if err != nil {
+														b.Errorf("Fetch error on cons_%d after %d: %v", idx+1, consumed, err)
+														return
+													}
+													for _, m := range msgs {
+														m.Ack()
+														consumed++
+													}
+													// Sample heap periodically.
+													if consumed%200 == 0 {
+														var m runtime.MemStats
+														runtime.ReadMemStats(&m)
+														for {
+															old := peakHeap.Load()
+															if m.HeapInuse <= old || peakHeap.CompareAndSwap(old, m.HeapInuse) {
+																break
+															}
+														}
+													}
+												}
+											}(c)
+										}
+										wg.Wait()
+
+										b.StopTimer()
+
+										// Final heap snapshot.
+										var mAfter runtime.MemStats
+										runtime.ReadMemStats(&mAfter)
+										peak := peakHeap.Load()
+										if mAfter.HeapInuse > peak {
+											peak = mAfter.HeapInuse
+										}
+
+										b.ReportMetric(float64(mBefore.HeapInuse)/(1024*1024), "baseline-heap-MB")
+										b.ReportMetric(float64(peak)/(1024*1024), "peak-heap-MB")
+										b.ReportMetric(float64(peak-mBefore.HeapInuse)/(1024*1024), "heap-delta-MB")
+										b.ReportMetric(float64(totalPublished), "msgs")
+
+										nc.Close()
+										s.Shutdown()
+									}
+								})
 							}
 						})
 					}
