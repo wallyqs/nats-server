@@ -131,8 +131,30 @@ The tests are well-structured:
    return first > start
    ```
 
+## Benchmark Results (with `start`/`count` reset fix applied)
+
+Both runs used the same benchmark code with `start` and `count` properly reset inside `b.Loop()`.
+
+**Machine:** Intel Xeon Platinum 8581C @ 2.10GHz, 16 cores, Go 1.25.7 linux/amd64
+
+| Test Case | Base (before PR) | PR (after) | Speedup |
+|---|---|---|---|
+| `wildcard_linear_scan` | 3,980 ms/op (1 iter) | 4,211 ms/op (1 iter) | ~same (expected: both use linear scan) |
+| **`wildcard_bounded_scan`** | **4,012 ms/op (1 iter)** | **322.8 us/op (3768 iters)** | **~12,400x faster** |
+| `literal_bounded_scan` | 1,218 ms/op (1 iter) | 1,245 ms/op (1 iter) | ~same (expected: same code path) |
+
+The `wildcard_bounded_scan` case shows the dramatic improvement: from ~4 seconds to ~323 microseconds per full scan of 100 matching messages among 10M total. This confirms the `MatchUntil` + early termination optimization is highly effective for the targeted scenario (wildcard filter, bounded FSS, sparse matches).
+
+The `wildcard_linear_scan` and `literal_bounded_scan` cases show no regression, as expected — these take the same code paths as before.
+
+All PR tests pass:
+- `TestMemStoreNextWildcardMatch` — PASS
+- `TestMemStoreNextLiteralMatch` — PASS
+- `TestStoreLoadNextMsgWildcardStartBeforeFirstMatch` (Memory + File) — PASS
+- `TestSubjectTreeMatchUntil` — PASS
+
 ## Verdict
 
-The core optimization is correct and well-designed. The `MatchUntil` approach elegantly avoids both the intermediate slice allocation and the redundant `Find()` lookups of the old code. The early termination logic is sound.
+The core optimization is correct and well-designed. The `MatchUntil` approach elegantly avoids both the intermediate slice allocation and the redundant `Find()` lookups of the old code. The early termination logic is sound. Benchmark confirms ~12,400x speedup for the targeted wildcard bounded scan scenario with no regressions.
 
 The benchmark reset bug should be fixed before merge to ensure the reported numbers are accurate. The `linearScanMaxFSS` threshold is worth revisiting as a follow-up to unlock the optimization for larger subject trees.
