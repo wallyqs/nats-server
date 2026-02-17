@@ -1336,6 +1336,12 @@ func writeSnapshotFileParts(name string, hdr, peerstate, data, checksum []byte) 
 		os.Remove(tmp)
 		return err
 	}
+	// Flush directory metadata to ensure the rename is durable across
+	// power loss, matching the behavior of writeAtomically.
+	if d, err := os.Open(filepath.Dir(name)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return nil
 }
 
