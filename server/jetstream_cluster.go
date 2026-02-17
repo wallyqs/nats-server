@@ -1484,7 +1484,7 @@ func (js *jetStream) monitorCluster() {
 
 	var (
 		isLeader       bool
-		lastSnapTime   time.Time
+		lastSnapNano   atomic.Int64 // UnixNano of last successful snapshot, accessed from async goroutine.
 		compactSizeMin = uint64(8 * 1024 * 1024) // 8MB
 		minSnapDelta   = 30 * time.Second
 	)
@@ -1573,7 +1573,7 @@ func (js *jetStream) monitorCluster() {
 			if err != nil {
 				s.Warnf("Error generating JetStream cluster snapshot: %v", err)
 			} else if csz, err := c.InstallSnapshot(snap); err == nil {
-				lastSnapTime = time.Now()
+				lastSnapNano.Store(time.Now().UnixNano())
 				failedSnapshots.Store(0)
 				// Fallback snapshot was successful, the next one can be async again.
 				fallbackSnapshot = false
@@ -1625,7 +1625,7 @@ func (js *jetStream) monitorCluster() {
 				abort(err)
 			} else {
 				// Successful snapshot.
-				lastSnapTime = time.Now()
+				lastSnapNano.Store(time.Now().UnixNano())
 				failedSnapshots.Store(0)
 				if took := time.Since(start); took > 2*time.Second {
 					s.rateLimitFormatWarnf("Metalayer async snapshot took %.3fs (streams: %d, consumers: %d, compacted: %s)",
@@ -1731,7 +1731,7 @@ func (js *jetStream) monitorCluster() {
 					}
 					if js.hasPeerEntries(ce.Entries) || (didSnap && !isLeader) {
 						doSnapshot(true)
-					} else if nb > compactSizeMin && time.Since(lastSnapTime) > minSnapDelta {
+					} else if nb > compactSizeMin && time.Duration(time.Now().UnixNano()-lastSnapNano.Load()) > minSnapDelta {
 						doSnapshot(false)
 					}
 					recovering = isRecovering
