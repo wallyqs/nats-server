@@ -2767,9 +2767,15 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 					msg := make([]byte, msgSize)
 					rand.New(rand.NewSource(12345)).Read(msg)
 
+					// Force GC and capture baseline heap.
+					runtime.GC()
+					var mBefore runtime.MemStats
+					runtime.ReadMemStats(&mBefore)
+
 					b.SetBytes(int64(msgSize))
 					b.ResetTimer()
 
+					var peakHeap uint64
 					for i := 0; i < b.N; i++ {
 						idx := i % numSubjects
 						fastRandomMutation(msg, 10)
@@ -2785,8 +2791,28 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 						if err := msgs[0].AckSync(); err != nil {
 							b.Fatalf("AckSync error on cons_%d: %v", idx+1, err)
 						}
+
+						// Sample heap periodically to find peak.
+						if i%10 == 0 {
+							var m runtime.MemStats
+							runtime.ReadMemStats(&m)
+							if m.HeapInuse > peakHeap {
+								peakHeap = m.HeapInuse
+							}
+						}
 					}
 					b.StopTimer()
+
+					// Final heap snapshot.
+					var mAfter runtime.MemStats
+					runtime.ReadMemStats(&mAfter)
+					if mAfter.HeapInuse > peakHeap {
+						peakHeap = mAfter.HeapInuse
+					}
+
+					b.ReportMetric(float64(mBefore.HeapInuse)/(1024*1024), "baseline-heap-MB")
+					b.ReportMetric(float64(peakHeap)/(1024*1024), "peak-heap-MB")
+					b.ReportMetric(float64(peakHeap-mBefore.HeapInuse)/(1024*1024), "heap-delta-MB")
 				})
 			}
 		})
