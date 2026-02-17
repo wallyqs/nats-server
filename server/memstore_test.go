@@ -1672,11 +1672,11 @@ func Benchmark_MemStoreLoadNextMsgFiltered(b *testing.B) {
 			b.ResetTimer()
 
 			var smv StoreMsg
-			var start uint64
-			var count uint64
 			expectedMatches := uint64(tc.msgs / tc.matchingMsgEvery)
 
 			for b.Loop() {
+				var start uint64
+				var count uint64
 				for {
 					_, start, err = ms.LoadNextMsg(tc.filter, tc.wc, start, &smv)
 					start++
