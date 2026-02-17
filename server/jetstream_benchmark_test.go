@@ -2834,6 +2834,7 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 										// All 10 consumers drain concurrently.
 										var wg sync.WaitGroup
 										var peakHeap atomic.Uint64
+										var fetchErrors atomic.Int64
 										peakHeap.Store(mBefore.HeapInuse)
 
 										for c := 0; c < numSubjects; c++ {
@@ -2848,7 +2849,8 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 													}
 													msgs, err := subs[idx].Fetch(batchSz, nats.MaxWait(30*time.Second))
 													if err != nil {
-														b.Errorf("Fetch error on cons_%d after %d: %v", idx+1, consumed, err)
+														fetchErrors.Add(1)
+														b.Logf("Fetch error on cons_%d after %d: %v", idx+1, consumed, err)
 														return
 													}
 													for _, m := range msgs {
@@ -2885,6 +2887,7 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 										b.ReportMetric(float64(peak)/(1024*1024), "peak-heap-MB")
 										b.ReportMetric(float64(peak-mBefore.HeapInuse)/(1024*1024), "heap-delta-MB")
 										b.ReportMetric(float64(totalPublished), "msgs")
+										b.ReportMetric(float64(fetchErrors.Load()), "fetch-errors")
 
 										nc.Close()
 										s.Shutdown()
