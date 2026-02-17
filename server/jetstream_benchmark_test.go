@@ -2828,13 +2828,13 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 										var mBefore runtime.MemStats
 										runtime.ReadMemStats(&mBefore)
 
-										b.SetBytes(int64(totalPublished) * int64(msgSize))
 										b.StartTimer()
 
 										// All 10 consumers drain concurrently.
 										var wg sync.WaitGroup
 										var peakHeap atomic.Uint64
 										var fetchErrors atomic.Int64
+										var totalConsumed atomic.Int64
 										peakHeap.Store(mBefore.HeapInuse)
 
 										for c := 0; c < numSubjects; c++ {
@@ -2856,6 +2856,7 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 													for _, m := range msgs {
 														m.Ack()
 														consumed++
+														totalConsumed.Add(1)
 													}
 													// Sample heap periodically.
 													if consumed%200 == 0 {
@@ -2875,6 +2876,10 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 
 										b.StopTimer()
 
+										// Set bytes based on actual consumption so MB/s reflects reality.
+										consumed := totalConsumed.Load()
+										b.SetBytes(consumed * int64(msgSize))
+
 										// Final heap snapshot.
 										var mAfter runtime.MemStats
 										runtime.ReadMemStats(&mAfter)
@@ -2886,7 +2891,8 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 										b.ReportMetric(float64(mBefore.HeapInuse)/(1024*1024), "baseline-heap-MB")
 										b.ReportMetric(float64(peak)/(1024*1024), "peak-heap-MB")
 										b.ReportMetric(float64(peak-mBefore.HeapInuse)/(1024*1024), "heap-delta-MB")
-										b.ReportMetric(float64(totalPublished), "msgs")
+										b.ReportMetric(float64(totalPublished), "published-msgs")
+										b.ReportMetric(float64(consumed), "consumed-msgs")
 										b.ReportMetric(float64(fetchErrors.Load()), "fetch-errors")
 
 										nc.Close()
