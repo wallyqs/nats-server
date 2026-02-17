@@ -330,15 +330,6 @@ type ClientInfo struct {
 	Nonce      string        `json:"nonce,omitempty"`
 }
 
-// forAssignmentSnap returns the minimum amount of ClientInfo we need for assignment snapshots.
-func (ci *ClientInfo) forAssignmentSnap() *ClientInfo {
-	return &ClientInfo{
-		Account: ci.Account,
-		Service: ci.Service,
-		Cluster: ci.Cluster,
-	}
-}
-
 // forProposal returns the minimum amount of ClientInfo we need for assignment proposals.
 func (ci *ClientInfo) forProposal() *ClientInfo {
 	if ci == nil {

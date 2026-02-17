@@ -2088,15 +2088,22 @@ func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAss
 			nca += len(sa.consumers)
 		}
 	}
-	// Pre-allocate a flat slice for all consumers to avoid per-consumer heap allocations.
+	// Pre-allocate flat slices for all consumers and ClientInfo structs
+	// to avoid per-element heap allocations (150K+ at scale).
 	allConsumers := make([]writeableConsumerAssignment, 0, nca)
+	allClients := make([]ClientInfo, 0, nsa+nca)
 	out := make([]writeableStreamAssignment, 0, nsa)
 	for _, asa := range streams {
 		for _, sa := range asa {
 			cStart := len(allConsumers)
 			for _, ca := range sa.consumers {
+				allClients = append(allClients, ClientInfo{
+					Account: ca.Client.Account,
+					Service: ca.Client.Service,
+					Cluster: ca.Client.Cluster,
+				})
 				allConsumers = append(allConsumers, writeableConsumerAssignment{
-					Client:     ca.Client.forAssignmentSnap(),
+					Client:     &allClients[len(allClients)-1],
 					Created:    ca.Created,
 					Name:       ca.Name,
 					Stream:     ca.Stream,
@@ -2110,8 +2117,13 @@ func (js *jetStream) encodeMetaSnapshot(streams map[string]map[string]*streamAss
 			for i := range consumers {
 				consumers[i] = &allConsumers[cStart+i]
 			}
+			allClients = append(allClients, ClientInfo{
+				Account: sa.Client.Account,
+				Service: sa.Client.Service,
+				Cluster: sa.Client.Cluster,
+			})
 			out = append(out, writeableStreamAssignment{
-				Client:     sa.Client.forAssignmentSnap(),
+				Client:     &allClients[len(allClients)-1],
 				Created:    sa.Created,
 				ConfigJSON: sa.ConfigJSON,
 				Group:      sa.Group,
