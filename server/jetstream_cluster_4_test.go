@@ -7531,3 +7531,149 @@ func TestJetStreamClusterMalformedAckParseErrors(t *testing.T) {
 	require_Equal(t, string(msgs[0].Data), "still working")
 	require_NoError(t, msgs[0].AckSync())
 }
+
+// TestJetStreamClusterCrossAccountAckParseErrors tests that JetStream ACKs
+// flowing through a cluster with cross-account stream imports do not cause
+// route parse errors. The ACK reply subject gets an '@deliver_subject' suffix
+// appended when remapping (see processMsgResults in client.go), and this test
+// verifies that the RMSG/HMSG protocol framing on routes remains intact.
+// Relates to: https://github.com/nats-io/nats-server/issues/7842
+func TestJetStreamClusterCrossAccountAckParseErrors(t *testing.T) {
+	tmpl := `
+		listen: 127.0.0.1:-1
+		server_name: %s
+		jetstream: {max_mem_store: 256MB, max_file_store: 2GB, store_dir: '%s'}
+		accounts {
+			SYS { users = [{user: sys, password: sys}] }
+			JS {
+				jetstream: enabled
+				users = [{user: js, password: js}]
+				exports [
+					{stream: ">"}
+					{service: "$JS.API.>"}
+				]
+			}
+			APP {
+				users = [{user: app, password: app}]
+				imports [
+					{stream: {subject: ">", account: JS}}
+					{service: {subject: "$JS.API.>", account: JS}}
+				]
+			}
+		}
+		system_account: SYS
+		cluster {
+			name: %s
+			listen: 127.0.0.1:%d
+			routes = [%s]
+		}
+	`
+	c := createJetStreamClusterWithTemplate(t, tmpl, "R3X", 3)
+	defer c.shutdown()
+
+	// Install loggers on all servers to capture parse errors.
+	loggers := make([]*DummyLogger, len(c.servers))
+	for i, s := range c.servers {
+		l := &DummyLogger{AllMsgs: make([]string, 0, 64)}
+		loggers[i] = l
+		s.SetLogger(l, false, false)
+	}
+
+	// Connect as the JS account user to create stream and consumers.
+	ncJS, err := nats.Connect(c.randomServer().ClientURL(), nats.UserInfo("js", "js"))
+	require_NoError(t, err)
+	defer ncJS.Close()
+	jsCtx, err := ncJS.JetStream(nats.MaxWait(10 * time.Second))
+	require_NoError(t, err)
+
+	// Create R3 stream with subjects that will be imported by APP account.
+	_, err = jsCtx.AddStream(&nats.StreamConfig{
+		Name:     "EVENTS",
+		Subjects: []string{"events.>"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	_, err = jsCtx.AddConsumer("EVENTS", &nats.ConsumerConfig{
+		Durable:       "PROCESSOR",
+		AckPolicy:     nats.AckExplicitPolicy,
+		FilterSubject: "events.>",
+	})
+	require_NoError(t, err)
+
+	// Publish messages from the JS account.
+	for i := 0; i < 20; i++ {
+		_, err = jsCtx.Publish(fmt.Sprintf("events.item.%d", i), []byte(fmt.Sprintf("payload-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Connect as the APP account user on a DIFFERENT server in the cluster.
+	// This ensures ACK messages must traverse routes (RMSG/HMSG).
+	appServer := c.servers[0]
+	jsServer := c.servers[len(c.servers)-1]
+	if appServer == jsServer {
+		appServer = c.servers[1]
+	}
+
+	ncApp, err := nats.Connect(appServer.ClientURL(), nats.UserInfo("app", "app"))
+	require_NoError(t, err)
+	defer ncApp.Close()
+
+	// Subscribe to ">" in the APP account. This creates a wildcard subscription
+	// that will receive messages forwarded from the JS account via the import.
+	// This triggers the '@' remapping on ACK reply subjects because the server
+	// must encode the delivery subject into the reply for cross-account routing.
+	appSub, err := ncApp.Subscribe(">", func(msg *nats.Msg) {})
+	require_NoError(t, err)
+	defer appSub.Unsubscribe()
+	require_NoError(t, ncApp.Flush())
+
+	// Now consume and ACK messages from the JS account consumer.
+	// Each ACK will flow through the cluster with potentially remapped reply
+	// subjects containing the '@' separator.
+	sub, err := jsCtx.PullSubscribe("events.>", "PROCESSOR")
+	require_NoError(t, err)
+
+	// Fetch and ACK in batches to exercise the protocol under load.
+	totalAcked := 0
+	for totalAcked < 20 {
+		msgs, err := sub.Fetch(5, nats.MaxWait(5*time.Second))
+		require_NoError(t, err)
+		for _, m := range msgs {
+			require_NoError(t, m.AckSync())
+			totalAcked++
+		}
+	}
+
+	// Publish and consume more messages to ensure the cluster is still healthy.
+	for i := 0; i < 10; i++ {
+		_, err = jsCtx.Publish(fmt.Sprintf("events.second.%d", i), []byte("second-batch"))
+		require_NoError(t, err)
+	}
+
+	msgs2, err := sub.Fetch(10, nats.MaxWait(5*time.Second))
+	require_NoError(t, err)
+	require_True(t, len(msgs2) == 10)
+	for _, m := range msgs2 {
+		require_NoError(t, m.AckSync())
+	}
+
+	// Verify the cluster is still fully formed.
+	c.checkClusterFormed()
+
+	// Verify stream info is consistent.
+	si, err := jsCtx.StreamInfo("EVENTS")
+	require_NoError(t, err)
+	require_True(t, si.State.Msgs == 30)
+
+	// Check that no parse errors were logged on any server.
+	for i, l := range loggers {
+		l.Lock()
+		for _, msg := range l.AllMsgs {
+			if strings.Contains(msg, "Parse Error") {
+				t.Errorf("server %d logged parse error: %s", i, msg)
+			}
+		}
+		l.Unlock()
+	}
+}
