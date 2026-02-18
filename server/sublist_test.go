@@ -2389,3 +2389,129 @@ func Benchmark___________________subjectIsLiteral(b *testing.B) {
 		subjectIsLiteral("foo.bar.baz.22")
 	}
 }
+
+// tokenizeOld is the previous byte-by-byte tokenization for benchmarking comparison.
+func tokenizeOld(tts []string, subject string) []string {
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tts = append(tts, subject[start:i])
+			start = i + 1
+		}
+	}
+	tts = append(tts, subject[start:])
+	return tts
+}
+
+func benchTokenize(b *testing.B, subject string, fn func([]string, string) []string) {
+	b.Helper()
+	tsa := [32]string{}
+	for i := 0; i < b.N; i++ {
+		fn(tsa[:0], subject)
+	}
+}
+
+func Benchmark________TokenizeOld_SingleToken(b *testing.B) {
+	benchTokenize(b, "foo", tokenizeOld)
+}
+
+func Benchmark________TokenizeNew_SingleToken(b *testing.B) {
+	benchTokenize(b, "foo", tokenizeSubjectIntoSlice)
+}
+
+func Benchmark_________TokenizeOld_TwoTokens(b *testing.B) {
+	benchTokenize(b, "foo.bar", tokenizeOld)
+}
+
+func Benchmark_________TokenizeNew_TwoTokens(b *testing.B) {
+	benchTokenize(b, "foo.bar", tokenizeSubjectIntoSlice)
+}
+
+func Benchmark________TokenizeOld_FourTokens(b *testing.B) {
+	benchTokenize(b, "foo.bar.baz.quux", tokenizeOld)
+}
+
+func Benchmark________TokenizeNew_FourTokens(b *testing.B) {
+	benchTokenize(b, "foo.bar.baz.quux", tokenizeSubjectIntoSlice)
+}
+
+func Benchmark_____TokenizeOld_FiveTokensLong(b *testing.B) {
+	benchTokenize(b, "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token", tokenizeOld)
+}
+
+func Benchmark_____TokenizeNew_FiveTokensLong(b *testing.B) {
+	benchTokenize(b, "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token", tokenizeSubjectIntoSlice)
+}
+
+func Benchmark__TokenizeOld_ThreeTokensTypical(b *testing.B) {
+	benchTokenize(b, "events.user.created", tokenizeOld)
+}
+
+func Benchmark__TokenizeNew_ThreeTokensTypical(b *testing.B) {
+	benchTokenize(b, "events.user.created", tokenizeSubjectIntoSlice)
+}
+
+func Benchmark_TokenizeOld_FourTokensSysPrefix(b *testing.B) {
+	benchTokenize(b, "$SYS.REQ.SERVER.PING", tokenizeOld)
+}
+
+func Benchmark_TokenizeNew_FourTokensSysPrefix(b *testing.B) {
+	benchTokenize(b, "$SYS.REQ.SERVER.PING", tokenizeSubjectIntoSlice)
+}
+
+// tokenizeWithThreshold is a parameterized hybrid for threshold sweep benchmarking.
+// threshold=0 means always use strings.IndexByte; threshold=256 means always use byte-by-byte.
+func tokenizeWithThreshold(tts []string, subject string, threshold int) []string {
+	if len(subject) < threshold {
+		start := 0
+		for i := 0; i < len(subject); i++ {
+			if subject[i] == btsep {
+				tts = append(tts, subject[start:i])
+				start = i + 1
+			}
+		}
+		tts = append(tts, subject[start:])
+		return tts
+	}
+	for {
+		if idx := strings.IndexByte(subject, btsep); idx >= 0 {
+			tts = append(tts, subject[:idx])
+			subject = subject[idx+1:]
+		} else {
+			tts = append(tts, subject)
+			break
+		}
+	}
+	return tts
+}
+
+func BenchmarkTokenizeThresholdSweep(b *testing.B) {
+	subjects := []struct {
+		name    string
+		subject string
+	}{
+		{"03_foo", "foo"},
+		{"07_foo.bar", "foo.bar"},
+		{"11_foo.bar.baz", "foo.bar.baz"},
+		{"16_foo.bar.baz.quux", "foo.bar.baz.quux"},
+		{"20_events.user.created", "events.user.created"},
+		{"21_SYS.REQ.SERVER.PING", "$SYS.REQ.SERVER.PING"},
+		{"30_medium.length.subject.here", "a-medium.length.subject.here.x"},
+		{"85_long", "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token"},
+	}
+	thresholds := []int{0, 8, 12, 16, 20, 24, 32, 256}
+
+	for _, subj := range subjects {
+		for _, thresh := range thresholds {
+			name := fmt.Sprintf("len%s/thresh%03d", subj.name, thresh)
+			s := subj.subject
+			t := thresh
+			b.Run(name, func(b *testing.B) {
+				tsa := [32]string{}
+				for i := 0; i < b.N; i++ {
+					tokenizeWithThreshold(tsa[:0], s, t)
+				}
+			})
+		}
+	}
+}
