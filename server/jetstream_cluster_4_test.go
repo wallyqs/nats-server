@@ -7398,9 +7398,21 @@ func TestJetStreamClusterMalformedAckParseErrors(t *testing.T) {
 	})
 	require_NoError(t, err)
 
-	// Publish messages.
+	// Publish messages, some with large payloads and long Nats-Msg-Id headers.
 	for i := 0; i < 30; i++ {
-		_, err = js.Publish(fmt.Sprintf("events.%d", i), []byte(fmt.Sprintf("msg-%d", i)))
+		msg := nats.NewMsg(fmt.Sprintf("events.%d", i))
+		if i%3 == 0 {
+			// Every 3rd message: large payload (32KB+) with a long Nats-Msg-Id.
+			msg.Data = []byte(strings.Repeat("X", 32*1024+i))
+			msg.Header.Set("Nats-Msg-Id", fmt.Sprintf("msg-id-%s-%d", strings.Repeat("abcdefghij", 20), i))
+		} else if i%3 == 1 {
+			// Every other 3rd: 64KB payload with long Nats-Msg-Id.
+			msg.Data = []byte(strings.Repeat("Y", 64*1024+i))
+			msg.Header.Set("Nats-Msg-Id", fmt.Sprintf("long-dedup-id-%s-%d", strings.Repeat("0123456789", 25), i))
+		} else {
+			msg.Data = []byte(fmt.Sprintf("msg-%d", i))
+		}
+		_, err = js.PublishMsg(msg)
 		require_NoError(t, err)
 	}
 
@@ -7445,7 +7457,11 @@ func TestJetStreamClusterMalformedAckParseErrors(t *testing.T) {
 			// Every other message in the batch: send a malformed ACK first,
 			// then send the real ACK.
 			if i%2 == 0 && m.Reply != "" {
-				switch batch % 6 {
+				bigPayload := strings.Repeat("A", 32*1024+batch)
+				longId := fmt.Sprintf("dedup-%s-%d", strings.Repeat("x", 200), batch)
+				hdrBlock := fmt.Sprintf("NATS/1.0\r\nNats-Msg-Id: %s\r\n\r\n", longId)
+
+				switch batch % 9 {
 				case 0:
 					// Simulate corruption: PUB with ACK subject but no size field.
 					// This is what "processPub Parse Error: "$JS.ACK.XXXX"" looks like.
@@ -7465,6 +7481,16 @@ func TestJetStreamClusterMalformedAckParseErrors(t *testing.T) {
 				case 5:
 					// PUB with only the prefix, as if the rest was in a lost packet.
 					sendRaw("PUB $JS.ACK\r\n")
+				case 6:
+					// Large 32KB+ payload ACK with no size (corruption).
+					sendRaw(fmt.Sprintf("PUB %s\r\n%s\r\n", m.Reply, bigPayload))
+				case 7:
+					// HPUB with long Nats-Msg-Id header, correct framing.
+					total := len(hdrBlock) + len(bigPayload)
+					sendRaw(fmt.Sprintf("HPUB %s %d %d\r\n%s%s\r\n", m.Reply, len(hdrBlock), total, hdrBlock, bigPayload))
+				case 8:
+					// HPUB with long Nats-Msg-Id header but missing total size (corruption).
+					sendRaw(fmt.Sprintf("HPUB %s %d\r\n", m.Reply, len(hdrBlock)))
 				}
 			}
 
@@ -7477,6 +7503,10 @@ func TestJetStreamClusterMalformedAckParseErrors(t *testing.T) {
 
 	// Also send some malformed ACKs with valid-looking subjects but
 	// corrupted framing, simulating what the route parser would see.
+	longMsgId := strings.Repeat("abcdefghij", 20)
+	largePayload := strings.Repeat("Z", 32*1024)
+	hdr := fmt.Sprintf("NATS/1.0\r\nNats-Msg-Id: %s\r\n\r\n", longMsgId)
+
 	malformedProtos := []string{
 		// Subject with no size - triggers "processPub Parse Error"
 		"PUB $JS.ACK.TEST.CONSUMER.1.1.1.1683849600000000000.0\r\n",
@@ -7492,6 +7522,18 @@ func TestJetStreamClusterMalformedAckParseErrors(t *testing.T) {
 		"HPUB $JS.ACK.TEST.CONSUMER.1.1.1.1683849600000000000.0 999 5\r\nhello\r\n",
 		// Empty PUB
 		"PUB \r\n",
+		// Large payload (32KB+) ACK with correct framing
+		fmt.Sprintf("PUB $JS.ACK.TEST.CONSUMER.1.1.1.1683849600000000000.0 %d\r\n%s\r\n", len(largePayload), largePayload),
+		// Large payload ACK with no size (corruption: size field lost)
+		"PUB $JS.ACK.TEST.CONSUMER.1.1.1.1683849600000000000.0\r\n" + largePayload + "\r\n",
+		// HPUB with long Nats-Msg-Id header but missing total size
+		fmt.Sprintf("HPUB $JS.ACK.TEST.CONSUMER.1.1.1.1683849600000000000.0 %d\r\n", len(hdr)),
+		// HPUB with long header, correct header size but wrong total size
+		fmt.Sprintf("HPUB $JS.ACK.TEST.CONSUMER.1.1.1.1683849600000000000.0 %d 5\r\n%shello\r\n", len(hdr), hdr),
+		// HPUB with long header and large payload, sizes correct
+		fmt.Sprintf("HPUB $JS.ACK.TEST.CONSUMER.1.1.1.1683849600000000000.0 %d %d\r\n%s%s\r\n", len(hdr), len(hdr)+len(largePayload), hdr, largePayload),
+		// HPUB with long header and large payload, but header size is 0
+		fmt.Sprintf("HPUB $JS.ACK.TEST.CONSUMER.1.1.1.1683849600000000000.0 0 %d\r\n%s%s\r\n", len(hdr)+len(largePayload), hdr, largePayload),
 	}
 	for _, proto := range malformedProtos {
 		sendRaw(proto)
@@ -7603,9 +7645,22 @@ func TestJetStreamClusterCrossAccountAckParseErrors(t *testing.T) {
 	})
 	require_NoError(t, err)
 
-	// Publish messages from the JS account.
+	// Publish messages from the JS account, some with large payloads and
+	// long Nats-Msg-Id headers to exercise larger RMSG/HMSG frames on routes.
 	for i := 0; i < 20; i++ {
-		_, err = jsCtx.Publish(fmt.Sprintf("events.item.%d", i), []byte(fmt.Sprintf("payload-%d", i)))
+		msg := nats.NewMsg(fmt.Sprintf("events.item.%d", i))
+		if i%4 == 0 {
+			// 32KB+ payload with long dedup header.
+			msg.Data = []byte(strings.Repeat("P", 32*1024+i))
+			msg.Header.Set("Nats-Msg-Id", fmt.Sprintf("cross-acct-%s-%d", strings.Repeat("id", 100), i))
+		} else if i%4 == 2 {
+			// 64KB payload.
+			msg.Data = []byte(strings.Repeat("Q", 64*1024+i))
+			msg.Header.Set("Nats-Msg-Id", fmt.Sprintf("big-msg-%s-%d", strings.Repeat("z", 200), i))
+		} else {
+			msg.Data = []byte(fmt.Sprintf("payload-%d", i))
+		}
+		_, err = jsCtx.PublishMsg(msg)
 		require_NoError(t, err)
 	}
 
