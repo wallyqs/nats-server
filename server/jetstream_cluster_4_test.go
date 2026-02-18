@@ -7791,3 +7791,198 @@ func TestJetStreamClusterConsumerDeliveryPoolReuseCorruption(t *testing.T) {
 		require_NoError(t, m.Ack())
 	}
 }
+
+// captureParseErrorLogger is a logger that captures route protocol parse errors.
+// Used by TestJetStreamClusterRouteDesyncDetection to detect route desync.
+type captureParseErrorLogger struct {
+	DummyLogger
+	errors atomic.Int64
+	mu     sync.Mutex
+	msgs   []string
+}
+
+func (l *captureParseErrorLogger) Errorf(format string, v ...any) {
+	msg := fmt.Sprintf(format, v...)
+	if strings.Contains(msg, "Parse Error") || strings.Contains(msg, "parser ERROR") {
+		l.mu.Lock()
+		l.errors.Add(1)
+		l.msgs = append(l.msgs, msg)
+		l.mu.Unlock()
+	}
+	l.DummyLogger.Errorf(format, v...)
+}
+
+// TestJetStreamClusterRouteDesyncDetection is a stress test for issue #7842.
+// It exercises the JetStream message paths through routes at high throughput
+// while monitoring for route protocol parse errors (the exact symptom reported).
+//
+// The test publishes from non-leader servers forcing all messages through routes,
+// uses concurrent publishers, direct-get, and consumer delivery to exercise
+// multiple code paths where jsPubMsg is used. All servers have a custom logger
+// that captures any "Parse Error" log lines, which indicate route protocol desync.
+//
+// NOTE: This test may not reliably reproduce the race condition since it depends
+// on specific goroutine scheduling. However, it validates that under load, no
+// route protocol desync occurs with the current (fixed) code.
+func TestJetStreamClusterRouteDesyncDetection(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	// Install error loggers that capture route parse errors on all servers.
+	// Use captureParseErrorLogger to detect route parse errors.
+	loggers := make([]*captureParseErrorLogger, len(c.servers))
+	for i, s := range c.servers {
+		l := &captureParseErrorLogger{}
+		loggers[i] = l
+		s.SetLogger(l, false, false)
+	}
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Create stream with R3 for full route exercise.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "ROUTETEST",
+		Subjects: []string{"rt.>"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Create a push consumer with deliver subject.
+	_, err = js.AddConsumer("ROUTETEST", &nats.ConsumerConfig{
+		Durable:        "routeconsumer",
+		AckPolicy:      nats.AckExplicitPolicy,
+		DeliverSubject: nats.NewInbox(),
+	})
+	require_NoError(t, err)
+
+	leader := c.streamLeader(globalAccountName, "ROUTETEST")
+
+	// Get two non-leader servers to publish from (forces route delivery).
+	var pubServers []*Server
+	for _, s := range c.servers {
+		if s != leader {
+			pubServers = append(pubServers, s)
+		}
+	}
+	require_True(t, len(pubServers) >= 2)
+
+	numMsgs := 500
+	numPublishers := 4
+	var published sync.WaitGroup
+	var pubCount atomic.Int64
+
+	// Concurrent publishers from non-leader servers.
+	for p := 0; p < numPublishers; p++ {
+		published.Add(1)
+		go func(pid int) {
+			defer published.Done()
+			// Alternate between non-leader servers.
+			srv := pubServers[pid%len(pubServers)]
+			pnc, pjs := jsClientConnect(t, srv)
+			defer pnc.Close()
+
+			for i := pid; i < numMsgs; i += numPublishers {
+				subj := fmt.Sprintf("rt.p%d.%d", pid, i)
+				body := fmt.Sprintf("pub-%04d-iter-%04d-%s", pid, i, strings.Repeat("P", 128+i%256))
+
+				m := nats.NewMsg(subj)
+				m.Header.Set("Nats-Msg-Id", fmt.Sprintf("msg-%d-%d-%s", pid, i, nuid.Next()))
+				m.Header.Set("X-Publisher", strconv.Itoa(pid))
+				m.Data = []byte(body)
+
+				if _, err := pjs.PublishMsg(m); err != nil {
+					// Don't fail from goroutine, just count.
+					continue
+				}
+				pubCount.Add(1)
+			}
+		}(p)
+	}
+	published.Wait()
+
+	totalPub := int(pubCount.Load())
+	if totalPub == 0 {
+		t.Fatal("No messages were published")
+	}
+
+	// Wait for all messages to be stored.
+	checkFor(t, 10*time.Second, 200*time.Millisecond, func() error {
+		si, err := js.StreamInfo("ROUTETEST")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(totalPub) {
+			return fmt.Errorf("expected %d messages, got %d", totalPub, si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Subscribe and consume all messages, verifying integrity.
+	sub, err := js.SubscribeSync("rt.>", nats.Bind("ROUTETEST", "routeconsumer"))
+	require_NoError(t, err)
+
+	var consumeErrors int
+	for i := 0; i < totalPub; i++ {
+		m, err := sub.NextMsg(10 * time.Second)
+		if err != nil {
+			consumeErrors++
+			if consumeErrors > 3 {
+				t.Fatalf("Too many consume errors (at msg %d): %v", i, err)
+			}
+			continue
+		}
+
+		got := string(m.Data)
+
+		// Check for protocol metadata contamination (indicates desync corruption).
+		if strings.Contains(got, "RMSG ") || strings.Contains(got, "HMSG ") {
+			t.Fatalf("Message %d body contains route protocol metadata (DESYNC!):\n  got: %.200q", i, got)
+		}
+
+		if !strings.HasPrefix(got, "pub-") {
+			t.Fatalf("Message %d body corrupted (missing prefix):\n  got: %.200q", i, got)
+		}
+
+		m.Ack()
+	}
+
+	// Also exercise direct-get path with batch requests.
+	ncDirect, _ := jsClientConnect(t, leader)
+	defer ncDirect.Close()
+
+	inbox := nats.NewInbox()
+	directSub, err := ncDirect.SubscribeSync(inbox)
+	require_NoError(t, err)
+
+	// Request a batch of messages via direct-get.
+	req := fmt.Sprintf(`{"batch": 50, "seq": 1}`)
+	err = ncDirect.PublishRequest("$JS.API.DIRECT.GET.ROUTETEST", inbox, []byte(req))
+	require_NoError(t, err)
+	ncDirect.Flush()
+
+	// Drain direct-get responses.
+	for {
+		m, err := directSub.NextMsg(2 * time.Second)
+		if err != nil {
+			break
+		}
+		got := string(m.Data)
+		if strings.Contains(got, "RMSG ") || strings.Contains(got, "HMSG ") {
+			t.Fatalf("Direct-get response contains route protocol metadata (DESYNC!):\n  got: %.200q", got)
+		}
+	}
+
+	// Check all server loggers for parse errors - the key symptom of #7842.
+	for i, l := range loggers {
+		l.mu.Lock()
+		errs := l.errors.Load()
+		msgs := append([]string{}, l.msgs...)
+		l.mu.Unlock()
+
+		if errs > 0 {
+			t.Fatalf("Server %d logged %d route parse errors (ROUTE DESYNC DETECTED):\n  %s",
+				i, errs, strings.Join(msgs, "\n  "))
+		}
+	}
+}
