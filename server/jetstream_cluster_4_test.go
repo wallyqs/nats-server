@@ -7807,22 +7807,75 @@ func TestJetStreamClusterCrossAccountAckParseErrors(t *testing.T) {
 		appServer = c.servers[1]
 	}
 
-	ncApp, err := nats.Connect(appServer.ClientURL(), nats.UserInfo("app", "app"))
-	require_NoError(t, err)
-	defer ncApp.Close()
+	// Connect APP account users on multiple different servers to maximize
+	// the number of route hops ACK reply subjects must traverse.
+	var appConns []*nats.Conn
+	for _, s := range c.servers {
+		nc, err := nats.Connect(s.ClientURL(), nats.UserInfo("app", "app"))
+		require_NoError(t, err)
+		defer nc.Close()
+		appConns = append(appConns, nc)
+	}
 
-	// Subscribe to ">" in the APP account. This creates a wildcard subscription
-	// that will receive messages forwarded from the JS account via the import.
-	// This triggers the '@' remapping on ACK reply subjects because the server
-	// must encode the delivery subject into the reply for cross-account routing.
-	appSub, err := ncApp.Subscribe(">", func(msg *nats.Msg) {})
-	require_NoError(t, err)
-	defer appSub.Unsubscribe()
-	require_NoError(t, ncApp.Flush())
+	// Create a variety of subscriptions across all APP connections.
+	// Each subscription pattern causes different reply subject remapping
+	// via the '@' separator on routes, exercising more RMSG/HMSG framing paths.
+	noop := func(msg *nats.Msg) {}
+	var appSubs []*nats.Subscription
+
+	for i, nc := range appConns {
+		// Wildcard catch-all on each server.
+		sub, err := nc.Subscribe(">", noop)
+		require_NoError(t, err)
+		appSubs = append(appSubs, sub)
+
+		// Specific event subject subscriptions.
+		sub, err = nc.Subscribe("events.>", noop)
+		require_NoError(t, err)
+		appSubs = append(appSubs, sub)
+
+		sub, err = nc.Subscribe(fmt.Sprintf("events.item.%d", i), noop)
+		require_NoError(t, err)
+		appSubs = append(appSubs, sub)
+
+		// Queue group subscriptions - these generate different routing.
+		sub, err = nc.QueueSubscribe("events.>", "workers", noop)
+		require_NoError(t, err)
+		appSubs = append(appSubs, sub)
+
+		sub, err = nc.QueueSubscribe(">", fmt.Sprintf("group-%d", i), noop)
+		require_NoError(t, err)
+		appSubs = append(appSubs, sub)
+
+		// Token wildcard to match specific levels.
+		sub, err = nc.Subscribe("events.*."+strconv.Itoa(i), noop)
+		require_NoError(t, err)
+		appSubs = append(appSubs, sub)
+
+		require_NoError(t, nc.Flush())
+	}
+	defer func() {
+		for _, sub := range appSubs {
+			sub.Unsubscribe()
+		}
+	}()
+
+	// Also connect JS account users on different servers with subscriptions
+	// to $JS.ACK.> so ACK traffic has listeners on multiple routes.
+	for _, s := range c.servers {
+		nc, err := nats.Connect(s.ClientURL(), nats.UserInfo("js", "js"))
+		require_NoError(t, err)
+		defer nc.Close()
+		sub, err := nc.Subscribe("$JS.ACK.>", noop)
+		require_NoError(t, err)
+		defer sub.Unsubscribe()
+		require_NoError(t, nc.Flush())
+	}
 
 	// Now consume and ACK messages from the JS account consumer.
 	// Each ACK will flow through the cluster with potentially remapped reply
-	// subjects containing the '@' separator.
+	// subjects containing the '@' separator, fanned out to all the
+	// subscriptions above across multiple routes.
 	sub, err := jsCtx.PullSubscribe("events.>", "PROCESSOR")
 	require_NoError(t, err)
 
@@ -7838,14 +7891,16 @@ func TestJetStreamClusterCrossAccountAckParseErrors(t *testing.T) {
 	}
 
 	// Publish and consume more messages to ensure the cluster is still healthy.
-	for i := 0; i < 10; i++ {
-		_, err = jsCtx.Publish(fmt.Sprintf("events.second.%d", i), []byte("second-batch"))
+	// Use multiple subjects to hit the various specific subscriptions.
+	for i := 0; i < 15; i++ {
+		subj := fmt.Sprintf("events.second.%d", i%len(c.servers))
+		_, err = jsCtx.Publish(subj, []byte(strings.Repeat("R", 1024)))
 		require_NoError(t, err)
 	}
 
-	msgs2, err := sub.Fetch(10, nats.MaxWait(5*time.Second))
+	msgs2, err := sub.Fetch(15, nats.MaxWait(5*time.Second))
 	require_NoError(t, err)
-	require_True(t, len(msgs2) == 10)
+	require_True(t, len(msgs2) == 15)
 	for _, m := range msgs2 {
 		require_NoError(t, m.AckSync())
 	}
@@ -7856,7 +7911,7 @@ func TestJetStreamClusterCrossAccountAckParseErrors(t *testing.T) {
 	// Verify stream info is consistent.
 	si, err := jsCtx.StreamInfo("EVENTS")
 	require_NoError(t, err)
-	require_True(t, si.State.Msgs == 30)
+	require_True(t, si.State.Msgs == 35)
 
 	// Check that no parse errors were logged on any server.
 	for i, l := range loggers {
