@@ -5241,10 +5241,7 @@ func (mset *stream) getDirectMulti(req *JSApiMsgGetRequest, reply string) {
 		// Track our lseq
 		lseq = sm.seq
 		// Send out our message.
-		// Copy sm.msg since it references the store's internal buffer which
-		// can be reused after we return. The outq is consumed asynchronously
-		// by internalLoop, so the data must outlive this function.
-		mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, copyBytes(sm.msg), nil, 0))
+		mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, sm.msg, nil, 0))
 		// Check if we have exceeded max bytes.
 		sentBytes += len(sm.subj) + len(sm.hdr) + len(sm.msg)
 		if sentBytes >= mb {
@@ -5378,10 +5375,7 @@ func (mset *stream) getDirectRequest(req *JSApiMsgGetRequest, reply string) {
 		// Track our lseq
 		lseq = sm.seq
 		// Send out our message.
-		// Copy sm.msg since it references the store's internal buffer which
-		// can be reused after we return. The outq is consumed asynchronously
-		// by internalLoop, so the data must outlive this function.
-		mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, copyBytes(sm.msg), nil, 0))
+		mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, sm.msg, nil, 0))
 		// Check if we have exceeded max bytes.
 		sentBytes += len(sm.subj) + len(sm.hdr) + len(sm.msg)
 		if sentBytes >= mb {
