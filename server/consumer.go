@@ -485,6 +485,11 @@ type consumer struct {
 	lwqic             time.Time
 	closed            bool
 
+	// Tracks sublist generation id from last processWaiting pass where all
+	// waiting requests had interest. Allows skipping redundant interest checks.
+	pwGenID uint64
+	pwAllOk bool
+
 	// Clustered.
 	ca        *consumerAssignment
 	node      RaftNode
@@ -4666,6 +4671,28 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 		return next
 	}
 
+	// Generation-based short-circuit: if the sublist hasn't changed since
+	// our last pass where all waiting requests had interest, we can skip
+	// the expensive interest-check loop entirely and just handle
+	// expirations and heartbeats.
+	var skipInterestCheck bool
+	if o.pwAllOk && o.acc != nil && o.acc.sl != nil {
+		curGen := atomic.LoadUint64(&o.acc.sl.genid)
+		skipInterestCheck = curGen == o.pwGenID
+	}
+
+	// Local dedup cache for interest checks within this pass.
+	// Keyed by interest subject — avoids calling HasInterest multiple times
+	// for the same subject (common with pull consumers).
+	type interestKey struct {
+		sl       *Sublist
+		interest string
+	}
+	var interestCache map[interestKey]bool
+
+	allHaveInterest := true
+	hasCrossAccount := false
+
 	var pre *waitingRequest
 	for wr := wq.head; wr != nil; {
 		// Check expiration.
@@ -4700,19 +4727,47 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 				continue
 			}
 		}
-		// Now check interest.
-		interest := wr.acc.sl.HasInterest(wr.interest)
-		if !interest && (s.leafNodeEnabled || s.gateway.enabled) {
-			// If we are here check on gateways and leaf nodes (as they can mask gateways on the other end).
-			// If we have interest or the request is too young break and do not expire.
-			if time.Since(wr.received) < defaultGatewayRecentSubExpiration {
-				interest = true
-			} else if s.gateway.enabled && s.hasGatewayInterest(wr.acc.Name, wr.interest) {
-				interest = true
+
+		// Now check interest, unless we can skip via generation shortcut.
+		// The generation shortcut only applies to the consumer's own account
+		// sublist. Cross-account requests (via exports) still go through the
+		// normal dedup path.
+		var interest bool
+		if skipInterestCheck && wr.acc.sl == o.acc.sl {
+			interest = true
+		} else {
+			if wr.acc.sl != o.acc.sl {
+				hasCrossAccount = true
+			}
+			// Deduplicate HasInterest calls for the same (sublist, subject) pair.
+			// We only cache the sublist result, not gateway/leaf fallbacks which
+			// depend on per-request timing (wr.received).
+			key := interestKey{wr.acc.sl, wr.interest}
+			var ok bool
+			if interestCache != nil {
+				interest, ok = interestCache[key]
+			}
+			if !ok {
+				interest = wr.acc.sl.HasInterest(wr.interest)
+				if interestCache == nil {
+					interestCache = make(map[interestKey]bool)
+				}
+				interestCache[key] = interest
+			}
+			if !interest && (s.leafNodeEnabled || s.gateway.enabled) {
+				// If we are here check on gateways and leaf nodes (as they can mask gateways on the other end).
+				// If we have interest or the request is too young break and do not expire.
+				if time.Since(wr.received) < defaultGatewayRecentSubExpiration {
+					interest = true
+				} else if s.gateway.enabled && s.hasGatewayInterest(wr.acc.Name, wr.interest) {
+					interest = true
+				}
 			}
 		}
+
 		// Check if we have interest.
 		if !interest {
+			allHaveInterest = false
 			// No more interest here so go ahead and remove this one from our list.
 			wr = remove(pre, wr)
 			continue
@@ -4737,6 +4792,17 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 		// Update pre and wr here.
 		pre = wr
 		wr = wr.next
+	}
+
+	// Update the generation-based cache for next call.
+	// Only cache the "all ok" result when all requests used the consumer's own
+	// account sublist (no cross-account exports). When any request loses interest
+	// or cross-account requests are present, we must re-check on subsequent calls.
+	if allHaveInterest && !skipInterestCheck && !hasCrossAccount && o.acc != nil && o.acc.sl != nil {
+		o.pwGenID = atomic.LoadUint64(&o.acc.sl.genid)
+		o.pwAllOk = true
+	} else if !allHaveInterest || hasCrossAccount {
+		o.pwAllOk = false
 	}
 
 	return expired, wq.len(), brp, fexp
