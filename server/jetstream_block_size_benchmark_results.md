@@ -19,10 +19,11 @@ The benchmark generates a flat cross-product of the following parameters
 
 ## Results So Far
 
-The results below cover a focused slice of the matrix:
-**MsgSz=64KB, MaxBytes=2GB, Consumers={10,40}**.
+Results below cover **MsgSz=64KB** across two MaxBytes tiers.
 
-### 10 Consumers / 10 Subjects
+### MaxBytes=2GB, Consumers={10,40}
+
+#### 10 Consumers / 10 Subjects
 
 #### 25% Fill (512MB pre-loaded)
 
@@ -44,7 +45,7 @@ The results below cover a focused slice of the matrix:
 
 ---
 
-### 40 Consumers / 40 Subjects
+#### 40 Consumers / 40 Subjects
 
 #### 25% Fill (512MB pre-loaded)
 
@@ -66,18 +67,46 @@ The results below cover a focused slice of the matrix:
 
 ---
 
-## Analysis (64KB Messages, 2GB MaxBytes)
+### MaxBytes=8GB, Consumers=40
+
+#### 75% Fill (6GB pre-loaded)
+
+| BlkSz | MB/s   | Consumed Msgs | Fetch Errors | Heap Delta (MB) | Peak Heap (MB) | Allocs |
+|-------|--------|---------------|--------------|-----------------|----------------|--------|
+| 4MB   | **181.82** | **81,388** | 200         | **1,692**       | **2,007**      | 3,466K |
+| 8MB   | 178.21 | 81,354        | 200          | 1,856           | 2,172          | 4,492K |
+
+---
+
+## Analysis
+
+### Effect of MaxBytes on Throughput
+
+Scaling from 2GB to 8GB MaxBytes dramatically increases throughput:
+- **2GB / 40c / 75%:** 4MB = 52 MB/s, 8MB = 52 MB/s
+- **8GB / 40c / 75%:** 4MB = 182 MB/s, 8MB = 178 MB/s (~3.5x improvement)
+
+This suggests the 2GB results were constrained by stream capacity (fewer total blocks to read from), not block I/O itself. At 8GB the larger working set exposes the true sequential read throughput of the storage layer.
 
 ### Throughput (MB/s)
+
+### Throughput — 2GB MaxBytes
 
 - **2MB, 4MB, and 8MB** are closely grouped at 17-20 MB/s (25% fill) and 49-52 MB/s (75% fill).
 - **16MB is consistently the slowest**, losing ~45% throughput at low fill and ~15% at high fill.
 - Throughput is **stable across concurrency levels** — going from 10 to 40 consumers barely changes MB/s, indicating the bottleneck is storage I/O rather than consumer contention.
 - At 75% fill with 40 consumers, **4MB posted the highest throughput** (52.06 MB/s).
 
+### Throughput — 8GB MaxBytes
+
+- At 8GB with 40 consumers and 75% fill, **4MB leads** at 181.82 MB/s vs 178.21 MB/s for 8MB (2% faster).
+- Both block sizes consumed virtually identical message counts (~81K), showing the throughput gap comes from per-message overhead, not stalls.
+
 ### Memory (Heap Delta)
 
 This is where block sizes diverge most significantly.
+
+**2GB MaxBytes:**
 
 | BlkSz | 10c / 25% | 40c / 25% | Scaling | 10c / 75% | 40c / 75% | Scaling |
 |-------|-----------|-----------|---------|-----------|-----------|---------|
@@ -86,8 +115,16 @@ This is where block sizes diverge most significantly.
 | 8MB   | 359 MB    | 820 MB    | 2.3x    | 589 MB    | 1,094 MB  | 1.9x    |
 | 16MB  | 378 MB    | 987 MB    | 2.6x    | 503 MB    | 1,075 MB  | 2.1x    |
 
-- **4MB has the lowest heap delta** in every single test configuration.
-- At 25% fill, 4MB is the **only block size where memory stays flat** as concurrency increases (322 MB → 307 MB), likely because the block count hits a sweet spot that avoids excessive mmap overhead.
+**8GB MaxBytes (40 consumers, 75% fill):**
+
+| BlkSz | Heap Delta (MB) | Peak Heap (MB) | Allocs |
+|-------|-----------------|----------------|--------|
+| 4MB   | **1,692**       | **2,007**      | 3,466K |
+| 8MB   | 1,856           | 2,172          | 4,492K |
+
+- **4MB has the lowest heap delta** in every tested configuration, including at 8GB scale.
+- At 8GB, 4MB uses **9% less memory** than 8MB (1,692 vs 1,856 MB delta) and **23% fewer allocations** (3.5M vs 4.5M).
+- At 2GB / 25% fill, 4MB is the **only block size where memory stays flat** as concurrency increases (322 MB → 307 MB), likely because the block count hits a sweet spot that avoids excessive mmap overhead.
 - **2MB is the worst for memory** at high concurrency — too many small blocks mapped simultaneously by 40 consumers drives heap delta to 1.5 GB at 75% fill.
 
 ### Consumed Messages
@@ -111,13 +148,13 @@ Tracks throughput closely. At 75% fill with 40 consumers:
 | Concurrency scaling   | **4MB**  | 2MB    |
 | Consumed completeness | 4MB / 8MB | 16MB  |
 
-4MB delivers top-tier throughput while using **40-60% less memory** than the next best option. It is the only block size that does not degrade under increased consumer concurrency, making it the strongest choice for production workloads with large messages and high fan-out.
+4MB delivers top-tier throughput while using **40-60% less memory** than the next best option at 2GB scale. The 8GB results confirm this advantage holds at larger stream sizes: 4MB beats 8MB on throughput (+2%), heap delta (-9%), and allocations (-23%). It is the only block size that does not degrade under increased consumer concurrency, making it the strongest choice for production workloads with large messages and high fan-out.
 
 ## Open Questions
 
 The expanded test matrix enables follow-up investigation of:
 
 - **Smaller messages (1KB-16KB):** Does the 4MB advantage hold, or does a smaller block size win when per-message overhead dominates?
-- **Larger MaxBytes (4GB-8GB):** How does block size interact with stream size at scale? Does the memory advantage of 4MB persist when there are many more blocks?
+- **2MB and 16MB at 8GB:** Do the extremes fare even worse at scale, or does the gap narrow?
 - **High concurrency (100-200 consumers):** At what consumer count does contention become the bottleneck over block I/O?
 - **Small streams (256MB):** With fewer total blocks, does block size matter at all?
