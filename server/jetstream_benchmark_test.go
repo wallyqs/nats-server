@@ -2735,191 +2735,205 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 		{"InitData=75pct", 0.75},
 	}
 
-	for _, numConsumers := range numConsumersCases {
-		b.Run(fmt.Sprintf("Consumers=%d", numConsumers), func(b *testing.B) {
-			for _, bc := range blockSizeCases {
-				b.Run(bc.name, func(b *testing.B) {
-					for _, mc := range maxBytesCases {
-						b.Run(mc.name, func(b *testing.B) {
-							for _, ic := range initDataCases {
-								b.Run(ic.name, func(b *testing.B) {
-									for _, msgSize := range messageSizeCases {
-										b.Run(fmt.Sprintf("MsgSz=%d", msgSize), func(b *testing.B) {
-											for n := 0; n < b.N; n++ {
-										b.StopTimer()
+	type benchCase struct {
+		name         string
+		numConsumers int
+		blkSize      int64
+		maxBytes     int64
+		initPercent  float64
+		msgSize      int
+	}
 
-										s := RunBasicJetStreamServer(b)
-										s.optsMu.Lock()
-										s.opts.SyncInterval = 5 * time.Minute
-										s.optsMu.Unlock()
-
-										nc, err := nats.Connect(s.ClientURL())
-										require_NoError(b, err)
-
-										js, err := nc.JetStream(
-											nats.MaxWait(publishTimeout),
-											nats.PublishAsyncMaxPending(16384),
-										)
-										require_NoError(b, err)
-
-										streamName := "BENCH_MC"
-										_, err = js.AddStream(&nats.StreamConfig{
-											Name:      streamName,
-											Subjects:  []string{"foo.>"},
-											Retention: nats.WorkQueuePolicy,
-											Storage:   nats.FileStorage,
-											MaxBytes:  mc.maxBytes,
-										})
-										require_NoError(b, err)
-
-										// Override block size on the underlying filestore.
-										mset, err := s.GlobalAccount().lookupStream(streamName)
-										require_NoError(b, err)
-										mset.mu.RLock()
-										fs := mset.store.(*fileStore)
-										mset.mu.RUnlock()
-										fs.mu.Lock()
-										fs.fcfg.BlockSize = uint64(bc.blkSize)
-										fs.mu.Unlock()
-
-										// Build subjects list.
-										subjects := make([]string, numConsumers)
-										for i := 0; i < numConsumers; i++ {
-											subjects[i] = fmt.Sprintf("foo.%d", i+1)
-										}
-
-										// Pre-fill the stream up to the target percentage of MaxBytes.
-										msg := make([]byte, msgSize)
-										rand.New(rand.NewSource(12345)).Read(msg)
-
-										targetBytes := int64(float64(mc.maxBytes) * ic.percent)
-										totalPublished := 0
-										for int64(totalPublished*msgSize) < targetBytes {
-											idx := totalPublished % numConsumers
-											fastRandomMutation(msg, 10)
-											_, err := js.PublishAsync(subjects[idx], msg)
-											if err != nil {
-												b.Fatalf("Pre-fill publish error: %v", err)
-											}
-											totalPublished++
-											// Drain async acks periodically to avoid stalling.
-											if totalPublished%10000 == 0 {
-												select {
-												case <-js.PublishAsyncComplete():
-												case <-time.After(publishTimeout):
-													b.Fatalf("Pre-fill publish timed out at %d msgs", totalPublished)
-												}
-											}
-										}
-										select {
-										case <-js.PublishAsyncComplete():
-										case <-time.After(publishTimeout):
-											b.Fatalf("Pre-fill publish timed out")
-										}
-
-										msgsPerConsumer := totalPublished / numConsumers
-
-										// Create pull consumers, one per subject.
-										subs := make([]*nats.Subscription, numConsumers)
-										for i := 0; i < numConsumers; i++ {
-											subs[i], err = js.PullSubscribe(
-												subjects[i],
-												fmt.Sprintf("cons_%d", i+1),
-												nats.BindStream(streamName),
-												nats.AckExplicit(),
-											)
-											require_NoError(b, err)
-										}
-
-										// Force GC and capture baseline heap.
-										runtime.GC()
-										var mBefore runtime.MemStats
-										runtime.ReadMemStats(&mBefore)
-
-										b.StartTimer()
-
-										// All consumers drain concurrently.
-										var wg sync.WaitGroup
-										var peakHeap atomic.Uint64
-										var fetchErrors atomic.Int64
-										var totalConsumed atomic.Int64
-										peakHeap.Store(mBefore.HeapInuse)
-
-										for c := 0; c < numConsumers; c++ {
-											wg.Add(1)
-											go func(idx int) {
-												defer wg.Done()
-												consumed := 0
-												consecutiveErrors := 0
-												for consumed < msgsPerConsumer {
-													batchSz := msgsPerConsumer - consumed
-													if batchSz > 100 {
-														batchSz = 100
-													}
-													msgs, err := subs[idx].Fetch(batchSz, nats.MaxWait(5*time.Second))
-													if err != nil {
-														fetchErrors.Add(1)
-														consecutiveErrors++
-														if consecutiveErrors >= 5 {
-															b.Logf("cons_%d giving up after %d msgs, %d consecutive errors: %v", idx+1, consumed, consecutiveErrors, err)
-															return
-														}
-														continue
-													}
-													consecutiveErrors = 0
-													for _, m := range msgs {
-														m.Ack()
-														consumed++
-														totalConsumed.Add(1)
-													}
-													// Sample heap periodically.
-													if consumed%200 == 0 {
-														var m runtime.MemStats
-														runtime.ReadMemStats(&m)
-														for {
-															old := peakHeap.Load()
-															if m.HeapInuse <= old || peakHeap.CompareAndSwap(old, m.HeapInuse) {
-																break
-															}
-														}
-													}
-												}
-											}(c)
-										}
-										wg.Wait()
-
-										b.StopTimer()
-
-										// Set bytes based on actual consumption so MB/s reflects reality.
-										consumed := totalConsumed.Load()
-										b.SetBytes(consumed * int64(msgSize))
-
-										// Final heap snapshot.
-										var mAfter runtime.MemStats
-										runtime.ReadMemStats(&mAfter)
-										peak := peakHeap.Load()
-										if mAfter.HeapInuse > peak {
-											peak = mAfter.HeapInuse
-										}
-
-										b.ReportMetric(float64(mBefore.HeapInuse)/(1024*1024), "baseline-heap-MB")
-										b.ReportMetric(float64(peak)/(1024*1024), "peak-heap-MB")
-										b.ReportMetric(float64(peak-mBefore.HeapInuse)/(1024*1024), "heap-delta-MB")
-										b.ReportMetric(float64(totalPublished), "published-msgs")
-										b.ReportMetric(float64(consumed), "consumed-msgs")
-										b.ReportMetric(float64(fetchErrors.Load()), "fetch-errors")
-
-											nc.Close()
-											s.Shutdown()
-										}
-									})
-								}
-							})
-						}
-					})
+	var cases []benchCase
+	for _, nc := range numConsumersCases {
+		for _, bc := range blockSizeCases {
+			for _, mc := range maxBytesCases {
+				for _, ic := range initDataCases {
+					for _, ms := range messageSizeCases {
+						cases = append(cases, benchCase{
+							name: fmt.Sprintf("Consumers=%d/%s/%s/%s/MsgSz=%d",
+								nc, bc.name, mc.name, ic.name, ms),
+							numConsumers: nc,
+							blkSize:      bc.blkSize,
+							maxBytes:     mc.maxBytes,
+							initPercent:  ic.percent,
+							msgSize:      ms,
+						})
+					}
 				}
-			})
+			}
 		}
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			for n := 0; n < b.N; n++ {
+				b.StopTimer()
+
+				s := RunBasicJetStreamServer(b)
+				s.optsMu.Lock()
+				s.opts.SyncInterval = 5 * time.Minute
+				s.optsMu.Unlock()
+
+				nc, err := nats.Connect(s.ClientURL())
+				require_NoError(b, err)
+
+				js, err := nc.JetStream(
+					nats.MaxWait(publishTimeout),
+					nats.PublishAsyncMaxPending(16384),
+				)
+				require_NoError(b, err)
+
+				streamName := "BENCH_MC"
+				_, err = js.AddStream(&nats.StreamConfig{
+					Name:      streamName,
+					Subjects:  []string{"foo.>"},
+					Retention: nats.WorkQueuePolicy,
+					Storage:   nats.FileStorage,
+					MaxBytes:  tc.maxBytes,
+				})
+				require_NoError(b, err)
+
+				// Override block size on the underlying filestore.
+				mset, err := s.GlobalAccount().lookupStream(streamName)
+				require_NoError(b, err)
+				mset.mu.RLock()
+				fs := mset.store.(*fileStore)
+				mset.mu.RUnlock()
+				fs.mu.Lock()
+				fs.fcfg.BlockSize = uint64(tc.blkSize)
+				fs.mu.Unlock()
+
+				// Build subjects list.
+				subjects := make([]string, tc.numConsumers)
+				for i := 0; i < tc.numConsumers; i++ {
+					subjects[i] = fmt.Sprintf("foo.%d", i+1)
+				}
+
+				// Pre-fill the stream up to the target percentage of MaxBytes.
+				msg := make([]byte, tc.msgSize)
+				rand.New(rand.NewSource(12345)).Read(msg)
+
+				targetBytes := int64(float64(tc.maxBytes) * tc.initPercent)
+				totalPublished := 0
+				for int64(totalPublished*tc.msgSize) < targetBytes {
+					idx := totalPublished % tc.numConsumers
+					fastRandomMutation(msg, 10)
+					_, err := js.PublishAsync(subjects[idx], msg)
+					if err != nil {
+						b.Fatalf("Pre-fill publish error: %v", err)
+					}
+					totalPublished++
+					// Drain async acks periodically to avoid stalling.
+					if totalPublished%10000 == 0 {
+						select {
+						case <-js.PublishAsyncComplete():
+						case <-time.After(publishTimeout):
+							b.Fatalf("Pre-fill publish timed out at %d msgs", totalPublished)
+						}
+					}
+				}
+				select {
+				case <-js.PublishAsyncComplete():
+				case <-time.After(publishTimeout):
+					b.Fatalf("Pre-fill publish timed out")
+				}
+
+				msgsPerConsumer := totalPublished / tc.numConsumers
+
+				// Create pull consumers, one per subject.
+				subs := make([]*nats.Subscription, tc.numConsumers)
+				for i := 0; i < tc.numConsumers; i++ {
+					subs[i], err = js.PullSubscribe(
+						subjects[i],
+						fmt.Sprintf("cons_%d", i+1),
+						nats.BindStream(streamName),
+						nats.AckExplicit(),
+					)
+					require_NoError(b, err)
+				}
+
+				// Force GC and capture baseline heap.
+				runtime.GC()
+				var mBefore runtime.MemStats
+				runtime.ReadMemStats(&mBefore)
+
+				b.StartTimer()
+
+				// All consumers drain concurrently.
+				var wg sync.WaitGroup
+				var peakHeap atomic.Uint64
+				var fetchErrors atomic.Int64
+				var totalConsumed atomic.Int64
+				peakHeap.Store(mBefore.HeapInuse)
+
+				for c := 0; c < tc.numConsumers; c++ {
+					wg.Add(1)
+					go func(idx int) {
+						defer wg.Done()
+						consumed := 0
+						consecutiveErrors := 0
+						for consumed < msgsPerConsumer {
+							batchSz := msgsPerConsumer - consumed
+							if batchSz > 100 {
+								batchSz = 100
+							}
+							msgs, err := subs[idx].Fetch(batchSz, nats.MaxWait(5*time.Second))
+							if err != nil {
+								fetchErrors.Add(1)
+								consecutiveErrors++
+								if consecutiveErrors >= 5 {
+									b.Logf("cons_%d giving up after %d msgs, %d consecutive errors: %v", idx+1, consumed, consecutiveErrors, err)
+									return
+								}
+								continue
+							}
+							consecutiveErrors = 0
+							for _, m := range msgs {
+								m.Ack()
+								consumed++
+								totalConsumed.Add(1)
+							}
+							// Sample heap periodically.
+							if consumed%200 == 0 {
+								var m runtime.MemStats
+								runtime.ReadMemStats(&m)
+								for {
+									old := peakHeap.Load()
+									if m.HeapInuse <= old || peakHeap.CompareAndSwap(old, m.HeapInuse) {
+										break
+									}
+								}
+							}
+						}
+					}(c)
+				}
+				wg.Wait()
+
+				b.StopTimer()
+
+				// Set bytes based on actual consumption so MB/s reflects reality.
+				consumed := totalConsumed.Load()
+				b.SetBytes(consumed * int64(tc.msgSize))
+
+				// Final heap snapshot.
+				var mAfter runtime.MemStats
+				runtime.ReadMemStats(&mAfter)
+				peak := peakHeap.Load()
+				if mAfter.HeapInuse > peak {
+					peak = mAfter.HeapInuse
+				}
+
+				b.ReportMetric(float64(mBefore.HeapInuse)/(1024*1024), "baseline-heap-MB")
+				b.ReportMetric(float64(peak)/(1024*1024), "peak-heap-MB")
+				b.ReportMetric(float64(peak-mBefore.HeapInuse)/(1024*1024), "heap-delta-MB")
+				b.ReportMetric(float64(totalPublished), "published-msgs")
+				b.ReportMetric(float64(consumed), "consumed-msgs")
+				b.ReportMetric(float64(fetchErrors.Load()), "fetch-errors")
+
+				nc.Close()
+				s.Shutdown()
+			}
 		})
 	}
 }
