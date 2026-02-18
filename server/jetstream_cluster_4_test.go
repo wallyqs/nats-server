@@ -16,6 +16,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -7362,6 +7363,140 @@ func TestJetStreamClusterMetaCompactSizeThreshold(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestJetStreamClusterDirectGetBufferReuse verifies that concurrent direct get
+// requests on a clustered stream do not cause route parse errors due to the
+// message payload buffer being shared between the store load and the outq send.
+// Before the fix, getDirectMulti and getDirectRequest passed sm.msg (a slice
+// into the store's internal buffer) directly to newJSPubMsg without copying.
+// The outq is consumed asynchronously by internalLoop, so by the time it reads
+// pm.msg the underlying bytes could have been overwritten, producing corrupt
+// RMSG/HMSG frames on routes and triggering processRoutedMsgArgs Parse Error.
+// Relates to: https://github.com/nats-io/nats-server/issues/7842
+func TestJetStreamClusterDirectGetBufferReuse(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	// Install loggers on all servers to capture parse errors.
+	loggers := make([]*DummyLogger, len(c.servers))
+	for i, s := range c.servers {
+		l := &DummyLogger{AllMsgs: make([]string, 0, 256)}
+		loggers[i] = l
+		s.SetLogger(l, true, false)
+	}
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	cfg := &StreamConfig{
+		Name:        "TEST",
+		Subjects:    []string{"kv.>"},
+		Replicas:    3,
+		MaxMsgsPer:  10,
+		AllowDirect: true,
+		Storage:     FileStorage,
+	}
+	addStream(t, nc, cfg)
+
+	// Seed the stream with enough messages to exercise store block reuse.
+	payload := bytes.Repeat([]byte("D"), 1024)
+	numKeys := 200
+	for i := 0; i < numKeys; i++ {
+		_, err := js.Publish(fmt.Sprintf("kv.key.%d", i), payload)
+		require_NoError(t, err)
+	}
+
+	getSubj := fmt.Sprintf(JSDirectMsgGetT, "TEST")
+
+	// Concurrently:
+	// 1. Issue rapid-fire direct get requests (single and batch) from
+	//    clients connected to different servers so responses traverse routes.
+	// 2. Publish new messages to create store activity and buffer churn.
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Publisher goroutines - keep writing to cause store churn.
+	for p := 0; p < 3; p++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pnc, pjs := jsClientConnect(t, c.randomServer())
+			defer pnc.Close()
+			i := 0
+			for {
+				select {
+				case <-stop:
+					select {
+					case <-pjs.PublishAsyncComplete():
+					case <-time.After(5 * time.Second):
+					}
+					return
+				default:
+					pjs.PublishAsync(fmt.Sprintf("kv.key.%d", i%numKeys), payload)
+					i++
+				}
+			}
+		}()
+	}
+
+	// Direct get goroutines - hammer single and batch direct gets.
+	for g := 0; g < 5; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			gnc, _ := jsClientConnect(t, c.servers[id%len(c.servers)])
+			defer gnc.Close()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				key := fmt.Sprintf("kv.key.%d", rand.Intn(numKeys))
+				if id%2 == 0 {
+					// Single direct get.
+					req, _ := json.Marshal(&JSApiMsgGetRequest{LastFor: key})
+					gnc.Request(getSubj, req, 500*time.Millisecond)
+				} else {
+					// Batch direct get with NextFor (exercises getDirectRequest batch path).
+					req, _ := json.Marshal(&JSApiMsgGetRequest{
+						NextFor: "kv.>",
+						Batch:   10,
+						Seq:     uint64(rand.Intn(numKeys) + 1),
+					})
+					gnc.Request(getSubj, req, 500*time.Millisecond)
+				}
+			}
+		}(g)
+	}
+
+	// Let the concurrent activity run.
+	time.Sleep(3 * time.Second)
+	close(stop)
+	wg.Wait()
+
+	// Verify the cluster is still fully formed.
+	c.checkClusterFormed()
+
+	// Verify we can still do normal operations.
+	_, err := js.Publish("kv.key.final", []byte("still working"))
+	require_NoError(t, err)
+
+	si, err := js.StreamInfo("TEST")
+	require_NoError(t, err)
+	require_True(t, si.State.Msgs > 0)
+
+	// Check that no route parse errors were logged.
+	for i, l := range loggers {
+		l.Lock()
+		for _, msg := range l.AllMsgs {
+			if strings.Contains(msg, "Parse Error") && strings.Contains(msg, "rid:") {
+				t.Errorf("server %d logged route parse error: %s", i, msg)
+			}
+		}
+		l.Unlock()
 	}
 }
 
