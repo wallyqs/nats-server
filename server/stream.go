@@ -6845,7 +6845,10 @@ func (q *jsOutQ) send(msg *jsPubMsg) {
 	if q == nil || msg == nil {
 		return
 	}
-	q.push(msg)
+	if _, err := q.push(msg); err != nil {
+		// outq is full; return message to pool to avoid leak.
+		msg.returnToPool()
+	}
 }
 
 func (q *jsOutQ) unregister() {
@@ -6864,6 +6867,13 @@ type StoredMsg struct {
 	Time     time.Time `json:"time"`
 }
 
+// defaultOutQMaxBytes is the byte budget for a stream's outbound message queue.
+// When the in-flight message bytes exceed this limit, send() drops the message
+// and returns it to the pool. The consumer's delivery loop will re-queue the
+// message on the next pull/push cycle, preserving at-least-once semantics at
+// the cost of a short retry delay.
+const defaultOutQMaxBytes = 256 * 1024 * 1024 // 256 MB
+
 // This is similar to system semantics but did not want to overload the single system sendq,
 // or require system account when doing simple setup with jetstream.
 func (mset *stream) setupSendCapabilities() {
@@ -6873,7 +6883,15 @@ func (mset *stream) setupSendCapabilities() {
 		return
 	}
 	qname := fmt.Sprintf("[ACC:%s] stream '%s' sendQ", mset.acc.Name, mset.cfg.Name)
-	mset.outq = &jsOutQ{newIPQueue[*jsPubMsg](mset.srv, qname)}
+	mset.outq = &jsOutQ{newIPQueue[*jsPubMsg](mset.srv, qname,
+		ipqSizeCalculation(func(pm *jsPubMsg) uint64 {
+			if pm != nil {
+				return uint64(pm.size())
+			}
+			return 0
+		}),
+		ipqLimitBySize[*jsPubMsg](defaultOutQMaxBytes),
+	)}
 	go mset.internalLoop()
 }
 

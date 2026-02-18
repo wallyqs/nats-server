@@ -284,6 +284,11 @@ const (
 	lostQuorumCheckIntervalDefault = hbIntervalDefault * 10 // 10 seconds
 	observerModeIntervalDefault    = 48 * time.Hour
 	peerRemoveTimeoutDefault       = 5 * time.Minute
+	// defaultPropQueueMaxBytes is the byte budget for the Raft proposal queue.
+	// When the encoded in-flight entries exceed this limit, Propose() will
+	// return an error so callers can apply back-pressure instead of letting
+	// the queue grow without bound.
+	defaultPropQueueMaxBytes = 256 * 1024 * 1024 // 256 MB
 )
 
 var (
@@ -447,7 +452,15 @@ func (s *Server) initRaftNode(accName string, cfg *RaftConfig, labels pprofLabel
 		quit:     make(chan struct{}),
 		reqs:     newIPQueue[*voteRequest](s, qpfx+"vreq"),
 		votes:    newIPQueue[*voteResponse](s, qpfx+"vresp"),
-		prop:     newIPQueue[*proposedEntry](s, qpfx+"entry"),
+		prop: newIPQueue[*proposedEntry](s, qpfx+"entry",
+			ipqSizeCalculation(func(pe *proposedEntry) uint64 {
+				if pe != nil && pe.Entry != nil {
+					return uint64(len(pe.Data))
+				}
+				return 0
+			}),
+			ipqLimitBySize[*proposedEntry](defaultPropQueueMaxBytes),
+		),
 		entry:    newIPQueue[*appendEntry](s, qpfx+"appendEntry"),
 		resp:     newIPQueue[*appendEntryResponse](s, qpfx+"appendEntryResponse"),
 		apply:    newIPQueue[*CommittedEntry](s, qpfx+"committedEntry"),
@@ -920,8 +933,8 @@ func (n *raft) Propose(data []byte) error {
 	if werr := n.werr; werr != nil {
 		return werr
 	}
-	n.prop.push(newProposedEntry(newEntry(EntryNormal, data), _EMPTY_))
-	return nil
+	_, err := n.prop.push(newProposedEntry(newEntry(EntryNormal, data), _EMPTY_))
+	return err
 }
 
 // ProposeMulti will propose multiple entries at once.

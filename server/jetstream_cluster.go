@@ -9673,7 +9673,23 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 	}
 
 	// Do proposal.
-	_ = node.Propose(esm)
+	if err = node.Propose(esm); err != nil {
+		// The proposal queue is full (back-pressure) or the node is no longer
+		// leader. Recycle the encoded buffer and return a transient error to
+		// the publisher so it can retry.
+		recycleStreamMsgBuf(esm)
+		mset.clMu.Unlock()
+		if mt != nil {
+			mset.getAndDeleteMsgTrace(mtKey)
+		}
+		if canRespond {
+			var resp = &JSPubAckResponse{PubAck: &PubAck{Stream: name}}
+			resp.Error = &ApiError{Code: 503, Description: err.Error()}
+			response, _ = json.Marshal(resp)
+			outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, nil, response, nil, 0))
+		}
+		return err
+	}
 	// The proposal can fail, but we always account for trying.
 	mset.clseq++
 	mset.trackReplicationTraffic(node, len(esm), r)
