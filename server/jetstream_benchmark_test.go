@@ -864,7 +864,7 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 		clusterSize int
 		replicas    int
 		messageSize int
-		numSubjects int
+		numConsumers int
 	}{
 		{1, 1, 10, 1},   // Single node, 10B messages
 		{1, 1, 1024, 1}, // Single node, 1KB messages
@@ -891,7 +891,7 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 			bc.clusterSize,
 			bc.replicas,
 			bc.messageSize,
-			bc.numSubjects,
+			bc.numConsumers,
 		)
 		b.Run(
 			name,
@@ -907,8 +907,8 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 						name,
 						func(b *testing.B) {
 
-							subjects := make([]string, bc.numSubjects)
-							for i := 0; i < bc.numSubjects; i++ {
+							subjects := make([]string, bc.numConsumers)
+							for i := 0; i < bc.numConsumers; i++ {
 								subjects[i] = fmt.Sprintf("s-%d", i+1)
 							}
 
@@ -938,7 +938,7 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 							}
 
 							if verbose {
-								b.Logf("Creating stream with R=%d and %d input subjects", bc.replicas, bc.numSubjects)
+								b.Logf("Creating stream with R=%d and %d input subjects", bc.replicas, bc.numConsumers)
 							}
 							_, err = jsStreamCreate(b, nc, &StreamConfig{
 								Name:     streamName,
@@ -1202,19 +1202,19 @@ func BenchmarkJetStreamCounters(b *testing.B) {
 		storageType StorageType
 		clusterSize int
 		replicas    int
-		numSubjects int
+		numConsumers int
 		sources     int
 	}
 	var benchmarksCases []benchmarksCase
 	for _, storage := range []StorageType{FileStorage, MemoryStorage} {
 		for _, replicas := range []int{1, 3} {
-			for _, numSubjects := range []int{1, 1000} {
+			for _, numConsumers := range []int{1, 1000} {
 				for _, sources := range []int{0, 10, 25, 250} {
 					benchmarksCases = append(benchmarksCases, benchmarksCase{
 						storageType: storage,
 						clusterSize: 3,
 						replicas:    replicas,
-						numSubjects: numSubjects,
+						numConsumers: numConsumers,
 						sources:     sources,
 					})
 				}
@@ -1239,7 +1239,7 @@ func BenchmarkJetStreamCounters(b *testing.B) {
 			bc.storageType,
 			bc.clusterSize,
 			bc.replicas,
-			bc.numSubjects,
+			bc.numConsumers,
 			bc.sources,
 		)
 
@@ -1251,8 +1251,8 @@ func BenchmarkJetStreamCounters(b *testing.B) {
 				}
 
 				b.Run(name, func(b *testing.B) {
-					subjects := make([]string, bc.numSubjects)
-					for i := range bc.numSubjects {
+					subjects := make([]string, bc.numConsumers)
+					for i := range bc.numConsumers {
 						subjects[i] = fmt.Sprintf("s-%d", i+1)
 					}
 
@@ -1282,7 +1282,7 @@ func BenchmarkJetStreamCounters(b *testing.B) {
 					}
 
 					if verbose {
-						b.Logf("Creating stream with R=%d and %d input subjects", bc.replicas, bc.numSubjects)
+						b.Logf("Creating stream with R=%d and %d input subjects", bc.replicas, bc.numConsumers)
 					}
 					if _, err := jsStreamCreate(b, nc, &StreamConfig{
 						Name:            streamName,
@@ -1345,7 +1345,7 @@ func BenchmarkJetStreamInterestStreamWithLimit(b *testing.B) {
 		seed             = 12345
 		publishBatchSize = 100
 		messageSize      = 256
-		numSubjects      = 2500
+		numConsumers      = 2500
 		subjectPrefix    = "S"
 		numPublishers    = 4
 		randomData       = true
@@ -1357,7 +1357,7 @@ func BenchmarkJetStreamInterestStreamWithLimit(b *testing.B) {
 			"BatchSize: %d, MsgSize: %d, Subjects: %d, Publishers: %d, Random Message: %v",
 			publishBatchSize,
 			messageSize,
-			numSubjects,
+			numConsumers,
 			numPublishers,
 			randomData,
 		)
@@ -1421,7 +1421,7 @@ func BenchmarkJetStreamInterestStreamWithLimit(b *testing.B) {
 
 		// Warm up: publish a few messages
 		for i := 0; i < warmupMessages; i++ {
-			subject := fmt.Sprintf("%s.%d", subjectPrefix, fastrand.Uint32n(numSubjects))
+			subject := fmt.Sprintf("%s.%d", subjectPrefix, fastrand.Uint32n(numConsumers))
 			if randomData {
 				fastRandomMutation(messageBuf, 10)
 			}
@@ -1458,7 +1458,7 @@ func BenchmarkJetStreamInterestStreamWithLimit(b *testing.B) {
 
 			// Publish a batch of messages
 			for i := 0; i < batchSize; i++ {
-				subject := fmt.Sprintf("%s.%d", subjectPrefix, fastrand.Uint32n(numSubjects))
+				subject := fmt.Sprintf("%s.%d", subjectPrefix, fastrand.Uint32n(numConsumers))
 				if randomData {
 					fastRandomMutation(messageBuf, 10)
 				}
@@ -2693,10 +2693,9 @@ func BenchmarkJetStreamBlockSizeBurstDrain(b *testing.B) {
 //
 //	go test -bench='BenchmarkJetStreamBlockSizeMultiConsumer' -benchmem -count=6
 func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
-	const (
-		publishTimeout = 30 * time.Second
-		numSubjects    = 40
-	)
+	const publishTimeout = 30 * time.Second
+
+	numConsumersCases := []int{1, 10, 40, 100}
 
 	messageSizeCases := []int{
 		1024,      // 1KB
@@ -2731,15 +2730,17 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 		{"InitData=75pct", 0.75},
 	}
 
-	for _, bc := range blockSizeCases {
-		b.Run(bc.name, func(b *testing.B) {
-			for _, mc := range maxBytesCases {
-				b.Run(mc.name, func(b *testing.B) {
-					for _, ic := range initDataCases {
-						b.Run(ic.name, func(b *testing.B) {
-							for _, msgSize := range messageSizeCases {
-								b.Run(fmt.Sprintf("MsgSz=%d", msgSize), func(b *testing.B) {
-									for n := 0; n < b.N; n++ {
+	for _, numConsumers := range numConsumersCases {
+		b.Run(fmt.Sprintf("Consumers=%d", numConsumers), func(b *testing.B) {
+			for _, bc := range blockSizeCases {
+				b.Run(bc.name, func(b *testing.B) {
+					for _, mc := range maxBytesCases {
+						b.Run(mc.name, func(b *testing.B) {
+							for _, ic := range initDataCases {
+								b.Run(ic.name, func(b *testing.B) {
+									for _, msgSize := range messageSizeCases {
+										b.Run(fmt.Sprintf("MsgSz=%d", msgSize), func(b *testing.B) {
+											for n := 0; n < b.N; n++ {
 										b.StopTimer()
 
 										s := RunBasicJetStreamServer(b)
@@ -2777,8 +2778,8 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 										fs.mu.Unlock()
 
 										// Build subjects list.
-										subjects := make([]string, numSubjects)
-										for i := 0; i < numSubjects; i++ {
+										subjects := make([]string, numConsumers)
+										for i := 0; i < numConsumers; i++ {
 											subjects[i] = fmt.Sprintf("foo.%d", i+1)
 										}
 
@@ -2789,7 +2790,7 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 										targetBytes := int64(float64(mc.maxBytes) * ic.percent)
 										totalPublished := 0
 										for int64(totalPublished*msgSize) < targetBytes {
-											idx := totalPublished % numSubjects
+											idx := totalPublished % numConsumers
 											fastRandomMutation(msg, 10)
 											_, err := js.PublishAsync(subjects[idx], msg)
 											if err != nil {
@@ -2811,11 +2812,11 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 											b.Fatalf("Pre-fill publish timed out")
 										}
 
-										msgsPerConsumer := totalPublished / numSubjects
+										msgsPerConsumer := totalPublished / numConsumers
 
 										// Create pull consumers, one per subject.
-										subs := make([]*nats.Subscription, numSubjects)
-										for i := 0; i < numSubjects; i++ {
+										subs := make([]*nats.Subscription, numConsumers)
+										for i := 0; i < numConsumers; i++ {
 											subs[i], err = js.PullSubscribe(
 												subjects[i],
 												fmt.Sprintf("cons_%d", i+1),
@@ -2839,7 +2840,7 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 										var totalConsumed atomic.Int64
 										peakHeap.Store(mBefore.HeapInuse)
 
-										for c := 0; c < numSubjects; c++ {
+										for c := 0; c < numConsumers; c++ {
 											wg.Add(1)
 											go func(idx int) {
 												defer wg.Done()
@@ -2903,15 +2904,17 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 										b.ReportMetric(float64(consumed), "consumed-msgs")
 										b.ReportMetric(float64(fetchErrors.Load()), "fetch-errors")
 
-										nc.Close()
-										s.Shutdown()
-									}
-								})
-							}
-						})
-					}
-				})
-			}
+											nc.Close()
+											s.Shutdown()
+										}
+									})
+								}
+							})
+						}
+					})
+				}
+			})
+		}
 		})
 	}
 }
