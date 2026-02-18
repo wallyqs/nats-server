@@ -35,6 +35,7 @@ import (
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/internal/fastrand"
+	"github.com/nats-io/nats-server/v2/server/stree"
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"
 )
@@ -260,6 +261,7 @@ type importMap struct {
 	streams  []*streamImport
 	services map[string][]*serviceImport
 	rrMap    map[string][]*serviceRespEntry
+	rrTree   stree.SubjectTree[struct{}]
 }
 
 // NewAccount creates a new unlimited account with the given name.
@@ -1863,6 +1865,10 @@ func (a *Account) addReverseRespMapEntry(acc *Account, reply, from string) {
 	sre := &serviceRespEntry{acc, from}
 	sra := a.imports.rrMap[reply]
 	a.imports.rrMap[reply] = append(sra, sre)
+	// If this is a new key, also insert into the SubjectTree for fast wildcard matching.
+	if sra == nil {
+		a.imports.rrTree.Insert([]byte(reply), struct{}{})
+	}
 	a.mu.Unlock()
 }
 
@@ -1881,27 +1887,18 @@ func (a *Account) checkForReverseEntries(reply string, checkInterest, recursed b
 		return
 	}
 
+	// Use the SubjectTree to efficiently find matching keys instead of iterating
+	// all rrMap entries and tokenizing each one. The tree's Match method traverses
+	// only relevant trie branches for the wildcard filter.
 	var _rs [64]string
 	rs := _rs[:0]
-	if n := len(a.imports.rrMap); n > cap(rs) {
-		rs = make([]string, 0, n)
-	}
-
-	for k := range a.imports.rrMap {
-		rs = append(rs, k)
-	}
+	a.imports.rrTree.Match([]byte(reply), func(subject []byte, val *struct{}) {
+		rs = append(rs, string(subject))
+	})
 	a.mu.RUnlock()
 
-	tsa := [32]string{}
-	tts := tokenizeSubjectIntoSlice(tsa[:0], reply)
-
-	rsa := [32]string{}
 	for _, r := range rs {
-		rts := tokenizeSubjectIntoSlice(rsa[:0], r)
-		//  isSubsetMatchTokenized is heavy so make sure we do this without the lock.
-		if isSubsetMatchTokenized(rts, tts) {
-			a._checkForReverseEntry(r, nil, checkInterest, recursed)
-		}
+		a._checkForReverseEntry(r, nil, checkInterest, recursed)
 	}
 }
 
@@ -1967,6 +1964,7 @@ func (a *Account) _checkForReverseEntry(reply string, si *serviceImport, checkIn
 	sres := a.imports.rrMap[reply]
 	if si == nil {
 		delete(a.imports.rrMap, reply)
+		a.imports.rrTree.Delete([]byte(reply))
 	} else if sres != nil {
 		// Find the one we are looking for..
 		for i, sre := range sres {
@@ -1979,6 +1977,7 @@ func (a *Account) _checkForReverseEntry(reply string, si *serviceImport, checkIn
 			a.imports.rrMap[si.to] = sres
 		} else {
 			delete(a.imports.rrMap, si.to)
+			a.imports.rrTree.Delete([]byte(si.to))
 		}
 	}
 	a.mu.Unlock()
