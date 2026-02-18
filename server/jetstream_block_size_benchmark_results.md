@@ -1,24 +1,30 @@
 # JetStream Block Size Benchmark Results
 
 Benchmark: `BenchmarkJetStreamBlockSizeMultiConsumer`
-Message size: 65,536 bytes (64KB)
-MaxBytes: 2GB
 Platform: linux (64 cores)
 
-## Test Matrix
+## Full Test Matrix
 
-| Parameter       | Values                      |
-|-----------------|-----------------------------|
-| Block sizes     | 2MB, 4MB, 8MB, 16MB        |
-| Fill levels     | 25% (512MB), 75% (1.5GB)   |
-| Consumer counts | 10, 40                      |
-| Subjects        | 1 per consumer (dedicated)  |
+The benchmark generates a flat cross-product of the following parameters
+(2,400 combinations total), selectable via `-run` filters:
 
----
+| Parameter       | Values                                      |
+|-----------------|---------------------------------------------|
+| Block sizes     | 2MB, 4MB, 8MB, 16MB                        |
+| Message sizes   | 1KB, 4KB, 8KB, 16KB, 64KB                  |
+| MaxBytes        | 256MB, 1GB, 2GB, 4GB, 8GB                  |
+| Fill levels     | 25%, 75%                                    |
+| Consumer counts | 1, 10, 40, 100, 150, 200                   |
+| Subjects        | 1 per consumer (dedicated)                  |
 
-## Results: 10 Consumers / 10 Subjects
+## Results So Far
 
-### 25% Fill (512MB pre-loaded)
+The results below cover a focused slice of the matrix:
+**MsgSz=64KB, MaxBytes=2GB, Consumers={10,40}**.
+
+### 10 Consumers / 10 Subjects
+
+#### 25% Fill (512MB pre-loaded)
 
 | BlkSz | MB/s  | Consumed Msgs | Fetch Errors | Heap Delta (MB) | Peak Heap (MB) | Allocs |
 |-------|-------|---------------|--------------|-----------------|----------------|--------|
@@ -27,7 +33,7 @@ Platform: linux (64 cores)
 | 8MB   | **20.06** | **7,809** | 50           | 358.8           | 652.3          | 294K   |
 | 16MB  | 9.46  | 3,649         | 50           | 378.4           | 681.5          | 139K   |
 
-### 75% Fill (1.5GB pre-loaded)
+#### 75% Fill (1.5GB pre-loaded)
 
 | BlkSz | MB/s  | Consumed Msgs | Fetch Errors | Heap Delta (MB) | Peak Heap (MB) | Allocs |
 |-------|-------|---------------|--------------|-----------------|----------------|--------|
@@ -38,9 +44,9 @@ Platform: linux (64 cores)
 
 ---
 
-## Results: 40 Consumers / 40 Subjects
+### 40 Consumers / 40 Subjects
 
-### 25% Fill (512MB pre-loaded)
+#### 25% Fill (512MB pre-loaded)
 
 | BlkSz | MB/s  | Consumed Msgs | Fetch Errors | Heap Delta (MB) | Peak Heap (MB) | Allocs |
 |-------|-------|---------------|--------------|-----------------|----------------|--------|
@@ -49,7 +55,7 @@ Platform: linux (64 cores)
 | 8MB   | 17.59 | 6,798         | 200          | 819.8           | 819.8          | 387K   |
 | 16MB  | 11.15 | 4,297         | 200          | 987.0           | 987.0          | 281K   |
 
-### 75% Fill (1.5GB pre-loaded)
+#### 75% Fill (1.5GB pre-loaded)
 
 | BlkSz | MB/s  | Consumed Msgs | Fetch Errors | Heap Delta (MB) | Peak Heap (MB) | Allocs |
 |-------|-------|---------------|--------------|-----------------|----------------|--------|
@@ -60,7 +66,7 @@ Platform: linux (64 cores)
 
 ---
 
-## Analysis
+## Analysis (64KB Messages, 2GB MaxBytes)
 
 ### Throughput (MB/s)
 
@@ -106,3 +112,12 @@ Tracks throughput closely. At 75% fill with 40 consumers:
 | Consumed completeness | 4MB / 8MB | 16MB  |
 
 4MB delivers top-tier throughput while using **40-60% less memory** than the next best option. It is the only block size that does not degrade under increased consumer concurrency, making it the strongest choice for production workloads with large messages and high fan-out.
+
+## Open Questions
+
+The expanded test matrix enables follow-up investigation of:
+
+- **Smaller messages (1KB-16KB):** Does the 4MB advantage hold, or does a smaller block size win when per-message overhead dominates?
+- **Larger MaxBytes (4GB-8GB):** How does block size interact with stream size at scale? Does the memory advantage of 4MB persist when there are many more blocks?
+- **High concurrency (100-200 consumers):** At what consumer count does contention become the bottleneck over block I/O?
+- **Small streams (256MB):** With fewer total blocks, does block size matter at all?
