@@ -676,10 +676,11 @@ func compressOptsEqual(c1, c2 *CompressionOpts) bool {
 // with a nil []s2.WriterOption, but not with a nil s2.WriterOption, so
 // this is more versatile.
 func s2WriterOptions(cm string) []s2.WriterOption {
-	_opts := [2]s2.WriterOption{}
+	_opts := [3]s2.WriterOption{}
 	opts := append(
 		_opts[:0],
-		s2.WriterConcurrency(1), // Stop asynchronous flushing in separate goroutines
+		s2.WriterConcurrency(1),       // Stop asynchronous flushing in separate goroutines
+		s2.WriterBlockSize(32*1024),   // 32KB blocks instead of 1MB default to reduce per-connection memory
 	)
 	switch cm {
 	case CompressionS2Uncompressed:
@@ -689,7 +690,8 @@ func s2WriterOptions(cm string) []s2.WriterOption {
 	case CompressionS2Better:
 		return append(opts, s2.WriterBetterCompression())
 	default:
-		return nil
+		// CompressionS2Fast: s2's default level is fast, so no extra option needed.
+		return opts
 	}
 }
 
