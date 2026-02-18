@@ -2695,7 +2695,7 @@ func BenchmarkJetStreamBlockSizeBurstDrain(b *testing.B) {
 func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 	const publishTimeout = 30 * time.Second
 
-	numConsumersCases := []int{1, 10, 40, 100}
+	numConsumersCases := []int{1, 10, 40, 100, 150, 200}
 
 	messageSizeCases := []int{
 		1024,      // 1KB
