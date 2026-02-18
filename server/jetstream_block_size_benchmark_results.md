@@ -142,6 +142,128 @@ Run on branch `release/v2.12.3`. All results below use BlkSz=8MB, MaxBytes=4GB.
 
 ---
 
+### 8MB Blocks, 4GB MaxBytes — v2.12.4 Baseline
+
+Same matrix as v2.12.3 above, run on branch `release/v2.12.4` for comparison.
+
+#### Throughput (MB/s)
+
+| Consumers | Fill | 1KB    | 4KB    | 8KB    | 16KB    | 64KB   |
+|-----------|------|--------|--------|--------|---------|--------|
+| 1         | 25%  | 170.79 | 529.82 | 846.91 | 1204.81 | 38.29  |
+| 1         | 75%  | 170.01 | 538.96 | 855.19 | 1212.20 | 99.26  |
+| 10        | 25%  | 113.38 | 506.37 | 752.36 | 956.54  | 37.56  |
+| 10        | 75%  | 72.94  | 414.40 | 711.88 | 947.96  | 98.21  |
+| 40        | 25%  | 180.05 | 561.81 | 683.16 | 866.03  | 38.62  |
+| 40        | 75%  | 127.89 | 486.51 | 651.78 | 811.62  | 100.04 |
+| 100       | 25%  | 157.68 | 469.40 | 814.11 | 1166.36 | 35.68  |
+| 100       | 75%  | 162.60 | 554.36 | 907.40 | 1292.36 | 99.22  |
+| 150       | 25%  | 139.07 | 457.15 | 836.45 | 1233.51 | 31.28  |
+| 150       | 75%  | 153.45 | 524.69 | 934.27 | 1360.00 | 43.34  |
+| 200       | 25%  | 120.09 | 418.55 | 678.57 | 1299.93 | 29.37  |
+| 200       | 75%  | 142.93 | 497.67 | 889.86 | 1420.36 | 40.26  |
+
+#### Heap Delta (MB)
+
+| Consumers | Fill | 1KB   | 4KB   | 8KB   | 16KB  | 64KB  |
+|-----------|------|-------|-------|-------|-------|-------|
+| 1         | 25%  | 346.2 | 370.8 | 375.5 | 413.1 | 331.9 |
+| 1         | 75%  | 429.8 | 382.5 | 394.9 | 404.3 | 375.3 |
+| 10        | 25%  | 805.1 | 458.0 | 435.5 | 353.4 | 391.5 |
+| 10        | 75%  | 1,377 | 1,318 | 516.0 | 476.0 | 643.8 |
+| 40        | 25%  | 785.9 | 481.6 | 441.1 | 424.8 | 759.0 |
+| 40        | 75%  | 2,059 | 701.4 | 541.0 | 479.0 | 1,164 |
+| 100       | 25%  | 878.2 | 562.9 | 605.5 | 726.4 | 542.4 |
+| 100       | 75%  | 1,967 | 790.0 | 737.8 | 822.2 | 1,153 |
+| 150       | 25%  | 915.6 | 704.6 | 773.8 | 772.9 | 1,270 |
+| 150       | 75%  | 1,830 | 892.2 | 903.3 | 1,053 | 2,847 |
+| 200       | 25%  | 898.7 | 830.3 | 994.7 | 1,042 | 1,168 |
+| 200       | 75%  | 1,995 | 905.6 | 1,037 | 1,323 | 3,827 |
+
+#### Allocations
+
+| Consumers | Fill | 1KB    | 4KB    | 8KB    | 16KB  | 64KB  |
+|-----------|------|--------|--------|--------|-------|-------|
+| 1         | 25%  | 26.0M  | 6.5M  | 3.3M  | 1.6M  | 405K  |
+| 1         | 75%  | 78.1M  | 19.6M | 9.8M  | 4.9M  | 1.1M  |
+| 10        | 25%  | 37.0M  | 9.2M  | 4.6M  | 2.3M  | 557K  |
+| 10        | 75%  | 114.8M | 27.7M | 13.8M | 7.0M  | 1.5M  |
+| 40        | 25%  | 67.3M  | 16.8M | 8.4M  | 4.1M  | 846K  |
+| 40        | 75%  | 203.5M | 50.8M | 25.3M | 12.5M | 2.3M  |
+| 100       | 25%  | 129.2M | 31.5M | 15.1M | 6.9M  | 719K  |
+| 100       | 75%  | 387.8M | 94.3M | 45.2M | 20.7M | 2.0M  |
+| 150       | 25%  | 180.1M | 42.8M | 19.9M | 8.5M  | 493K  |
+| 150       | 75%  | 540.3M | 128.7M | 59.9M | 25.6M | 1.4M |
+| 200       | 25%  | 230.3M | 53.7M | 24.2M | 9.5M  | 512K  |
+| 200       | 75%  | 690.7M | 161.2M | 72.7M | 28.7M | 1.6M |
+
+---
+
+### v2.12.3 vs v2.12.4 — Delta Analysis (8MB blocks, 4GB)
+
+Percentage change of v2.12.3 relative to v2.12.4. Positive = v2.12.3 is
+higher (faster for throughput, more memory for heap). Based on single runs
+per configuration — differences within ±10% are likely noise.
+
+#### Throughput Delta (%)
+
+| Consumers | Fill | 1KB  | 4KB   | 8KB   | 16KB  | 64KB  |
+|-----------|------|------|-------|-------|-------|-------|
+| 1         | 25%  | +3   | +4    | +7    | +6    | -7    |
+| 1         | 75%  | +4   | -9    | +6    | +10   | +3    |
+| 10        | 25%  | +13  | +1    | +3    | -1    | -3    |
+| 10        | 75%  | +14  | +16   | +9    | -1    | -1    |
+| 40        | 25%  | +2   | -13   | +14   | +18   | -10   |
+| 40        | 75%  | +10  | +3    | +2    | +19   | -2    |
+| 100       | 25%  | +5   | +18   | +5    | +8    | -3    |
+| 100       | 75%  | +4   | +6    | +6    | +3    | +1    |
+| 150       | 25%  | +3   | -4    | -7    | +2    | +3    |
+| 150       | 75%  | +5   | +3    | +1    | +7    | +9    |
+| 200       | 25%  | +3   | +4    | +12   | +1    | 0     |
+| 200       | 75%  | +3   | +2    | -2    | +4    | -1    |
+| **Avg**   |      | **+6** | **+3** | **+5** | **+6** | **-1** |
+
+#### Heap Delta … Delta (%)
+
+| Consumers | Fill | 1KB  | 4KB   | 8KB  | 16KB  | 64KB  |
+|-----------|------|------|-------|------|-------|-------|
+| 1         | 25%  | +5   | +2    | +3   | -2    | +10   |
+| 1         | 75%  | +4   | +1    | +4   | -1    | 0     |
+| 10        | 25%  | +2   | +1    | +1   | +19   | +4    |
+| 10        | 75%  | +9   | -42   | +11  | +8    | -32   |
+| 40        | 25%  | +2   | -3    | +6   | +9    | -18   |
+| 40        | 75%  | -6   | +4    | +9   | +2    | -40   |
+| 100       | 25%  | +3   | +12   | +5   | -12   | +17   |
+| 100       | 75%  | -7   | +3    | +6   | 0     | +25   |
+| 150       | 25%  | -6   | 0     | +3   | -4    | -32   |
+| 150       | 75%  | +4   | 0     | -2   | -2    | +28   |
+| 200       | 25%  | +14  | +8    | -6   | -3    | -8    |
+| 200       | 75%  | -1   | +11   | +1   | +1    | +14   |
+| **Avg**   |      | **+2** | **0** | **+3** | **+1** | **-3** |
+
+#### Allocation Delta
+
+Within 1% across all 60 data points — effectively identical between versions.
+
+#### Summary
+
+**v2.12.3 and v2.12.4 produce equivalent results within measurement noise.**
+
+- **Throughput:** v2.12.3 averages 3-6% faster for 1-16KB messages and
+  ~1% slower for 64KB, but individual cells swing ±19%. Not statistically
+  significant from single runs.
+- **Heap delta:** No consistent trend in either direction. Individual cells
+  range from -42% to +28%, but per-message-size averages are within ±3%.
+  The 64KB heap measurements are especially volatile (±40%).
+- **Allocations:** Near-identical across all configurations (<1% delta),
+  confirming no meaningful code-path differences between the two versions
+  for this benchmark.
+- **Implication:** All analysis and recommendations derived from the v2.12.3
+  matrix apply equally to v2.12.4. The block size change discussion is
+  version-independent for the v2.12.x line.
+
+---
+
 ## Analysis
 
 ### Effect of MaxBytes on Throughput
