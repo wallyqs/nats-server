@@ -2710,7 +2710,10 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 		maxBytes int64
 	}{
 		{"MaxBytes=256MB", 256 * 1024 * 1024},
+		{"MaxBytes=1GB", 1 * 1024 * 1024 * 1024},
 		{"MaxBytes=2GB", 2 * 1024 * 1024 * 1024},
+		{"MaxBytes=4GB", 4 * 1024 * 1024 * 1024},
+		{"MaxBytes=8GB", 8 * 1024 * 1024 * 1024},
 	}
 
 	blockSizeCases := []struct {
