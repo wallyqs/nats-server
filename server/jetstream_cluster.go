@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -9039,6 +9040,86 @@ const (
 	msgFlagFromSourceOrMirror uint64 = 1 << iota
 )
 
+// Tiered buffer pool sizes for stream message encoding.
+const (
+	streamMsgBufSmall  = 256
+	streamMsgBufMedium = 4096
+	streamMsgBufLarge  = 16384
+	streamMsgBufXLarge = 65536
+)
+
+// Buffer pools for stream message encoding, modeled after the existing
+// tiered pool pattern used in filestore.go and client.go. Uses fixed-size
+// backing arrays so that recycleStreamMsgBuf can identify the pool tier
+// by capacity.
+var (
+	streamMsgBufPoolSmall = &sync.Pool{
+		New: func() any {
+			b := [streamMsgBufSmall]byte{}
+			return &b
+		},
+	}
+	streamMsgBufPoolMedium = &sync.Pool{
+		New: func() any {
+			b := [streamMsgBufMedium]byte{}
+			return &b
+		},
+	}
+	streamMsgBufPoolLarge = &sync.Pool{
+		New: func() any {
+			b := [streamMsgBufLarge]byte{}
+			return &b
+		},
+	}
+	streamMsgBufPoolXLarge = &sync.Pool{
+		New: func() any {
+			b := [streamMsgBufXLarge]byte{}
+			return &b
+		},
+	}
+)
+
+// getStreamMsgBuf returns a byte slice from the appropriate pool tier
+// based on the requested size. Returns a zero-length slice with capacity
+// at least sz. Buffers larger than the biggest pool tier are freshly allocated.
+func getStreamMsgBuf(sz int) []byte {
+	switch {
+	case sz <= streamMsgBufSmall:
+		return streamMsgBufPoolSmall.Get().(*[streamMsgBufSmall]byte)[:0]
+	case sz <= streamMsgBufMedium:
+		return streamMsgBufPoolMedium.Get().(*[streamMsgBufMedium]byte)[:0]
+	case sz <= streamMsgBufLarge:
+		return streamMsgBufPoolLarge.Get().(*[streamMsgBufLarge]byte)[:0]
+	case sz <= streamMsgBufXLarge:
+		return streamMsgBufPoolXLarge.Get().(*[streamMsgBufXLarge]byte)[:0]
+	default:
+		return make([]byte, 0, sz)
+	}
+}
+
+// recycleStreamMsgBuf returns a buffer to the appropriate pool tier if its
+// capacity matches a known pool size. Buffers from non-pooled allocations
+// are silently ignored and left for GC. Safe to call with nil.
+func recycleStreamMsgBuf(buf []byte) {
+	if buf == nil {
+		return
+	}
+	switch cap(buf) {
+	case streamMsgBufSmall:
+		b := (*[streamMsgBufSmall]byte)(buf[:streamMsgBufSmall])
+		streamMsgBufPoolSmall.Put(b)
+	case streamMsgBufMedium:
+		b := (*[streamMsgBufMedium]byte)(buf[:streamMsgBufMedium])
+		streamMsgBufPoolMedium.Put(b)
+	case streamMsgBufLarge:
+		b := (*[streamMsgBufLarge]byte)(buf[:streamMsgBufLarge])
+		streamMsgBufPoolLarge.Put(b)
+	case streamMsgBufXLarge:
+		b := (*[streamMsgBufXLarge]byte)(buf[:streamMsgBufXLarge])
+		streamMsgBufPoolXLarge.Put(b)
+	}
+}
+
 func encodeStreamMsg(subject, reply string, hdr, msg []byte, lseq uint64, ts int64, sourced bool) []byte {
 	return encodeStreamMsgAllowCompress(subject, reply, hdr, msg, lseq, ts, sourced)
 }
@@ -9052,6 +9133,8 @@ func encodeStreamMsgAllowCompress(subject, reply string, hdr, msg []byte, lseq u
 const compressThreshold = 8192 // 8k
 
 // If allowed and contents over the threshold we will compress.
+// The returned buffer may come from a sync.Pool and should be recycled
+// via recycleStreamMsgBuf when no longer needed.
 func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte, lseq uint64, ts int64, sourced bool, batchId string, batchSeq uint64, batchCommit bool) []byte {
 	// Clip the subject, reply, header and msgs down. Operate on
 	// uint64 lengths to avoid overflowing.
@@ -9077,7 +9160,7 @@ func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte
 
 	var le = binary.LittleEndian
 	var opIndex int
-	buf := make([]byte, 1, elen)
+	buf := getStreamMsgBuf(elen)[:1]
 	if batchId != _EMPTY_ {
 		if batchCommit {
 			buf[0] = byte(batchCommitMsgOp)
@@ -9107,7 +9190,8 @@ func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte
 
 	// Check if we should compress.
 	if shouldCompress {
-		nbuf := make([]byte, s2.MaxEncodedLen(elen))
+		maxCompLen := s2.MaxEncodedLen(elen)
+		nbuf := getStreamMsgBuf(maxCompLen)[:maxCompLen]
 		if opIndex > 0 {
 			copy(nbuf[:opIndex], buf[:opIndex])
 		}
@@ -9116,7 +9200,10 @@ func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte
 		// Only pay the cost of decode on the other side if we compressed.
 		// S2 will allow us to try without major penalty for non-compressable data.
 		if len(ebuf) < len(buf) {
+			recycleStreamMsgBuf(buf)
 			buf = nbuf[:len(ebuf)+opIndex+1]
+		} else {
+			recycleStreamMsgBuf(nbuf)
 		}
 	}
 

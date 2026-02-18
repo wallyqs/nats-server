@@ -2321,6 +2321,10 @@ func (ce *CommittedEntry) ReturnToPool() {
 	}
 	if len(ce.Entries) > 0 {
 		for _, e := range ce.Entries {
+			// Recycle any pooled encoding buffers (e.g. from encodeStreamMsg).
+			// recycleStreamMsgBuf uses capacity-based discrimination, so
+			// non-pooled buffers are safely ignored.
+			recycleStreamMsgBuf(e.Data)
 			entryPool.Put(e)
 		}
 	}
