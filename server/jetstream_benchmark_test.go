@@ -864,7 +864,7 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 		clusterSize int
 		replicas    int
 		messageSize int
-		numSubjects int
+		numConsumers int
 	}{
 		{1, 1, 10, 1},   // Single node, 10B messages
 		{1, 1, 1024, 1}, // Single node, 1KB messages
@@ -891,7 +891,7 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 			bc.clusterSize,
 			bc.replicas,
 			bc.messageSize,
-			bc.numSubjects,
+			bc.numConsumers,
 		)
 		b.Run(
 			name,
@@ -907,8 +907,8 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 						name,
 						func(b *testing.B) {
 
-							subjects := make([]string, bc.numSubjects)
-							for i := 0; i < bc.numSubjects; i++ {
+							subjects := make([]string, bc.numConsumers)
+							for i := 0; i < bc.numConsumers; i++ {
 								subjects[i] = fmt.Sprintf("s-%d", i+1)
 							}
 
@@ -938,7 +938,7 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 							}
 
 							if verbose {
-								b.Logf("Creating stream with R=%d and %d input subjects", bc.replicas, bc.numSubjects)
+								b.Logf("Creating stream with R=%d and %d input subjects", bc.replicas, bc.numConsumers)
 							}
 							_, err = jsStreamCreate(b, nc, &StreamConfig{
 								Name:     streamName,
@@ -1202,19 +1202,19 @@ func BenchmarkJetStreamCounters(b *testing.B) {
 		storageType StorageType
 		clusterSize int
 		replicas    int
-		numSubjects int
+		numConsumers int
 		sources     int
 	}
 	var benchmarksCases []benchmarksCase
 	for _, storage := range []StorageType{FileStorage, MemoryStorage} {
 		for _, replicas := range []int{1, 3} {
-			for _, numSubjects := range []int{1, 1000} {
+			for _, numConsumers := range []int{1, 1000} {
 				for _, sources := range []int{0, 10, 25, 250} {
 					benchmarksCases = append(benchmarksCases, benchmarksCase{
 						storageType: storage,
 						clusterSize: 3,
 						replicas:    replicas,
-						numSubjects: numSubjects,
+						numConsumers: numConsumers,
 						sources:     sources,
 					})
 				}
@@ -1239,7 +1239,7 @@ func BenchmarkJetStreamCounters(b *testing.B) {
 			bc.storageType,
 			bc.clusterSize,
 			bc.replicas,
-			bc.numSubjects,
+			bc.numConsumers,
 			bc.sources,
 		)
 
@@ -1251,8 +1251,8 @@ func BenchmarkJetStreamCounters(b *testing.B) {
 				}
 
 				b.Run(name, func(b *testing.B) {
-					subjects := make([]string, bc.numSubjects)
-					for i := range bc.numSubjects {
+					subjects := make([]string, bc.numConsumers)
+					for i := range bc.numConsumers {
 						subjects[i] = fmt.Sprintf("s-%d", i+1)
 					}
 
@@ -1282,7 +1282,7 @@ func BenchmarkJetStreamCounters(b *testing.B) {
 					}
 
 					if verbose {
-						b.Logf("Creating stream with R=%d and %d input subjects", bc.replicas, bc.numSubjects)
+						b.Logf("Creating stream with R=%d and %d input subjects", bc.replicas, bc.numConsumers)
 					}
 					if _, err := jsStreamCreate(b, nc, &StreamConfig{
 						Name:            streamName,
@@ -1345,7 +1345,7 @@ func BenchmarkJetStreamInterestStreamWithLimit(b *testing.B) {
 		seed             = 12345
 		publishBatchSize = 100
 		messageSize      = 256
-		numSubjects      = 2500
+		numConsumers      = 2500
 		subjectPrefix    = "S"
 		numPublishers    = 4
 		randomData       = true
@@ -1357,7 +1357,7 @@ func BenchmarkJetStreamInterestStreamWithLimit(b *testing.B) {
 			"BatchSize: %d, MsgSize: %d, Subjects: %d, Publishers: %d, Random Message: %v",
 			publishBatchSize,
 			messageSize,
-			numSubjects,
+			numConsumers,
 			numPublishers,
 			randomData,
 		)
@@ -1421,7 +1421,7 @@ func BenchmarkJetStreamInterestStreamWithLimit(b *testing.B) {
 
 		// Warm up: publish a few messages
 		for i := 0; i < warmupMessages; i++ {
-			subject := fmt.Sprintf("%s.%d", subjectPrefix, fastrand.Uint32n(numSubjects))
+			subject := fmt.Sprintf("%s.%d", subjectPrefix, fastrand.Uint32n(numConsumers))
 			if randomData {
 				fastRandomMutation(messageBuf, 10)
 			}
@@ -1458,7 +1458,7 @@ func BenchmarkJetStreamInterestStreamWithLimit(b *testing.B) {
 
 			// Publish a batch of messages
 			for i := 0; i < batchSize; i++ {
-				subject := fmt.Sprintf("%s.%d", subjectPrefix, fastrand.Uint32n(numSubjects))
+				subject := fmt.Sprintf("%s.%d", subjectPrefix, fastrand.Uint32n(numConsumers))
 				if randomData {
 					fastRandomMutation(messageBuf, 10)
 				}
@@ -2302,6 +2302,640 @@ func BenchmarkJetStreamScanForSources(b *testing.B) {
 	b.Run("StartingSequenceForSources", func(b *testing.B) {
 		mset.startingSequenceForSources()
 	})
+}
+
+// BenchmarkJetStreamBlockSizePublish benchmarks publishing on streams with
+// MaxBytes set, comparing 4MB vs 8MB block sizes across retention policies.
+//
+// To compare, run:
+//
+//	go test -bench='BenchmarkJetStreamBlockSizePublish' -benchmem -count=6
+func BenchmarkJetStreamBlockSizePublish(b *testing.B) {
+	const (
+		publishTimeout = 10 * time.Second
+		maxBytes       = int64(256 * 1024 * 1024) // 256MB
+	)
+
+	messageSizeCases := []int{
+		256,      // 256B
+		1024,     // 1KB
+		8 * 1024, // 8KB
+	}
+
+	blockSizeCases := []struct {
+		name    string
+		blkSize int64
+	}{
+		{"BlkSz=4MB", 4 * 1024 * 1024},
+		{"BlkSz=8MB", 8 * 1024 * 1024},
+	}
+
+	retentionCases := []struct {
+		name      string
+		retention nats.RetentionPolicy
+	}{
+		{"Retention=Limits", nats.LimitsPolicy},
+		{"Retention=WorkQueue", nats.WorkQueuePolicy},
+		{"Retention=Interest", nats.InterestPolicy},
+	}
+
+	for _, rc := range retentionCases {
+		b.Run(rc.name, func(b *testing.B) {
+			for _, bc := range blockSizeCases {
+				b.Run(bc.name, func(b *testing.B) {
+					for _, msgSize := range messageSizeCases {
+						b.Run(fmt.Sprintf("MsgSz=%d", msgSize), func(b *testing.B) {
+							s := RunBasicJetStreamServer(b)
+							defer s.Shutdown()
+							s.optsMu.Lock()
+							s.opts.SyncInterval = 5 * time.Minute
+							s.optsMu.Unlock()
+
+							nc, err := nats.Connect(s.ClientURL())
+							require_NoError(b, err)
+							defer nc.Close()
+
+							js, err := nc.JetStream(nats.MaxWait(publishTimeout))
+							require_NoError(b, err)
+
+							streamName := "BENCH_PUB"
+							subject := "bench.pub.test"
+							_, err = js.AddStream(&nats.StreamConfig{
+								Name:      streamName,
+								Subjects:  []string{"bench.pub.>"},
+								Retention: rc.retention,
+								Storage:   nats.FileStorage,
+								MaxBytes:  maxBytes,
+							})
+							require_NoError(b, err)
+
+							// Override block size on the underlying filestore.
+							mset, err := s.GlobalAccount().lookupStream(streamName)
+							require_NoError(b, err)
+							mset.mu.RLock()
+							fs := mset.store.(*fileStore)
+							mset.mu.RUnlock()
+							fs.mu.Lock()
+							fs.fcfg.BlockSize = uint64(bc.blkSize)
+							fs.mu.Unlock()
+
+							// Interest retention discards messages with no
+							// consumers, so create one before publishing.
+							if rc.retention == nats.InterestPolicy {
+								_, err = js.PullSubscribe(subject, "interest-consumer",
+									nats.BindStream(streamName),
+									nats.AckExplicit(),
+								)
+								require_NoError(b, err)
+							}
+
+							msg := make([]byte, msgSize)
+							rand.New(rand.NewSource(12345)).Read(msg)
+
+							b.SetBytes(int64(msgSize))
+							b.ResetTimer()
+
+							for i := 0; i < b.N; i++ {
+								fastRandomMutation(msg, 10)
+								_, err := js.Publish(subject, msg)
+								if err != nil {
+									b.Fatalf("Publish error: %v", err)
+								}
+							}
+							b.StopTimer()
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkJetStreamBlockSizePublishAndConsume benchmarks publishing and
+// consuming on streams with MaxBytes set, comparing 4MB vs 8MB block sizes
+// across all retention policies. Each iteration publishes one message and
+// immediately consumes it with an ack.
+//
+// For Interest streams a durable consumer is created before publishing so
+// that acking removes the message. For WorkQueue streams the pull consumer
+// triggers removal on ack. For Limits streams messages remain after ack.
+//
+// To compare, run:
+//
+//	go test -bench='BenchmarkJetStreamBlockSizePublishAndConsume' -benchmem -count=6
+func BenchmarkJetStreamBlockSizePublishAndConsume(b *testing.B) {
+	const (
+		publishTimeout = 10 * time.Second
+		maxBytes       = int64(256 * 1024 * 1024) // 256MB
+	)
+
+	messageSizeCases := []int{
+		256,       // 256B
+		1024,      // 1KB
+		8 * 1024,  // 8KB
+		64 * 1024, // 64KB
+	}
+
+	blockSizeCases := []struct {
+		name    string
+		blkSize int64
+	}{
+		{"BlkSz=4MB", 4 * 1024 * 1024},
+		{"BlkSz=8MB", 8 * 1024 * 1024},
+	}
+
+	retentionCases := []struct {
+		name      string
+		retention nats.RetentionPolicy
+	}{
+		{"Retention=Limits", nats.LimitsPolicy},
+		{"Retention=WorkQueue", nats.WorkQueuePolicy},
+		{"Retention=Interest", nats.InterestPolicy},
+	}
+
+	for _, rc := range retentionCases {
+		b.Run(rc.name, func(b *testing.B) {
+			for _, bc := range blockSizeCases {
+				b.Run(bc.name, func(b *testing.B) {
+					for _, msgSize := range messageSizeCases {
+						b.Run(fmt.Sprintf("MsgSz=%d", msgSize), func(b *testing.B) {
+							s := RunBasicJetStreamServer(b)
+							defer s.Shutdown()
+							s.optsMu.Lock()
+							s.opts.SyncInterval = 5 * time.Minute
+							s.optsMu.Unlock()
+
+							nc, err := nats.Connect(s.ClientURL())
+							require_NoError(b, err)
+							defer nc.Close()
+
+							js, err := nc.JetStream(nats.MaxWait(publishTimeout))
+							require_NoError(b, err)
+
+							streamName := "BENCH_PC"
+							subject := "bench.pc.test"
+							_, err = js.AddStream(&nats.StreamConfig{
+								Name:      streamName,
+								Subjects:  []string{"bench.pc.>"},
+								Retention: rc.retention,
+								Storage:   nats.FileStorage,
+								MaxBytes:  maxBytes,
+							})
+							require_NoError(b, err)
+
+							// Override block size on the underlying filestore.
+							mset, err := s.GlobalAccount().lookupStream(streamName)
+							require_NoError(b, err)
+							mset.mu.RLock()
+							fs := mset.store.(*fileStore)
+							mset.mu.RUnlock()
+							fs.mu.Lock()
+							fs.fcfg.BlockSize = uint64(bc.blkSize)
+							fs.mu.Unlock()
+
+							// Create a pull consumer.
+							sub, err := js.PullSubscribe(subject, "bench-consumer",
+								nats.BindStream(streamName),
+								nats.AckExplicit(),
+							)
+							require_NoError(b, err)
+
+							msg := make([]byte, msgSize)
+							rand.New(rand.NewSource(12345)).Read(msg)
+
+							b.SetBytes(int64(msgSize))
+							b.ResetTimer()
+
+							for i := 0; i < b.N; i++ {
+								fastRandomMutation(msg, 10)
+								_, err := js.Publish(subject, msg)
+								if err != nil {
+									b.Fatalf("Publish error: %v", err)
+								}
+
+								msgs, err := sub.Fetch(1, nats.MaxWait(5*time.Second))
+								if err != nil || len(msgs) != 1 {
+									b.Fatalf("Fetch error: %v, got %d msgs", err, len(msgs))
+								}
+								if err := msgs[0].AckSync(); err != nil {
+									b.Fatalf("AckSync error: %v", err)
+								}
+							}
+							b.StopTimer()
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkJetStreamBlockSizeBurstDrain benchmarks a burst publish followed
+// by a full drain across retention policies, comparing block sizes.
+// This exercises the scenario where a large number of messages accumulate
+// and then are consumed — the pattern most affected by block size as it
+// determines how many blocks are active and how memory is allocated.
+func BenchmarkJetStreamBlockSizeBurstDrain(b *testing.B) {
+	const (
+		publishTimeout = 30 * time.Second
+		maxBytes       = int64(256 * 1024 * 1024)
+		msgSize        = 1024 // 1KB
+	)
+
+	burstSizes := []int{1_000, 10_000}
+
+	blockSizeCases := []struct {
+		name    string
+		blkSize int64
+	}{
+		{"BlkSz=4MB", 4 * 1024 * 1024},
+		{"BlkSz=8MB", 8 * 1024 * 1024},
+	}
+
+	retentionCases := []struct {
+		name      string
+		retention nats.RetentionPolicy
+	}{
+		{"Retention=Limits", nats.LimitsPolicy},
+		{"Retention=WorkQueue", nats.WorkQueuePolicy},
+		{"Retention=Interest", nats.InterestPolicy},
+	}
+
+	for _, rc := range retentionCases {
+		b.Run(rc.name, func(b *testing.B) {
+			for _, bc := range blockSizeCases {
+				b.Run(bc.name, func(b *testing.B) {
+					for _, burstSize := range burstSizes {
+						b.Run(fmt.Sprintf("Burst=%d", burstSize), func(b *testing.B) {
+							for n := 0; n < b.N; n++ {
+								b.StopTimer()
+
+								s := RunBasicJetStreamServer(b)
+								s.optsMu.Lock()
+								s.opts.SyncInterval = 5 * time.Minute
+								s.optsMu.Unlock()
+
+								nc, err := nats.Connect(s.ClientURL())
+								require_NoError(b, err)
+
+								js, err := nc.JetStream(
+									nats.MaxWait(publishTimeout),
+									nats.PublishAsyncMaxPending(4000),
+								)
+								require_NoError(b, err)
+
+								streamName := "BENCH_BURST"
+								subject := "bench.burst.test"
+								_, err = js.AddStream(&nats.StreamConfig{
+									Name:      streamName,
+									Subjects:  []string{"bench.burst.>"},
+									Retention: rc.retention,
+									Storage:   nats.FileStorage,
+									MaxBytes:  maxBytes,
+								})
+								require_NoError(b, err)
+
+								// Override block size.
+								mset, err := s.GlobalAccount().lookupStream(streamName)
+								require_NoError(b, err)
+								mset.mu.RLock()
+								fs := mset.store.(*fileStore)
+								mset.mu.RUnlock()
+								fs.mu.Lock()
+								fs.fcfg.BlockSize = uint64(bc.blkSize)
+								fs.mu.Unlock()
+
+								msg := make([]byte, msgSize)
+								rand.New(rand.NewSource(12345)).Read(msg)
+
+								// Interest retention discards messages with no
+								// consumers, so create the consumer before publishing.
+								var sub *nats.Subscription
+								if rc.retention == nats.InterestPolicy {
+									sub, err = js.PullSubscribe(subject, "drain-consumer",
+										nats.BindStream(streamName),
+										nats.AckExplicit(),
+									)
+									require_NoError(b, err)
+								}
+
+								// Publish burst (not timed).
+								for i := 0; i < burstSize; i++ {
+									fastRandomMutation(msg, 10)
+									_, err := js.PublishAsync(subject, msg)
+									if err != nil {
+										b.Fatalf("PublishAsync error: %v", err)
+									}
+								}
+								select {
+								case <-js.PublishAsyncComplete():
+								case <-time.After(publishTimeout):
+									b.Fatalf("Publish burst timed out")
+								}
+
+								// Create consumer for drain (already created above for Interest).
+								if sub == nil {
+									sub, err = js.PullSubscribe(subject, "drain-consumer",
+										nats.BindStream(streamName),
+										nats.AckExplicit(),
+									)
+									require_NoError(b, err)
+								}
+
+								// Drain phase (timed).
+								b.StartTimer()
+
+								consumed := 0
+								for consumed < burstSize {
+									batchSz := burstSize - consumed
+									if batchSz > 100 {
+										batchSz = 100
+									}
+									msgs, err := sub.Fetch(batchSz, nats.MaxWait(10*time.Second))
+									if err != nil {
+										b.Fatalf("Fetch error after %d consumed: %v", consumed, err)
+									}
+									for _, m := range msgs {
+										if err := m.Ack(); err != nil {
+											b.Fatalf("Ack error: %v", err)
+										}
+										consumed++
+									}
+								}
+
+								b.StopTimer()
+
+								nc.Close()
+								s.Shutdown()
+							}
+
+							b.SetBytes(int64(msgSize) * int64(burstSize))
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkJetStreamBlockSizeMultiConsumer benchmarks a WorkQueue stream
+// listening on foo.> with 10 subjects (foo.1 .. foo.10) and 10 pull
+// consumers, one per subject. The stream is pre-filled with data up to a
+// configurable percentage of MaxBytes (the "InitData" parameter), spread
+// evenly across all 10 subjects. The timed phase measures all 10 consumers
+// draining the stream concurrently.
+//
+// This exercises a realistic pattern where block size determines how much
+// memory is loaded when multiple consumers are simultaneously reading from
+// different regions of a full stream.
+//
+// To compare, run:
+//
+//	go test -bench='BenchmarkJetStreamBlockSizeMultiConsumer' -benchmem -count=6
+func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
+	const publishTimeout = 30 * time.Second
+
+	numConsumersCases := []int{1, 10, 40, 100, 150, 200}
+
+	messageSizeCases := []int{
+		1024,      // 1KB
+		4 * 1024,  // 4KB
+		8 * 1024,  // 8KB
+		16 * 1024, // 16KB
+		64 * 1024, // 64KB
+	}
+
+	maxBytesCases := []struct {
+		name     string
+		maxBytes int64
+	}{
+		{"MaxBytes=256MB", 256 * 1024 * 1024},
+		{"MaxBytes=1GB", 1 * 1024 * 1024 * 1024},
+		{"MaxBytes=2GB", 2 * 1024 * 1024 * 1024},
+		{"MaxBytes=4GB", 4 * 1024 * 1024 * 1024},
+		{"MaxBytes=8GB", 8 * 1024 * 1024 * 1024},
+	}
+
+	blockSizeCases := []struct {
+		name    string
+		blkSize int64
+	}{
+		{"BlkSz=2MB", 2 * 1024 * 1024},
+		{"BlkSz=4MB", 4 * 1024 * 1024},
+		{"BlkSz=8MB", 8 * 1024 * 1024},
+		{"BlkSz=16MB", 16 * 1024 * 1024},
+	}
+
+	// InitData: percentage of MaxBytes to pre-fill before the timed drain.
+	initDataCases := []struct {
+		name    string
+		percent float64
+	}{
+		{"InitData=25pct", 0.25},
+		{"InitData=75pct", 0.75},
+	}
+
+	type benchCase struct {
+		name         string
+		numConsumers int
+		blkSize      int64
+		maxBytes     int64
+		initPercent  float64
+		msgSize      int
+	}
+
+	var cases []benchCase
+	for _, nc := range numConsumersCases {
+		for _, bc := range blockSizeCases {
+			for _, mc := range maxBytesCases {
+				for _, ic := range initDataCases {
+					for _, ms := range messageSizeCases {
+						cases = append(cases, benchCase{
+							name: fmt.Sprintf("Consumers=%d/%s/%s/%s/MsgSz=%d",
+								nc, bc.name, mc.name, ic.name, ms),
+							numConsumers: nc,
+							blkSize:      bc.blkSize,
+							maxBytes:     mc.maxBytes,
+							initPercent:  ic.percent,
+							msgSize:      ms,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			for n := 0; n < b.N; n++ {
+				b.StopTimer()
+
+				s := RunBasicJetStreamServer(b)
+				s.optsMu.Lock()
+				s.opts.SyncInterval = 5 * time.Minute
+				s.optsMu.Unlock()
+
+				nc, err := nats.Connect(s.ClientURL())
+				require_NoError(b, err)
+
+				js, err := nc.JetStream(
+					nats.MaxWait(publishTimeout),
+					nats.PublishAsyncMaxPending(16384),
+				)
+				require_NoError(b, err)
+
+				streamName := "BENCH_MC"
+				_, err = js.AddStream(&nats.StreamConfig{
+					Name:      streamName,
+					Subjects:  []string{"foo.>"},
+					Retention: nats.WorkQueuePolicy,
+					Storage:   nats.FileStorage,
+					MaxBytes:  tc.maxBytes,
+				})
+				require_NoError(b, err)
+
+				// Override block size on the underlying filestore.
+				mset, err := s.GlobalAccount().lookupStream(streamName)
+				require_NoError(b, err)
+				mset.mu.RLock()
+				fs := mset.store.(*fileStore)
+				mset.mu.RUnlock()
+				fs.mu.Lock()
+				fs.fcfg.BlockSize = uint64(tc.blkSize)
+				fs.mu.Unlock()
+
+				// Build subjects list.
+				subjects := make([]string, tc.numConsumers)
+				for i := 0; i < tc.numConsumers; i++ {
+					subjects[i] = fmt.Sprintf("foo.%d", i+1)
+				}
+
+				// Pre-fill the stream up to the target percentage of MaxBytes.
+				msg := make([]byte, tc.msgSize)
+				rand.New(rand.NewSource(12345)).Read(msg)
+
+				targetBytes := int64(float64(tc.maxBytes) * tc.initPercent)
+				totalPublished := 0
+				for int64(totalPublished*tc.msgSize) < targetBytes {
+					idx := totalPublished % tc.numConsumers
+					fastRandomMutation(msg, 10)
+					_, err := js.PublishAsync(subjects[idx], msg)
+					if err != nil {
+						b.Fatalf("Pre-fill publish error: %v", err)
+					}
+					totalPublished++
+					// Drain async acks periodically to avoid stalling.
+					if totalPublished%10000 == 0 {
+						select {
+						case <-js.PublishAsyncComplete():
+						case <-time.After(publishTimeout):
+							b.Fatalf("Pre-fill publish timed out at %d msgs", totalPublished)
+						}
+					}
+				}
+				select {
+				case <-js.PublishAsyncComplete():
+				case <-time.After(publishTimeout):
+					b.Fatalf("Pre-fill publish timed out")
+				}
+
+				msgsPerConsumer := totalPublished / tc.numConsumers
+
+				// Create pull consumers, one per subject.
+				subs := make([]*nats.Subscription, tc.numConsumers)
+				for i := 0; i < tc.numConsumers; i++ {
+					subs[i], err = js.PullSubscribe(
+						subjects[i],
+						fmt.Sprintf("cons_%d", i+1),
+						nats.BindStream(streamName),
+						nats.AckExplicit(),
+					)
+					require_NoError(b, err)
+				}
+
+				// Force GC and capture baseline heap.
+				runtime.GC()
+				var mBefore runtime.MemStats
+				runtime.ReadMemStats(&mBefore)
+
+				b.StartTimer()
+
+				// All consumers drain concurrently.
+				var wg sync.WaitGroup
+				var peakHeap atomic.Uint64
+				var fetchErrors atomic.Int64
+				var totalConsumed atomic.Int64
+				peakHeap.Store(mBefore.HeapInuse)
+
+				for c := 0; c < tc.numConsumers; c++ {
+					wg.Add(1)
+					go func(idx int) {
+						defer wg.Done()
+						consumed := 0
+						consecutiveErrors := 0
+						for consumed < msgsPerConsumer {
+							batchSz := msgsPerConsumer - consumed
+							if batchSz > 100 {
+								batchSz = 100
+							}
+							msgs, err := subs[idx].Fetch(batchSz, nats.MaxWait(5*time.Second))
+							if err != nil {
+								fetchErrors.Add(1)
+								consecutiveErrors++
+								if consecutiveErrors >= 5 {
+									b.Logf("cons_%d giving up after %d msgs, %d consecutive errors: %v", idx+1, consumed, consecutiveErrors, err)
+									return
+								}
+								continue
+							}
+							consecutiveErrors = 0
+							for _, m := range msgs {
+								m.Ack()
+								consumed++
+								totalConsumed.Add(1)
+							}
+							// Sample heap periodically.
+							if consumed%200 == 0 {
+								var m runtime.MemStats
+								runtime.ReadMemStats(&m)
+								for {
+									old := peakHeap.Load()
+									if m.HeapInuse <= old || peakHeap.CompareAndSwap(old, m.HeapInuse) {
+										break
+									}
+								}
+							}
+						}
+					}(c)
+				}
+				wg.Wait()
+
+				b.StopTimer()
+
+				// Set bytes based on actual consumption so MB/s reflects reality.
+				consumed := totalConsumed.Load()
+				b.SetBytes(consumed * int64(tc.msgSize))
+
+				// Final heap snapshot.
+				var mAfter runtime.MemStats
+				runtime.ReadMemStats(&mAfter)
+				peak := peakHeap.Load()
+				if mAfter.HeapInuse > peak {
+					peak = mAfter.HeapInuse
+				}
+
+				b.ReportMetric(float64(mBefore.HeapInuse)/(1024*1024), "baseline-heap-MB")
+				b.ReportMetric(float64(peak)/(1024*1024), "peak-heap-MB")
+				b.ReportMetric(float64(peak-mBefore.HeapInuse)/(1024*1024), "heap-delta-MB")
+				b.ReportMetric(float64(totalPublished), "published-msgs")
+				b.ReportMetric(float64(consumed), "consumed-msgs")
+				b.ReportMetric(float64(fetchErrors.Load()), "fetch-errors")
+
+				nc.Close()
+				s.Shutdown()
+			}
+		})
+	}
 }
 
 // Helper function to stand up a JS-enabled single server or cluster
