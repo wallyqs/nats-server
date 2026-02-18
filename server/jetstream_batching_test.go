@@ -2922,3 +2922,73 @@ func TestJetStreamAtomicBatchPublishCommitUnsupported(t *testing.T) {
 	require_NoError(t, err)
 	require_Len(t, len(sliceHeader(JSRequiredApiLevel, sm.Header)), 0)
 }
+
+func BenchmarkEncodeStreamMsg(b *testing.B) {
+	// Benchmark the encode path (where allocations happen) and the
+	// decode+recycle path (where pooled buffers are returned).
+	// Run with: go test -run=^$ -bench BenchmarkEncodeStreamMsg -benchmem
+	//
+	// To compare before/after:
+	//   git stash && go test ... -count=6 > old.txt
+	//   git stash pop && go test ... -count=6 > new.txt
+	//   benchstat old.txt new.txt
+
+	sizes := []struct {
+		name string
+		sz   int
+	}{
+		{"0B", 0},
+		{"128B", 128},
+		{"1KB", 1024},
+		{"4KB", 4096},
+		{"16KB", 16384},   // above compressThreshold, compressible
+		{"64KB", 65536},   // large, compressible
+		{"256KB", 262144}, // very large, compressible
+	}
+
+	for _, tc := range sizes {
+		msg := bytes.Repeat([]byte("A"), tc.sz)
+
+		// Encode-only: measures allocation on the hot path.
+		b.Run("Encode/"+tc.name, func(b *testing.B) {
+			b.SetBytes(int64(tc.sz))
+			b.ReportAllocs()
+			for b.Loop() {
+				encodeStreamMsgAllowCompress("foo.bar.baz", "_INBOX.XXXX", nil, msg, 1, 1234567890, false)
+			}
+		})
+
+		// Encode-only with batch header.
+		b.Run("EncodeBatch/"+tc.name, func(b *testing.B) {
+			b.SetBytes(int64(tc.sz))
+			b.ReportAllocs()
+			for b.Loop() {
+				encodeStreamMsgAllowCompressAndBatch("foo.bar.baz", "_INBOX.XXXX", nil, msg, 1, 1234567890, false, "batch-uuid-1234", 1, false)
+			}
+		})
+
+		// Full round-trip: encode → decode → recycle.
+		// This is the steady-state loop: the pool only helps if
+		// buffers are returned, so we recycle after each iteration.
+		b.Run("EncodeDecodeRecycle/"+tc.name, func(b *testing.B) {
+			b.SetBytes(int64(tc.sz))
+			b.ReportAllocs()
+			for b.Loop() {
+				esm := encodeStreamMsgAllowCompress("foo.bar.baz", "_INBOX.XXXX", nil, msg, 1, 1234567890, false)
+				buf, op := esm[1:], entryOp(esm[0])
+				if op == compressedStreamMsgOp {
+					var err error
+					buf, err = s2.Decode(nil, buf)
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+				_, _, _, _, _, _, _, err := decodeStreamMsg(buf)
+				if err != nil {
+					b.Fatal(err)
+				}
+				recycleStreamMsgBuf(esm)
+			}
+		})
+	}
+}
