@@ -2699,7 +2699,9 @@ func BenchmarkJetStreamBlockSizeMultiConsumer(b *testing.B) {
 
 	messageSizeCases := []int{
 		1024,      // 1KB
+		4 * 1024,  // 4KB
 		8 * 1024,  // 8KB
+		16 * 1024, // 16KB
 		64 * 1024, // 64KB
 	}
 
