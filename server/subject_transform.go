@@ -415,27 +415,14 @@ func tokenizeSubject(subject string) []string {
 	// Tokenize the subject.
 	tsa := [32]string{}
 	tts := tsa[:0]
-	const threshold = 32
-	if len(subject) < threshold {
-		start := 0
-		for i := 0; i < len(subject); i++ {
-			if subject[i] == btsep {
-				tts = append(tts, subject[start:i])
-				start = i + 1
-			}
-		}
-		tts = append(tts, subject[start:])
-		return tts
-	}
-	for {
-		if idx := strings.IndexByte(subject, btsep); idx >= 0 {
-			tts = append(tts, subject[:idx])
-			subject = subject[idx+1:]
-		} else {
-			tts = append(tts, subject)
-			break
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tts = append(tts, subject[start:i])
+			start = i + 1
 		}
 	}
+	tts = append(tts, subject[start:])
 	return tts
 }
 
