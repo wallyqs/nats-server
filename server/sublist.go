@@ -1409,6 +1409,23 @@ func tokenAt(subject string, index uint8) string {
 
 // use similar to append. meaning, the updated slice will be returned
 func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
+	// For short subjects, the manual byte-by-byte scan is faster due to
+	// avoiding function call overhead. For longer subjects (>=32 bytes),
+	// strings.IndexByte leverages SIMD instructions for significant speedup.
+	const threshold = 32
+
+	if len(subject) < threshold {
+		start := 0
+		for i := 0; i < len(subject); i++ {
+			if subject[i] == btsep {
+				tts = append(tts, subject[start:i])
+				start = i + 1
+			}
+		}
+		tts = append(tts, subject[start:])
+		return tts
+	}
+
 	for {
 		if idx := strings.IndexByte(subject, btsep); idx >= 0 {
 			tts = append(tts, subject[:idx])
