@@ -354,6 +354,86 @@ func TestGenericSublistNumInterest(t *testing.T) {
 	require_NoError(t, s.Remove("*", 66))
 }
 
+// --- BENCHMARKS ---
+
+// longSubject generates a subject string of approximately n bytes using
+// realistic token patterns separated by dots.
+func longSubject(n int) string {
+	tokens := []string{
+		"ACCOUNT", "CLAIMS", "UPDATE", "RESPONSE",
+		"AABBCCDDEEFFGGHHIIJJKKLLMMNN", "JETSTREAM", "CONSUMER",
+		"APISERVER", "MONITOR", "HEALTHCHECK",
+	}
+	var b strings.Builder
+	for i := 0; b.Len() < n; i++ {
+		if i > 0 {
+			b.WriteByte('.')
+		}
+		b.WriteString(tokens[i%len(tokens)])
+	}
+	return b.String()
+}
+
+func BenchmarkMatch(b *testing.B) {
+	for _, tt := range []struct {
+		name string
+		subj string
+	}{
+		{"Short_19B", "events.user.created"},
+		{"Long_75B", "$SYS.REQ.ACCOUNT.PING.AABBCCDDEEFFGGHHIIJJKKLLMMNN.CLAIMS.UPDATE.RESPONSE"},
+		{"Long_256B", longSubject(256)},
+	} {
+		b.Run(tt.name, func(b *testing.B) {
+			s := NewSublist[int]()
+			s.Insert(tt.subj, 1)
+			b.ResetTimer()
+			for b.Loop() {
+				s.Match(tt.subj, func(int) {})
+			}
+		})
+	}
+}
+
+func BenchmarkHasInterest(b *testing.B) {
+	for _, tt := range []struct {
+		name string
+		subj string
+	}{
+		{"Short_19B", "events.user.created"},
+		{"Long_75B", "$SYS.REQ.ACCOUNT.PING.AABBCCDDEEFFGGHHIIJJKKLLMMNN.CLAIMS.UPDATE.RESPONSE"},
+		{"Long_256B", longSubject(256)},
+	} {
+		b.Run(tt.name, func(b *testing.B) {
+			s := NewSublist[int]()
+			s.Insert(tt.subj, 1)
+			b.ResetTimer()
+			for b.Loop() {
+				s.HasInterest(tt.subj)
+			}
+		})
+	}
+}
+
+func BenchmarkTokenizeSubjectIntoSlice(b *testing.B) {
+	for _, tt := range []struct {
+		name string
+		subj string
+	}{
+		{"Short_19B", "events.user.created"},
+		{"Long_75B", "$SYS.REQ.ACCOUNT.PING.AABBCCDDEEFFGGHHIIJJKKLLMMNN.CLAIMS.UPDATE.RESPONSE"},
+		{"Long_256B", longSubject(256)},
+		// Few tokens with long segments to isolate IndexByte SIMD benefit.
+		{"Long_FewTokens_128B", "AABBCCDDEEFFGGHHIIJJKKLLMMNNOOPPQQRRSSTTUUVVWWXXYYZZ.AABBCCDDEEFFGGHHIIJJKKLLMMNNOOPPQQRRSSTTUUVVWWXXYYZZ.AABBCCDDEEFFGGHH01234"},
+	} {
+		b.Run(tt.name, func(b *testing.B) {
+			var tsa [32]string
+			for b.Loop() {
+				tokenizeSubjectIntoSlice(tsa[:0], tt.subj)
+			}
+		})
+	}
+}
+
 // --- TEST HELPERS ---
 
 func require_Matches[T comparable](t *testing.T, s *GenericSublist[T], sub string, c int) {
