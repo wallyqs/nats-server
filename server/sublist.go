@@ -1405,7 +1405,7 @@ func tokenAt(subject string, index uint8) string {
 
 // use similar to append. meaning, the updated slice will be returned
 func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
-	if len(subject) < 16 {
+	if len(subject) < 32 {
 		start := 0
 		for i := 0; i < len(subject); i++ {
 			if subject[i] == btsep {
