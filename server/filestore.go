@@ -11297,14 +11297,16 @@ func (fs *fileStore) deleteMap() (dmap avl.SequenceSet) {
 	fs.readLockAllMsgBlocks()
 	defer fs.readUnlockAllMsgBlocks()
 
+	// Collect clones of each block's dmap. Block dmaps have non-overlapping
+	// sequence ranges, so we can use Absorb for an O(n) balanced merge
+	// instead of per-sequence Insert at O(n log n).
+	srcs := make([]*avl.SequenceSet, 0, len(fs.blks))
 	for _, mb := range fs.blks {
 		if mb.dmap.Size() > 0 {
-			mb.dmap.Range(func(seq uint64) bool {
-				dmap.Insert(seq)
-				return true
-			})
+			srcs = append(srcs, mb.dmap.Clone())
 		}
 	}
+	dmap.Absorb(srcs...)
 	return dmap
 }
 

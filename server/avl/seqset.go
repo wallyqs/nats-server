@@ -187,6 +187,72 @@ func (ss *SequenceSet) Clone() *SequenceSet {
 	return css
 }
 
+// Absorb efficiently merges one or more SequenceSets whose nodes do not
+// overlap with each other or with ss (i.e. no two sets share the same node
+// base). This is much faster than Union for the non-overlapping case because
+// it copies nodes directly and builds a balanced tree in O(n) instead of
+// doing per-sequence inserts at O(n log n).
+// The receiver must be empty. The source sets should not be used after this call.
+func (ss *SequenceSet) Absorb(srcs ...*SequenceSet) {
+	// Count total nodes across all sources.
+	total := 0
+	for _, src := range srcs {
+		total += src.nodes
+	}
+	if total == 0 {
+		return
+	}
+
+	// Collect all nodes in-order (sorted by base) into a flat slice.
+	nodes := make([]*node, 0, total)
+	for _, src := range srcs {
+		src.root.collectInOrder(&nodes)
+	}
+
+	// Sort by base to guarantee BST order across all sources.
+	slices.SortFunc(nodes, func(a, b *node) int {
+		return cmp.Compare(a.base, b.base)
+	})
+
+	// Count total set bits for the size field.
+	sz := 0
+	for _, n := range nodes {
+		for _, b := range n.bits {
+			sz += bits.OnesCount64(b)
+		}
+		// Clear child pointers; buildBalanced will set them.
+		n.l = nil
+		n.r = nil
+	}
+
+	ss.root = buildBalanced(nodes)
+	ss.nodes = len(nodes)
+	ss.size = sz
+}
+
+// collectInOrder appends all nodes in this subtree to dst in ascending base order.
+func (n *node) collectInOrder(dst *[]*node) {
+	if n == nil {
+		return
+	}
+	n.l.collectInOrder(dst)
+	*dst = append(*dst, n)
+	n.r.collectInOrder(dst)
+}
+
+// buildBalanced builds a height-balanced BST from a sorted slice of nodes.
+func buildBalanced(nodes []*node) *node {
+	if len(nodes) == 0 {
+		return nil
+	}
+	mid := len(nodes) / 2
+	n := nodes[mid]
+	n.l = buildBalanced(nodes[:mid])
+	n.r = buildBalanced(nodes[mid+1:])
+	n.h = calcH(n)
+	return n
+}
+
 // Union will union this SequenceSet with ssa.
 func (ss *SequenceSet) Union(ssa ...*SequenceSet) {
 	for _, sa := range ssa {
