@@ -439,7 +439,10 @@ func (n *node) insert(seq uint64, inserted *bool, nodes *int) *node {
 	} else if seq >= n.base+numEntries {
 		n.r = n.r.insert(seq, inserted, nodes)
 	} else {
+		// Sequence falls within this node's range; just flip a bit.
+		// No structural change, so skip height/balance update on ancestors.
 		n.set(seq, inserted)
+		return n
 	}
 
 	n.h = maxH(n) + 1
