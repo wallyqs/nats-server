@@ -511,6 +511,12 @@ func (n *node) insert(seq uint64, inserted *bool, nodes *int) *node {
 		return n
 	}
 
+	// If nothing was inserted (duplicate sequence), the tree structure
+	// is unchanged so skip height recalculation and rebalancing.
+	if !*inserted {
+		return n
+	}
+
 	// Compute height and balance factor in one pass,
 	// reading each child's height at most once.
 	var lh, rh int
