@@ -534,18 +534,6 @@ func visitLevel[T comparable](l *level[T], depth int) int {
 
 // use similar to append. meaning, the updated slice will be returned
 func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
-	// Use strings.IndexByte while the remaining subject is long enough
-	// to benefit from SIMD scanning. As the subject shrinks with each
-	// token extracted, fall back to a simple byte-by-byte loop.
-	for len(subject) >= 64 {
-		idx := strings.IndexByte(subject, btsep)
-		if idx < 0 {
-			tts = append(tts, subject)
-			return tts
-		}
-		tts = append(tts, subject[:idx])
-		subject = subject[idx+1:]
-	}
 	start := 0
 	for i := 0; i < len(subject); i++ {
 		if subject[i] == btsep {
