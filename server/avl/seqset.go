@@ -445,10 +445,23 @@ func (n *node) insert(seq uint64, inserted *bool, nodes *int) *node {
 		return n
 	}
 
-	n.h = maxH(n) + 1
+	// Compute height and balance factor in one pass,
+	// reading each child's height at most once.
+	var lh, rh int
+	if n.l != nil {
+		lh = n.l.h
+	}
+	if n.r != nil {
+		rh = n.r.h
+	}
+	if lh > rh {
+		n.h = lh + 1
+	} else {
+		n.h = rh + 1
+	}
 
 	// Don't make a function, impacts performance.
-	if bf := balanceF(n); bf > 1 {
+	if bf := lh - rh; bf > 1 {
 		// Left unbalanced.
 		if balanceF(n.l) < 0 {
 			n.l = n.l.rotateL()
@@ -469,11 +482,11 @@ func (n *node) rotateL() *node {
 	if r != nil {
 		n.r = r.l
 		r.l = n
-		n.h = maxH(n) + 1
-		r.h = maxH(r) + 1
+		n.h = calcH(n)
+		r.h = calcH(r)
 	} else {
 		n.r = nil
-		n.h = maxH(n) + 1
+		n.h = calcH(n)
 	}
 	return r
 }
@@ -483,13 +496,29 @@ func (n *node) rotateR() *node {
 	if l != nil {
 		n.l = l.r
 		l.r = n
-		n.h = maxH(n) + 1
-		l.h = maxH(l) + 1
+		n.h = calcH(n)
+		l.h = calcH(l)
 	} else {
 		n.l = nil
-		n.h = maxH(n) + 1
+		n.h = calcH(n)
 	}
 	return l
+}
+
+// calcH returns the height for node n (max child height + 1).
+// n must not be nil.
+func calcH(n *node) int {
+	var lh, rh int
+	if n.l != nil {
+		lh = n.l.h
+	}
+	if n.r != nil {
+		rh = n.r.h
+	}
+	if lh > rh {
+		return lh + 1
+	}
+	return rh + 1
 }
 
 func balanceF(n *node) int {
