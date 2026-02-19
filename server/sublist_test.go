@@ -2459,6 +2459,68 @@ func Benchmark_TokenizeNew_FourTokensSysPrefix(b *testing.B) {
 	benchTokenize(b, "$SYS.REQ.SERVER.PING", tokenizeSubjectIntoSlice)
 }
 
+// tokenizeHybrid16 re-checks inside the loop, falling back to byte-by-byte
+// once the remainder shrinks below 16 bytes.
+func tokenizeHybrid16(tts []string, subject string) []string {
+	for len(subject) >= 16 {
+		if idx := strings.IndexByte(subject, btsep); idx >= 0 {
+			tts = append(tts, subject[:idx])
+			subject = subject[idx+1:]
+		} else {
+			tts = append(tts, subject)
+			return tts
+		}
+	}
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tts = append(tts, subject[start:i])
+			start = i + 1
+		}
+	}
+	tts = append(tts, subject[start:])
+	return tts
+}
+
+// tokenizeHybrid32 is the same but with threshold=32.
+func tokenizeHybrid32(tts []string, subject string) []string {
+	for len(subject) >= 32 {
+		if idx := strings.IndexByte(subject, btsep); idx >= 0 {
+			tts = append(tts, subject[:idx])
+			subject = subject[idx+1:]
+		} else {
+			tts = append(tts, subject)
+			return tts
+		}
+	}
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tts = append(tts, subject[start:i])
+			start = i + 1
+		}
+	}
+	tts = append(tts, subject[start:])
+	return tts
+}
+
+// Realistic 9-token subject based on production token-length distribution:
+// pos:  0(5)  1(10) 2(2) 3(5) 4(12) 5(13) 6(8) 7(21) 8(21) + 8 dots = 105 bytes
+const nineTokenSubject = "acct1.svc-events.v2.nats1.request-data.response-type.dispatch.account-session-token.cluster-region-useast"
+
+func Benchmark_______TokenizeOld_NineTokens(b *testing.B) {
+	benchTokenize(b, nineTokenSubject, tokenizeOld)
+}
+func Benchmark_______TokenizeNew_NineTokens(b *testing.B) {
+	benchTokenize(b, nineTokenSubject, tokenizeSubjectIntoSlice)
+}
+func Benchmark___TokenizeHybrid16_NineTokens(b *testing.B) {
+	benchTokenize(b, nineTokenSubject, tokenizeHybrid16)
+}
+func Benchmark___TokenizeHybrid32_NineTokens(b *testing.B) {
+	benchTokenize(b, nineTokenSubject, tokenizeHybrid32)
+}
+
 // tokenizeWithThreshold is a parameterized hybrid for threshold sweep benchmarking.
 // threshold=0 means always use strings.IndexByte; threshold=256 means always use byte-by-byte.
 func tokenizeWithThreshold(tts []string, subject string, threshold int) []string {
