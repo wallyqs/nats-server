@@ -1404,20 +1404,13 @@ func tokenAt(subject string, index uint8) string {
 }
 
 // use similar to append. meaning, the updated slice will be returned.
-// Dispatches to a byte-scan loop for short subjects where the per-call
-// overhead of strings.IndexByte exceeds the scan cost.
+// Thin dispatcher: short subjects use a byte-scan loop, long subjects
+// use strings.IndexByte for SIMD-accelerated scanning.
 func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
 	if len(subject) < 32 {
 		return tokenizeSubjectIntoSliceShort(tts, subject)
 	}
-	for {
-		idx := strings.IndexByte(subject, btsep)
-		if idx < 0 {
-			return append(tts, subject)
-		}
-		tts = append(tts, subject[:idx])
-		subject = subject[idx+1:]
-	}
+	return tokenizeSubjectIntoSliceLong(tts, subject)
 }
 
 // tokenizeSubjectIntoSliceShort is optimized for short subjects (< 32 bytes)
@@ -1431,6 +1424,19 @@ func tokenizeSubjectIntoSliceShort(tts []string, subject string) []string {
 		}
 	}
 	return append(tts, subject[start:])
+}
+
+// tokenizeSubjectIntoSliceLong uses strings.IndexByte for SIMD-accelerated
+// scanning, which is faster for subjects >= 32 bytes with long tokens.
+func tokenizeSubjectIntoSliceLong(tts []string, subject string) []string {
+	for {
+		idx := strings.IndexByte(subject, btsep)
+		if idx < 0 {
+			return append(tts, subject)
+		}
+		tts = append(tts, subject[:idx])
+		subject = subject[idx+1:]
+	}
 }
 
 // SubjectMatchesFilter returns true if the subject matches the provided
