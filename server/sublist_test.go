@@ -2570,27 +2570,6 @@ func tokenizeIndexByteOnly(tts []string, subject string) []string {
 	}
 }
 
-// tokenizeIdx5Loop is like tokenizeSubjectIntoSlice but unrolls 5
-// IndexByte calls instead of 4 before falling back to the byte-scan loop.
-func tokenizeIdx5Loop(tts []string, subject string) []string {
-	for i := 0; i < 5; i++ {
-		idx := strings.IndexByte(subject, btsep)
-		if idx < 0 {
-			return append(tts, subject)
-		}
-		tts = append(tts, subject[:idx])
-		subject = subject[idx+1:]
-	}
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tts = append(tts, subject[start:i])
-			start = i + 1
-		}
-	}
-	return append(tts, subject[start:])
-}
-
 func BenchmarkTokenizeSubjects_Compare(b *testing.B) {
 	for _, subj := range benchSubjects {
 		label := fmt.Sprintf("%03d_%dt", len(subj), strings.Count(subj, ".")+1)
@@ -2598,12 +2577,6 @@ func BenchmarkTokenizeSubjects_Compare(b *testing.B) {
 			var tsa [32]string
 			for i := 0; i < b.N; i++ {
 				tokenizeSubjectIntoSlice(tsa[:0], subj)
-			}
-		})
-		b.Run(label+"/idx5+loop", func(b *testing.B) {
-			var tsa [32]string
-			for i := 0; i < b.N; i++ {
-				tokenizeIdx5Loop(tsa[:0], subj)
 			}
 		})
 		b.Run(label+"/forloop", func(b *testing.B) {
