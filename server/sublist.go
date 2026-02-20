@@ -1405,7 +1405,9 @@ func tokenAt(subject string, index uint8) string {
 
 // use similar to append. meaning, the updated slice will be returned.
 // Uses strings.IndexByte for up to 4 leading tokens (SIMD-accelerated
-// separator search), then falls back to a byte-scan loop for the tail.
+// separator search), then applies LastIndexByte on the remaining tail
+// to peel the final token and byte-scans the middle. This protects the
+// common 3-4 token fast path while improving 5+ token subjects.
 func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
 	for i := 0; i < 4; i++ {
 		idx := strings.IndexByte(subject, btsep)
@@ -1415,8 +1417,13 @@ func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
 		tts = append(tts, subject[:idx])
 		subject = subject[idx+1:]
 	}
-	// Byte-scan loop for remaining tokens — the subject tail is typically
-	// short enough that per-byte scanning beats IndexByte call overhead.
+	// Probe from the end: peel the final token, byte-scan the middle.
+	last := strings.LastIndexByte(subject, btsep)
+	if last < 0 {
+		return append(tts, subject) // exactly 5 tokens total
+	}
+	finalToken := subject[last+1:]
+	subject = subject[:last]
 	start := 0
 	for i := 0; i < len(subject); i++ {
 		if subject[i] == btsep {
@@ -1424,7 +1431,8 @@ func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
 			start = i + 1
 		}
 	}
-	return append(tts, subject[start:])
+	tts = append(tts, subject[start:])
+	return append(tts, finalToken)
 }
 
 // SubjectMatchesFilter returns true if the subject matches the provided
