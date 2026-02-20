@@ -5796,44 +5796,76 @@ func parseAckReplyNum(d string) (n int64) {
 const expectedNumReplyTokens = 9
 
 // Grab encoded information in the reply subject for a delivered message.
+// Uses backward scan to find dot positions from the end, avoiding traversal
+// of potentially long stream/consumer name tokens that are not needed.
+// The ACK reply format is: $JS.ACK.<stream>.<consumer>.<dc>.<sseq>.<dseq>.<ts>.<pending>
 func replyInfo(subject string) (sseq, dseq, dc uint64, ts int64, pending uint64) {
-	tsa := [expectedNumReplyTokens]string{}
-	start, tokens := 0, tsa[:0]
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tokens = append(tokens, subject[start:i])
-			start = i + 1
-		}
-	}
-	tokens = append(tokens, subject[start:])
-	if len(tokens) != expectedNumReplyTokens || tokens[0] != "$JS" || tokens[1] != "ACK" {
+	if len(subject) < 12 || subject[:4] != "$JS." || subject[4:8] != "ACK." {
 		return 0, 0, 0, 0, 0
 	}
-	// TODO(dlc) - Should we error if we do not match consumer name?
-	// stream is tokens[2], consumer is 3.
-	dc = uint64(parseAckReplyNum(tokens[4]))
-	sseq, dseq = uint64(parseAckReplyNum(tokens[5])), uint64(parseAckReplyNum(tokens[6]))
-	ts = parseAckReplyNum(tokens[7])
-	pending = uint64(parseAckReplyNum(tokens[8]))
+
+	// Scan backward to find the last 6 dot positions.
+	// For 9 tokens we need 8 dots total. 2 are in "$JS.ACK." prefix.
+	// The remaining 6 separate: stream.consumer.dc.sseq.dseq.ts.pending
+	var dots [6]int
+	n := 0
+	for i := len(subject) - 1; i >= 8 && n < 6; i-- {
+		if subject[i] == btsep {
+			dots[n] = i
+			n++
+		}
+	}
+	if n != 6 {
+		return 0, 0, 0, 0, 0
+	}
+
+	// Verify no extra dots between prefix end (pos 8) and dots[5] (stream.consumer boundary).
+	for i := 8; i < dots[5]; i++ {
+		if subject[i] == btsep {
+			return 0, 0, 0, 0, 0
+		}
+	}
+
+	// dots layout (right to left):
+	// dots[0] = between ts and pending
+	// dots[1] = between dseq and ts
+	// dots[2] = between sseq and dseq
+	// dots[3] = between dc and sseq
+	// dots[4] = between consumer and dc
+	// dots[5] = between stream and consumer
+	dc = uint64(parseAckReplyNum(subject[dots[4]+1 : dots[3]]))
+	sseq, dseq = uint64(parseAckReplyNum(subject[dots[3]+1 : dots[2]])), uint64(parseAckReplyNum(subject[dots[2]+1 : dots[1]]))
+	ts = parseAckReplyNum(subject[dots[1]+1 : dots[0]])
+	pending = uint64(parseAckReplyNum(subject[dots[0]+1:]))
 
 	return sseq, dseq, dc, ts, pending
 }
 
 func ackReplyInfo(subject string) (sseq, dseq, dc uint64) {
-	tsa := [expectedNumReplyTokens]string{}
-	start, tokens := 0, tsa[:0]
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tokens = append(tokens, subject[start:i])
-			start = i + 1
-		}
-	}
-	tokens = append(tokens, subject[start:])
-	if len(tokens) != expectedNumReplyTokens || tokens[0] != "$JS" || tokens[1] != "ACK" {
+	if len(subject) < 12 || subject[:4] != "$JS." || subject[4:8] != "ACK." {
 		return 0, 0, 0
 	}
-	dc = uint64(parseAckReplyNum(tokens[4]))
-	sseq, dseq = uint64(parseAckReplyNum(tokens[5])), uint64(parseAckReplyNum(tokens[6]))
+
+	var dots [6]int
+	n := 0
+	for i := len(subject) - 1; i >= 8 && n < 6; i-- {
+		if subject[i] == btsep {
+			dots[n] = i
+			n++
+		}
+	}
+	if n != 6 {
+		return 0, 0, 0
+	}
+
+	for i := 8; i < dots[5]; i++ {
+		if subject[i] == btsep {
+			return 0, 0, 0
+		}
+	}
+
+	dc = uint64(parseAckReplyNum(subject[dots[4]+1 : dots[3]]))
+	sseq, dseq = uint64(parseAckReplyNum(subject[dots[3]+1 : dots[2]])), uint64(parseAckReplyNum(subject[dots[2]+1 : dots[1]]))
 
 	return sseq, dseq, dc
 }
