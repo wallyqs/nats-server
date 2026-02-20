@@ -2621,6 +2621,140 @@ func Benchmark__TokenizeMeetMiddle_ThreeTokensTypical(b *testing.B) {
 	benchTokenize(b, "events.user.created", tokenizeMeetInMiddle)
 }
 
+// tokenizeBestOf combines the byte-by-byte fast path for short subjects
+// with the MeetInMiddle strategy for longer subjects.
+func tokenizeBestOf(tts []string, subject string) []string {
+	if len(subject) < 32 {
+		start := 0
+		for i := 0; i < len(subject); i++ {
+			if subject[i] == btsep {
+				tts = append(tts, subject[start:i])
+				start = i + 1
+			}
+		}
+		tts = append(tts, subject[start:])
+		return tts
+	}
+	var rightBuf [16]string
+	ri := 0
+	for {
+		li := strings.IndexByte(subject, btsep)
+		if li < 0 {
+			tts = append(tts, subject)
+			break
+		}
+		lastDot := strings.LastIndexByte(subject, btsep)
+		if lastDot == li {
+			tts = append(tts, subject[:li])
+			tts = append(tts, subject[li+1:])
+			break
+		}
+		tts = append(tts, subject[:li])
+		rightBuf[ri] = subject[lastDot+1:]
+		ri++
+		subject = subject[li+1 : lastDot]
+	}
+	for i := ri - 1; i >= 0; i-- {
+		tts = append(tts, rightBuf[i])
+	}
+	return tts
+}
+
+// tokenizeBestOf64 uses a higher threshold (64) to keep the simple IndexByte
+// loop for medium subjects, only switching to MeetInMiddle for long ones.
+func tokenizeBestOf64(tts []string, subject string) []string {
+	if len(subject) < 32 {
+		start := 0
+		for i := 0; i < len(subject); i++ {
+			if subject[i] == btsep {
+				tts = append(tts, subject[start:i])
+				start = i + 1
+			}
+		}
+		tts = append(tts, subject[start:])
+		return tts
+	}
+	if len(subject) < 64 {
+		for {
+			if idx := strings.IndexByte(subject, btsep); idx >= 0 {
+				tts = append(tts, subject[:idx])
+				subject = subject[idx+1:]
+			} else {
+				tts = append(tts, subject)
+				break
+			}
+		}
+		return tts
+	}
+	var rightBuf [16]string
+	ri := 0
+	for {
+		li := strings.IndexByte(subject, btsep)
+		if li < 0 {
+			tts = append(tts, subject)
+			break
+		}
+		lastDot := strings.LastIndexByte(subject, btsep)
+		if lastDot == li {
+			tts = append(tts, subject[:li])
+			tts = append(tts, subject[li+1:])
+			break
+		}
+		tts = append(tts, subject[:li])
+		rightBuf[ri] = subject[lastDot+1:]
+		ri++
+		subject = subject[li+1 : lastDot]
+	}
+	for i := ri - 1; i >= 0; i-- {
+		tts = append(tts, rightBuf[i])
+	}
+	return tts
+}
+
+func Benchmark_________TokenizeBestOf_SingleToken(b *testing.B) {
+	benchTokenize(b, "foo", tokenizeBestOf)
+}
+func Benchmark_________TokenizeBestOf_TwoTokens(b *testing.B) {
+	benchTokenize(b, "foo.bar", tokenizeBestOf)
+}
+func Benchmark_________TokenizeBestOf_FourTokens(b *testing.B) {
+	benchTokenize(b, "foo.bar.baz.quux", tokenizeBestOf)
+}
+func Benchmark______TokenizeBestOf_FiveTokensLong(b *testing.B) {
+	benchTokenize(b, "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token", tokenizeBestOf)
+}
+func Benchmark___TokenizeBestOf_ThreeTokensTypical(b *testing.B) {
+	benchTokenize(b, "events.user.created", tokenizeBestOf)
+}
+func Benchmark__TokenizeBestOf_FourTokensSysPrefix(b *testing.B) {
+	benchTokenize(b, "$SYS.REQ.SERVER.PING", tokenizeBestOf)
+}
+func Benchmark________TokenizeBestOf_NineTokens(b *testing.B) {
+	benchTokenize(b, nineTokenSubject, tokenizeBestOf)
+}
+
+func Benchmark_______TokenizeBestOf64_SingleToken(b *testing.B) {
+	benchTokenize(b, "foo", tokenizeBestOf64)
+}
+func Benchmark_______TokenizeBestOf64_TwoTokens(b *testing.B) {
+	benchTokenize(b, "foo.bar", tokenizeBestOf64)
+}
+func Benchmark_______TokenizeBestOf64_FourTokens(b *testing.B) {
+	benchTokenize(b, "foo.bar.baz.quux", tokenizeBestOf64)
+}
+func Benchmark____TokenizeBestOf64_FiveTokensLong(b *testing.B) {
+	benchTokenize(b, "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token", tokenizeBestOf64)
+}
+func Benchmark_TokenizeBestOf64_ThreeTokensTypical(b *testing.B) {
+	benchTokenize(b, "events.user.created", tokenizeBestOf64)
+}
+func Benchmark_TokenizeBestOf64_FourTokensSysPrefix(b *testing.B) {
+	benchTokenize(b, "$SYS.REQ.SERVER.PING", tokenizeBestOf64)
+}
+func Benchmark______TokenizeBestOf64_NineTokens(b *testing.B) {
+	benchTokenize(b, nineTokenSubject, tokenizeBestOf64)
+}
+
 // tokenizeWithThreshold is a parameterized hybrid for threshold sweep benchmarking.
 // threshold=0 means always use strings.IndexByte; threshold=256 means always use byte-by-byte.
 func tokenizeWithThreshold(tts []string, subject string, threshold int) []string {
