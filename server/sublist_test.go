@@ -2390,6 +2390,48 @@ func Benchmark___________________subjectIsLiteral(b *testing.B) {
 	}
 }
 
+func TestTokenizeVariantsCorrectness(t *testing.T) {
+	subjects := []string{
+		"foo",
+		"foo.bar",
+		"events.user.created",
+		"$SYS.REQ.SERVER.PING",
+		"foo.bar.baz.quux",
+		"this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token",
+		"$JS.ACK.asdf-asdf-events.asdf-asdf-events.1.284222.291929.1671900992627312000.0",
+		nineTokenSubject,
+		"a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p",
+	}
+
+	type variant struct {
+		name string
+		fn   func([]string, string) []string
+	}
+	variants := []variant{
+		{"adaptive", tokenizeAdaptive},
+		{"lastprobe", tokenizeLastProbe},
+		{"forloop", tokenizeForLoopOnly},
+		{"indexbyte", tokenizeIndexByteOnly},
+	}
+
+	for _, subj := range subjects {
+		var tsa [32]string
+		expected := tokenizeSubjectIntoSlice(tsa[:0], subj)
+		for _, v := range variants {
+			var tsa2 [32]string
+			got := v.fn(tsa2[:0], subj)
+			if len(got) != len(expected) {
+				t.Fatalf("%s(%q): len %d, want %d", v.name, subj, len(got), len(expected))
+			}
+			for i := range expected {
+				if got[i] != expected[i] {
+					t.Fatalf("%s(%q): token[%d]=%q, want %q", v.name, subj, i, got[i], expected[i])
+				}
+			}
+		}
+	}
+}
+
 // tokenizeOld is the previous byte-by-byte tokenization for benchmarking comparison.
 func tokenizeOld(tts []string, subject string) []string {
 	start := 0
@@ -2570,6 +2612,77 @@ func tokenizeIndexByteOnly(tts []string, subject string) []string {
 	}
 }
 
+// tokenizeAdaptive uses idx4 then switches strategy based on remaining
+// tail length. If the tail is still long (>32 bytes), it continues with
+// IndexByte (SIMD pays off); otherwise it falls through to byte-scan.
+func tokenizeAdaptive(tts []string, subject string) []string {
+	for i := 0; i < 4; i++ {
+		idx := strings.IndexByte(subject, btsep)
+		if idx < 0 {
+			return append(tts, subject)
+		}
+		tts = append(tts, subject[:idx])
+		subject = subject[idx+1:]
+	}
+	if len(subject) > 32 {
+		// Tail is long — IndexByte with SIMD still pays off.
+		for {
+			idx := strings.IndexByte(subject, btsep)
+			if idx < 0 {
+				return append(tts, subject)
+			}
+			tts = append(tts, subject[:idx])
+			subject = subject[idx+1:]
+		}
+	}
+	// Short tail: byte-scan.
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tts = append(tts, subject[start:i])
+			start = i + 1
+		}
+	}
+	return append(tts, subject[start:])
+}
+
+// tokenizeLastProbe uses LastIndexByte upfront to peel off the final
+// token and measure the dotted prefix. Short prefixes (<=32 bytes) get
+// byte-scanned; long prefixes use IndexByte for SIMD throughput.
+func tokenizeLastProbe(tts []string, subject string) []string {
+	last := strings.LastIndexByte(subject, btsep)
+	if last < 0 {
+		return append(tts, subject)
+	}
+	// Final token comes for free from the backward scan.
+	finalToken := subject[last+1:]
+	prefix := subject[:last]
+
+	if len(prefix) <= 32 {
+		// Short prefix: byte-scan is cheaper than call overhead.
+		start := 0
+		for i := 0; i < len(prefix); i++ {
+			if prefix[i] == btsep {
+				tts = append(tts, prefix[start:i])
+				start = i + 1
+			}
+		}
+		tts = append(tts, prefix[start:])
+	} else {
+		// Long prefix: IndexByte for SIMD throughput.
+		for {
+			idx := strings.IndexByte(prefix, btsep)
+			if idx < 0 {
+				tts = append(tts, prefix)
+				break
+			}
+			tts = append(tts, prefix[:idx])
+			prefix = prefix[idx+1:]
+		}
+	}
+	return append(tts, finalToken)
+}
+
 func BenchmarkTokenizeSubjects_Compare(b *testing.B) {
 	for _, subj := range benchSubjects {
 		label := fmt.Sprintf("%03d_%dt", len(subj), strings.Count(subj, ".")+1)
@@ -2589,6 +2702,18 @@ func BenchmarkTokenizeSubjects_Compare(b *testing.B) {
 			var tsa [32]string
 			for i := 0; i < b.N; i++ {
 				tokenizeIndexByteOnly(tsa[:0], subj)
+			}
+		})
+		b.Run(label+"/adaptive", func(b *testing.B) {
+			var tsa [32]string
+			for i := 0; i < b.N; i++ {
+				tokenizeAdaptive(tsa[:0], subj)
+			}
+		})
+		b.Run(label+"/lastprobe", func(b *testing.B) {
+			var tsa [32]string
+			for i := 0; i < b.N; i++ {
+				tokenizeLastProbe(tsa[:0], subj)
 			}
 		})
 	}
