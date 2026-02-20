@@ -5798,16 +5798,14 @@ const expectedNumReplyTokens = 9
 // Grab encoded information in the reply subject for a delivered message.
 func replyInfo(subject string) (sseq, dseq, dc uint64, ts int64, pending uint64) {
 	tsa := [expectedNumReplyTokens]string{}
-	tokens := tsa[:0]
-	for {
-		idx := strings.IndexByte(subject, btsep)
-		if idx < 0 {
-			tokens = append(tokens, subject)
-			break
+	start, tokens := 0, tsa[:0]
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tokens = append(tokens, subject[start:i])
+			start = i + 1
 		}
-		tokens = append(tokens, subject[:idx])
-		subject = subject[idx+1:]
 	}
+	tokens = append(tokens, subject[start:])
 	if len(tokens) != expectedNumReplyTokens || tokens[0] != "$JS" || tokens[1] != "ACK" {
 		return 0, 0, 0, 0, 0
 	}
@@ -5823,16 +5821,14 @@ func replyInfo(subject string) (sseq, dseq, dc uint64, ts int64, pending uint64)
 
 func ackReplyInfo(subject string) (sseq, dseq, dc uint64) {
 	tsa := [expectedNumReplyTokens]string{}
-	tokens := tsa[:0]
-	for {
-		idx := strings.IndexByte(subject, btsep)
-		if idx < 0 {
-			tokens = append(tokens, subject)
-			break
+	start, tokens := 0, tsa[:0]
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tokens = append(tokens, subject[start:i])
+			start = i + 1
 		}
-		tokens = append(tokens, subject[:idx])
-		subject = subject[idx+1:]
 	}
+	tokens = append(tokens, subject[start:])
 	if len(tokens) != expectedNumReplyTokens || tokens[0] != "$JS" || tokens[1] != "ACK" {
 		return 0, 0, 0
 	}
