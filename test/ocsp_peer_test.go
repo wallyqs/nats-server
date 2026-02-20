@@ -2839,7 +2839,7 @@ func TestOCSPPeerNextUpdateUnset(t *testing.T) {
 			"TTL set to 4 seconds with second client connection leveraging cache from first client connect",
 			`
 				port: -1
-				http_port: 8222
+				http_port: -1
 				tls: {
 					cert_file: "configs/certs/ocsp_peer/mini-ca/server1/TestServer1_bundle.pem"
 					key_file: "configs/certs/ocsp_peer/mini-ca/server1/private/TestServer1_keypair.pem"
@@ -2871,7 +2871,7 @@ func TestOCSPPeerNextUpdateUnset(t *testing.T) {
 			"TTL set to 1 seconds with second client connection not leveraging cache items from first client connect",
 			`
 				port: -1
-				http_port: 8222
+				http_port: -1
 				tls: {
 					cert_file: "configs/certs/ocsp_peer/mini-ca/server1/TestServer1_bundle.pem"
 					key_file: "configs/certs/ocsp_peer/mini-ca/server1/private/TestServer1_keypair.pem"
@@ -2910,13 +2910,13 @@ func TestOCSPPeerNextUpdateUnset(t *testing.T) {
 			defer s.Shutdown()
 			nc, err := nats.Connect(fmt.Sprintf("tls://localhost:%d", opts.Port), test.opts...)
 			if test.err == nil && err != nil {
-				t.Errorf("Expected to connect, got %v", err)
+				t.Fatalf("Expected to connect, got %v", err)
 			} else if test.err != nil && err == nil {
-				t.Errorf("Expected error on connect")
+				t.Fatalf("Expected error on connect")
 			} else if test.err != nil && err != nil {
 				// Error on connect was expected
 				if test.err.Error() != err.Error() {
-					t.Errorf("Expected error %s, got: %s", test.err, err)
+					t.Fatalf("Expected error %s, got: %s", test.err, err)
 				}
 				return
 			}
@@ -2927,19 +2927,23 @@ func TestOCSPPeerNextUpdateUnset(t *testing.T) {
 
 			nc, err = nats.Connect(fmt.Sprintf("tls://localhost:%d", opts.Port), test.opts...)
 			if test.err == nil && err != nil {
-				t.Errorf("Expected to connect, got %v", err)
+				t.Fatalf("Expected to connect, got %v", err)
 			} else if test.err != nil && err == nil {
-				t.Errorf("Expected error on connect")
+				t.Fatalf("Expected error on connect")
 			} else if test.err != nil && err != nil {
 				// Error on connect was expected
 				if test.err.Error() != err.Error() {
-					t.Errorf("Expected error %s, got: %s", test.err, err)
+					t.Fatalf("Expected error %s, got: %s", test.err, err)
 				}
 				return
 			}
 			defer nc.Close()
 
-			v := monitorGetVarzHelper(t, 8222)
+			monAddr := s.MonitorAddr()
+			if monAddr == nil {
+				t.Fatalf("Expected monitoring port to be running")
+			}
+			v := monitorGetVarzHelper(t, monAddr.Port)
 			if v.OCSPResponseCache == nil {
 				t.Fatalf("Expected OCSP statistics to be in varz")
 			}
