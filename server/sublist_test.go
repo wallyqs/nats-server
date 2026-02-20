@@ -2458,3 +2458,26 @@ func Benchmark_TokenizeOld_FourTokensSysPrefix(b *testing.B) {
 func Benchmark_TokenizeNew_FourTokensSysPrefix(b *testing.B) {
 	benchTokenize(b, "$SYS.REQ.SERVER.PING", tokenizeSubjectIntoSlice)
 }
+
+func benchHasInterest(b *testing.B, subject string) {
+	b.Helper()
+	for i := 0; i < b.N; i++ {
+		benchSublistSl.HasInterest(subject)
+	}
+}
+
+func Benchmark_____HasInterestThreeTokensTypical(b *testing.B) {
+	benchHasInterest(b, "synadia.nats.jetstream")
+}
+
+func Benchmark______HasInterestFourTokensTypical(b *testing.B) {
+	benchHasInterest(b, "synadia.nats.jetstream.nkeys")
+}
+
+func Benchmark_HasInterestFiveTokensLong(b *testing.B) {
+	benchHasInterest(b, "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token")
+}
+
+func Benchmark_HasInterestSixTokensLong(b *testing.B) {
+	benchHasInterest(b, "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token.extra-long-token")
+}

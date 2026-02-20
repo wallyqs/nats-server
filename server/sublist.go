@@ -648,20 +648,38 @@ func (s *Sublist) hasInterest(subject string, doLock bool, np, nq *int) bool {
 
 	tsa := [32]string{}
 	tokens := tsa[:0]
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			if i-start == 0 {
-				return false
+	if len(subject) > 32 {
+		for {
+			if idx := strings.IndexByte(subject, btsep); idx >= 0 {
+				if idx == 0 {
+					return false
+				}
+				tokens = append(tokens, subject[:idx])
+				subject = subject[idx+1:]
+			} else {
+				if len(subject) == 0 {
+					return false
+				}
+				tokens = append(tokens, subject)
+				break
 			}
-			tokens = append(tokens, subject[start:i])
-			start = i + 1
 		}
+	} else {
+		start := 0
+		for i := 0; i < len(subject); i++ {
+			if subject[i] == btsep {
+				if i-start == 0 {
+					return false
+				}
+				tokens = append(tokens, subject[start:i])
+				start = i + 1
+			}
+		}
+		if start >= len(subject) {
+			return false
+		}
+		tokens = append(tokens, subject[start:])
 	}
-	if start >= len(subject) {
-		return false
-	}
-	tokens = append(tokens, subject[start:])
 
 	if doLock {
 		s.RLock()
