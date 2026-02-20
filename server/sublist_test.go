@@ -2410,6 +2410,7 @@ func TestTokenizeVariantsCorrectness(t *testing.T) {
 	variants := []variant{
 		{"adaptive", tokenizeAdaptive},
 		{"lastprobe", tokenizeLastProbe},
+		{"idx4tailprobe", tokenizeIdx4TailProbe},
 		{"forloop", tokenizeForLoopOnly},
 		{"indexbyte", tokenizeIndexByteOnly},
 	}
@@ -2683,6 +2684,38 @@ func tokenizeLastProbe(tts []string, subject string) []string {
 	return append(tts, finalToken)
 }
 
+// tokenizeIdx4TailProbe uses idx4 for the first 4 tokens (protecting
+// the common 3-4 token fast path), then applies LastIndexByte on the
+// remaining tail to peel the final token and byte-scan the middle.
+// This avoids the lastprobe regression on short subjects while keeping
+// its advantage on medium/long tails.
+func tokenizeIdx4TailProbe(tts []string, subject string) []string {
+	for i := 0; i < 4; i++ {
+		idx := strings.IndexByte(subject, btsep)
+		if idx < 0 {
+			return append(tts, subject)
+		}
+		tts = append(tts, subject[:idx])
+		subject = subject[idx+1:]
+	}
+	// Probe the tail: peel final token, byte-scan the rest.
+	last := strings.LastIndexByte(subject, btsep)
+	if last < 0 {
+		return append(tts, subject) // exactly 5 tokens
+	}
+	finalToken := subject[last+1:]
+	subject = subject[:last]
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tts = append(tts, subject[start:i])
+			start = i + 1
+		}
+	}
+	tts = append(tts, subject[start:])
+	return append(tts, finalToken)
+}
+
 func BenchmarkTokenizeSubjects_Compare(b *testing.B) {
 	for _, subj := range benchSubjects {
 		label := fmt.Sprintf("%03d_%dt", len(subj), strings.Count(subj, ".")+1)
@@ -2714,6 +2747,12 @@ func BenchmarkTokenizeSubjects_Compare(b *testing.B) {
 			var tsa [32]string
 			for i := 0; i < b.N; i++ {
 				tokenizeLastProbe(tsa[:0], subj)
+			}
+		})
+		b.Run(label+"/idx4tailprobe", func(b *testing.B) {
+			var tsa [32]string
+			for i := 0; i < b.N; i++ {
+				tokenizeIdx4TailProbe(tsa[:0], subj)
 			}
 		})
 	}
