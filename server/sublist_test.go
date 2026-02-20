@@ -2521,6 +2521,106 @@ func Benchmark___TokenizeHybrid32_NineTokens(b *testing.B) {
 	benchTokenize(b, nineTokenSubject, tokenizeHybrid32)
 }
 
+// tokenizePeelLast uses LastIndexByte to peel the last token first,
+// then IndexByte-loops on the prefix. Avoids the final "not-found" IndexByte scan.
+func tokenizePeelLast(tts []string, subject string) []string {
+	if len(subject) < 32 {
+		start := 0
+		for i := 0; i < len(subject); i++ {
+			if subject[i] == btsep {
+				tts = append(tts, subject[start:i])
+				start = i + 1
+			}
+		}
+		tts = append(tts, subject[start:])
+		return tts
+	}
+	// Peel last token via LastIndexByte.
+	lastDot := strings.LastIndexByte(subject, btsep)
+	if lastDot < 0 {
+		tts = append(tts, subject)
+		return tts
+	}
+	lastToken := subject[lastDot+1:]
+	subject = subject[:lastDot]
+	// Now every IndexByte call is guaranteed to find a dot.
+	for {
+		idx := strings.IndexByte(subject, btsep)
+		if idx < 0 {
+			tts = append(tts, subject)
+			break
+		}
+		tts = append(tts, subject[:idx])
+		subject = subject[idx+1:]
+	}
+	tts = append(tts, lastToken)
+	return tts
+}
+
+// tokenizeMeetInMiddle scans from both ends with IndexByte/LastIndexByte,
+// converging toward the center. Halves iterations but doubles calls per round.
+func tokenizeMeetInMiddle(tts []string, subject string) []string {
+	if len(subject) < 32 {
+		start := 0
+		for i := 0; i < len(subject); i++ {
+			if subject[i] == btsep {
+				tts = append(tts, subject[start:i])
+				start = i + 1
+			}
+		}
+		tts = append(tts, subject[start:])
+		return tts
+	}
+	var rightBuf [16]string
+	ri := 0
+	for {
+		li := strings.IndexByte(subject, btsep)
+		if li < 0 {
+			// No dots left — single remaining token.
+			tts = append(tts, subject)
+			break
+		}
+		lastDot := strings.LastIndexByte(subject, btsep)
+		if lastDot == li {
+			// Only one dot — two tokens left.
+			tts = append(tts, subject[:li])
+			tts = append(tts, subject[li+1:])
+			break
+		}
+		// Peel from both ends.
+		tts = append(tts, subject[:li])
+		rightBuf[ri] = subject[lastDot+1:]
+		ri++
+		subject = subject[li+1 : lastDot]
+	}
+	// Append right-side tokens in reverse order.
+	for i := ri - 1; i >= 0; i-- {
+		tts = append(tts, rightBuf[i])
+	}
+	return tts
+}
+
+func Benchmark_____TokenizePeelLast_NineTokens(b *testing.B) {
+	benchTokenize(b, nineTokenSubject, tokenizePeelLast)
+}
+func Benchmark__TokenizeMeetMiddle_NineTokens(b *testing.B) {
+	benchTokenize(b, nineTokenSubject, tokenizeMeetInMiddle)
+}
+
+// Also test these on smaller subjects for completeness.
+func Benchmark_____TokenizePeelLast_FiveTokensLong(b *testing.B) {
+	benchTokenize(b, "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token", tokenizePeelLast)
+}
+func Benchmark__TokenizeMeetMiddle_FiveTokensLong(b *testing.B) {
+	benchTokenize(b, "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token", tokenizeMeetInMiddle)
+}
+func Benchmark_____TokenizePeelLast_ThreeTokensTypical(b *testing.B) {
+	benchTokenize(b, "events.user.created", tokenizePeelLast)
+}
+func Benchmark__TokenizeMeetMiddle_ThreeTokensTypical(b *testing.B) {
+	benchTokenize(b, "events.user.created", tokenizeMeetInMiddle)
+}
+
 // tokenizeWithThreshold is a parameterized hybrid for threshold sweep benchmarking.
 // threshold=0 means always use strings.IndexByte; threshold=256 means always use byte-by-byte.
 func tokenizeWithThreshold(tts []string, subject string, threshold int) []string {
