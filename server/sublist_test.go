@@ -2519,10 +2519,11 @@ func Benchmark__TokenizeDirect_NineTokens(b *testing.B) {
 }
 
 // benchSubjects exercises progressively longer subjects with realistic
-// NATS token patterns (3-9 tokens, 51-161 bytes).
+// NATS token patterns (3-10 tokens, 51-161 bytes).
 var benchSubjects = []string{
 	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV",
 	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH",
+	"$JS.ACK.asdf-asdf-events.asdf-asdf-events.1.284222.291929.1671900992627312000.0",
 	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM",
 	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ",
 	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0",
@@ -2538,6 +2539,56 @@ func BenchmarkTokenizeSubjects(b *testing.B) {
 			var tsa [32]string
 			for i := 0; i < b.N; i++ {
 				tokenizeSubjectIntoSlice(tsa[:0], subj)
+			}
+		})
+	}
+}
+
+// tokenizeForLoopOnly is the original pure for-loop implementation,
+// kept here for A/B benchmarking.
+func tokenizeForLoopOnly(tts []string, subject string) []string {
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			tts = append(tts, subject[start:i])
+			start = i + 1
+		}
+	}
+	return append(tts, subject[start:])
+}
+
+// tokenizeIndexByteOnly is the pure IndexByte loop implementation,
+// kept here for A/B benchmarking.
+func tokenizeIndexByteOnly(tts []string, subject string) []string {
+	for {
+		idx := strings.IndexByte(subject, btsep)
+		if idx < 0 {
+			return append(tts, subject)
+		}
+		tts = append(tts, subject[:idx])
+		subject = subject[idx+1:]
+	}
+}
+
+func BenchmarkTokenizeSubjects_Compare(b *testing.B) {
+	for _, subj := range benchSubjects {
+		label := fmt.Sprintf("%03d_%dt", len(subj), strings.Count(subj, ".")+1)
+		b.Run(label+"/idx4+loop", func(b *testing.B) {
+			var tsa [32]string
+			for i := 0; i < b.N; i++ {
+				tokenizeSubjectIntoSlice(tsa[:0], subj)
+			}
+		})
+		b.Run(label+"/forloop", func(b *testing.B) {
+			var tsa [32]string
+			for i := 0; i < b.N; i++ {
+				tokenizeForLoopOnly(tsa[:0], subj)
+			}
+		})
+		b.Run(label+"/indexbyte", func(b *testing.B) {
+			var tsa [32]string
+			for i := 0; i < b.N; i++ {
+				tokenizeIndexByteOnly(tsa[:0], subj)
 			}
 		})
 	}
