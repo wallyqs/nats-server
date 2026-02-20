@@ -2459,51 +2459,6 @@ func Benchmark_TokenizeNew_FourTokensSysPrefix(b *testing.B) {
 	benchTokenize(b, "$SYS.REQ.SERVER.PING", tokenizeSubjectIntoSlice)
 }
 
-// tokenizeHybrid16 re-checks inside the loop, falling back to byte-by-byte
-// once the remainder shrinks below 16 bytes.
-func tokenizeHybrid16(tts []string, subject string) []string {
-	for len(subject) >= 16 {
-		if idx := strings.IndexByte(subject, btsep); idx >= 0 {
-			tts = append(tts, subject[:idx])
-			subject = subject[idx+1:]
-		} else {
-			tts = append(tts, subject)
-			return tts
-		}
-	}
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tts = append(tts, subject[start:i])
-			start = i + 1
-		}
-	}
-	tts = append(tts, subject[start:])
-	return tts
-}
-
-// tokenizeHybrid32 is the same but with threshold=32.
-func tokenizeHybrid32(tts []string, subject string) []string {
-	for len(subject) >= 32 {
-		if idx := strings.IndexByte(subject, btsep); idx >= 0 {
-			tts = append(tts, subject[:idx])
-			subject = subject[idx+1:]
-		} else {
-			tts = append(tts, subject)
-			return tts
-		}
-	}
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tts = append(tts, subject[start:i])
-			start = i + 1
-		}
-	}
-	tts = append(tts, subject[start:])
-	return tts
-}
-
 // Realistic 9-token subject based on production token-length distribution:
 // pos:  0(5)  1(10) 2(2) 3(5) 4(12) 5(13) 6(8) 7(21) 8(21) + 8 dots = 105 bytes
 const nineTokenSubject = "acct1.svc-events.v2.nats1.request-data.response-type.dispatch.account-session-token.cluster-region-useast"
@@ -2514,300 +2469,51 @@ func Benchmark_______TokenizeOld_NineTokens(b *testing.B) {
 func Benchmark_______TokenizeNew_NineTokens(b *testing.B) {
 	benchTokenize(b, nineTokenSubject, tokenizeSubjectIntoSlice)
 }
-func Benchmark___TokenizeHybrid16_NineTokens(b *testing.B) {
-	benchTokenize(b, nineTokenSubject, tokenizeHybrid16)
-}
-func Benchmark___TokenizeHybrid32_NineTokens(b *testing.B) {
-	benchTokenize(b, nineTokenSubject, tokenizeHybrid32)
-}
 
-// tokenizePeelLast uses LastIndexByte to peel the last token first,
-// then IndexByte-loops on the prefix. Avoids the final "not-found" IndexByte scan.
-func tokenizePeelLast(tts []string, subject string) []string {
-	if len(subject) < 32 {
-		start := 0
-		for i := 0; i < len(subject); i++ {
-			if subject[i] == btsep {
-				tts = append(tts, subject[start:i])
-				start = i + 1
-			}
-		}
-		tts = append(tts, subject[start:])
-		return tts
-	}
-	// Peel last token via LastIndexByte.
-	lastDot := strings.LastIndexByte(subject, btsep)
-	if lastDot < 0 {
-		tts = append(tts, subject)
-		return tts
-	}
-	lastToken := subject[lastDot+1:]
-	subject = subject[:lastDot]
-	// Now every IndexByte call is guaranteed to find a dot.
-	for {
-		idx := strings.IndexByte(subject, btsep)
-		if idx < 0 {
-			tts = append(tts, subject)
-			break
-		}
-		tts = append(tts, subject[:idx])
-		subject = subject[idx+1:]
-	}
-	tts = append(tts, lastToken)
-	return tts
-}
+// --- Direct-call benchmarks: measure ACTUAL performance including inlining ---
+// Unlike benchTokenize(), these call tokenizeSubjectIntoSlice directly so the
+// compiler can inline the call at the call site. This measures what hot callers
+// (consumer.isSubsetOfSubjects, filestore closures, etc.) actually experience.
 
-// tokenizeMeetInMiddle scans from both ends with IndexByte/LastIndexByte,
-// converging toward the center. Halves iterations but doubles calls per round.
-func tokenizeMeetInMiddle(tts []string, subject string) []string {
-	if len(subject) < 32 {
-		start := 0
-		for i := 0; i < len(subject); i++ {
-			if subject[i] == btsep {
-				tts = append(tts, subject[start:i])
-				start = i + 1
-			}
-		}
-		tts = append(tts, subject[start:])
-		return tts
+func Benchmark__TokenizeDirect_SingleToken(b *testing.B) {
+	var tsa [32]string
+	for i := 0; i < b.N; i++ {
+		tokenizeSubjectIntoSlice(tsa[:0], "foo")
 	}
-	var rightBuf [16]string
-	ri := 0
-	for {
-		li := strings.IndexByte(subject, btsep)
-		if li < 0 {
-			// No dots left — single remaining token.
-			tts = append(tts, subject)
-			break
-		}
-		lastDot := strings.LastIndexByte(subject, btsep)
-		if lastDot == li {
-			// Only one dot — two tokens left.
-			tts = append(tts, subject[:li])
-			tts = append(tts, subject[li+1:])
-			break
-		}
-		// Peel from both ends.
-		tts = append(tts, subject[:li])
-		rightBuf[ri] = subject[lastDot+1:]
-		ri++
-		subject = subject[li+1 : lastDot]
+}
+func Benchmark__TokenizeDirect_TwoTokens(b *testing.B) {
+	var tsa [32]string
+	for i := 0; i < b.N; i++ {
+		tokenizeSubjectIntoSlice(tsa[:0], "foo.bar")
 	}
-	// Append right-side tokens in reverse order.
-	for i := ri - 1; i >= 0; i-- {
-		tts = append(tts, rightBuf[i])
+}
+func Benchmark__TokenizeDirect_ThreeTokensTypical(b *testing.B) {
+	var tsa [32]string
+	for i := 0; i < b.N; i++ {
+		tokenizeSubjectIntoSlice(tsa[:0], "events.user.created")
 	}
-	return tts
 }
-
-func Benchmark_____TokenizePeelLast_NineTokens(b *testing.B) {
-	benchTokenize(b, nineTokenSubject, tokenizePeelLast)
-}
-func Benchmark__TokenizeMeetMiddle_NineTokens(b *testing.B) {
-	benchTokenize(b, nineTokenSubject, tokenizeMeetInMiddle)
-}
-
-// Also test these on smaller subjects for completeness.
-func Benchmark_____TokenizePeelLast_FiveTokensLong(b *testing.B) {
-	benchTokenize(b, "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token", tokenizePeelLast)
-}
-func Benchmark__TokenizeMeetMiddle_FiveTokensLong(b *testing.B) {
-	benchTokenize(b, "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token", tokenizeMeetInMiddle)
-}
-func Benchmark_____TokenizePeelLast_ThreeTokensTypical(b *testing.B) {
-	benchTokenize(b, "events.user.created", tokenizePeelLast)
-}
-func Benchmark__TokenizeMeetMiddle_ThreeTokensTypical(b *testing.B) {
-	benchTokenize(b, "events.user.created", tokenizeMeetInMiddle)
-}
-
-// tokenizeBestOf combines the byte-by-byte fast path for short subjects
-// with the MeetInMiddle strategy for longer subjects.
-func tokenizeBestOf(tts []string, subject string) []string {
-	if len(subject) < 32 {
-		start := 0
-		for i := 0; i < len(subject); i++ {
-			if subject[i] == btsep {
-				tts = append(tts, subject[start:i])
-				start = i + 1
-			}
-		}
-		tts = append(tts, subject[start:])
-		return tts
+func Benchmark__TokenizeDirect_FourTokensSysPrefix(b *testing.B) {
+	var tsa [32]string
+	for i := 0; i < b.N; i++ {
+		tokenizeSubjectIntoSlice(tsa[:0], "$SYS.REQ.SERVER.PING")
 	}
-	var rightBuf [16]string
-	ri := 0
-	for {
-		li := strings.IndexByte(subject, btsep)
-		if li < 0 {
-			tts = append(tts, subject)
-			break
-		}
-		lastDot := strings.LastIndexByte(subject, btsep)
-		if lastDot == li {
-			tts = append(tts, subject[:li])
-			tts = append(tts, subject[li+1:])
-			break
-		}
-		tts = append(tts, subject[:li])
-		rightBuf[ri] = subject[lastDot+1:]
-		ri++
-		subject = subject[li+1 : lastDot]
+}
+func Benchmark__TokenizeDirect_FourTokens(b *testing.B) {
+	var tsa [32]string
+	for i := 0; i < b.N; i++ {
+		tokenizeSubjectIntoSlice(tsa[:0], "foo.bar.baz.quux")
 	}
-	for i := ri - 1; i >= 0; i-- {
-		tts = append(tts, rightBuf[i])
+}
+func Benchmark__TokenizeDirect_FiveTokensLong(b *testing.B) {
+	var tsa [32]string
+	for i := 0; i < b.N; i++ {
+		tokenizeSubjectIntoSlice(tsa[:0], "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token")
 	}
-	return tts
 }
-
-// tokenizeBestOf64 uses a higher threshold (64) to keep the simple IndexByte
-// loop for medium subjects, only switching to MeetInMiddle for long ones.
-func tokenizeBestOf64(tts []string, subject string) []string {
-	if len(subject) < 32 {
-		start := 0
-		for i := 0; i < len(subject); i++ {
-			if subject[i] == btsep {
-				tts = append(tts, subject[start:i])
-				start = i + 1
-			}
-		}
-		tts = append(tts, subject[start:])
-		return tts
-	}
-	if len(subject) < 64 {
-		for {
-			if idx := strings.IndexByte(subject, btsep); idx >= 0 {
-				tts = append(tts, subject[:idx])
-				subject = subject[idx+1:]
-			} else {
-				tts = append(tts, subject)
-				break
-			}
-		}
-		return tts
-	}
-	var rightBuf [16]string
-	ri := 0
-	for {
-		li := strings.IndexByte(subject, btsep)
-		if li < 0 {
-			tts = append(tts, subject)
-			break
-		}
-		lastDot := strings.LastIndexByte(subject, btsep)
-		if lastDot == li {
-			tts = append(tts, subject[:li])
-			tts = append(tts, subject[li+1:])
-			break
-		}
-		tts = append(tts, subject[:li])
-		rightBuf[ri] = subject[lastDot+1:]
-		ri++
-		subject = subject[li+1 : lastDot]
-	}
-	for i := ri - 1; i >= 0; i-- {
-		tts = append(tts, rightBuf[i])
-	}
-	return tts
-}
-
-func Benchmark_________TokenizeBestOf_SingleToken(b *testing.B) {
-	benchTokenize(b, "foo", tokenizeBestOf)
-}
-func Benchmark_________TokenizeBestOf_TwoTokens(b *testing.B) {
-	benchTokenize(b, "foo.bar", tokenizeBestOf)
-}
-func Benchmark_________TokenizeBestOf_FourTokens(b *testing.B) {
-	benchTokenize(b, "foo.bar.baz.quux", tokenizeBestOf)
-}
-func Benchmark______TokenizeBestOf_FiveTokensLong(b *testing.B) {
-	benchTokenize(b, "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token", tokenizeBestOf)
-}
-func Benchmark___TokenizeBestOf_ThreeTokensTypical(b *testing.B) {
-	benchTokenize(b, "events.user.created", tokenizeBestOf)
-}
-func Benchmark__TokenizeBestOf_FourTokensSysPrefix(b *testing.B) {
-	benchTokenize(b, "$SYS.REQ.SERVER.PING", tokenizeBestOf)
-}
-func Benchmark________TokenizeBestOf_NineTokens(b *testing.B) {
-	benchTokenize(b, nineTokenSubject, tokenizeBestOf)
-}
-
-func Benchmark_______TokenizeBestOf64_SingleToken(b *testing.B) {
-	benchTokenize(b, "foo", tokenizeBestOf64)
-}
-func Benchmark_______TokenizeBestOf64_TwoTokens(b *testing.B) {
-	benchTokenize(b, "foo.bar", tokenizeBestOf64)
-}
-func Benchmark_______TokenizeBestOf64_FourTokens(b *testing.B) {
-	benchTokenize(b, "foo.bar.baz.quux", tokenizeBestOf64)
-}
-func Benchmark____TokenizeBestOf64_FiveTokensLong(b *testing.B) {
-	benchTokenize(b, "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token", tokenizeBestOf64)
-}
-func Benchmark_TokenizeBestOf64_ThreeTokensTypical(b *testing.B) {
-	benchTokenize(b, "events.user.created", tokenizeBestOf64)
-}
-func Benchmark_TokenizeBestOf64_FourTokensSysPrefix(b *testing.B) {
-	benchTokenize(b, "$SYS.REQ.SERVER.PING", tokenizeBestOf64)
-}
-func Benchmark______TokenizeBestOf64_NineTokens(b *testing.B) {
-	benchTokenize(b, nineTokenSubject, tokenizeBestOf64)
-}
-
-// tokenizeWithThreshold is a parameterized hybrid for threshold sweep benchmarking.
-// threshold=0 means always use strings.IndexByte; threshold=256 means always use byte-by-byte.
-func tokenizeWithThreshold(tts []string, subject string, threshold int) []string {
-	if len(subject) < threshold {
-		start := 0
-		for i := 0; i < len(subject); i++ {
-			if subject[i] == btsep {
-				tts = append(tts, subject[start:i])
-				start = i + 1
-			}
-		}
-		tts = append(tts, subject[start:])
-		return tts
-	}
-	for {
-		if idx := strings.IndexByte(subject, btsep); idx >= 0 {
-			tts = append(tts, subject[:idx])
-			subject = subject[idx+1:]
-		} else {
-			tts = append(tts, subject)
-			break
-		}
-	}
-	return tts
-}
-
-func BenchmarkTokenizeThresholdSweep(b *testing.B) {
-	subjects := []struct {
-		name    string
-		subject string
-	}{
-		{"03_foo", "foo"},
-		{"07_foo.bar", "foo.bar"},
-		{"11_foo.bar.baz", "foo.bar.baz"},
-		{"16_foo.bar.baz.quux", "foo.bar.baz.quux"},
-		{"20_events.user.created", "events.user.created"},
-		{"21_SYS.REQ.SERVER.PING", "$SYS.REQ.SERVER.PING"},
-		{"30_medium.length.subject.here", "a-medium.length.subject.here.x"},
-		{"85_long", "this-is-a-longer-token.another-longer-token.yet-another-one.and-more-here.final-token"},
-	}
-	thresholds := []int{0, 8, 12, 16, 20, 24, 32, 256}
-
-	for _, subj := range subjects {
-		for _, thresh := range thresholds {
-			name := fmt.Sprintf("len%s/thresh%03d", subj.name, thresh)
-			s := subj.subject
-			t := thresh
-			b.Run(name, func(b *testing.B) {
-				tsa := [32]string{}
-				for i := 0; i < b.N; i++ {
-					tokenizeWithThreshold(tsa[:0], s, t)
-				}
-			})
-		}
+func Benchmark__TokenizeDirect_NineTokens(b *testing.B) {
+	var tsa [32]string
+	for i := 0; i < b.N; i++ {
+		tokenizeSubjectIntoSlice(tsa[:0], nineTokenSubject)
 	}
 }
