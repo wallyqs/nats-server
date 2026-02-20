@@ -4306,30 +4306,33 @@ func (s *Server) jsConsumerCreateRequest(sub *subscription, c *client, a *Accoun
 	var streamName, consumerName, filteredSubject string
 	var rt ccReqType
 
-	if n := numTokens(subject); n < 5 {
+	tsa := [32]string{}
+	tokens := tokenizeSubjectIntoSlice(tsa[:0], subject)
+	n := len(tokens)
+
+	if n < 5 {
 		s.Warnf(badAPIRequestT, msg)
 		return
 	} else if n == 5 {
 		// Legacy ephemeral.
 		rt = ccLegacyEphemeral
-		streamName = streamNameFromSubject(subject)
+		streamName = tokens[4]
 	} else {
 		// New style and durable legacy.
-		if tokenAt(subject, 4) == "DURABLE" {
+		if tokens[3] == "DURABLE" {
 			rt = ccLegacyDurable
 			if n != 7 {
 				resp.Error = NewJSConsumerDurableNameNotInSubjectError()
 				s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 				return
 			}
-			streamName = tokenAt(subject, 6)
-			consumerName = tokenAt(subject, 7)
+			streamName = tokens[5]
+			consumerName = tokens[6]
 		} else {
-			streamName = streamNameFromSubject(subject)
-			consumerName = consumerNameFromSubject(subject)
+			streamName = tokens[4]
+			consumerName = tokens[5]
 			// New has optional filtered subject as part of main subject..
 			if n > 6 {
-				tokens := strings.Split(subject, tsep)
 				filteredSubject = strings.Join(tokens[6:], tsep)
 			}
 		}
@@ -4352,7 +4355,7 @@ func (s *Server) jsConsumerCreateRequest(sub *subscription, c *client, a *Accoun
 
 	// Should we expect a durable name
 	if rt == ccLegacyDurable {
-		if numTokens(subject) < 7 {
+		if n < 7 {
 			resp.Error = NewJSConsumerDurableNameNotInSubjectError()
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
