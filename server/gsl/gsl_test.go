@@ -354,6 +354,69 @@ func TestGenericSublistNumInterest(t *testing.T) {
 	require_NoError(t, s.Remove("*", 66))
 }
 
+// --- BENCHMARKS ---
+
+// Realistic NATS subject based on observed token length distribution:
+//
+//	Position:  0     1          2   3     4            5             6        7                     8
+//	Avg len:   5     10         2   5     12           13            8        21                    21
+const benchSubject = "NATS0.ABCDEFGHIJ.AB.NATS0.ABCDEFGHIJKL.ABCDEFGHIJKLM.ABCDEFGH.ABCDEFGHIJKLMNOPQRSTU.ABCDEFGHIJKLMNOPQRSTU"
+
+func BenchmarkMatch(b *testing.B) {
+	for _, tt := range []struct {
+		name string
+		subj string
+	}{
+		{"3_tokens_19B", "events.user.created"},
+		{"9_tokens_105B", benchSubject},
+	} {
+		b.Run(tt.name, func(b *testing.B) {
+			s := NewSublist[int]()
+			s.Insert(tt.subj, 1)
+			b.ResetTimer()
+			for b.Loop() {
+				s.Match(tt.subj, func(int) {})
+			}
+		})
+	}
+}
+
+func BenchmarkHasInterest(b *testing.B) {
+	for _, tt := range []struct {
+		name string
+		subj string
+	}{
+		{"3_tokens_19B", "events.user.created"},
+		{"9_tokens_105B", benchSubject},
+	} {
+		b.Run(tt.name, func(b *testing.B) {
+			s := NewSublist[int]()
+			s.Insert(tt.subj, 1)
+			b.ResetTimer()
+			for b.Loop() {
+				s.HasInterest(tt.subj)
+			}
+		})
+	}
+}
+
+func BenchmarkTokenizeSubjectIntoSlice(b *testing.B) {
+	for _, tt := range []struct {
+		name string
+		subj string
+	}{
+		{"3_tokens_19B", "events.user.created"},
+		{"9_tokens_105B", benchSubject},
+	} {
+		b.Run(tt.name, func(b *testing.B) {
+			var tsa [32]string
+			for b.Loop() {
+				tokenizeSubjectIntoSlice(tsa[:0], tt.subj)
+			}
+		})
+	}
+}
+
 // --- TEST HELPERS ---
 
 func require_Matches[T comparable](t *testing.T, s *GenericSublist[T], sub string, c int) {
