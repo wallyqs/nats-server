@@ -1372,16 +1372,10 @@ func SubjectsCollide(subj1, subj2 string) bool {
 
 // Returns number of tokens in the subject.
 func numTokens(subject string) int {
-	var numTokens int
 	if len(subject) == 0 {
 		return 0
 	}
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			numTokens++
-		}
-	}
-	return numTokens + 1
+	return strings.Count(subject, tsep) + 1
 }
 
 // Fast way to return an indexed token.
