@@ -14,22 +14,24 @@
 package server
 
 import (
+	"strings"
 	"testing"
 )
 
-// ackReplyInfoManualLoop is the previous implementation that uses a manual
-// byte-by-byte loop to tokenize the subject. Kept here for benchmark comparison
-// against the current strings.IndexByte-based implementation.
-func ackReplyInfoManualLoop(subject string) (sseq, dseq, dc uint64) {
+// ackReplyInfoIndexByte uses strings.IndexByte to tokenize the subject.
+// Kept here for benchmark comparison against the manual loop in production.
+func ackReplyInfoIndexByte(subject string) (sseq, dseq, dc uint64) {
 	tsa := [expectedNumReplyTokens]string{}
-	start, tokens := 0, tsa[:0]
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tokens = append(tokens, subject[start:i])
-			start = i + 1
+	tokens := tsa[:0]
+	for {
+		idx := strings.IndexByte(subject, btsep)
+		if idx < 0 {
+			tokens = append(tokens, subject)
+			break
 		}
+		tokens = append(tokens, subject[:idx])
+		subject = subject[idx+1:]
 	}
-	tokens = append(tokens, subject[start:])
 	if len(tokens) != expectedNumReplyTokens || tokens[0] != "$JS" || tokens[1] != "ACK" {
 		return 0, 0, 0
 	}
@@ -39,18 +41,20 @@ func ackReplyInfoManualLoop(subject string) (sseq, dseq, dc uint64) {
 	return sseq, dseq, dc
 }
 
-// replyInfoManualLoop is the previous implementation that uses a manual
-// byte-by-byte loop. Kept for benchmark comparison.
-func replyInfoManualLoop(subject string) (sseq, dseq, dc uint64, ts int64, pending uint64) {
+// replyInfoIndexByte uses strings.IndexByte to tokenize the subject.
+// Kept for benchmark comparison.
+func replyInfoIndexByte(subject string) (sseq, dseq, dc uint64, ts int64, pending uint64) {
 	tsa := [expectedNumReplyTokens]string{}
-	start, tokens := 0, tsa[:0]
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tokens = append(tokens, subject[start:i])
-			start = i + 1
+	tokens := tsa[:0]
+	for {
+		idx := strings.IndexByte(subject, btsep)
+		if idx < 0 {
+			tokens = append(tokens, subject)
+			break
 		}
+		tokens = append(tokens, subject[:idx])
+		subject = subject[idx+1:]
 	}
-	tokens = append(tokens, subject[start:])
 	if len(tokens) != expectedNumReplyTokens || tokens[0] != "$JS" || tokens[1] != "ACK" {
 		return 0, 0, 0, 0, 0
 	}
@@ -62,66 +66,92 @@ func replyInfoManualLoop(subject string) (sseq, dseq, dc uint64, ts int64, pendi
 	return sseq, dseq, dc, ts, pending
 }
 
-var sampleAckReply = "$JS.ACK.asdf-asdf-events.asdf-asdf-events.1.284222.291929.1671900992627312000.0"
+var (
+	// Short names (~80 bytes total).
+	sampleAckReplyShort = "$JS.ACK.asdf-asdf-events.asdf-asdf-events.1.284222.291929.1671900992627312000.0"
+
+	// Long consumer name (~200+ bytes total) to simulate realistic production subjects
+	// where consumer names can be 114-195 characters.
+	sampleAckReplyLong = "$JS.ACK.orders-stream-production." +
+		"durable-consumer-orders-processing-pipeline-us-east-1-partition-42-group-alpha-with-retry-policy-exponential-backoff-v2" +
+		".1.284222.291929.1671900992627312000.0"
+)
 
 func BenchmarkAckReplyInfo(b *testing.B) {
-	b.Run("ManualLoop", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			sseq, dseq, dc := ackReplyInfoManualLoop(sampleAckReply)
-			if sseq == 0 || dseq == 0 || dc == 0 {
-				b.Fatal("unexpected zero result")
+	for _, tc := range []struct {
+		name    string
+		subject string
+	}{
+		{"Short", sampleAckReplyShort},
+		{"Long", sampleAckReplyLong},
+	} {
+		b.Run(tc.name+"/ManualLoop", func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				sseq, dseq, dc := ackReplyInfo(tc.subject)
+				if sseq == 0 || dseq == 0 || dc == 0 {
+					b.Fatal("unexpected zero result")
+				}
 			}
-		}
-	})
-	b.Run("IndexByte", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			sseq, dseq, dc := ackReplyInfo(sampleAckReply)
-			if sseq == 0 || dseq == 0 || dc == 0 {
-				b.Fatal("unexpected zero result")
+		})
+		b.Run(tc.name+"/IndexByte", func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				sseq, dseq, dc := ackReplyInfoIndexByte(tc.subject)
+				if sseq == 0 || dseq == 0 || dc == 0 {
+					b.Fatal("unexpected zero result")
+				}
 			}
-		}
-	})
+		})
+	}
 }
 
 func BenchmarkReplyInfo(b *testing.B) {
-	b.Run("ManualLoop", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			sseq, dseq, dc, ts, pending := replyInfoManualLoop(sampleAckReply)
-			if sseq == 0 || dseq == 0 || dc == 0 || ts == 0 || pending != 0 {
-				b.Fatal("unexpected result")
+	for _, tc := range []struct {
+		name    string
+		subject string
+	}{
+		{"Short", sampleAckReplyShort},
+		{"Long", sampleAckReplyLong},
+	} {
+		b.Run(tc.name+"/ManualLoop", func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				sseq, dseq, dc, ts, pending := replyInfo(tc.subject)
+				if sseq == 0 || dseq == 0 || dc == 0 || ts == 0 || pending != 0 {
+					b.Fatal("unexpected result")
+				}
 			}
-		}
-	})
-	b.Run("IndexByte", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			sseq, dseq, dc, ts, pending := replyInfo(sampleAckReply)
-			if sseq == 0 || dseq == 0 || dc == 0 || ts == 0 || pending != 0 {
-				b.Fatal("unexpected result")
+		})
+		b.Run(tc.name+"/IndexByte", func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				sseq, dseq, dc, ts, pending := replyInfoIndexByte(tc.subject)
+				if sseq == 0 || dseq == 0 || dc == 0 || ts == 0 || pending != 0 {
+					b.Fatal("unexpected result")
+				}
 			}
-		}
-	})
+		})
+	}
 }
 
-func TestAckReplyInfoIndexByte(t *testing.T) {
-	// Verify both implementations return the same results.
-	sseq1, dseq1, dc1 := ackReplyInfoManualLoop(sampleAckReply)
-	sseq2, dseq2, dc2 := ackReplyInfo(sampleAckReply)
-	if sseq1 != sseq2 || dseq1 != dseq2 || dc1 != dc2 {
-		t.Fatalf("ackReplyInfo mismatch: manual(%d,%d,%d) vs indexbyte(%d,%d,%d)",
-			sseq1, dseq1, dc1, sseq2, dseq2, dc2)
-	}
+func TestAckReplyInfoEquivalence(t *testing.T) {
+	for _, subject := range []string{sampleAckReplyShort, sampleAckReplyLong} {
+		sseq1, dseq1, dc1 := ackReplyInfo(subject)
+		sseq2, dseq2, dc2 := ackReplyInfoIndexByte(subject)
+		if sseq1 != sseq2 || dseq1 != dseq2 || dc1 != dc2 {
+			t.Fatalf("ackReplyInfo mismatch on %q: manual(%d,%d,%d) vs indexbyte(%d,%d,%d)",
+				subject, sseq1, dseq1, dc1, sseq2, dseq2, dc2)
+		}
 
-	sseq3, dseq3, dc3, ts1, pending1 := replyInfoManualLoop(sampleAckReply)
-	sseq4, dseq4, dc4, ts2, pending2 := replyInfo(sampleAckReply)
-	if sseq3 != sseq4 || dseq3 != dseq4 || dc3 != dc4 || ts1 != ts2 || pending1 != pending2 {
-		t.Fatalf("replyInfo mismatch: manual(%d,%d,%d,%d,%d) vs indexbyte(%d,%d,%d,%d,%d)",
-			sseq3, dseq3, dc3, ts1, pending1, sseq4, dseq4, dc4, ts2, pending2)
+		sseq3, dseq3, dc3, ts1, pending1 := replyInfo(subject)
+		sseq4, dseq4, dc4, ts2, pending2 := replyInfoIndexByte(subject)
+		if sseq3 != sseq4 || dseq3 != dseq4 || dc3 != dc4 || ts1 != ts2 || pending1 != pending2 {
+			t.Fatalf("replyInfo mismatch on %q: manual(%d,%d,%d,%d,%d) vs indexbyte(%d,%d,%d,%d,%d)",
+				subject, sseq3, dseq3, dc3, ts1, pending1, sseq4, dseq4, dc4, ts2, pending2)
+		}
 	}
 
 	// Test with invalid subjects.
 	for _, bad := range []string{"", "foo.bar", "$JS.NACK.a.b.1.2.3.4.5"} {
-		s1, d1, c1 := ackReplyInfoManualLoop(bad)
-		s2, d2, c2 := ackReplyInfo(bad)
+		s1, d1, c1 := ackReplyInfo(bad)
+		s2, d2, c2 := ackReplyInfoIndexByte(bad)
 		if s1 != s2 || d1 != d2 || c1 != c2 {
 			t.Fatalf("mismatch on bad input %q: manual(%d,%d,%d) vs indexbyte(%d,%d,%d)",
 				bad, s1, d1, c1, s2, d2, c2)
