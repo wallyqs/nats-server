@@ -14,6 +14,7 @@
 package gsl
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -360,58 +361,54 @@ func TestGenericSublistNumInterest(t *testing.T) {
 //
 //	Position:  0     1          2   3     4            5             6        7                     8
 //	Avg len:   5     10         2   5     12           13            8        21                    21
-const benchSubject = "NATS0.ABCDEFGHIJ.AB.NATS0.ABCDEFGHIJKL.ABCDEFGHIJKLM.ABCDEFGH.ABCDEFGHIJKLMNOPQRSTU.ABCDEFGHIJKLMNOPQRSTU"
+// Each subject is a prefix of the next, growing from 3 to 10 tokens.
+var benchSubjects = []string{
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH.ABCDEFGHIJKL",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH.ABCDEFGHIJKL.ABCDEFGHIJKLMNOPQRSTU",
+}
+
+func benchName(subj string) string {
+	return fmt.Sprintf("%d_tokens_%dB", strings.Count(subj, ".")+1, len(subj))
+}
 
 func BenchmarkMatch(b *testing.B) {
-	for _, tt := range []struct {
-		name string
-		subj string
-	}{
-		{"3_tokens_19B", "events.user.created"},
-		{"9_tokens_105B", benchSubject},
-	} {
-		b.Run(tt.name, func(b *testing.B) {
+	for _, subj := range benchSubjects {
+		b.Run(benchName(subj), func(b *testing.B) {
 			s := NewSublist[int]()
-			s.Insert(tt.subj, 1)
+			s.Insert(subj, 1)
 			b.ResetTimer()
 			for b.Loop() {
-				s.Match(tt.subj, func(int) {})
+				s.Match(subj, func(int) {})
 			}
 		})
 	}
 }
 
 func BenchmarkHasInterest(b *testing.B) {
-	for _, tt := range []struct {
-		name string
-		subj string
-	}{
-		{"3_tokens_19B", "events.user.created"},
-		{"9_tokens_105B", benchSubject},
-	} {
-		b.Run(tt.name, func(b *testing.B) {
+	for _, subj := range benchSubjects {
+		b.Run(benchName(subj), func(b *testing.B) {
 			s := NewSublist[int]()
-			s.Insert(tt.subj, 1)
+			s.Insert(subj, 1)
 			b.ResetTimer()
 			for b.Loop() {
-				s.HasInterest(tt.subj)
+				s.HasInterest(subj)
 			}
 		})
 	}
 }
 
 func BenchmarkTokenizeSubjectIntoSlice(b *testing.B) {
-	for _, tt := range []struct {
-		name string
-		subj string
-	}{
-		{"3_tokens_19B", "events.user.created"},
-		{"9_tokens_105B", benchSubject},
-	} {
-		b.Run(tt.name, func(b *testing.B) {
+	for _, subj := range benchSubjects {
+		b.Run(benchName(subj), func(b *testing.B) {
 			var tsa [32]string
 			for b.Loop() {
-				tokenizeSubjectIntoSlice(tsa[:0], tt.subj)
+				tokenizeSubjectIntoSlice(tsa[:0], subj)
 			}
 		})
 	}
