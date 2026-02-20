@@ -174,37 +174,19 @@ func (s *GenericSublist[T]) match(subject string, cb func(T), doLock bool) {
 	tsa := [32]string{}
 	tokens := tsa[:0]
 
-	const threshold = 32
-	if len(subject) < threshold {
-		start := 0
-		for i := 0; i < len(subject); i++ {
-			if subject[i] == btsep {
-				if i-start == 0 {
-					return
-				}
-				tokens = append(tokens, subject[start:i])
-				start = i + 1
+	for {
+		if idx := strings.IndexByte(subject, btsep); idx >= 0 {
+			if idx == 0 {
+				return
 			}
-		}
-		if start >= len(subject) {
-			return
-		}
-		tokens = append(tokens, subject[start:])
-	} else {
-		for {
-			if idx := strings.IndexByte(subject, btsep); idx >= 0 {
-				if idx == 0 {
-					return
-				}
-				tokens = append(tokens, subject[:idx])
-				subject = subject[idx+1:]
-			} else {
-				if len(subject) == 0 {
-					return
-				}
-				tokens = append(tokens, subject)
-				break
+			tokens = append(tokens, subject[:idx])
+			subject = subject[idx+1:]
+		} else {
+			if len(subject) == 0 {
+				return
 			}
+			tokens = append(tokens, subject)
+			break
 		}
 	}
 
@@ -219,37 +201,19 @@ func (s *GenericSublist[T]) hasInterest(subject string, doLock bool, np *int) bo
 	tsa := [32]string{}
 	tokens := tsa[:0]
 
-	const threshold = 32
-	if len(subject) < threshold {
-		start := 0
-		for i := 0; i < len(subject); i++ {
-			if subject[i] == btsep {
-				if i-start == 0 {
-					return false
-				}
-				tokens = append(tokens, subject[start:i])
-				start = i + 1
+	for {
+		if idx := strings.IndexByte(subject, btsep); idx >= 0 {
+			if idx == 0 {
+				return false
 			}
-		}
-		if start >= len(subject) {
-			return false
-		}
-		tokens = append(tokens, subject[start:])
-	} else {
-		for {
-			if idx := strings.IndexByte(subject, btsep); idx >= 0 {
-				if idx == 0 {
-					return false
-				}
-				tokens = append(tokens, subject[:idx])
-				subject = subject[idx+1:]
-			} else {
-				if len(subject) == 0 {
-					return false
-				}
-				tokens = append(tokens, subject)
-				break
+			tokens = append(tokens, subject[:idx])
+			subject = subject[idx+1:]
+		} else {
+			if len(subject) == 0 {
+				return false
 			}
+			tokens = append(tokens, subject)
+			break
 		}
 	}
 
