@@ -2903,6 +2903,10 @@ func TestOCSPPeerNextUpdateUnset(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			// Cleanup any previous test that saved a local cache
 			deleteLocalStore(t, "")
+			// Flush idle HTTP connections from the default transport to prevent
+			// stale pooled connections from a prior subtest's OCSP fetches from
+			// interfering with this subtest.
+			http.DefaultTransport.(*http.Transport).CloseIdleConnections()
 			test.configure()
 			content := test.config
 			conf := createConfFile(t, []byte(content))
