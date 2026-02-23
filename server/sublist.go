@@ -1156,7 +1156,7 @@ func visitLevel(l *level, depth int) int {
 }
 
 // Determine if a subject has any wildcard tokens.
-func subjectHasWildcard(subject string) bool {
+func subjectHasWildcardScalar(subject string) bool {
 	// This one exits earlier then !subjectIsLiteral(subject)
 	for i, c := range subject {
 		if c == pwc || c == fwc {
@@ -1171,7 +1171,7 @@ func subjectHasWildcard(subject string) bool {
 
 // Determine if the subject has any wildcards. Fast version, does not check for
 // valid subject. Used in caching layer.
-func subjectIsLiteral(subject string) bool {
+func subjectIsLiteralScalar(subject string) bool {
 	for i, c := range subject {
 		if c == pwc || c == fwc {
 			if (i == 0 || subject[i-1] == btsep) &&
@@ -1371,7 +1371,7 @@ func SubjectsCollide(subj1, subj2 string) bool {
 }
 
 // Returns number of tokens in the subject.
-func numTokens(subject string) int {
+func numTokensScalar(subject string) int {
 	var numTokens int
 	if len(subject) == 0 {
 		return 0
@@ -1404,7 +1404,7 @@ func tokenAt(subject string, index uint8) string {
 }
 
 // use similar to append. meaning, the updated slice will be returned
-func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
+func tokenizeSubjectIntoSliceScalar(tts []string, subject string) []string {
 	start := 0
 	for i := 0; i < len(subject); i++ {
 		if subject[i] == btsep {
