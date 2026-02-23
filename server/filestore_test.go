@@ -8539,6 +8539,176 @@ func Benchmark_FileStoreSyncDeletedPartialBlocks(b *testing.B) {
 	}
 }
 
+func Benchmark_FileStoreMultiLastSeqs(b *testing.B) {
+	// Benchmark MultiLastSeqs with varying number of unique subjects and
+	// block configurations. This exercises the core path that builds the
+	// last-per-subject consumer state.
+	msg := []byte("ok")
+
+	b.Run("Wildcard", func(b *testing.B) {
+		// Wildcard filter with many unique subjects spread across blocks.
+		for _, numSubjects := range []int{10, 100, 1000} {
+			b.Run(fmt.Sprintf("Subjects-%d", numSubjects), func(b *testing.B) {
+				fs, err := newFileStore(
+					FileStoreConfig{StoreDir: b.TempDir(), BlockSize: 4096},
+					StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: FileStorage})
+				require_NoError(b, err)
+				defer fs.Stop()
+
+				for i := 0; i < 100_000; i++ {
+					subj := fmt.Sprintf("foo.%d", rand.Intn(numSubjects))
+					fs.StoreMsg(subj, nil, msg, 0)
+				}
+
+				filter := []string{"foo.*"}
+				b.ResetTimer()
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					seqs, err := fs.MultiLastSeqs(filter, 0, -1)
+					if err != nil {
+						b.Fatalf("Unexpected error: %v", err)
+					}
+					if len(seqs) != numSubjects {
+						b.Fatalf("Expected %d seqs, got %d", numSubjects, len(seqs))
+					}
+				}
+			})
+		}
+	})
+
+	b.Run("Literal", func(b *testing.B) {
+		// Literal subject filters rather than wildcards.
+		for _, numFilters := range []int{1, 10, 100} {
+			b.Run(fmt.Sprintf("Filters-%d", numFilters), func(b *testing.B) {
+				numSubjects := 1000
+				fs, err := newFileStore(
+					FileStoreConfig{StoreDir: b.TempDir(), BlockSize: 4096},
+					StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: FileStorage})
+				require_NoError(b, err)
+				defer fs.Stop()
+
+				for i := 0; i < 100_000; i++ {
+					subj := fmt.Sprintf("foo.%d", rand.Intn(numSubjects))
+					fs.StoreMsg(subj, nil, msg, 0)
+				}
+
+				filters := make([]string, numFilters)
+				for i := range filters {
+					filters[i] = fmt.Sprintf("foo.%d", i)
+				}
+
+				b.ResetTimer()
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					seqs, err := fs.MultiLastSeqs(filters, 0, -1)
+					if err != nil {
+						b.Fatalf("Unexpected error: %v", err)
+					}
+					if len(seqs) != numFilters {
+						b.Fatalf("Expected %d seqs, got %d", numFilters, len(seqs))
+					}
+				}
+			})
+		}
+	})
+
+	b.Run("SparseSubjects", func(b *testing.B) {
+		// Simulates sparsely populated streams where the subjects we're
+		// interested in are far back in the stream history.
+		fs, err := newFileStore(
+			FileStoreConfig{StoreDir: b.TempDir(), BlockSize: 4096},
+			StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: FileStorage})
+		require_NoError(b, err)
+		defer fs.Stop()
+
+		// Store a few messages for our target subjects early on.
+		for i := 0; i < 10; i++ {
+			fs.StoreMsg(fmt.Sprintf("foo.target_%d", i), nil, msg, 0)
+		}
+		// Then fill the stream with many messages on other subjects.
+		for i := 0; i < 100_000; i++ {
+			subj := fmt.Sprintf("foo.other_%d", rand.Intn(500))
+			fs.StoreMsg(subj, nil, msg, 0)
+		}
+
+		filters := make([]string, 10)
+		for i := range filters {
+			filters[i] = fmt.Sprintf("foo.target_%d", i)
+		}
+
+		b.ResetTimer()
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			seqs, err := fs.MultiLastSeqs(filters, 0, -1)
+			if err != nil {
+				b.Fatalf("Unexpected error: %v", err)
+			}
+			if len(seqs) != 10 {
+				b.Fatalf("Expected 10 seqs, got %d", len(seqs))
+			}
+		}
+	})
+
+	b.Run("WithMaxSeq", func(b *testing.B) {
+		// Benchmark with a maxSeq that is in the middle of the stream,
+		// forcing the search to start from an earlier block.
+		for _, pct := range []int{25, 50, 75} {
+			b.Run(fmt.Sprintf("Pct-%d", pct), func(b *testing.B) {
+				fs, err := newFileStore(
+					FileStoreConfig{StoreDir: b.TempDir(), BlockSize: 4096},
+					StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: FileStorage})
+				require_NoError(b, err)
+				defer fs.Stop()
+
+				numMsgs := 100_000
+				for i := 0; i < numMsgs; i++ {
+					subj := fmt.Sprintf("foo.%d", rand.Intn(100))
+					fs.StoreMsg(subj, nil, msg, 0)
+				}
+
+				maxSeq := uint64(numMsgs * pct / 100)
+				filter := []string{"foo.*"}
+				b.ResetTimer()
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					_, err := fs.MultiLastSeqs(filter, maxSeq, -1)
+					if err != nil {
+						b.Fatalf("Unexpected error: %v", err)
+					}
+				}
+			})
+		}
+	})
+
+	b.Run("ManyBlocks", func(b *testing.B) {
+		// Small block size to create many blocks, stressing the block
+		// iteration logic.
+		fs, err := newFileStore(
+			FileStoreConfig{StoreDir: b.TempDir(), BlockSize: 256},
+			StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: FileStorage})
+		require_NoError(b, err)
+		defer fs.Stop()
+
+		for i := 0; i < 50_000; i++ {
+			subj := fmt.Sprintf("foo.%d", rand.Intn(100))
+			fs.StoreMsg(subj, nil, msg, 0)
+		}
+
+		filter := []string{"foo.*"}
+		b.ResetTimer()
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			seqs, err := fs.MultiLastSeqs(filter, 0, -1)
+			if err != nil {
+				b.Fatalf("Unexpected error: %v", err)
+			}
+			if len(seqs) != 100 {
+				b.Fatalf("Expected 100 seqs, got %d", len(seqs))
+			}
+		}
+	})
+}
+
 func TestFileStoreWriteFullStateDetectCorruptState(t *testing.T) {
 	fs, err := newFileStore(
 		FileStoreConfig{StoreDir: t.TempDir()},
