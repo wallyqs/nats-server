@@ -382,6 +382,19 @@ func (u *metadataOption) IsStatszChange() bool {
 	return true
 }
 
+// featureFlagsOption implements the option interface for the `feature_flags` setting.
+type featureFlagsOption struct {
+	noopOption
+}
+
+func (u *featureFlagsOption) Apply(server *Server) {
+	server.Noticef("Reloaded: feature_flags")
+}
+
+func (u *featureFlagsOption) IsStatszChange() bool {
+	return true
+}
+
 // usersOption implements the option interface for the authorization `users`
 // setting.
 type usersOption struct {
@@ -1259,7 +1272,7 @@ func imposeOrder(value any) error {
 		slices.Sort(value.AllowedOrigins)
 	case string, bool, uint8, uint16, uint64, int, int32, int64, time.Duration, float64, nil, LeafNodeOpts, ClusterOpts, *tls.Config, PinnedCertSet,
 		*URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication, MQTTOpts, jwt.TagList,
-		*OCSPConfig, map[string]string, JSLimitOpts, StoreCipher, *OCSPResponseCacheConfig, *ProxiesConfig, WriteTimeoutPolicy:
+		*OCSPConfig, map[string]string, map[string]bool, JSLimitOpts, StoreCipher, *OCSPResponseCacheConfig, *ProxiesConfig, WriteTimeoutPolicy:
 		// explicitly skipped types
 	case *AuthCallout:
 	case JSTpmOpts:
@@ -1358,6 +1371,8 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			diffOpts = append(diffOpts, &tagsOption{})
 		case "metadata":
 			diffOpts = append(diffOpts, &metadataOption{})
+		case "featureflags":
+			diffOpts = append(diffOpts, &featureFlagsOption{})
 		case "authorization":
 			diffOpts = append(diffOpts, &authorizationOption{})
 		case "authtimeout":

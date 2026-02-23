@@ -6392,3 +6392,60 @@ func TestConfigReloadNoPanicOnShutdown(t *testing.T) {
 		wg.Wait()
 	}
 }
+
+func TestConfigReloadFeatureFlags(t *testing.T) {
+	// Start server without feature_flags configured.
+	s, _, conf := runReloadServerWithContent(t, []byte(`
+		listen: "0.0.0.0:-1"
+	`))
+	defer s.Shutdown()
+
+	// Verify no feature flags are configured initially.
+	opts := s.getOpts()
+	if opts.FeatureFlags != nil {
+		t.Fatalf("Expected no FeatureFlags initially, got: %v", opts.FeatureFlags)
+	}
+
+	// Reload with feature_flags set.
+	reloadUpdateConfig(t, s, conf, `
+		listen: "0.0.0.0:-1"
+		feature_flags {
+			js_ack_fc_v2: true
+		}
+	`)
+
+	// Verify feature flags are now set.
+	opts = s.getOpts()
+	if opts.FeatureFlags == nil {
+		t.Fatal("Expected FeatureFlags to be set after reload")
+	}
+	if v, ok := opts.FeatureFlags["js_ack_fc_v2"]; !ok || !v {
+		t.Fatalf("Expected js_ack_fc_v2 to be true, got: %v", opts.FeatureFlags)
+	}
+
+	// Reload with different feature flags.
+	reloadUpdateConfig(t, s, conf, `
+		listen: "0.0.0.0:-1"
+		feature_flags {
+			js_ack_fc_v2: false
+		}
+	`)
+
+	opts = s.getOpts()
+	if opts.FeatureFlags == nil {
+		t.Fatal("Expected FeatureFlags to be set after second reload")
+	}
+	if v := opts.FeatureFlags["js_ack_fc_v2"]; v {
+		t.Fatalf("Expected js_ack_fc_v2 to be false after second reload, got: %v", opts.FeatureFlags)
+	}
+
+	// Reload removing feature_flags entirely.
+	reloadUpdateConfig(t, s, conf, `
+		listen: "0.0.0.0:-1"
+	`)
+
+	opts = s.getOpts()
+	if opts.FeatureFlags != nil {
+		t.Fatalf("Expected FeatureFlags to be nil after removing from config, got: %v", opts.FeatureFlags)
+	}
+}
