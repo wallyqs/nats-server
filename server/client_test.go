@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
@@ -3886,5 +3887,52 @@ func TestNBPoolPutReslicedBufferIsDiscarded(t *testing.T) {
 			nbPoolPut(orig)
 			require_Equal(t, nbPoolReturnCount.Load(), int64(1))
 		})
+	}
+}
+
+func TestFlushOutboundS2CompressionPoolBufferRecycling(t *testing.T) {
+	// Verify that flushOutbound returns pool-backed buffers from
+	// c.out.nb before replacing them with S2-compressed output.
+	//
+	// Bug: flushOutbound iterated the collapsed buffers to write them
+	// into the S2 compressor, then reassigned `collapsed` to the
+	// compressed output. The original pool-backed buffers were
+	// orphaned and never returned via nbPoolPut.
+	opts := DefaultOptions()
+	opts.MaxPending = 1024
+	s := &Server{opts: opts}
+
+	fakeConn := &testConnWritePartial{}
+	c := &client{srv: s, nc: fakeConn, kind: ROUTER}
+	c.initClient()
+
+	// Enable S2 compression (as route/leafnode connections do).
+	c.out.cw = s2.NewWriter(nil, s2.WriterConcurrency(1))
+
+	// Queue data via queueOutbound so buffers come from the pool.
+	payload := make([]byte, 256)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	c.mu.Lock()
+	c.queueOutbound(payload)
+	require_True(t, c.out.pb > 0)
+	require_True(t, len(c.out.nb) > 0)
+
+	// Count pool returns during flushOutbound.
+	nbPoolReturnCount.Store(0)
+	c.flushOutbound()
+	returns := nbPoolReturnCount.Load()
+	c.mu.Unlock()
+
+	t.Logf("Pool returns during S2 flushOutbound: %d", returns)
+
+	// With the fix, the original pool buffers are returned after the
+	// compressor has consumed them (at least 1 for the input data).
+	// Before the fix, collapsed was reassigned without returning the
+	// originals, so the return count from the S2 path was 0.
+	if returns < 1 {
+		t.Fatalf("Expected at least 1 pool return during S2 flushOutbound, got %d", returns)
 	}
 }
