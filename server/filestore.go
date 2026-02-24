@@ -5457,12 +5457,11 @@ func (fs *fileStore) removeMsgFromBlock(mb *msgBlock, seq uint64, secure, viaLim
 	} else if !isEmpty {
 		// Out of order delete.
 		mb.dmap.Insert(seq)
-		// Make simple check here similar to Compact(). If we can save 50% and over a certain threshold do inline.
-		// All other more thorough cleanup will happen in syncBlocks logic.
-		// Note that we do not have to store empty records for the deleted, so don't use to calculate.
-		// TODO(dlc) - This should not be inline, should kick the sync routine.
+		// Rather than compacting inline while holding the fs write lock (which blocks all
+		// concurrent operations), spawn a goroutine that re-acquires with lighter locks:
+		// fs.mu.RLock + mb.mu.Lock, allowing concurrent reads and writes on other blocks.
 		if !isLastBlock && mb.shouldCompactInline() {
-			mb.compact()
+			go fs.compactBlock(mb)
 		}
 	}
 
@@ -5560,6 +5559,37 @@ func (mb *msgBlock) shouldCompactInline() bool {
 // Lock should be held.
 func (mb *msgBlock) shouldCompactSync() bool {
 	return mb.bytes*2 < mb.rbytes && !mb.noCompact
+}
+
+// compactBlock is called in a goroutine to compact a message block without
+// holding the fs write lock on the hot path. It acquires fs.mu as a read lock
+// and mb.mu as a write lock, matching the lock pattern used by syncBlocks.
+// This performs the same mb.compact() operation (no tombstone cleanup) but
+// without blocking concurrent operations on other blocks.
+func (fs *fileStore) compactBlock(mb *msgBlock) {
+	if fs.isClosed() {
+		return
+	}
+	fs.mu.RLock()
+	mb.mu.Lock()
+	if mb.closed {
+		mb.mu.Unlock()
+		fs.mu.RUnlock()
+		return
+	}
+	mb.compact()
+	shouldRemove := mb.rbytes == 0
+	mb.mu.Unlock()
+	fs.mu.RUnlock()
+
+	// If compaction emptied the block, remove it.
+	if shouldRemove {
+		fs.mu.Lock()
+		mb.mu.Lock()
+		fs.removeMsgBlock(mb)
+		mb.mu.Unlock()
+		fs.mu.Unlock()
+	}
 }
 
 // This will compact and rewrite this block. This version will not process any tombstone cleanup.
