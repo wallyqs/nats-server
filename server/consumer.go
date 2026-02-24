@@ -4666,6 +4666,21 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 		return next
 	}
 
+	// Pre-lock the most common Sublist to batch interest checks across the
+	// entire waiting queue. This avoids per-request RLock/RUnlock overhead
+	// whose internal atomic.Int32.Add on readerCount causes heavy contention
+	// when many pull requests are pending.
+	var lockedSL *Sublist
+	if wq.head != nil {
+		lockedSL = wq.head.acc.sl
+		lockedSL.RLock()
+	}
+	defer func() {
+		if lockedSL != nil {
+			lockedSL.RUnlock()
+		}
+	}()
+
 	var pre *waitingRequest
 	for wr := wq.head; wr != nil; {
 		// Check expiration.
@@ -4701,7 +4716,14 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 			}
 		}
 		// Now check interest.
-		interest := wr.acc.sl.HasInterest(wr.interest)
+		// Use the pre-locked Sublist when the account matches (common case),
+		// otherwise fall back to individual locking for cross-account requests.
+		var interest bool
+		if sl := wr.acc.sl; sl == lockedSL {
+			interest = sl.hasInterest(wr.interest, false, nil, nil)
+		} else {
+			interest = sl.HasInterest(wr.interest)
+		}
 		if !interest && (s.leafNodeEnabled || s.gateway.enabled) {
 			// If we are here check on gateways and leaf nodes (as they can mask gateways on the other end).
 			// If we have interest or the request is too young break and do not expire.
