@@ -1693,6 +1693,11 @@ func (c *client) flushOutbound() bool {
 		if err == nil {
 			err = cw.Close()
 		}
+		// Return the original pool buffers now that their contents have
+		// been consumed by the compressor (or the compressor has failed).
+		for _, buf := range collapsed {
+			nbPoolPut(buf)
+		}
 		if err != nil {
 			c.Errorf("Error compressing data: %v", err)
 			// We need to grab the lock now before marking as closed and exiting
