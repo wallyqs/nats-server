@@ -3765,9 +3765,16 @@ func (mset *stream) skipBatchIfRecovering(batch *batchApply, buf []byte) (bool, 
 	}
 
 	if op == compressedStreamMsgOp {
-		if mbuf, err = s2.Decode(nil, mbuf); err != nil {
+		dLen, dErr := s2.DecodedLen(mbuf)
+		if dErr != nil {
+			return false, dErr
+		}
+		dst := getStreamMsgBuf(dLen)
+		if mbuf, err = s2.Decode(dst, mbuf); err != nil {
+			recycleStreamMsgBuf(dst)
 			return false, err
 		}
+		defer recycleStreamMsgBuf(mbuf)
 	}
 
 	_, _, _, _, lseq, _, _, err := decodeStreamMsg(mbuf)
@@ -3794,11 +3801,18 @@ func (js *jetStream) applyStreamMsgOp(mset *stream, op entryOp, mbuf []byte, isR
 	s := js.srv
 
 	if op == compressedStreamMsgOp {
+		dLen, dErr := s2.DecodedLen(mbuf)
+		if dErr != nil {
+			panic(dErr.Error())
+		}
+		dst := getStreamMsgBuf(dLen)
 		var err error
-		mbuf, err = s2.Decode(nil, mbuf)
+		mbuf, err = s2.Decode(dst, mbuf)
 		if err != nil {
+			recycleStreamMsgBuf(dst)
 			panic(err.Error())
 		}
+		defer recycleStreamMsgBuf(mbuf)
 	}
 
 	subject, reply, hdr, msg, lseq, ts, sourced, err := decodeStreamMsg(mbuf)
@@ -9993,11 +10007,18 @@ func (mset *stream) processCatchupMsg(msg []byte) (uint64, error) {
 	}
 
 	if op == compressedStreamMsgOp {
+		dLen, dErr := s2.DecodedLen(mbuf)
+		if dErr != nil {
+			panic(dErr.Error())
+		}
+		dst := getStreamMsgBuf(dLen)
 		var err error
-		mbuf, err = s2.Decode(nil, mbuf)
+		mbuf, err = s2.Decode(dst, mbuf)
 		if err != nil {
+			recycleStreamMsgBuf(dst)
 			panic(err.Error())
 		}
+		defer recycleStreamMsgBuf(mbuf)
 	}
 
 	subj, _, hdr, msg, seq, ts, _, err := decodeStreamMsg(mbuf)
