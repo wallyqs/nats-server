@@ -201,6 +201,80 @@ func TestSIMDSubjectIsValid(t *testing.T) {
 	}
 }
 
+func TestSIMDSubjectIsSubsetMatch(t *testing.T) {
+	cases := []struct {
+		name    string
+		subject string
+		test    string
+		want    bool
+	}{
+		// Exact matches.
+		{"exact_short", "foo.bar", "foo.bar", true},
+		{"exact_long", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH", true},
+		{"exact_single", "foo", "foo", true},
+		// Wildcard matches.
+		{"fwc_alone", "foo.*", ">", true},
+		{"pwc_both", "foo.*", "*.*", true},
+		{"pwc_match", "foo.*", "foo.*", true},
+		{"fwc_match", "foo.>", ">", true},
+		{"fwc_star_gt", "foo.>", "*.>", true},
+		{"fwc_self", "foo.>", "foo.>", true},
+		// Wildcard mismatches.
+		{"pwc_no_match", "foo.*", "foo.bar", false},
+		{"fwc_no_match", "foo.>", "foo.bar", false},
+		// Empty tokens (bad subjects).
+		{"empty_token_subj", "foo..bar", "foo.*", false},
+		{"empty_token_test", "foo.*", "foo..bar", false},
+		// Empty strings.
+		{"both_empty", "", "", false},
+		{"empty_subject", "", "foo", false},
+		{"empty_test", "foo", "", false},
+		// Long subjects that exercise SIMD path.
+		{"long_exact_match", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM", true},
+		{"long_fwc", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.>", true},
+		{"long_pwc_end", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.*", true},
+		{"long_mismatch_late", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.XXXXXXXX", false},
+		{"long_mismatch_early", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV",
+			"XXXXX.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV", false},
+		{"long_diff_lengths", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.EXTRA", false},
+		// JetStream ACK subject.
+		{"js_ack_exact", "$JS.ACK.asdf-asdf-events.asdf-asdf-events.1.284222.291929.1671900992627312000.0",
+			"$JS.ACK.asdf-asdf-events.asdf-asdf-events.1.284222.291929.1671900992627312000.0", true},
+		{"js_ack_fwc", "$JS.ACK.asdf-asdf-events.asdf-asdf-events.1.284222.291929.1671900992627312000.0",
+			"$JS.ACK.asdf-asdf-events.>", true},
+		{"js_ack_pwc", "$JS.ACK.asdf-asdf-events.asdf-asdf-events.1.284222.291929.1671900992627312000.0",
+			"$JS.ACK.asdf-asdf-events.asdf-asdf-events.*.*.*.*.*", true},
+		// Boundary: 15, 16, 17 byte subjects.
+		{"15_bytes", "abcde.ghijklmno", "abcde.ghijklmno", true},
+		{"16_bytes", "abcde.ghijklmnop", "abcde.ghijklmnop", true},
+		{"17_bytes", "abcde.ghijklmnopq", "abcde.ghijklmnopq", true},
+		// Partial wildcard semantics.
+		{"star_in_subject", "*", "*", true},
+		{"star_vs_literal", "*", "foo", false},
+		{"gt_in_subject", "foo.bar", "foo.bar.>", false},
+		// Subject with > should not match as fwc in subject position.
+		{"fwc_in_subject_pos", ">", "foo", false},
+		{"fwc_subject_multi", ">.bar", "foo.bar", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := subjectIsSubsetMatch(tc.subject, tc.test)
+			gotScalar := subjectIsSubsetMatchScalar(tc.subject, tc.test)
+			if got != tc.want {
+				t.Fatalf("subjectIsSubsetMatch(%q, %q) = %v, want %v", tc.subject, tc.test, got, tc.want)
+			}
+			if got != gotScalar {
+				t.Fatalf("subjectIsSubsetMatch(%q, %q) = %v, scalar = %v — mismatch", tc.subject, tc.test, got, gotScalar)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Benchmarks — compare SIMD-dispatched vs scalar for various subject lengths.
 // ---------------------------------------------------------------------------
@@ -351,6 +425,65 @@ func BenchmarkSublistMatch(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				s.Match(subj)
 			}
+		})
+	}
+}
+
+// --- subjectIsSubsetMatch ---
+
+func BenchmarkSIMDSubsetMatch(b *testing.B) {
+	benchCases := []struct {
+		name    string
+		subject string
+		test    string
+	}{
+		// Exact literal match (common case) — exercises SIMD prefix comparison.
+		{"exact_short", "foo.bar.baz.quux", "foo.bar.baz.quux"},
+		{"exact_medium",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH"},
+		{"exact_long",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH.ABCDEFGHIJKL",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH.ABCDEFGHIJKL"},
+		// Wildcard at end — SIMD skips shared prefix, scalar handles >.
+		{"fwc_medium",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.>"},
+		{"fwc_long",
+			"$JS.ACK.asdf-asdf-events.asdf-asdf-events.1.284222.291929.1671900992627312000.0",
+			"$JS.ACK.asdf-asdf-events.>"},
+		// Partial wildcards throughout — exercises scalar wildcard logic.
+		{"pwc_many",
+			"$JS.ACK.asdf-asdf-events.asdf-asdf-events.1.284222.291929.1671900992627312000.0",
+			"$JS.ACK.asdf-asdf-events.asdf-asdf-events.*.*.*.*.*"},
+		// Late mismatch — SIMD skips long matching prefix.
+		{"late_mismatch",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.XXXXXXXX"},
+		// Early mismatch — SIMD bails on first chunk.
+		{"early_mismatch",
+			"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV",
+			"XXXXX.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV"},
+		// Short subjects — below SIMD threshold.
+		{"short_exact", "foo.bar", "foo.bar"},
+		{"short_wc", "foo.bar", "foo.*"},
+	}
+
+	for _, tc := range benchCases {
+		b.Run(tc.name, func(b *testing.B) {
+			totalBytes := int64(len(tc.subject) + len(tc.test))
+			b.Run("simd", func(b *testing.B) {
+				b.SetBytes(totalBytes)
+				for i := 0; i < b.N; i++ {
+					subjectIsSubsetMatch(tc.subject, tc.test)
+				}
+			})
+			b.Run("scalar", func(b *testing.B) {
+				b.SetBytes(totalBytes)
+				for i := 0; i < b.N; i++ {
+					subjectIsSubsetMatchScalar(tc.subject, tc.test)
+				}
+			})
 		})
 	}
 }

@@ -18,6 +18,7 @@ package server
 import (
 	"math/bits"
 	"simd/archsimd"
+	"strings"
 	"unsafe"
 )
 
@@ -245,4 +246,108 @@ func subjectHasWildcard(subject string) bool {
 		}
 	}
 	return false
+}
+
+// subjectIsSubsetMatch checks whether subject is a subset match of test,
+// using SIMD to compare prefix bytes from both strings simultaneously.
+// Instead of tokenizing both strings into []string slices, this loads
+// 16 bytes from each string into SIMD registers and compares them directly.
+// Identical chunks (same bytes, same dot positions, no wildcards) are
+// skipped at 16 bytes per iteration. On the first mismatch the remainder
+// is handled by a scalar streaming loop that walks tokens incrementally.
+func subjectIsSubsetMatch(subject, test string) bool {
+	ns, nt := len(subject), len(test)
+	if ns == 0 || nt == 0 {
+		return false
+	}
+
+	si, ti := 0, 0
+
+	// SIMD fast path: compare 16-byte chunks from both strings.
+	// When all 16 bytes are identical (same content and dot positions),
+	// advance both pointers by 16 — skipping multiple tokens at once.
+	if ns >= 16 && nt >= 16 {
+		sData := stringToBytes(subject)
+		tData := stringToBytes(test)
+		sBase := unsafe.Pointer(&sData[0])
+		tBase := unsafe.Pointer(&tData[0])
+		dot := archsimd.BroadcastInt8x16(int8(btsep))
+
+		for si+16 <= ns && ti+16 <= nt {
+			vs := archsimd.LoadInt8x16((*[16]int8)(unsafe.Add(sBase, si)))
+			vt := archsimd.LoadInt8x16((*[16]int8)(unsafe.Add(tBase, ti)))
+			eqBits := vs.Equal(vt).ToBits()
+			if eqBits != 0xFFFF {
+				// Mismatch within this chunk. Skip past the last dot
+				// in the matching prefix so the scalar tail begins at
+				// a clean token boundary.
+				diffPos := bits.TrailingZeros16(^eqBits)
+				if diffPos > 0 {
+					dotBits := vs.Equal(dot).ToBits() & uint16(1<<diffPos-1)
+					if dotBits != 0 {
+						adv := 15 - bits.LeadingZeros16(dotBits) + 1
+						si += adv
+						ti += adv
+					}
+				}
+				break
+			}
+			si += 16
+			ti += 16
+		}
+	}
+
+	// Scalar streaming: walk both remainders token-by-token.
+	return subjectIsSubsetMatchStreamFrom(subject[si:], test[ti:])
+}
+
+// subjectIsSubsetMatchStreamFrom performs the subset match comparison by
+// walking both strings token-by-token, finding dot separators incrementally
+// rather than pre-tokenizing into []string slices.
+func subjectIsSubsetMatchStreamFrom(subject, test string) bool {
+	for {
+		if len(test) == 0 {
+			return len(subject) == 0
+		}
+		if len(subject) == 0 {
+			return false
+		}
+
+		// Next token from test (the filter/pattern).
+		ti := strings.IndexByte(test, btsep)
+		var t2 string
+		if ti >= 0 {
+			t2, test = test[:ti], test[ti+1:]
+		} else {
+			t2, test = test, _EMPTY_
+		}
+		if len(t2) == 0 {
+			return false
+		}
+		if len(t2) == 1 && t2[0] == fwc {
+			return true
+		}
+
+		// Next token from subject.
+		si := strings.IndexByte(subject, btsep)
+		var t1 string
+		if si >= 0 {
+			t1, subject = subject[:si], subject[si+1:]
+		} else {
+			t1, subject = subject, _EMPTY_
+		}
+		if len(t1) == 0 || (len(t1) == 1 && t1[0] == fwc) {
+			return false
+		}
+
+		if len(t1) == 1 && t1[0] == pwc {
+			if !(len(t2) == 1 && t2[0] == pwc) {
+				return false
+			}
+			continue
+		}
+		if t2[0] != pwc && t1 != t2 {
+			return false
+		}
+	}
 }

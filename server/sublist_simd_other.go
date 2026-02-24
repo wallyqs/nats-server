@@ -37,3 +37,8 @@ func subjectHasWildcard(subject string) bool {
 func subjectIsValid(subject string) bool {
 	return subjectIsValidScalar(subject)
 }
+
+// subjectIsSubsetMatch checks whether subject is a subset match of test.
+func subjectIsSubsetMatch(subject, test string) bool {
+	return subjectIsSubsetMatchScalar(subject, test)
+}

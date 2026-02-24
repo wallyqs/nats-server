@@ -1426,8 +1426,10 @@ func SubjectMatchesFilter(subject, filter string) bool {
 	return subjectIsSubsetMatch(subject, filter)
 }
 
-// Calls into the function isSubsetMatch()
-func subjectIsSubsetMatch(subject, test string) bool {
+// subjectIsSubsetMatchScalar calls into the function isSubsetMatch().
+// This is the scalar fallback; the SIMD-dispatched subjectIsSubsetMatch
+// is defined in sublist_simd_*.go.
+func subjectIsSubsetMatchScalar(subject, test string) bool {
 	tsa := [32]string{}
 	tts := tokenizeSubjectIntoSlice(tsa[:0], subject)
 	return isSubsetMatch(tts, test)
