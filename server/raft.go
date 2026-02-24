@@ -4223,7 +4223,7 @@ func (n *raft) sendAppendEntryLocked(entries []*Entry, checkLeader bool) error {
 	ae := n.buildAppendEntry(entries)
 
 	var err error
-	var scratch [1024]byte
+	var scratch [8192]byte
 	ae.buf, err = ae.encode(scratch[:])
 	if err != nil {
 		return err
