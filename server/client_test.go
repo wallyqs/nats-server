@@ -27,7 +27,6 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
-	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -3857,112 +3856,35 @@ func TestClientFlushOutboundWriteTimeoutPolicy(t *testing.T) {
 	}
 }
 
-func TestNBPoolPutReslicedBufferRecycling(t *testing.T) {
-	// This test verifies that pool buffers are properly returned even when
-	// the working slice has been consumed (re-sliced) during processing.
-	// Issue: in wsCollapsePtoNB's compression loop, b = b[n:] changes the
-	// slice header so cap(b) no longer matches the pool size, causing
-	// nbPoolPut(b) to silently discard the buffer.
-
-	// Disable GC so sync.Pool items aren't collected during the test.
-	prev := debug.SetGCPercent(-1)
-	defer debug.SetGCPercent(prev)
-
+func TestNBPoolPutReslicedBufferIsDiscarded(t *testing.T) {
+	// Verify that nbPoolPut on a re-sliced buffer does NOT count as a
+	// successful return, while nbPoolPut on the original slice does.
+	// This reproduces the bug in wsCollapsePtoNB's compression loop
+	// where b = b[n:] changed the capacity, making nbPoolPut(b) a no-op.
 	for _, poolSize := range []int{nbPoolSizeSmall, nbPoolSizeMedium, nbPoolSizeLarge} {
 		t.Run(fmt.Sprintf("size_%d", poolSize), func(t *testing.T) {
-			// Get a buffer from the pool.
 			b := nbPoolGet(poolSize)
-			require_Equal(t, cap(b), poolSize)
 
-			// Save the original slice BEFORE re-slicing (this is the fix pattern).
-			orig := b
-
-			// Simulate the compression loop: re-slice to consume the buffer.
+			// Simulate the compression loop: re-slice to consume all data.
 			b = b[:poolSize]
 			b = b[poolSize:]
-			// After full re-slice: len=0, cap=0.
 			require_Equal(t, cap(b), 0)
 
-			// nbPoolPut on a fully consumed slice is a no-op because cap=0.
-			// But the saved original still has the correct capacity.
-			require_Equal(t, cap(orig), poolSize)
+			// nbPoolPut on the re-sliced buffer: should NOT succeed.
+			nbPoolReturnCount.Store(0)
+			nbPoolPut(b)
+			require_Equal(t, nbPoolReturnCount.Load(), int64(0))
 
-			// Return using the ORIGINAL slice reference.
-			nbPoolPut(orig)
-
-			// Verify the buffer was returned by getting it back from the pool.
-			recycled := nbPoolGet(poolSize)
-			require_Equal(t, cap(recycled), poolSize)
-			nbPoolPut(recycled)
-		})
-	}
-}
-
-func TestNBPoolPutPartialResliceIsNoOp(t *testing.T) {
-	// Even a partial re-slice (e.g. b = b[1:]) changes the capacity so
-	// nbPoolPut silently discards the buffer.
-	for _, poolSize := range []int{nbPoolSizeSmall, nbPoolSizeMedium, nbPoolSizeLarge} {
-		t.Run(fmt.Sprintf("size_%d", poolSize), func(t *testing.T) {
-			b := nbPoolGet(poolSize)
-			require_Equal(t, cap(b), poolSize)
-
+			// Now with the fix pattern: save original before re-slicing.
+			b = nbPoolGet(poolSize)
+			orig := b
 			b = b[:poolSize]
-			b = b[1:] // Shift by just 1 byte.
+			b = b[poolSize:]
 
-			// Capacity is now poolSize-1, which doesn't match any pool bucket.
-			require_Equal(t, cap(b), poolSize-1)
-
-			// This demonstrates the problem: nbPoolPut will fall through
-			// to the default case and silently discard the buffer.
-			// After the fix, callers must retain the original slice ref.
+			// nbPoolPut on the original: should succeed.
+			nbPoolReturnCount.Store(0)
+			nbPoolPut(orig)
+			require_Equal(t, nbPoolReturnCount.Load(), int64(1))
 		})
-	}
-}
-
-func TestNBPoolAllocationRate(t *testing.T) {
-	// Measures the allocation rate when pool buffers are properly recycled
-	// vs. when they are leaked (simulating the re-slice bug).
-	// With proper recycling, the pool satisfies requests without new allocations.
-	// With the bug, every iteration forces a new allocation.
-
-	// Disable GC so sync.Pool items aren't collected mid-test.
-	prev := debug.SetGCPercent(-1)
-	defer debug.SetGCPercent(prev)
-
-	const iterations = 1000
-
-	// --- Correct usage: nbPoolPut with original slice ---
-	// Warm up the pool.
-	warmup := nbPoolGet(100)
-	nbPoolPut(warmup)
-
-	correctAllocs := testing.AllocsPerRun(iterations, func() {
-		b := nbPoolGet(100)
-		nbPoolPut(b) // Correct: b still has original capacity.
-	})
-
-	// --- Buggy usage: nbPoolPut after re-slice ---
-	// Warm up again.
-	warmup = nbPoolGet(100)
-	nbPoolPut(warmup)
-
-	buggyAllocs := testing.AllocsPerRun(iterations, func() {
-		b := nbPoolGet(100)
-		b = b[:cap(b)]
-		b = b[cap(b):] // Re-slice fully: cap becomes 0.
-		nbPoolPut(b)    // No-op: buffer leaked.
-		// Need to also get to keep pool drained.
-		b2 := nbPoolGet(100)
-		_ = b2
-	})
-
-	t.Logf("Correct usage: %.1f allocs/op", correctAllocs)
-	t.Logf("Buggy usage (re-sliced put): %.1f allocs/op", buggyAllocs)
-
-	// Correct usage should have 0 allocs (recycling from pool).
-	// Buggy usage should have >=1 alloc (pool is never replenished).
-	if correctAllocs >= buggyAllocs {
-		t.Fatalf("Expected correct usage (%.1f) to have fewer allocs than buggy usage (%.1f)",
-			correctAllocs, buggyAllocs)
 	}
 }
