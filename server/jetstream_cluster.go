@@ -9073,7 +9073,6 @@ func getCompressBuf(sz int) []byte {
 }
 
 func putCompressBuf(buf []byte) {
-	buf = buf[:0]
 	compressBufPool.Put(&buf)
 }
 
