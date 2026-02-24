@@ -7711,7 +7711,7 @@ func TestFileStoreTombstoneRbytes(t *testing.T) {
 
 func TestFileStoreMsgBlockShouldCompact(t *testing.T) {
 	fs, err := newFileStore(
-		FileStoreConfig{StoreDir: t.TempDir()},
+		FileStoreConfig{StoreDir: t.TempDir(), SyncInterval: 50 * time.Millisecond},
 		StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: FileStorage})
 	require_NoError(t, err)
 	defer fs.Stop()
@@ -7726,17 +7726,31 @@ func TestFileStoreMsgBlockShouldCompact(t *testing.T) {
 	for seq := 64; seq <= 127; seq++ {
 		fs.RemoveMsg(uint64(seq))
 	}
+
+	// Compaction is now handled asynchronously by syncBlocks rather than inline.
+	// The block should need compaction initially, and the sync timer has been kicked.
+	// Wait for async compaction to complete.
+	checkFor(t, 5*time.Second, 50*time.Millisecond, func() error {
+		fs.mu.RLock()
+		fblk := fs.blks[0]
+		fs.mu.RUnlock()
+		fblk.mu.RLock()
+		b, rb := fblk.bytes, fblk.rbytes
+		fblk.mu.RUnlock()
+		if b != rb {
+			return fmt.Errorf("block not yet compacted: bytes=%d rbytes=%d", b, rb)
+		}
+		return nil
+	})
+
 	fs.mu.RLock()
 	fblk := fs.blks[0]
 	sblk := fs.blks[1]
 	fs.mu.RUnlock()
 
 	fblk.mu.RLock()
-	bytes, rbytes := fblk.bytes, fblk.rbytes
 	shouldCompact := fblk.shouldCompactInline()
 	fblk.mu.RUnlock()
-	// Should have tripped compaction already.
-	require_Equal(t, bytes, rbytes)
 	require_False(t, shouldCompact)
 
 	sblk.mu.RLock()

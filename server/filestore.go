@@ -204,6 +204,7 @@ type fileStore struct {
 	dirty       int
 	closing     bool
 	closed      atomic.Bool // Atomic to reduce contention on ConsumerStores.
+	syncRunning atomic.Bool // Prevents concurrent syncBlocks runs when timer is kicked.
 	fip         bool
 	receivedAny bool
 	firstMoved  bool
@@ -5457,12 +5458,12 @@ func (fs *fileStore) removeMsgFromBlock(mb *msgBlock, seq uint64, secure, viaLim
 	} else if !isEmpty {
 		// Out of order delete.
 		mb.dmap.Insert(seq)
-		// Make simple check here similar to Compact(). If we can save 50% and over a certain threshold do inline.
-		// All other more thorough cleanup will happen in syncBlocks logic.
-		// Note that we do not have to store empty records for the deleted, so don't use to calculate.
-		// TODO(dlc) - This should not be inline, should kick the sync routine.
+		// Rather than compacting inline while holding the fs write lock (which blocks all
+		// concurrent operations), kick the sync timer to handle compaction asynchronously.
+		// syncBlocks will compact with only fs.mu.RLock + mb.mu.Lock, allowing concurrent
+		// reads and writes on other blocks to proceed.
 		if !isLastBlock && mb.shouldCompactInline() {
-			mb.compact()
+			fs.kickSyncTimer()
 		}
 	}
 
@@ -7167,6 +7168,12 @@ func (fs *fileStore) syncBlocks() {
 	if fs.isClosed() {
 		return
 	}
+	// Prevent concurrent runs when the sync timer is kicked for compaction.
+	if !fs.syncRunning.CompareAndSwap(false, true) {
+		return
+	}
+	defer fs.syncRunning.Store(false)
+
 	fs.mu.Lock()
 	blks := append([]*msgBlock(nil), fs.blks...)
 	lmb, firstMoved, firstSeq := fs.lmb, fs.firstMoved, fs.state.FirstSeq
@@ -10528,6 +10535,16 @@ func (fs *fileStore) cancelSyncTimer() {
 	if fs.syncTmr != nil {
 		fs.syncTmr.Stop()
 		fs.syncTmr = nil
+	}
+}
+
+// kickSyncTimer will reset the sync timer to fire shortly so that
+// compaction can be handled asynchronously by syncBlocks rather than
+// inline on the hot path.
+// Lock should be held.
+func (fs *fileStore) kickSyncTimer() {
+	if fs.syncTmr != nil {
+		fs.syncTmr.Reset(time.Millisecond)
 	}
 }
 
