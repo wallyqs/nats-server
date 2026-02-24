@@ -21,39 +21,6 @@ import (
 	"unsafe"
 )
 
-// numTokens returns the number of tokens in the subject using SIMD acceleration.
-// Subjects shorter than 16 bytes fall back to the scalar implementation.
-func numTokens(subject string) int {
-	if len(subject) == 0 {
-		return 0
-	}
-	if len(subject) < 16 {
-		return numTokensScalar(subject)
-	}
-
-	data := stringToBytes(subject)
-	base := unsafe.Pointer(&data[0])
-	dot := archsimd.BroadcastInt8x16(int8(btsep))
-	count := 0
-	n := len(data)
-	loopEnd := n - n%16
-
-	for i := 0; i < loopEnd; i += 16 {
-		chunk := (*[16]int8)(unsafe.Add(base, i))
-		v := archsimd.LoadInt8x16(chunk)
-		b := v.Equal(dot).ToBits()
-		count += bits.OnesCount16(b)
-	}
-
-	// Scalar tail for remaining bytes.
-	for i := loopEnd; i < n; i++ {
-		if data[i] == btsep {
-			count++
-		}
-	}
-	return count + 1
-}
-
 // tokenizeSubjectIntoSlice splits the subject into tokens at '.' delimiters
 // using SIMD acceleration. Use similar to append — the updated slice is returned.
 func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
@@ -134,6 +101,105 @@ func subjectIsLiteral(subject string) bool {
 			}
 		}
 	}
+	return true
+}
+
+// subjectIsValid checks whether a subject has valid structure using SIMD
+// acceleration: non-empty, no empty tokens (consecutive/leading/trailing dots),
+// no whitespace characters, and '>' wildcard only as the last token.
+func subjectIsValid(subject string) bool {
+	n := len(subject)
+	if n == 0 {
+		return false
+	}
+
+	data := stringToBytes(subject)
+
+	// Quick boundary checks: leading or trailing dot means an empty token.
+	if data[0] == btsep || data[n-1] == btsep {
+		return false
+	}
+
+	if n < 16 {
+		return subjectIsValidScalar(subject)
+	}
+
+	base := unsafe.Pointer(&data[0])
+
+	// Broadcast comparison vectors.
+	dotV := archsimd.BroadcastInt8x16(int8(btsep))
+	spaceV := archsimd.BroadcastInt8x16(int8(' '))
+	tabV := archsimd.BroadcastInt8x16(int8('\t'))
+	nlV := archsimd.BroadcastInt8x16(int8('\n'))
+	ffV := archsimd.BroadcastInt8x16(int8('\f'))
+	crV := archsimd.BroadcastInt8x16(int8('\r'))
+	gtV := archsimd.BroadcastInt8x16(int8(fwc))
+
+	loopEnd := n - n%16
+
+	for i := 0; i < loopEnd; i += 16 {
+		chunk := (*[16]int8)(unsafe.Add(base, i))
+		v := archsimd.LoadInt8x16(chunk)
+
+		// Any whitespace character in the subject is immediately invalid.
+		wsMask := v.Equal(spaceV).ToBits() |
+			v.Equal(tabV).ToBits() |
+			v.Equal(nlV).ToBits() |
+			v.Equal(ffV).ToBits() |
+			v.Equal(crV).ToBits()
+		if wsMask != 0 {
+			return false
+		}
+
+		// Check for consecutive dots (empty tokens).
+		dotMask := v.Equal(dotV).ToBits()
+		if dotMask != 0 {
+			// Two adjacent dot bits within this 16-byte chunk.
+			if dotMask&(dotMask>>1) != 0 {
+				return false
+			}
+			// Cross-chunk boundary: first byte of this chunk is a dot and
+			// last byte of the previous chunk was also a dot.
+			if i > 0 && dotMask&1 != 0 && data[i-1] == btsep {
+				return false
+			}
+		}
+
+		// '>' as a standalone token must be the last token.
+		gtMask := v.Equal(gtV).ToBits()
+		for gtMask != 0 {
+			j := bits.TrailingZeros16(gtMask)
+			pos := i + j
+			if (pos == 0 || data[pos-1] == btsep) &&
+				(pos+1 == n || data[pos+1] == btsep) {
+				// It is a '>' token — only valid at the very end.
+				if pos+1 < n {
+					return false
+				}
+			}
+			gtMask &= gtMask - 1
+		}
+	}
+
+	// Scalar tail for remaining bytes.
+	for i := loopEnd; i < n; i++ {
+		c := data[i]
+		switch c {
+		case ' ', '\t', '\n', '\r', '\f':
+			return false
+		case btsep:
+			if data[i-1] == btsep {
+				return false
+			}
+		case fwc:
+			if (i == 0 || data[i-1] == btsep) && (i+1 == n || data[i+1] == btsep) {
+				if i+1 < n {
+					return false
+				}
+			}
+		}
+	}
+
 	return true
 }
 

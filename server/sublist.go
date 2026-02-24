@@ -1190,7 +1190,7 @@ func IsValidPublishSubject(subject string) bool {
 
 // IsValidSubject returns true if a subject is valid, false otherwise
 func IsValidSubject(subject string) bool {
-	return isValidSubject(subject, false)
+	return subjectIsValid(subject)
 }
 
 func isValidSubject(subject string, checkRunes bool) bool {
@@ -1209,6 +1209,15 @@ func isValidSubject(subject string, checkRunes bool) bool {
 				return false
 			}
 		}
+	}
+	return subjectIsValid(subject)
+}
+
+// subjectIsValidScalar checks whether a subject has valid structure:
+// non-empty, no empty tokens, no whitespace, and '>' only as the last token.
+func subjectIsValidScalar(subject string) bool {
+	if subject == _EMPTY_ {
+		return false
 	}
 	sfwc := false
 	for t := range strings.SplitSeq(subject, tsep) {
@@ -1370,18 +1379,12 @@ func SubjectsCollide(subj1, subj2 string) bool {
 	return true
 }
 
-// Returns number of tokens in the subject.
-func numTokensScalar(subject string) int {
-	var numTokens int
+// numTokens returns the number of tokens in the subject.
+func numTokens(subject string) int {
 	if len(subject) == 0 {
 		return 0
 	}
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			numTokens++
-		}
-	}
-	return numTokens + 1
+	return strings.Count(subject, tsep) + 1
 }
 
 // Fast way to return an indexed token.

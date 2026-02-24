@@ -23,40 +23,6 @@ import (
 // Correctness tests — verify SIMD dispatch matches scalar for all functions.
 // ---------------------------------------------------------------------------
 
-func TestSIMDNumTokens(t *testing.T) {
-	cases := []struct {
-		name    string
-		subject string
-		want    int
-	}{
-		{"empty", "", 0},
-		{"single", "foo", 1},
-		{"two", "foo.bar", 2},
-		{"three", "foo.bar.baz", 3},
-		{"trailing_dot", "foo.bar.", 3},
-		{"leading_dot", ".foo.bar", 3},
-		{"only_dots", "...", 4},
-		{"long_subject", "a.bb.ccc.dddd.eeeee.ffffff.ggggggg.hhhhhhhh", 8},
-		{"no_dots_16", "abcdefghijklmnop", 1},
-		{"dots_every_other_16", "a.b.c.d.e.f.g.h.", 9},
-		{"exactly_16", "abcdefghijklmno.", 2},
-		{"17_chars", "abcdefghijklmnop.", 2},
-		{"32_tokens", strings.Repeat("a.", 31) + "a", 32},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := numTokens(tc.subject)
-			gotScalar := numTokensScalar(tc.subject)
-			if got != tc.want {
-				t.Fatalf("numTokens(%q) = %d, want %d", tc.subject, got, tc.want)
-			}
-			if got != gotScalar {
-				t.Fatalf("numTokens(%q) = %d, scalar = %d — mismatch", tc.subject, got, gotScalar)
-			}
-		})
-	}
-}
-
 func TestSIMDTokenizeSubjectIntoSlice(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -165,6 +131,76 @@ func TestSIMDSubjectHasWildcard(t *testing.T) {
 	}
 }
 
+func TestSIMDSubjectIsValid(t *testing.T) {
+	cases := []struct {
+		name    string
+		subject string
+		want    bool
+	}{
+		// Invalid: empty, leading/trailing/consecutive dots.
+		{"empty", "", false},
+		{"dot_only", ".", false},
+		{"leading_dot", ".foo", false},
+		{"trailing_dot", "foo.", false},
+		{"consecutive_dots", "foo..bar", false},
+		{"triple_dots", "foo...bar", false},
+		// Invalid: '>' wildcard not at end.
+		{"gt_not_last", ">.bar", false},
+		{"gt_mid", "foo.>.bar", false},
+		// Invalid: whitespace in tokens.
+		{"space_single", "foo. .bar", false},
+		{"tab_single", "foo.\t.bar", false},
+		{"space_multi", "foo.ba r.baz", false},
+		{"tab_multi", "foo.ba\tr.baz", false},
+		{"newline_multi", "foo.ba\nr.baz", false},
+		{"cr_multi", "foo.ba\rr.baz", false},
+		{"ff_multi", "foo.ba\fr.baz", false},
+		// Valid: simple subjects.
+		{"single_token", "foo", true},
+		{"two_tokens", "foo.bar", true},
+		{"three_tokens", "foo.bar.baz", true},
+		// Valid: wildcards.
+		{"star_alone", "*", true},
+		{"gt_alone", ">", true},
+		{"star_end", "foo.bar.*", true},
+		{"gt_end", "foo.bar.>", true},
+		{"star_mid", "foo.*.baz", true},
+		// Valid: embedded wildcard chars (not at token boundaries).
+		{"embedded_star", "foo*", true},
+		{"embedded_star2", "foo*bar", true},
+		{"embedded_gt", "foo>", true},
+		{"embedded_gt2", "foo>bar", true},
+		{"double_star_token", "foo.**", true},
+		{"double_gt_token", "foo.>>", true},
+		// Long subjects exercising SIMD path.
+		{"long_valid", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM", true},
+		{"long_with_gt_end", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.>", true},
+		{"long_with_star", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.*.ABCDEFGH", true},
+		{"long_consecutive_dots", "NATS0.ABCDEFGHIJKLMNOPQRSTUV..ABCDEFGH", false},
+		{"long_with_space", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH IJKLM.ABCDEFGH", false},
+		{"long_gt_not_last", "NATS0.ABCDEFGHIJKLMNOPQRSTUV.>.ABCDEFGH", false},
+		// Boundary: exactly 16 bytes, 17 bytes, 15 bytes.
+		{"exactly_16", "abcdefghijklmno.", false},   // trailing dot
+		{"exactly_16_valid", "abcde.ghijklmnop", true},
+		{"exactly_17", "abcde.ghijklmnopq", true},
+		{"15_bytes", "abcde.ghijklmno", true},
+		// Cross-chunk boundary: consecutive dots at positions 15-16.
+		{"dots_at_chunk_boundary", "abcdefghijklmno..qrstuvwxyz012345", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := subjectIsValid(tc.subject)
+			gotScalar := subjectIsValidScalar(tc.subject)
+			if got != tc.want {
+				t.Fatalf("subjectIsValid(%q) = %v, want %v", tc.subject, got, tc.want)
+			}
+			if got != gotScalar {
+				t.Fatalf("subjectIsValid(%q) = %v, scalar = %v — mismatch", tc.subject, got, gotScalar)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Benchmarks — compare SIMD-dispatched vs scalar for various subject lengths.
 // ---------------------------------------------------------------------------
@@ -179,26 +215,6 @@ var simdBenchSubjects = []string{
 	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH",
 	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH.ABCDEFGHIJKL",
 	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH.ABCDEFGHIJKL.ABCDEFGHIJKLMNOPQRSTU",
-}
-
-// --- numTokens ---
-
-func BenchmarkSIMDNumTokens(b *testing.B) {
-	for _, subj := range simdBenchSubjects {
-		label := fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, ".")))
-		b.Run(fmt.Sprintf("simd/%s", label), func(b *testing.B) {
-			b.SetBytes(int64(len(subj)))
-			for i := 0; i < b.N; i++ {
-				numTokens(subj)
-			}
-		})
-		b.Run(fmt.Sprintf("scalar/%s", label), func(b *testing.B) {
-			b.SetBytes(int64(len(subj)))
-			for i := 0; i < b.N; i++ {
-				numTokensScalar(subj)
-			}
-		})
-	}
 }
 
 // --- tokenizeSubjectIntoSlice ---
@@ -260,6 +276,26 @@ func BenchmarkSIMDHasWildcard(b *testing.B) {
 			b.SetBytes(int64(len(subj)))
 			for i := 0; i < b.N; i++ {
 				subjectHasWildcardScalar(subj)
+			}
+		})
+	}
+}
+
+// --- subjectIsValid ---
+
+func BenchmarkSIMDIsValid(b *testing.B) {
+	for _, subj := range simdBenchSubjects {
+		label := fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, ".")))
+		b.Run(fmt.Sprintf("simd/%s", label), func(b *testing.B) {
+			b.SetBytes(int64(len(subj)))
+			for i := 0; i < b.N; i++ {
+				subjectIsValid(subj)
+			}
+		})
+		b.Run(fmt.Sprintf("scalar/%s", label), func(b *testing.B) {
+			b.SetBytes(int64(len(subj)))
+			for i := 0; i < b.N; i++ {
+				subjectIsValidScalar(subj)
 			}
 		})
 	}

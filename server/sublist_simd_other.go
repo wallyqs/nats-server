@@ -15,11 +15,6 @@
 
 package server
 
-// numTokens returns the number of tokens in the subject.
-func numTokens(subject string) int {
-	return numTokensScalar(subject)
-}
-
 // tokenizeSubjectIntoSlice splits the subject into tokens at '.' delimiters.
 // Use similar to append — the updated slice is returned.
 func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
@@ -36,4 +31,9 @@ func subjectIsLiteral(subject string) bool {
 // Returns true if the subject has wildcards.
 func subjectHasWildcard(subject string) bool {
 	return subjectHasWildcardScalar(subject)
+}
+
+// subjectIsValid checks whether a subject has valid structure.
+func subjectIsValid(subject string) bool {
+	return subjectIsValidScalar(subject)
 }
