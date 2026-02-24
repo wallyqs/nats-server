@@ -3014,6 +3014,11 @@ func TestWSCompressionBasic(t *testing.T) {
 	proto := testWSCreateClientMsg(wsBinaryMessage, 1, true, true, []byte("SUB foo 1\r\nPING\r\n"))
 	c.Write(proto)
 	l := testWSReadFrame(t, br)
+	// We may receive an async INFO (connect_info) that the server sends
+	// after the first PING/PONG. Skip it if present.
+	if bytes.HasPrefix(l, []byte("INFO ")) {
+		l = testWSReadFrame(t, br)
+	}
 	if !bytes.Equal(l, []byte(pongProto)) {
 		t.Fatalf("Expected PONG, got %q", l)
 	}
