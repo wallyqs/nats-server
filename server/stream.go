@@ -4015,13 +4015,7 @@ func (si *sourceInfo) genSourceHeader(orig, reply string) string {
 	b.WriteByte(' ')
 	// Grab sequence as text here from reply subject.
 	var tsa [expectedNumReplyTokens]string
-	start, tokens := 0, tsa[:0]
-	for i := 0; i < len(reply); i++ {
-		if reply[i] == btsep {
-			tokens, start = append(tokens, reply[start:i]), i+1
-		}
-	}
-	tokens = append(tokens, reply[start:])
+	tokens := tokenizeSubjectIntoSlice(tsa[:0], reply)
 	seq := "1" // Default
 	if len(tokens) == expectedNumReplyTokens && tokens[0] == "$JS" && tokens[1] == "ACK" {
 		seq = tokens[5]
@@ -4040,13 +4034,7 @@ func (si *sourceInfo) genSourceHeader(orig, reply string) string {
 // Original version of header that stored ack reply direct.
 func streamAndSeqFromAckReply(reply string) (string, string, uint64) {
 	tsa := [expectedNumReplyTokens]string{}
-	start, tokens := 0, tsa[:0]
-	for i := 0; i < len(reply); i++ {
-		if reply[i] == btsep {
-			tokens, start = append(tokens, reply[start:i]), i+1
-		}
-	}
-	tokens = append(tokens, reply[start:])
+	tokens := tokenizeSubjectIntoSlice(tsa[:0], reply)
 	if len(tokens) != expectedNumReplyTokens || tokens[0] != "$JS" || tokens[1] != "ACK" {
 		return _EMPTY_, _EMPTY_, 0
 	}
@@ -5105,18 +5093,18 @@ func (mset *stream) processDirectGetLastBySubjectRequest(_ *subscription, c *cli
 		}
 	}
 
-	// Extract the key.
+	// Extract the key (everything after the 5th dot).
 	var key string
-	for i, n := 0, 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			if n == 4 {
-				if start := i + 1; start < len(subject) {
-					key = subject[i+1:]
-				}
-				break
-			}
-			n++
+	s := subject
+	for n := 0; n < 5; n++ {
+		i := strings.IndexByte(s, btsep)
+		if i < 0 {
+			break
 		}
+		s = s[i+1:]
+	}
+	if len(s) > 0 && s != subject {
+		key = s
 	}
 	if len(key) == 0 {
 		hdr := []byte("NATS/1.0 408 Bad Request\r\n\r\n")

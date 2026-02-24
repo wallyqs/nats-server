@@ -300,3 +300,83 @@ func BenchmarkSIMDIsValid(b *testing.B) {
 		})
 	}
 }
+
+// --- tokenAt ---
+
+func BenchmarkTokenAt(b *testing.B) {
+	for _, subj := range simdBenchSubjects {
+		numTokens := len(strings.Split(subj, "."))
+		label := fmt.Sprintf("len=%d/tokens=%d", len(subj), numTokens)
+		// Benchmark fetching a middle token.
+		idx := uint8(numTokens/2 + 1)
+		b.Run(fmt.Sprintf("IndexByte/%s", label), func(b *testing.B) {
+			b.SetBytes(int64(len(subj)))
+			for i := 0; i < b.N; i++ {
+				tokenAt(subj, idx)
+			}
+		})
+		b.Run(fmt.Sprintf("scalar/%s", label), func(b *testing.B) {
+			b.SetBytes(int64(len(subj)))
+			for i := 0; i < b.N; i++ {
+				tokenAtScalar(subj, idx)
+			}
+		})
+	}
+}
+
+// --- Sublist.Match (end-to-end with tokenization) ---
+
+func BenchmarkSublistMatch(b *testing.B) {
+	s := NewSublistWithCache()
+	// Insert a variety of subscriptions.
+	subs := make([]*subscription, 0, 500)
+	for _, subj := range []string{
+		"foo.bar.baz",
+		"foo.bar.*",
+		"foo.>",
+		"events.user.login.success",
+		"events.user.>",
+		"$JS.ACK.stream.consumer.*.*.*.*.*",
+		"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM",
+	} {
+		sub := &subscription{subject: []byte(subj)}
+		s.Insert(sub)
+		subs = append(subs, sub)
+	}
+
+	for _, subj := range simdBenchSubjects {
+		label := fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, ".")))
+		b.Run(label, func(b *testing.B) {
+			b.SetBytes(int64(len(subj)))
+			for i := 0; i < b.N; i++ {
+				s.Match(subj)
+			}
+		})
+	}
+}
+
+// --- Sublist.ReverseMatch ---
+
+func BenchmarkSublistReverseMatch(b *testing.B) {
+	s := NewSublistWithCache()
+	// Insert literal subjects that ReverseMatch will find.
+	for _, subj := range simdBenchSubjects {
+		sub := &subscription{subject: []byte(subj)}
+		s.Insert(sub)
+	}
+
+	for _, subj := range []string{
+		"NATS0.ABCDEFGHIJKLMNOPQRSTUV.*",
+		"NATS0.>",
+		"$JS.ACK.asdf-asdf-events.asdf-asdf-events.>",
+		"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.*",
+	} {
+		label := fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, ".")))
+		b.Run(label, func(b *testing.B) {
+			b.SetBytes(int64(len(subj)))
+			for i := 0; i < b.N; i++ {
+				s.ReverseMatch(subj)
+			}
+		})
+	}
+}

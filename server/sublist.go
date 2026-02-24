@@ -562,21 +562,13 @@ func (s *Sublist) match(subject string, doLock bool, doCopyOnCache bool) *Sublis
 	}
 
 	tsa := [32]string{}
-	tokens := tsa[:0]
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			if i-start == 0 {
-				return emptyResult
-			}
-			tokens = append(tokens, subject[start:i])
-			start = i + 1
+	tokens := tokenizeSubjectIntoSlice(tsa[:0], subject)
+	// Check for empty tokens (invalid subject with consecutive/leading/trailing dots).
+	for _, t := range tokens {
+		if len(t) == 0 {
+			return emptyResult
 		}
 	}
-	if start >= len(subject) {
-		return emptyResult
-	}
-	tokens = append(tokens, subject[start:])
 
 	// FIXME(dlc) - Make shared pool between sublist and client readLoop?
 	result := &SublistResult{}
@@ -647,21 +639,13 @@ func (s *Sublist) hasInterest(subject string, doLock bool, np, nq *int) bool {
 	}
 
 	tsa := [32]string{}
-	tokens := tsa[:0]
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			if i-start == 0 {
-				return false
-			}
-			tokens = append(tokens, subject[start:i])
-			start = i + 1
+	tokens := tokenizeSubjectIntoSlice(tsa[:0], subject)
+	// Check for empty tokens (invalid subject with consecutive/leading/trailing dots).
+	for _, t := range tokens {
+		if len(t) == 0 {
+			return false
 		}
 	}
-	if start >= len(subject) {
-		return false
-	}
-	tokens = append(tokens, subject[start:])
 
 	if doLock {
 		s.RLock()
@@ -1390,6 +1374,23 @@ func numTokens(subject string) int {
 // Fast way to return an indexed token.
 // This is one based, so first token is TokenAt(subject, 1)
 func tokenAt(subject string, index uint8) string {
+	s := subject
+	for ti := uint8(1); ti < index; ti++ {
+		i := strings.IndexByte(s, btsep)
+		if i < 0 {
+			return _EMPTY_
+		}
+		s = s[i+1:]
+	}
+	if i := strings.IndexByte(s, btsep); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// tokenAtScalar is the original manual byte-scanning version of tokenAt,
+// kept for benchmarking comparison.
+func tokenAtScalar(subject string, index uint8) string {
 	ti, start := uint8(1), 0
 	for i := 0; i < len(subject); i++ {
 		if subject[i] == btsep {
@@ -1651,15 +1652,7 @@ func (s *Sublist) collectAllSubs(l *level, subs *[]*subscription) {
 // to a subscription on `subject`.
 func (s *Sublist) ReverseMatch(subject string) *SublistResult {
 	tsa := [32]string{}
-	tokens := tsa[:0]
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tokens = append(tokens, subject[start:i])
-			start = i + 1
-		}
-	}
-	tokens = append(tokens, subject[start:])
+	tokens := tokenizeSubjectIntoSlice(tsa[:0], subject)
 
 	result := &SublistResult{}
 

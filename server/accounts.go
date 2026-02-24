@@ -863,15 +863,7 @@ func (a *Account) selectMappedSubject(dest string) (string, bool) {
 		} else {
 			// tokenize and reuse for subset matching.
 			if len(tts) == 0 {
-				start := 0
-				subject := dest
-				for i := 0; i < len(subject); i++ {
-					if subject[i] == btsep {
-						tts = append(tts, subject[start:i])
-						start = i + 1
-					}
-				}
-				tts = append(tts, subject[start:])
+				tts = tokenizeSubjectIntoSlice(tts, dest)
 			}
 			if isSubsetMatch(tts, rm.src) {
 				m = rm

@@ -412,18 +412,8 @@ func transformUntokenize(subject string) (string, []string) {
 }
 
 func tokenizeSubject(subject string) []string {
-	// Tokenize the subject.
 	tsa := [32]string{}
-	tts := tsa[:0]
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tts = append(tts, subject[start:i])
-			start = i + 1
-		}
-	}
-	tts = append(tts, subject[start:])
-	return tts
+	return tokenizeSubjectIntoSlice(tsa[:0], subject)
 }
 
 // Match will take a literal published subject that is associated with a client and will match and subjectTransform
