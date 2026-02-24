@@ -3198,8 +3198,6 @@ func TestJetStreamSnapshots(t *testing.T) {
 
 	require_True(t, performStreamRestore(t, nc2, sc, ss, snapshot))
 
-	// r.Reset(snapshot)
-
 	mset, err = acc.lookupStream("MY-STREAM")
 	require_NoError(t, err)
 

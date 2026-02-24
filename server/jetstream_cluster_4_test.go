@@ -7347,7 +7347,9 @@ func TestJetStreamClusterStreamSnapshots(t *testing.T) {
 
 		require_NoError(t, js.DeleteStream("test_stream"))
 		require_True(t, performStreamRestore(t, nc, cfg, state, archive))
+
 		c.waitOnAllCurrent()
+		c.waitOnStreamLeader(globalAccountName, "test_stream")
 
 		nsi, err := js.StreamInfo("test_stream")
 		require_NoError(t, err)
@@ -7379,12 +7381,12 @@ func TestJetStreamClusterStreamSnapshots(t *testing.T) {
 						Storage:  storetype,
 						Replicas: 3,
 					})
-					for range 300 {
+					for range 5 * 10 {
 						_, err := js.Publish("foo.bar", nil)
 						require_NoError(t, err)
 					}
 				},
-				"LimitsWithConsumers": func(t *testing.T, nc *nats.Conn, js nats.JetStreamContext) {
+				"LimitsWithR3Consumers": func(t *testing.T, nc *nats.Conn, js nats.JetStreamContext) {
 					jsStreamCreate(t, nc, &StreamConfig{
 						Name:     "test_stream",
 						Subjects: []string{"foo.>"},
@@ -7393,17 +7395,50 @@ func TestJetStreamClusterStreamSnapshots(t *testing.T) {
 					})
 					for n := range 5 {
 						_, err := js.AddConsumer("test_stream", &nats.ConsumerConfig{
-							Name:      fmt.Sprintf("consumer_%d", n),
-							AckPolicy: nats.AckExplicitPolicy,
-							Replicas:  3,
+							Name:          fmt.Sprintf("consumer_%d", n),
+							AckPolicy:     nats.AckExplicitPolicy,
+							MemoryStorage: storetype == MemoryStorage,
+							Replicas:      3,
 						})
 						require_NoError(t, err)
 					}
-					for range 300 {
+					for range 5 * 10 {
 						_, err := js.Publish("foo.bar", nil)
 						require_NoError(t, err)
 					}
 					for n := range 5 {
+						cn := fmt.Sprintf("consumer_%d", n)
+						sub, err := js.PullSubscribe(_EMPTY_, _EMPTY_, nats.Bind("test_stream", cn))
+						require_NoError(t, err)
+						for range n * 10 {
+							msgs, err := sub.Fetch(1)
+							require_NoError(t, err)
+							require_Len(t, len(msgs), 1)
+							require_NoError(t, msgs[0].AckSync())
+						}
+					}
+				},
+				"LimitsWithR1Consumers": func(t *testing.T, nc *nats.Conn, js nats.JetStreamContext) {
+					jsStreamCreate(t, nc, &StreamConfig{
+						Name:     "test_stream",
+						Subjects: []string{"foo.>"},
+						Storage:  storetype,
+						Replicas: 3,
+					})
+					for n := range 20 {
+						_, err := js.AddConsumer("test_stream", &nats.ConsumerConfig{
+							Name:          fmt.Sprintf("consumer_%d", n),
+							AckPolicy:     nats.AckExplicitPolicy,
+							MemoryStorage: storetype == MemoryStorage,
+							Replicas:      1,
+						})
+						require_NoError(t, err)
+					}
+					for range 20 * 10 {
+						_, err := js.Publish("foo.bar", nil)
+						require_NoError(t, err)
+					}
+					for n := range 20 {
 						cn := fmt.Sprintf("consumer_%d", n)
 						sub, err := js.PullSubscribe(_EMPTY_, _EMPTY_, nats.Bind("test_stream", cn))
 						require_NoError(t, err)
@@ -7433,7 +7468,7 @@ func TestJetStreamClusterStreamSnapshots(t *testing.T) {
 					require_Equal(t, si.State.Msgs, 0)
 					require_Equal(t, si.State.FirstSeq, 301)
 				},
-				"InterestWithConsumers": func(t *testing.T, nc *nats.Conn, js nats.JetStreamContext) {
+				"InterestWithR3Consumers": func(t *testing.T, nc *nats.Conn, js nats.JetStreamContext) {
 					jsStreamCreate(t, nc, &StreamConfig{
 						Name:      "test_stream",
 						Subjects:  []string{"foo.>"},
@@ -7446,6 +7481,7 @@ func TestJetStreamClusterStreamSnapshots(t *testing.T) {
 							Name:           fmt.Sprintf("consumer_%d", n),
 							AckPolicy:      nats.AckExplicitPolicy,
 							FilterSubjects: []string{"foo.>"},
+							MemoryStorage:  storetype == MemoryStorage,
 							Replicas:       3,
 						})
 						require_NoError(t, err)

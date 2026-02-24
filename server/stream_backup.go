@@ -34,7 +34,8 @@ type SnapshotConsumerState struct {
 }
 
 // Create a snapshot of this stream and its consumer's state along with messages.
-func CreateStreamSnapshotV2(store StreamStore, deadline time.Duration, includeConsumers bool) (*SnapshotResult, error) {
+// sa is passed in when the stream is clustered, so we can find child consumer assignments.
+func (js *jetStream) CreateStreamSnapshotV2(store StreamStore, deadline time.Duration, includeConsumers bool, sa *streamAssignment) (*SnapshotResult, error) {
 	pr, pw := net.Pipe()
 
 	// Set a write deadline here to protect ourselves.
@@ -48,13 +49,13 @@ func CreateStreamSnapshotV2(store StreamStore, deadline time.Duration, includeCo
 
 	// Stream in separate Go routine.
 	errCh := make(chan string, 1)
-	go streamSnapshotV2(store, &state, pw, includeConsumers, errCh)
+	go js.streamSnapshotV2(store, &state, pw, includeConsumers, sa, errCh)
 
 	return &SnapshotResult{pr, state, errCh}, nil
 }
 
 // Stream our snapshot through S2 compression and tar.
-func streamSnapshotV2(store StreamStore, state *StreamState, w io.WriteCloser, includeConsumers bool, errCh chan string) {
+func (js *jetStream) streamSnapshotV2(store StreamStore, state *StreamState, w io.WriteCloser, includeConsumers bool, sa *streamAssignment, errCh chan string) {
 	defer close(errCh)
 	defer w.Close()
 
@@ -65,6 +66,7 @@ func streamSnapshotV2(store StreamStore, state *StreamState, w io.WriteCloser, i
 	defer tw.Close()
 
 	now := time.Now()
+	clustered := js.isClustered()
 
 	writeGeneric := func(name string, mod time.Time, buf []byte) error {
 		hdr := &tar.Header{
@@ -109,11 +111,21 @@ func streamSnapshotV2(store StreamStore, state *StreamState, w io.WriteCloser, i
 
 	// If we aren't including consumers here then make sure the consumer count
 	// is set accordingly, this helps on the restore path.
+	var consumerAssignments map[string]*consumerAssignment
+	var streamState = *state
 	if !includeConsumers {
 		state.Consumers = 0
+	} else if clustered {
+		js.mu.RLock()
+		consumerAssignments = make(map[string]*consumerAssignment, len(sa.consumers))
+		for name, ca := range sa.consumers {
+			consumerAssignments[name] = ca.copyGroup()
+		}
+		streamState.Consumers = len(consumerAssignments)
+		js.mu.RUnlock()
 	}
 
-	ssj, err := json.Marshal(state)
+	ssj, err := json.Marshal(streamState)
 	if err != nil {
 		errCh <- err.Error()
 		return
@@ -126,19 +138,49 @@ func streamSnapshotV2(store StreamStore, state *StreamState, w io.WriteCloser, i
 	// Do consumers first, if the stream is interest/WQ then this may be
 	// important for message retention.
 	if includeConsumers {
-		for o := range store.Consumers() {
-			config := o.GetConfig()
-			state, err := o.State()
-			if err != nil {
-				errCh <- fmt.Sprintf("couldn't load consumer '%s' state: %s", config.Name, err)
+		if clustered {
+			if sa == nil {
+				errCh <- "stream assignment not present in clustered mode"
 				return
 			}
-			if err := writeConsumerMsg(SnapshotConsumerState{
-				ConsumerConfig: config,
-				ConsumerState:  state,
-			}); err != nil {
-				errCh <- err.Error()
-				return
+			for _, ca := range consumerAssignments {
+				ci, err := sysRequest[ConsumerInfo](js.srv, clusterConsumerInfoT, globalAccountName, sa.Config.Name, ca.Name)
+				if err != nil || ci == nil {
+					errCh <- fmt.Sprintf("failed to get consumer state for '%s > %s'", sa.Config.Name, ca.Name)
+					return
+				}
+				if err := writeConsumerMsg(SnapshotConsumerState{
+					ConsumerConfig: ca.Config,
+					ConsumerState: &ConsumerState{
+						Delivered: SequencePair{
+							Consumer: ci.Delivered.Consumer,
+							Stream:   ci.Delivered.Stream,
+						},
+						AckFloor: SequencePair{
+							Consumer: ci.AckFloor.Consumer,
+							Stream:   ci.AckFloor.Stream,
+						},
+					},
+				}); err != nil {
+					errCh <- err.Error()
+					return
+				}
+			}
+		} else {
+			for o := range store.Consumers() {
+				config := o.GetConfig()
+				state, err := o.State()
+				if err != nil {
+					errCh <- fmt.Sprintf("couldn't load consumer '%s' state: %s", config.Name, err)
+					return
+				}
+				if err := writeConsumerMsg(SnapshotConsumerState{
+					ConsumerConfig: config,
+					ConsumerState:  state,
+				}); err != nil {
+					errCh <- err.Error()
+					return
+				}
 			}
 		}
 	}
