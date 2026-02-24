@@ -169,23 +169,31 @@ func TestSIMDSubjectHasWildcard(t *testing.T) {
 // Benchmarks — compare SIMD-dispatched vs scalar for various subject lengths.
 // ---------------------------------------------------------------------------
 
-var benchSubjects = map[string]string{
-	"short_10B":    "foo.bar.ba",                                                    // 10 bytes
-	"medium_50B":   "account.user.session.token.validate.request.response.status.ok", // ~62 bytes
-	"long_120B":    strings.Repeat("segment.", 14) + "last",                         // ~120 bytes
-	"verylong_250": strings.Repeat("namespace.", 24) + "final",                      // ~250 bytes
+var simdBenchSubjects = []string{
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH",
+	"$JS.ACK.asdf-asdf-events.asdf-asdf-events.1.284222.291929.1671900992627312000.0",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH.ABCDEFGHIJKL",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH.ABCDEFGHIJKL.ABCDEFGHIJKLMNOPQRSTU",
 }
 
 // --- numTokens ---
 
 func BenchmarkSIMDNumTokens(b *testing.B) {
-	for label, subj := range benchSubjects {
+	for _, subj := range simdBenchSubjects {
+		label := fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, ".")))
 		b.Run(fmt.Sprintf("simd/%s", label), func(b *testing.B) {
+			b.SetBytes(int64(len(subj)))
 			for i := 0; i < b.N; i++ {
 				numTokens(subj)
 			}
 		})
 		b.Run(fmt.Sprintf("scalar/%s", label), func(b *testing.B) {
+			b.SetBytes(int64(len(subj)))
 			for i := 0; i < b.N; i++ {
 				numTokensScalar(subj)
 			}
@@ -196,17 +204,22 @@ func BenchmarkSIMDNumTokens(b *testing.B) {
 // --- tokenizeSubjectIntoSlice ---
 
 func BenchmarkSIMDTokenize(b *testing.B) {
-	for label, subj := range benchSubjects {
+	for _, subj := range simdBenchSubjects {
+		label := fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, ".")))
 		b.Run(fmt.Sprintf("simd/%s", label), func(b *testing.B) {
-			tts := make([]string, 0, 32)
+			tsa := [32]string{}
+			b.ReportAllocs()
+			b.SetBytes(int64(len(subj)))
 			for i := 0; i < b.N; i++ {
-				tts = tokenizeSubjectIntoSlice(tts[:0], subj)
+				tokenizeSubjectIntoSlice(tsa[:0], subj)
 			}
 		})
 		b.Run(fmt.Sprintf("scalar/%s", label), func(b *testing.B) {
-			tts := make([]string, 0, 32)
+			tsa := [32]string{}
+			b.ReportAllocs()
+			b.SetBytes(int64(len(subj)))
 			for i := 0; i < b.N; i++ {
-				tts = tokenizeSubjectIntoSliceScalar(tts[:0], subj)
+				tokenizeSubjectIntoSliceScalar(tsa[:0], subj)
 			}
 		})
 	}
@@ -215,13 +228,16 @@ func BenchmarkSIMDTokenize(b *testing.B) {
 // --- subjectIsLiteral ---
 
 func BenchmarkSIMDIsLiteral(b *testing.B) {
-	for label, subj := range benchSubjects {
+	for _, subj := range simdBenchSubjects {
+		label := fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, ".")))
 		b.Run(fmt.Sprintf("simd/%s", label), func(b *testing.B) {
+			b.SetBytes(int64(len(subj)))
 			for i := 0; i < b.N; i++ {
 				subjectIsLiteral(subj)
 			}
 		})
 		b.Run(fmt.Sprintf("scalar/%s", label), func(b *testing.B) {
+			b.SetBytes(int64(len(subj)))
 			for i := 0; i < b.N; i++ {
 				subjectIsLiteralScalar(subj)
 			}
@@ -232,13 +248,16 @@ func BenchmarkSIMDIsLiteral(b *testing.B) {
 // --- subjectHasWildcard ---
 
 func BenchmarkSIMDHasWildcard(b *testing.B) {
-	for label, subj := range benchSubjects {
+	for _, subj := range simdBenchSubjects {
+		label := fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, ".")))
 		b.Run(fmt.Sprintf("simd/%s", label), func(b *testing.B) {
+			b.SetBytes(int64(len(subj)))
 			for i := 0; i < b.N; i++ {
 				subjectHasWildcard(subj)
 			}
 		})
 		b.Run(fmt.Sprintf("scalar/%s", label), func(b *testing.B) {
+			b.SetBytes(int64(len(subj)))
 			for i := 0; i < b.N; i++ {
 				subjectHasWildcardScalar(subj)
 			}

@@ -33,7 +33,7 @@ func numTokens(subject string) int {
 
 	data := stringToBytes(subject)
 	base := unsafe.Pointer(&data[0])
-	dot := archsimd.BroadcastInt8x16(int8('.'))
+	dot := archsimd.BroadcastInt8x16(int8(btsep))
 	count := 0
 	n := len(data)
 	loopEnd := n - n%16
@@ -47,7 +47,7 @@ func numTokens(subject string) int {
 
 	// Scalar tail for remaining bytes.
 	for i := loopEnd; i < n; i++ {
-		if data[i] == '.' {
+		if data[i] == btsep {
 			count++
 		}
 	}
@@ -63,7 +63,7 @@ func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
 
 	data := stringToBytes(subject)
 	base := unsafe.Pointer(&data[0])
-	dot := archsimd.BroadcastInt8x16(int8('.'))
+	dot := archsimd.BroadcastInt8x16(int8(btsep))
 	last := 0
 	n := len(data)
 	loopEnd := n - n%16
@@ -83,7 +83,7 @@ func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
 
 	// Scalar tail for remaining bytes.
 	for i := loopEnd; i < n; i++ {
-		if data[i] == '.' {
+		if data[i] == btsep {
 			tts = append(tts, subject[last:i])
 			last = i + 1
 		}
@@ -101,8 +101,8 @@ func subjectIsLiteral(subject string) bool {
 
 	data := stringToBytes(subject)
 	base := unsafe.Pointer(&data[0])
-	star := archsimd.BroadcastInt8x16(int8('*'))
-	gt := archsimd.BroadcastInt8x16(int8('>'))
+	star := archsimd.BroadcastInt8x16(int8(pwc))
+	gt := archsimd.BroadcastInt8x16(int8(fwc))
 	n := len(data)
 	loopEnd := n - n%16
 
@@ -116,8 +116,8 @@ func subjectIsLiteral(subject string) bool {
 			j := bits.TrailingZeros16(combined)
 			pos := i + j
 			// Validate token boundary: must be at start/end of subject or surrounded by '.'.
-			if (pos == 0 || data[pos-1] == '.') &&
-				(pos+1 == n || data[pos+1] == '.') {
+			if (pos == 0 || data[pos-1] == btsep) &&
+				(pos+1 == n || data[pos+1] == btsep) {
 				return false
 			}
 			combined &= combined - 1
@@ -127,9 +127,9 @@ func subjectIsLiteral(subject string) bool {
 	// Scalar tail.
 	for i := loopEnd; i < n; i++ {
 		c := data[i]
-		if c == '*' || c == '>' {
-			if (i == 0 || data[i-1] == '.') &&
-				(i+1 == n || data[i+1] == '.') {
+		if c == pwc || c == fwc {
+			if (i == 0 || data[i-1] == btsep) &&
+				(i+1 == n || data[i+1] == btsep) {
 				return false
 			}
 		}
@@ -146,8 +146,8 @@ func subjectHasWildcard(subject string) bool {
 
 	data := stringToBytes(subject)
 	base := unsafe.Pointer(&data[0])
-	star := archsimd.BroadcastInt8x16(int8('*'))
-	gt := archsimd.BroadcastInt8x16(int8('>'))
+	star := archsimd.BroadcastInt8x16(int8(pwc))
+	gt := archsimd.BroadcastInt8x16(int8(fwc))
 	n := len(data)
 	loopEnd := n - n%16
 
@@ -160,8 +160,8 @@ func subjectHasWildcard(subject string) bool {
 		for combined != 0 {
 			j := bits.TrailingZeros16(combined)
 			pos := i + j
-			if (pos == 0 || data[pos-1] == '.') &&
-				(pos+1 == n || data[pos+1] == '.') {
+			if (pos == 0 || data[pos-1] == btsep) &&
+				(pos+1 == n || data[pos+1] == btsep) {
 				return true
 			}
 			combined &= combined - 1
@@ -171,9 +171,9 @@ func subjectHasWildcard(subject string) bool {
 	// Scalar tail.
 	for i := loopEnd; i < n; i++ {
 		c := data[i]
-		if c == '*' || c == '>' {
-			if (i == 0 || data[i-1] == '.') &&
-				(i+1 == n || data[i+1] == '.') {
+		if c == pwc || c == fwc {
+			if (i == 0 || data[i-1] == btsep) &&
+				(i+1 == n || data[i+1] == btsep) {
 				return true
 			}
 		}
