@@ -181,7 +181,8 @@ func (c *client) processAccountUnsub(arg []byte) {
 // we have an origin cluster and we force header semantics.
 func (c *client) processRoutedOriginClusterMsgArgs(arg []byte) error {
 	// Unroll splitArgs to avoid runtime/heap issues
-	args := c.argsa[:0]
+	a := [MAX_HMSG_ARGS + 1][]byte{}
+	args := a[:0]
 	start := -1
 	for i, b := range arg {
 		switch b {
@@ -210,7 +211,7 @@ func (c *client) processRoutedOriginClusterMsgArgs(arg []byte) error {
 	c.pa.arg = arg
 	switch len(args) {
 	case 0, 1, 2, 3, 4:
-		return fmt.Errorf("processRoutedOriginClusterMsgArgs Parse Error: '%s'", args)
+		return fmt.Errorf("processRoutedOriginClusterMsgArgs Parse Error: '%s'", arg)
 	case 5:
 		c.pa.reply = nil
 		c.pa.queues = nil
@@ -247,18 +248,27 @@ func (c *client) processRoutedOriginClusterMsgArgs(arg []byte) error {
 		c.pa.szb = args[len(args)-1]
 		c.pa.size = parseSize(c.pa.szb)
 
-		// Grab queue names.
+		// Grab queue names. Copy into qbuf to avoid the local args
+		// array from escaping to the heap.
+		var qi int
 		if c.pa.reply != nil {
-			c.pa.queues = args[5 : len(args)-2]
+			qi = 5
 		} else {
-			c.pa.queues = args[4 : len(args)-2]
+			qi = 4
+		}
+		queues := args[qi : len(args)-2]
+		if len(queues) <= len(c.pa.qbuf) {
+			c.pa.queues = c.pa.qbuf[:copy(c.pa.qbuf[:], queues)]
+		} else {
+			c.pa.queues = make([][]byte, len(queues))
+			copy(c.pa.queues, queues)
 		}
 	}
 	if c.pa.hdr < 0 {
 		return fmt.Errorf("processRoutedOriginClusterMsgArgs Bad or Missing Header Size: '%s'", arg)
 	}
 	if c.pa.size < 0 {
-		return fmt.Errorf("processRoutedOriginClusterMsgArgs Bad or Missing Size: '%s'", args)
+		return fmt.Errorf("processRoutedOriginClusterMsgArgs Bad or Missing Size: '%s'", arg)
 	}
 	if c.pa.hdr > c.pa.size {
 		return fmt.Errorf("processRoutedOriginClusterMsgArgs Header Size larger then TotalSize: '%s'", arg)
@@ -279,7 +289,8 @@ func (c *client) processRoutedOriginClusterMsgArgs(arg []byte) error {
 // Process an inbound HMSG specification from the remote route.
 func (c *client) processRoutedHeaderMsgArgs(arg []byte) error {
 	// Unroll splitArgs to avoid runtime/heap issues
-	args := c.argsa[:0]
+	a := [MAX_HMSG_ARGS][]byte{}
+	args := a[:0]
 	var an []byte
 	if c.kind == ROUTER {
 		if an = c.route.accName; len(an) > 0 {
@@ -307,7 +318,7 @@ func (c *client) processRoutedHeaderMsgArgs(arg []byte) error {
 	c.pa.arg = arg
 	switch len(args) {
 	case 0, 1, 2, 3:
-		return fmt.Errorf("processRoutedHeaderMsgArgs Parse Error: '%s'", args)
+		return fmt.Errorf("processRoutedHeaderMsgArgs Parse Error: '%s'", arg)
 	case 4:
 		c.pa.reply = nil
 		c.pa.queues = nil
@@ -344,18 +355,27 @@ func (c *client) processRoutedHeaderMsgArgs(arg []byte) error {
 		c.pa.szb = args[len(args)-1]
 		c.pa.size = parseSize(c.pa.szb)
 
-		// Grab queue names.
+		// Grab queue names. Copy into qbuf to avoid the local args
+		// array from escaping to the heap.
+		var qi int
 		if c.pa.reply != nil {
-			c.pa.queues = args[4 : len(args)-2]
+			qi = 4
 		} else {
-			c.pa.queues = args[3 : len(args)-2]
+			qi = 3
+		}
+		queues := args[qi : len(args)-2]
+		if len(queues) <= len(c.pa.qbuf) {
+			c.pa.queues = c.pa.qbuf[:copy(c.pa.qbuf[:], queues)]
+		} else {
+			c.pa.queues = make([][]byte, len(queues))
+			copy(c.pa.queues, queues)
 		}
 	}
 	if c.pa.hdr < 0 {
 		return fmt.Errorf("processRoutedHeaderMsgArgs Bad or Missing Header Size: '%s'", arg)
 	}
 	if c.pa.size < 0 {
-		return fmt.Errorf("processRoutedHeaderMsgArgs Bad or Missing Size: '%s'", args)
+		return fmt.Errorf("processRoutedHeaderMsgArgs Bad or Missing Size: '%s'", arg)
 	}
 	if c.pa.hdr > c.pa.size {
 		return fmt.Errorf("processRoutedHeaderMsgArgs Header Size larger then TotalSize: '%s'", arg)
@@ -375,7 +395,8 @@ func (c *client) processRoutedHeaderMsgArgs(arg []byte) error {
 // Process an inbound RMSG or LMSG specification from the remote route.
 func (c *client) processRoutedMsgArgs(arg []byte) error {
 	// Unroll splitArgs to avoid runtime/heap issues
-	args := c.argsa[:0]
+	a := [MAX_RMSG_ARGS][]byte{}
+	args := a[:0]
 	var an []byte
 	if c.kind == ROUTER {
 		if an = c.route.accName; len(an) > 0 {
@@ -403,7 +424,7 @@ func (c *client) processRoutedMsgArgs(arg []byte) error {
 	c.pa.arg = arg
 	switch len(args) {
 	case 0, 1, 2:
-		return fmt.Errorf("processRoutedMsgArgs Parse Error: '%s'", args)
+		return fmt.Errorf("processRoutedMsgArgs Parse Error: '%s'", arg)
 	case 3:
 		c.pa.reply = nil
 		c.pa.queues = nil
@@ -431,15 +452,24 @@ func (c *client) processRoutedMsgArgs(arg []byte) error {
 		c.pa.szb = args[len(args)-1]
 		c.pa.size = parseSize(c.pa.szb)
 
-		// Grab queue names.
+		// Grab queue names. Copy into qbuf to avoid the local args
+		// array from escaping to the heap.
+		var qi int
 		if c.pa.reply != nil {
-			c.pa.queues = args[4 : len(args)-1]
+			qi = 4
 		} else {
-			c.pa.queues = args[3 : len(args)-1]
+			qi = 3
+		}
+		queues := args[qi : len(args)-1]
+		if len(queues) <= len(c.pa.qbuf) {
+			c.pa.queues = c.pa.qbuf[:copy(c.pa.qbuf[:], queues)]
+		} else {
+			c.pa.queues = make([][]byte, len(queues))
+			copy(c.pa.queues, queues)
 		}
 	}
 	if c.pa.size < 0 {
-		return fmt.Errorf("processRoutedMsgArgs Bad or Missing Size: '%s'", args)
+		return fmt.Errorf("processRoutedMsgArgs Bad or Missing Size: '%s'", arg)
 	}
 
 	// Common ones processed after check for arg length

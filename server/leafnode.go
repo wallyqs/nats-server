@@ -2916,7 +2916,8 @@ func (c *client) processLeafUnsub(arg []byte) error {
 
 func (c *client) processLeafHeaderMsgArgs(arg []byte) error {
 	// Unroll splitArgs to avoid runtime/heap issues
-	args := c.argsa[:0]
+	a := [MAX_MSG_ARGS][]byte{}
+	args := a[:0]
 	start := -1
 	for i, b := range arg {
 		switch b {
@@ -2938,7 +2939,7 @@ func (c *client) processLeafHeaderMsgArgs(arg []byte) error {
 	c.pa.arg = arg
 	switch len(args) {
 	case 0, 1, 2:
-		return fmt.Errorf("processLeafHeaderMsgArgs Parse Error: '%s'", args)
+		return fmt.Errorf("processLeafHeaderMsgArgs Parse Error: '%s'", arg)
 	case 3:
 		c.pa.reply = nil
 		c.pa.queues = nil
@@ -2974,18 +2975,27 @@ func (c *client) processLeafHeaderMsgArgs(arg []byte) error {
 		c.pa.szb = args[len(args)-1]
 		c.pa.size = parseSize(c.pa.szb)
 
-		// Grab queue names.
+		// Grab queue names. Copy into qbuf to avoid the local args
+		// array from escaping to the heap.
+		var qi int
 		if c.pa.reply != nil {
-			c.pa.queues = args[3 : len(args)-2]
+			qi = 3
 		} else {
-			c.pa.queues = args[2 : len(args)-2]
+			qi = 2
+		}
+		queues := args[qi : len(args)-2]
+		if len(queues) <= len(c.pa.qbuf) {
+			c.pa.queues = c.pa.qbuf[:copy(c.pa.qbuf[:], queues)]
+		} else {
+			c.pa.queues = make([][]byte, len(queues))
+			copy(c.pa.queues, queues)
 		}
 	}
 	if c.pa.hdr < 0 {
 		return fmt.Errorf("processLeafHeaderMsgArgs Bad or Missing Header Size: '%s'", arg)
 	}
 	if c.pa.size < 0 {
-		return fmt.Errorf("processLeafHeaderMsgArgs Bad or Missing Size: '%s'", args)
+		return fmt.Errorf("processLeafHeaderMsgArgs Bad or Missing Size: '%s'", arg)
 	}
 	if c.pa.hdr > c.pa.size {
 		return fmt.Errorf("processLeafHeaderMsgArgs Header Size larger then TotalSize: '%s'", arg)
@@ -2999,7 +3009,8 @@ func (c *client) processLeafHeaderMsgArgs(arg []byte) error {
 
 func (c *client) processLeafMsgArgs(arg []byte) error {
 	// Unroll splitArgs to avoid runtime/heap issues
-	args := c.argsa[:0]
+	a := [MAX_MSG_ARGS][]byte{}
+	args := a[:0]
 	start := -1
 	for i, b := range arg {
 		switch b {
@@ -3021,7 +3032,7 @@ func (c *client) processLeafMsgArgs(arg []byte) error {
 	c.pa.arg = arg
 	switch len(args) {
 	case 0, 1:
-		return fmt.Errorf("processLeafMsgArgs Parse Error: '%s'", args)
+		return fmt.Errorf("processLeafMsgArgs Parse Error: '%s'", arg)
 	case 2:
 		c.pa.reply = nil
 		c.pa.queues = nil
@@ -3049,15 +3060,24 @@ func (c *client) processLeafMsgArgs(arg []byte) error {
 		c.pa.szb = args[len(args)-1]
 		c.pa.size = parseSize(c.pa.szb)
 
-		// Grab queue names.
+		// Grab queue names. Copy into qbuf to avoid the local args
+		// array from escaping to the heap.
+		var qi int
 		if c.pa.reply != nil {
-			c.pa.queues = args[3 : len(args)-1]
+			qi = 3
 		} else {
-			c.pa.queues = args[2 : len(args)-1]
+			qi = 2
+		}
+		queues := args[qi : len(args)-1]
+		if len(queues) <= len(c.pa.qbuf) {
+			c.pa.queues = c.pa.qbuf[:copy(c.pa.qbuf[:], queues)]
+		} else {
+			c.pa.queues = make([][]byte, len(queues))
+			copy(c.pa.queues, queues)
 		}
 	}
 	if c.pa.size < 0 {
-		return fmt.Errorf("processLeafMsgArgs Bad or Missing Size: '%s'", args)
+		return fmt.Errorf("processLeafMsgArgs Bad or Missing Size: '%s'", arg)
 	}
 
 	// Common ones processed after check for arg length

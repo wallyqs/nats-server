@@ -32,7 +32,6 @@ type parseState struct {
 	msgBuf  []byte
 	header  http.Header // access via getHeader
 	scratch [MAX_CONTROL_LINE_SIZE]byte
-	argsa   [MAX_HMSG_ARGS + 1][]byte // pre-allocated args array to avoid per-call heap escape
 }
 
 type pubArg struct {
@@ -47,6 +46,7 @@ type pubArg struct {
 	szb       []byte
 	hdb       []byte
 	queues    [][]byte
+	qbuf      [4][]byte // pre-allocated queue args buffer to avoid heap escape of parsed args array
 	size      int
 	hdr       int
 	psi       []*serviceImport
