@@ -3295,10 +3295,14 @@ func TestWSCompressionPoolBufferRecycling(t *testing.T) {
 
 	const iterations = 500
 
-	// Warm up: run a few iterations to populate the pool and JIT paths.
+	// Warm up: run a few iterations to populate the pool and
+	// initialize compressor state. Use nbPoolGet so that nbPoolPut
+	// inside wsCollapsePtoNB actually returns buffers to the pool.
 	for i := 0; i < 10; i++ {
 		c.mu.Lock()
-		c.out.nb = append(net.Buffers(nil), append([]byte(nil), payload...))
+		data := nbPoolGet(len(payload))
+		data = append(data, payload...)
+		c.out.nb = append(net.Buffers(nil), data)
 		c.out.pb = int64(len(payload))
 		c.ws.fs = 0
 		bufs, _ := c.collapsePtoNB()
