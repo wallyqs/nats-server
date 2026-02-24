@@ -3264,6 +3264,77 @@ func TestWSCompressionFrameSizeLimit(t *testing.T) {
 	}
 }
 
+func TestWSCompressionPoolBufferRecycling(t *testing.T) {
+	// This test verifies that wsCollapsePtoNB's compression path
+	// returns the input pool buffer via nbPoolPut.
+	//
+	// Bug: the compression loop re-sliced b via b = b[n:], then called
+	// nbPoolPut(b). Since cap(b) no longer matched any pool size,
+	// the put was a no-op and the buffer leaked. The fix uses nb[i]
+	// (the original unmodified slice) instead of the re-sliced b.
+	//
+	// We measure allocations over many iterations. With the fix,
+	// the input buffer is recycled so nbPoolGet serves from the warm
+	// pool (0 allocs). Without the fix, each iteration leaks the
+	// input buffer and forces a fresh allocation via New.
+	opts := testWSOptions()
+	opts.MaxPending = MAX_PENDING_SIZE
+	s := &Server{opts: opts}
+	c := &client{srv: s, ws: &websocket{compress: true}}
+	c.initClient()
+
+	// Use a payload larger than wsCompressThreshold (64 bytes)
+	// to trigger the compression path.
+	payload := make([]byte, 256)
+	for i := range payload {
+		payload[i] = byte(i % 251) // Semi-random to be compressible.
+	}
+
+	// Warm up: populate the pool and initialize the compressor.
+	nbSlice := make(net.Buffers, 1)
+	for i := 0; i < 10; i++ {
+		c.mu.Lock()
+		data := nbPoolGet(len(payload))
+		data = append(data, payload...)
+		nbSlice[0] = data
+		c.out.nb = nbSlice
+		c.out.pb = int64(len(payload))
+		c.ws.fs = 0
+		bufs, _ := c.collapsePtoNB()
+		for _, buf := range bufs {
+			nbPoolPut(buf)
+		}
+		c.out.nb = nil
+		c.mu.Unlock()
+	}
+
+	allocs := testing.AllocsPerRun(500, func() {
+		c.mu.Lock()
+		data := nbPoolGet(len(payload))
+		data = append(data, payload...)
+		nbSlice[0] = data
+		c.out.nb = nbSlice
+		c.out.pb = int64(len(payload))
+		c.ws.fs = 0
+		bufs, _ := c.collapsePtoNB()
+		for _, buf := range bufs {
+			nbPoolPut(buf)
+		}
+		c.out.nb = nil
+		c.mu.Unlock()
+	})
+
+	t.Logf("WS compression allocs per iteration: %.1f", allocs)
+
+	// With the fix, pool buffers (input data and frame headers) are
+	// recycled, so steady-state allocations come only from the
+	// bytes.Buffer backing store and bufs slice (~2 allocs).
+	// Without the fix, the leaked input buffer adds 1 more (~3 allocs).
+	if allocs > 2 {
+		t.Fatalf("Too many allocs per iteration (%.1f); pool buffers are likely being leaked", allocs)
+	}
+}
+
 func TestWSBasicAuth(t *testing.T) {
 	for _, test := range []struct {
 		name    string
