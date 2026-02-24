@@ -1393,7 +1393,7 @@ func (c *client) wsCollapsePtoNB() (net.Buffers, int64) {
 		if mfs > 0 && c.ws.nocompfrag {
 			mfs = 0
 		}
-		buf := bytes.NewBuffer(nbPoolGet(usz))
+		buf := bytes.NewBuffer(make([]byte, 0, usz))
 		cp := c.ws.compressor
 		if cp == nil {
 			c.ws.compressor, _ = flate.NewWriter(buf, flate.BestSpeed)
@@ -1402,7 +1402,7 @@ func (c *client) wsCollapsePtoNB() (net.Buffers, int64) {
 			cp.Reset(buf)
 		}
 		var csz int
-		for _, b := range nb {
+		for i, b := range nb {
 			for len(b) > 0 {
 				n, err := cp.Write(b)
 				if err != nil {
@@ -1414,7 +1414,10 @@ func (c *client) wsCollapsePtoNB() (net.Buffers, int64) {
 				}
 				b = b[n:]
 			}
-			nbPoolPut(b) // No longer needed as contents written to compressor.
+			// Use nb[i] (the original slice) rather than b, since the inner
+			// loop re-slices b and changes its capacity, which would cause
+			// nbPoolPut to silently discard the buffer.
+			nbPoolPut(nb[i])
 		}
 		if err := cp.Flush(); err != nil {
 			c.Errorf("Error during compression: %v", err)

@@ -3264,6 +3264,86 @@ func TestWSCompressionFrameSizeLimit(t *testing.T) {
 	}
 }
 
+func TestWSCompressionPoolBufferRecycling(t *testing.T) {
+	// This test verifies that pool buffers used as input to the WebSocket
+	// compression path in wsCollapsePtoNB are properly returned.
+	//
+	// Two bugs existed:
+	// 1. The compression loop re-sliced b via b = b[n:], then called
+	//    nbPoolPut(b). Since cap(b) no longer matched any pool size,
+	//    the put was a no-op and the buffer leaked.
+	// 2. bytes.NewBuffer(nbPoolGet(usz)) embedded a pool buffer inside
+	//    a bytes.Buffer. That pool buffer was never returned.
+	//
+	// To verify the fix, we measure how many pool allocations occur over
+	// many iterations. With proper recycling, input data buffers and frame
+	// header buffers come from the warm pool (0 alloc). The only expected
+	// per-iteration allocation is the compression output buffer (bytes.Buffer
+	// backing store), which is not pool-managed.
+	opts := testWSOptions()
+	opts.MaxPending = MAX_PENDING_SIZE
+	s := &Server{opts: opts}
+	c := &client{srv: s, ws: &websocket{compress: true}}
+	c.initClient()
+
+	// Use a payload larger than wsCompressThreshold (64 bytes)
+	// to trigger the compression path.
+	payload := make([]byte, 256)
+	for i := range payload {
+		payload[i] = byte(i % 251) // Semi-random to be compressible.
+	}
+
+	const iterations = 500
+
+	// Warm up: run a few iterations to populate the pool and JIT paths.
+	for i := 0; i < 10; i++ {
+		c.mu.Lock()
+		c.out.nb = append(net.Buffers(nil), append([]byte(nil), payload...))
+		c.out.pb = int64(len(payload))
+		c.ws.fs = 0
+		bufs, _ := c.collapsePtoNB()
+		for _, buf := range bufs {
+			nbPoolPut(buf)
+		}
+		c.out.nb = nil
+		c.mu.Unlock()
+	}
+
+	// Measure allocations through the compression path.
+	// Pre-allocate the net.Buffers slice to avoid counting test overhead.
+	nbSlice := make(net.Buffers, 1)
+	poolAllocs := testing.AllocsPerRun(iterations, func() {
+		c.mu.Lock()
+		data := nbPoolGet(len(payload))
+		data = append(data, payload...)
+		nbSlice[0] = data
+		c.out.nb = nbSlice
+		c.out.pb = int64(len(payload))
+		c.ws.fs = 0
+		bufs, _ := c.collapsePtoNB()
+		for _, buf := range bufs {
+			nbPoolPut(buf)
+		}
+		c.out.nb = nil
+		c.mu.Unlock()
+	})
+
+	t.Logf("Allocations per compression iteration: %.1f", poolAllocs)
+
+	// Expected allocations per iteration with the fix:
+	// - 1 for the compression output buffer (make([]byte, 0, usz))
+	// - 1 if bytes.Buffer grows during compression
+	// - 1 for the bufs slice inside wsCollapsePtoNB
+	// Pool-backed buffers (input data, frame headers) should come from the
+	// warm pool at zero cost. Before the fix, 2 additional pool buffers
+	// leaked per iteration (the re-sliced input buffer and the pool buffer
+	// embedded in bytes.NewBuffer), causing extra allocations as the pool
+	// was depleted.
+	if poolAllocs > 6 {
+		t.Fatalf("Too many allocations per iteration (%.1f); pool buffers are likely being leaked", poolAllocs)
+	}
+}
+
 func TestWSBasicAuth(t *testing.T) {
 	for _, test := range []struct {
 		name    string
