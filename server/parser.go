@@ -19,7 +19,87 @@ import (
 	"fmt"
 	"net/http"
 	"net/textproto"
+	"sync"
 )
+
+// Tiered buffer pool sizes for parser message buffers.
+// Used when a message payload exceeds the scratch buffer and arrives
+// split across TCP reads.
+const (
+	msgBufPoolSmall   = 8192   // 8KB
+	msgBufPoolMedium  = 16384  // 16KB
+	msgBufPoolLarge   = 32768  // 32KB
+	msgBufPoolXLarge  = 65536  // 64KB
+)
+
+var (
+	msgBufPool8k = &sync.Pool{
+		New: func() any {
+			b := [msgBufPoolSmall]byte{}
+			return &b
+		},
+	}
+	msgBufPool16k = &sync.Pool{
+		New: func() any {
+			b := [msgBufPoolMedium]byte{}
+			return &b
+		},
+	}
+	msgBufPool32k = &sync.Pool{
+		New: func() any {
+			b := [msgBufPoolLarge]byte{}
+			return &b
+		},
+	}
+	msgBufPool64k = &sync.Pool{
+		New: func() any {
+			b := [msgBufPoolXLarge]byte{}
+			return &b
+		},
+	}
+)
+
+// getMsgBufFromPool returns a byte slice from the appropriate pool tier
+// based on the requested capacity. Returns a zero-length slice with
+// capacity at least sz. Buffers larger than the biggest pool tier are
+// freshly allocated.
+func getMsgBufFromPool(sz int) []byte {
+	switch {
+	case sz <= msgBufPoolSmall:
+		return msgBufPool8k.Get().(*[msgBufPoolSmall]byte)[:0]
+	case sz <= msgBufPoolMedium:
+		return msgBufPool16k.Get().(*[msgBufPoolMedium]byte)[:0]
+	case sz <= msgBufPoolLarge:
+		return msgBufPool32k.Get().(*[msgBufPoolLarge]byte)[:0]
+	case sz <= msgBufPoolXLarge:
+		return msgBufPool64k.Get().(*[msgBufPoolXLarge]byte)[:0]
+	default:
+		return make([]byte, 0, sz)
+	}
+}
+
+// recycleMsgBuf returns a buffer to the appropriate pool tier if its
+// capacity matches a known pool size. Non-pooled buffers are silently
+// ignored. Safe to call with nil.
+func recycleMsgBuf(buf []byte) {
+	if buf == nil {
+		return
+	}
+	switch cap(buf) {
+	case msgBufPoolSmall:
+		b := (*[msgBufPoolSmall]byte)(buf[:msgBufPoolSmall])
+		msgBufPool8k.Put(b)
+	case msgBufPoolMedium:
+		b := (*[msgBufPoolMedium]byte)(buf[:msgBufPoolMedium])
+		msgBufPool16k.Put(b)
+	case msgBufPoolLarge:
+		b := (*[msgBufPoolLarge]byte)(buf[:msgBufPoolLarge])
+		msgBufPool32k.Put(b)
+	case msgBufPoolXLarge:
+		b := (*[msgBufPoolXLarge]byte)(buf[:msgBufPoolXLarge])
+		msgBufPool64k.Put(b)
+	}
+}
 
 type parserState int
 type parseState struct {
@@ -511,6 +591,7 @@ func (c *client) parse(buf []byte) error {
 			c.processInboundMsg(c.msgBuf)
 
 			mt.sendEvent()
+			recycleMsgBuf(c.msgBuf)
 			c.argBuf, c.msgBuf, c.header = nil, nil, nil
 			c.drop, c.as, c.state = 0, i+1, OP_START
 			// Drop all pub args
@@ -1212,7 +1293,7 @@ func (c *client) parse(buf []byte) error {
 			if lrem > c.pa.size+LEN_CR_LF {
 				goto parseErr
 			}
-			c.msgBuf = make([]byte, lrem, c.pa.size+LEN_CR_LF)
+			c.msgBuf = getMsgBufFromPool(c.pa.size + LEN_CR_LF)[:lrem]
 			copy(c.msgBuf, buf[c.as:])
 		} else {
 			c.msgBuf = c.scratch[len(c.argBuf):len(c.argBuf)]
