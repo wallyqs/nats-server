@@ -1800,13 +1800,15 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecovering bool) error {
 	var wsas []writeableStreamAssignment
 	if len(buf) > 0 {
-		jse, err := s2.Decode(nil, buf)
+		jse, err := s2DecodeInto(buf)
 		if err != nil {
 			return err
 		}
 		if err = json.Unmarshal(jse, &wsas); err != nil {
+			putDecompressBuf(jse)
 			return err
 		}
+		putDecompressBuf(jse)
 	}
 
 	// Build our new version here outside of js.
@@ -3765,9 +3767,10 @@ func (mset *stream) skipBatchIfRecovering(batch *batchApply, buf []byte) (bool, 
 	}
 
 	if op == compressedStreamMsgOp {
-		if mbuf, err = s2.Decode(nil, mbuf); err != nil {
+		if mbuf, err = s2DecodeInto(mbuf); err != nil {
 			return false, err
 		}
+		defer putDecompressBuf(mbuf)
 	}
 
 	_, _, _, _, lseq, _, _, err := decodeStreamMsg(mbuf)
@@ -3795,10 +3798,11 @@ func (js *jetStream) applyStreamMsgOp(mset *stream, op entryOp, mbuf []byte, isR
 
 	if op == compressedStreamMsgOp {
 		var err error
-		mbuf, err = s2.Decode(nil, mbuf)
+		mbuf, err = s2DecodeInto(mbuf)
 		if err != nil {
 			panic(err.Error())
 		}
+		defer putDecompressBuf(mbuf)
 	}
 
 	subject, reply, hdr, msg, lseq, ts, sourced, err := decodeStreamMsg(mbuf)
@@ -9052,6 +9056,11 @@ func encodeStreamMsgAllowCompress(subject, reply string, hdr, msg []byte, lseq u
 // TODO(dlc) - Eventually make configurable.
 const compressThreshold = 8192 // 8k
 
+// Maximum buffer size we'll keep in pools. Buffers larger than this
+// are let go for GC to collect, avoiding pinning oversized memory
+// from rare large messages.
+const maxPoolBufSize = 256 * 1024
+
 // Pool for compression scratch buffers to reduce GC pressure.
 // These are only needed transiently during S2 compression and are
 // returned to the pool immediately after use.
@@ -9073,7 +9082,53 @@ func getCompressBuf(sz int) []byte {
 }
 
 func putCompressBuf(buf []byte) {
+	if cap(buf) > maxPoolBufSize {
+		return
+	}
 	compressBufPool.Put(&buf)
+}
+
+// Pool for decompression buffers to reduce GC pressure on the decode side.
+// These hold the decompressed stream message and are returned to the pool
+// after the message contents have been copied into the store.
+var decompressBufPool = sync.Pool{
+	New: func() any {
+		return &[]byte{}
+	},
+}
+
+func getDecompressBuf(sz int) []byte {
+	bp := decompressBufPool.Get().(*[]byte)
+	buf := *bp
+	if cap(buf) >= sz {
+		return buf[:sz]
+	}
+	// Return undersized buffer to pool, allocate a new one.
+	decompressBufPool.Put(bp)
+	return make([]byte, sz)
+}
+
+func putDecompressBuf(buf []byte) {
+	if cap(buf) > maxPoolBufSize {
+		return
+	}
+	decompressBufPool.Put(&buf)
+}
+
+// s2DecodeInto decodes S2-compressed src into a pooled buffer.
+// The caller must call putDecompressBuf on the returned buffer when done.
+func s2DecodeInto(src []byte) ([]byte, error) {
+	dLen, err := s2.DecodedLen(src)
+	if err != nil {
+		return nil, err
+	}
+	dst := getDecompressBuf(dLen)
+	dst, err = s2.Decode(dst, src)
+	if err != nil {
+		putDecompressBuf(dst)
+		return nil, err
+	}
+	return dst, nil
 }
 
 // If allowed and contents over the threshold we will compress.
@@ -9920,10 +9975,11 @@ func (mset *stream) processCatchupMsg(msg []byte) (uint64, error) {
 
 	if op == compressedStreamMsgOp {
 		var err error
-		mbuf, err = s2.Decode(nil, mbuf)
+		mbuf, err = s2DecodeInto(mbuf)
 		if err != nil {
 			panic(err.Error())
 		}
+		defer putDecompressBuf(mbuf)
 	}
 
 	subj, _, hdr, msg, seq, ts, _, err := decodeStreamMsg(mbuf)

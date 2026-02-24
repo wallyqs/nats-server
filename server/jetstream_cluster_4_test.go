@@ -38,7 +38,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
@@ -7437,6 +7436,31 @@ func BenchmarkCompressBufPool(b *testing.B) {
 	}
 }
 
+func BenchmarkDecompressBufPool(b *testing.B) {
+	sizes := []int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024}
+
+	for _, sz := range sizes {
+		name := fmt.Sprintf("%dKB", sz/1024)
+
+		b.Run(fmt.Sprintf("pool/%s", name), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				buf := getDecompressBuf(sz)
+				_ = buf[sz-1] // touch the buffer
+				putDecompressBuf(buf)
+			}
+		})
+
+		b.Run(fmt.Sprintf("nopool/%s", name), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				buf := make([]byte, sz)
+				_ = buf[sz-1] // touch the buffer
+			}
+		})
+	}
+}
+
 // BenchmarkEncodeDecodeStreamMsg benchmarks the full roundtrip of encoding
 // and decoding a stream message, which is the typical hot path during
 // RAFT replication.
@@ -7467,10 +7491,11 @@ func BenchmarkEncodeDecodeStreamMsg(b *testing.B) {
 				mbuf := encoded[1:]
 				if op == compressedStreamMsgOp {
 					var err error
-					mbuf, err = s2.Decode(nil, mbuf)
+					mbuf, err = s2DecodeInto(mbuf)
 					if err != nil {
 						b.Fatal(err)
 					}
+					putDecompressBuf(mbuf)
 				}
 				_, _, _, _, _, _, _, err := decodeStreamMsg(mbuf)
 				if err != nil {
