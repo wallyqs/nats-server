@@ -4444,15 +4444,28 @@ func removeHeaderIfPrefixPresent(hdr []byte, prefix string) []byte {
 // Generate a new header based on optional original header and key value.
 // More used in JetStream layers.
 func genHeader(hdr []byte, key, value string) []byte {
-	var bb bytes.Buffer
+	// Pre-calculate exact size to avoid bytes.Buffer growSlice overhead
+	// and http.Header map allocation.
+	// Output format: <existing_hdr or hdrLine> + key + ": " + value + "\r\n" + "\r\n"
+	var baseLen int
 	if len(hdr) > LEN_CR_LF {
-		bb.Write(hdr[:len(hdr)-LEN_CR_LF])
+		baseLen = len(hdr) - LEN_CR_LF
 	} else {
-		bb.WriteString(hdrLine)
+		baseLen = len(hdrLine)
 	}
-	http.Header{key: []string{value}}.Write(&bb)
-	bb.WriteString(CR_LF)
-	return bb.Bytes()
+	needed := baseLen + len(key) + 2 + len(value) + LEN_CR_LF + LEN_CR_LF
+	result := make([]byte, 0, needed)
+	if len(hdr) > LEN_CR_LF {
+		result = append(result, hdr[:len(hdr)-LEN_CR_LF]...)
+	} else {
+		result = append(result, hdrLine...)
+	}
+	result = append(result, key...)
+	result = append(result, ':', ' ')
+	result = append(result, value...)
+	result = append(result, CR_LF...)
+	result = append(result, CR_LF...)
+	return result
 }
 
 // This will set a header for the message.
@@ -4460,27 +4473,35 @@ func genHeader(hdr []byte, key, value string) []byte {
 // from the inbound go routine. We will update the pubArgs.
 // This will replace any previously set header and not add to it per normal spec.
 func (c *client) setHeader(key, value string, msg []byte) []byte {
-	var bb bytes.Buffer
 	var omi int
+	var hdrPrefix []byte
 	// Write original header if present.
 	if c.pa.hdr > LEN_CR_LF {
 		omi = c.pa.hdr
 		hdr := removeHeaderIfPresent(msg[:c.pa.hdr-LEN_CR_LF], key)
 		if len(hdr) == 0 {
-			bb.WriteString(hdrLine)
+			hdrPrefix = []byte(hdrLine)
 		} else {
-			bb.Write(hdr)
+			hdrPrefix = hdr
 		}
 	} else {
-		bb.WriteString(hdrLine)
+		hdrPrefix = []byte(hdrLine)
 	}
-	http.Header{key: []string{value}}.Write(&bb)
-	bb.WriteString(CR_LF)
-	nhdr := bb.Len()
+	// Pre-calculate size to avoid repeated buffer growth.
+	// Format: hdrPrefix + key + ": " + value + "\r\n" + "\r\n" + msg[omi:]
+	newKV := len(key) + 2 + len(value) + LEN_CR_LF
+	needed := len(hdrPrefix) + newKV + LEN_CR_LF + len(msg[omi:])
+	result := make([]byte, 0, needed)
+	result = append(result, hdrPrefix...)
+	result = append(result, key...)
+	result = append(result, ':', ' ')
+	result = append(result, value...)
+	result = append(result, CR_LF...)
+	result = append(result, CR_LF...)
+	nhdr := len(result)
 	// Put the original message back.
-	// FIXME(dlc) - This is inefficient.
-	bb.Write(msg[omi:])
-	nsize := bb.Len() - LEN_CR_LF
+	result = append(result, msg[omi:]...)
+	nsize := len(result) - LEN_CR_LF
 	// MQTT producers don't have CRLF, so add it back.
 	if c.isMqtt() {
 		nsize += LEN_CR_LF
@@ -4491,7 +4512,7 @@ func (c *client) setHeader(key, value string, msg []byte) []byte {
 	c.pa.size = nsize
 	c.pa.hdb = []byte(strconv.Itoa(nhdr))
 	c.pa.szb = []byte(strconv.Itoa(nsize))
-	return bb.Bytes()
+	return result
 }
 
 // Will return a copy of the value for the header denoted by key or nil if it does not exist.
@@ -4689,7 +4710,7 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 		// Special case for now, need to formalize.
 		// TODO(dlc) - Formalize as a service import option for reply rewrite.
 		// For now we can't do $JS.ACK since that breaks pull consumers across accounts.
-		if !bytes.HasPrefix(c.pa.reply, []byte(jsAckPre)) {
+		if !bytes.HasPrefix(c.pa.reply, jsAckPreBytes) {
 			if rsi = c.setupResponseServiceImport(acc, si, tracking, headers); rsi != nil {
 				nrr = []byte(rsi.from)
 			}
@@ -4959,7 +4980,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 	// Check for JetStream encoded reply subjects.
 	// For now these will only be on $JS.ACK prefixed reply subjects.
 	var remapped bool
-	if len(creply) > 0 && c.kind != CLIENT && !isInternalClient(c.kind) && bytes.HasPrefix(creply, []byte(jsAckPre)) {
+	if len(creply) > 0 && c.kind != CLIENT && !isInternalClient(c.kind) && bytes.HasPrefix(creply, jsAckPreBytes) {
 		// We need to rewrite the subject and the reply.
 		// But, we must be careful that the stream name, consumer name, and subject can contain '@' characters.
 		// JS ACK contains at least 8 dots, find the first @ after this prefix.
@@ -5394,7 +5415,10 @@ sendToRoutesOrLeafs:
 	// already performed, otherwise we'd end up with a duplicate '@' suffix
 	// resulting in a protocol error.
 	if len(deliver) > 0 && len(reply) > 0 && !remapped {
-		reply = append(reply, '@')
+		// Use stack-allocated scratch buffer to avoid heap allocation
+		// when appending deliver subject to reply.
+		var _rply [256]byte
+		reply = append(append(_rply[:0], reply...), '@')
 		reply = append(reply, deliver...)
 	}
 

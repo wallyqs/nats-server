@@ -439,6 +439,7 @@ type consumer struct {
 	resetSub          *subscription
 	ackSub            *subscription
 	ackReplyT         string
+	ackReplyPrefix    []byte
 	ackSubj           string
 	nextMsgSubj       string
 	nextMsgReqs       *ipQueue[*nextMsgReq]
@@ -1276,6 +1277,8 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 	mn := strings.ReplaceAll(cfg.Name, "%", "%%")
 	pre := fmt.Sprintf(jsAckT, mn, strings.ReplaceAll(o.name, "%", "%%"))
 	o.ackReplyT = fmt.Sprintf("%s.%%d.%%d.%%d.%%d.%%d", pre)
+	// Store raw prefix (with actual % chars, not escaped) for fast ackReply formatting.
+	o.ackReplyPrefix = []byte(fmt.Sprintf(jsAckT, cfg.Name, o.name))
 	o.ackSubj = fmt.Sprintf("%s.*.*.*.*.*", pre)
 	o.nextMsgSubj = fmt.Sprintf(JSApiRequestNextT, mn, o.name)
 	o.resetSubj = fmt.Sprintf(JSApiConsumerResetT, mn, o.name)
@@ -5233,7 +5236,21 @@ func (o *consumer) sendIdleHeartbeat(subj string) {
 }
 
 func (o *consumer) ackReply(sseq, dseq, dc uint64, ts int64, pending uint64) string {
-	return fmt.Sprintf(o.ackReplyT, dc, sseq, dseq, ts, pending)
+	// Manual formatting avoids fmt.Sprintf overhead (format string parsing,
+	// interface boxing) which was a top allocator in high-throughput scenarios.
+	var buf [256]byte
+	b := append(buf[:0], o.ackReplyPrefix...)
+	b = append(b, '.')
+	b = strconv.AppendUint(b, dc, 10)
+	b = append(b, '.')
+	b = strconv.AppendUint(b, sseq, 10)
+	b = append(b, '.')
+	b = strconv.AppendUint(b, dseq, 10)
+	b = append(b, '.')
+	b = strconv.AppendInt(b, ts, 10)
+	b = append(b, '.')
+	b = strconv.AppendUint(b, pending, 10)
+	return string(b)
 }
 
 // Used mostly for testing. Sets max pending bytes for flow control setups.
@@ -5338,22 +5355,34 @@ func convertToHeadersOnly(pmsg *jsPubMsg) {
 	// If headers only do not send msg payload.
 	// Add in msg size itself as header.
 	hdr, msg := pmsg.hdr, pmsg.msg
-	var bb bytes.Buffer
+	sizeStr := strconv.FormatInt(int64(len(msg)), 10)
+
+	// Calculate exact size and write directly to pmsg.buf to avoid
+	// intermediate bytes.Buffer allocation and repeated growSlice calls.
+	var baseLen int
 	if len(hdr) == 0 {
-		bb.WriteString(hdrLine)
+		baseLen = len(hdrLine)
 	} else {
-		bb.Write(hdr)
-		bb.Truncate(len(hdr) - LEN_CR_LF)
+		baseLen = len(hdr) - LEN_CR_LF
 	}
-	bb.WriteString(JSMsgSize)
-	bb.WriteString(": ")
-	bb.WriteString(strconv.FormatInt(int64(len(msg)), 10))
-	bb.WriteString(CR_LF)
-	bb.WriteString(CR_LF)
+	needed := baseLen + len(JSMsgSize) + 2 + len(sizeStr) + LEN_CR_LF + LEN_CR_LF
+
+	buf := pmsg.buf[:0]
+	if cap(buf) < needed {
+		buf = make([]byte, 0, needed)
+	}
+	if len(hdr) == 0 {
+		buf = append(buf, hdrLine...)
+	} else {
+		buf = append(buf, hdr[:len(hdr)-LEN_CR_LF]...)
+	}
+	buf = append(buf, JSMsgSize...)
+	buf = append(buf, ':', ' ')
+	buf = append(buf, sizeStr...)
+	buf = append(buf, CR_LF...)
+	buf = append(buf, CR_LF...)
 	// Replace underlying buf which we can use directly when we send.
-	// TODO(dlc) - Probably just use directly when forming bytes.Buffer?
-	pmsg.buf = pmsg.buf[:0]
-	pmsg.buf = append(pmsg.buf, bb.Bytes()...)
+	pmsg.buf = buf
 	// Replace with new header.
 	pmsg.hdr = pmsg.buf
 	// Cancel msg payload

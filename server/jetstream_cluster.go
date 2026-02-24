@@ -8644,6 +8644,8 @@ func (s *Server) jsClusteredConsumerDeleteRequest(ci *ClientInfo, acc *Account, 
 
 func encodeMsgDelete(md *streamMsgDelete) []byte {
 	var bb bytes.Buffer
+	// Pre-size buffer to avoid growSlice. Typical encoded size is well under 256 bytes.
+	bb.Grow(128 + len(md.Stream) + len(md.Subject) + len(md.Reply))
 	bb.WriteByte(byte(deleteMsgOp))
 	json.NewEncoder(&bb).Encode(md)
 	return bb.Bytes()

@@ -320,6 +320,9 @@ const (
 var denyAllClientJs = []string{jsAllAPI, "$KV.>", "$OBJ.>"}
 var denyAllJs = []string{jscAllSubj, raftAllSubj, jsAllAPI, "$KV.>", "$OBJ.>"}
 
+// Pre-computed byte slice to avoid repeated []byte(jsAckPre) allocations in hot paths.
+var jsAckPreBytes = []byte(jsAckPre)
+
 func generateJSMappingTable(domain string) map[string]string {
 	mappings := map[string]string{}
 	// This set of mappings is very very very ugly.
