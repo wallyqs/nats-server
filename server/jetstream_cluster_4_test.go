@@ -7315,7 +7315,7 @@ func TestJetStreamClusterMetaCompactSizeThreshold(t *testing.T) {
 // makeCompressibleData creates a byte slice of exactly the requested size
 // filled with a repeating pattern, simulating typical text/JSON payloads.
 func makeCompressibleData(size int) []byte {
-	const pattern = "the quick brown fox jumps over the lazy dog\n"
+	const pattern = `{"ts":"2025-06-01T00:00:00Z","stream":"ORDERS","seq":1,"subject":"orders.new"}`
 	buf := make([]byte, size)
 	for i := 0; i < size; i += copy(buf[i:], pattern) {
 	}
