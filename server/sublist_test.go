@@ -2448,3 +2448,88 @@ func Benchmark_SubjectFilterMatchers(b *testing.B) {
 		})
 	}
 }
+
+var benchSubjects = []string{
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH",
+	"$JS.ACK.asdf-asdf-events.asdf-asdf-events.1.284222.291929.1671900992627312000.0",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH.ABCDEFGHIJKL",
+	"NATS0.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGHIJKLMNOPQRSTUV.ABCDEFGH.ABCDEFGHIJKLM.ABCDEFGHIJ.NATS0.ABCDEFGH.ABCDEFGHIJKL.ABCDEFGHIJKLMNOPQRSTU",
+}
+
+func Benchmark_tokenizeSubjectIntoSlice(b *testing.B) {
+	for _, subj := range benchSubjects {
+		b.Run(fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, "."))), func(b *testing.B) {
+			tsa := [32]string{}
+			b.ReportAllocs()
+			b.SetBytes(int64(len(subj)))
+			for i := 0; i < b.N; i++ {
+				tokenizeSubjectIntoSlice(tsa[:0], subj)
+			}
+		})
+	}
+}
+
+func Benchmark_subjectIsLiteral(b *testing.B) {
+	for _, subj := range benchSubjects {
+		b.Run(fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, "."))), func(b *testing.B) {
+			var result bool
+			b.SetBytes(int64(len(subj)))
+			for i := 0; i < b.N; i++ {
+				result = subjectIsLiteral(subj)
+			}
+			if !result {
+				b.Fatal("expected literal subject")
+			}
+		})
+	}
+}
+
+func Benchmark_subjectHasWildcard(b *testing.B) {
+	for _, subj := range benchSubjects {
+		b.Run(fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, "."))), func(b *testing.B) {
+			var result bool
+			b.SetBytes(int64(len(subj)))
+			for i := 0; i < b.N; i++ {
+				result = subjectHasWildcard(subj)
+			}
+			if result {
+				b.Fatal("expected no wildcard")
+			}
+		})
+	}
+}
+
+func Benchmark_IsValidLiteralSubject(b *testing.B) {
+	for _, subj := range benchSubjects {
+		b.Run(fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, "."))), func(b *testing.B) {
+			var result bool
+			b.SetBytes(int64(len(subj)))
+			for i := 0; i < b.N; i++ {
+				result = IsValidLiteralSubject(subj)
+			}
+			if !result {
+				b.Fatal("expected valid literal subject")
+			}
+		})
+	}
+}
+
+func Benchmark_IsValidSubject(b *testing.B) {
+	for _, subj := range benchSubjects {
+		b.Run(fmt.Sprintf("len=%d/tokens=%d", len(subj), len(strings.Split(subj, "."))), func(b *testing.B) {
+			var result bool
+			b.SetBytes(int64(len(subj)))
+			for i := 0; i < b.N; i++ {
+				result = IsValidSubject(subj)
+			}
+			if !result {
+				b.Fatal("expected valid subject")
+			}
+		})
+	}
+}
