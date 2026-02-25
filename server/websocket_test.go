@@ -3273,8 +3273,10 @@ func TestWSCompressionPoolBufferRecycling(t *testing.T) {
 	// the put was a no-op and the buffer leaked. The fix uses nb[i]
 	// (the original unmodified slice) instead of the re-sliced b.
 	//
-	// We use nbPoolReturnCount to count how many buffers are actually
-	// returned to the pool during a single compression call.
+	// We measure allocations over many iterations. With the fix,
+	// the input buffer is recycled so nbPoolGet serves from the warm
+	// pool (0 allocs). Without the fix, each iteration leaks the
+	// input buffer and forces a fresh allocation via New.
 	opts := testWSOptions()
 	opts.MaxPending = MAX_PENDING_SIZE
 	s := &Server{opts: opts}
@@ -3288,58 +3290,48 @@ func TestWSCompressionPoolBufferRecycling(t *testing.T) {
 		payload[i] = byte(i % 251) // Semi-random to be compressible.
 	}
 
-	// Warm up the compressor so we measure steady-state behavior.
-	c.mu.Lock()
-	data := nbPoolGet(len(payload))
-	data = append(data, payload...)
-	c.out.nb = append(net.Buffers(nil), data)
-	c.out.pb = int64(len(payload))
-	c.ws.fs = 0
-	bufs, _ := c.collapsePtoNB()
-	for _, buf := range bufs {
-		nbPoolPut(buf)
-	}
-	c.out.nb = nil
-	c.mu.Unlock()
-
-	// Now run one compression iteration and count pool returns.
-	c.mu.Lock()
-	data = nbPoolGet(len(payload))
-	data = append(data, payload...)
-	c.out.nb = append(net.Buffers(nil), data)
-	c.out.pb = int64(len(payload))
-	c.ws.fs = 0
-
-	nbPoolReturnCount.Store(0)
-	bufs, _ = c.collapsePtoNB()
-	returnsInCompress := nbPoolReturnCount.Load()
-	c.mu.Unlock()
-
-	t.Logf("Pool returns during wsCollapsePtoNB: %d", returnsInCompress)
-
-	// With the fix for issue #1, the input buffer is returned inside
-	// wsCollapsePtoNB (nbPoolPut(nb[i]) with the original slice).
-	// Before the fix, nbPoolPut(b) was called on a re-sliced b whose
-	// cap was 0, so the return count was 0.
-	if returnsInCompress < 1 {
-		t.Fatalf("Expected at least 1 pool return inside wsCollapsePtoNB (input buffer), got %d", returnsInCompress)
+	// Warm up: populate the pool and initialize the compressor.
+	nbSlice := make(net.Buffers, 1)
+	for i := 0; i < 10; i++ {
+		c.mu.Lock()
+		data := nbPoolGet(len(payload))
+		data = append(data, payload...)
+		nbSlice[0] = data
+		c.out.nb = nbSlice
+		c.out.pb = int64(len(payload))
+		c.ws.fs = 0
+		bufs, _ := c.collapsePtoNB()
+		for _, buf := range bufs {
+			nbPoolPut(buf)
+		}
+		c.out.nb = nil
+		c.mu.Unlock()
 	}
 
-	// Clean up output buffers.
-	nbPoolReturnCount.Store(0)
-	for _, buf := range bufs {
-		nbPoolPut(buf)
-	}
-	cleanupReturns := nbPoolReturnCount.Load()
+	allocs := testing.AllocsPerRun(500, func() {
+		c.mu.Lock()
+		data := nbPoolGet(len(payload))
+		data = append(data, payload...)
+		nbSlice[0] = data
+		c.out.nb = nbSlice
+		c.out.pb = int64(len(payload))
+		c.ws.fs = 0
+		bufs, _ := c.collapsePtoNB()
+		for _, buf := range bufs {
+			nbPoolPut(buf)
+		}
+		c.out.nb = nil
+		c.mu.Unlock()
+	})
 
-	t.Logf("Pool returns during output cleanup: %d", cleanupReturns)
+	t.Logf("WS compression allocs per iteration: %.1f", allocs)
 
-	// The output bufs include a frame header (pool-backed, cap=512) and
-	// compressed payload (from bytes.Buffer, non-pool cap — silently
-	// discarded by nbPoolPut). So we expect at least 1 return for the
-	// frame header.
-	if cleanupReturns < 1 {
-		t.Fatalf("Expected at least 1 pool return during cleanup (frame header), got %d", cleanupReturns)
+	// With the fix, pool buffers (input data and frame headers) are
+	// recycled, so steady-state allocations come only from the
+	// bytes.Buffer backing store and bufs slice (~2 allocs).
+	// Without the fix, the leaked input buffer adds 1 more (~3 allocs).
+	if allocs > 2 {
+		t.Fatalf("Too many allocs per iteration (%.1f); pool buffers are likely being leaked", allocs)
 	}
 }
 

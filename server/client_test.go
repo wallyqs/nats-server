@@ -3858,46 +3858,54 @@ func TestClientFlushOutboundWriteTimeoutPolicy(t *testing.T) {
 }
 
 func TestNBPoolPutReslicedBufferIsDiscarded(t *testing.T) {
-	// Verify that nbPoolPut on a re-sliced buffer does NOT count as a
-	// successful return, while nbPoolPut on the original slice does.
-	// This reproduces the bug in wsCollapsePtoNB's compression loop
-	// where b = b[n:] changed the capacity, making nbPoolPut(b) a no-op.
+	// Verify that nbPoolPut on a re-sliced buffer fails to recycle,
+	// causing the next nbPoolGet to allocate. This reproduces the bug
+	// in wsCollapsePtoNB's compression loop where b = b[n:] changed
+	// the capacity, making nbPoolPut(b) a no-op.
 	for _, poolSize := range []int{nbPoolSizeSmall, nbPoolSizeMedium, nbPoolSizeLarge} {
 		t.Run(fmt.Sprintf("size_%d", poolSize), func(t *testing.T) {
-			b := nbPoolGet(poolSize)
+			// Warm up the pool.
+			w := nbPoolGet(poolSize)
+			nbPoolPut(w)
 
-			// Simulate the compression loop: re-slice to consume all data.
-			b = b[:poolSize]
-			b = b[poolSize:]
-			require_Equal(t, cap(b), 0)
+			// Correct usage: put with original slice, then get reuses it.
+			correctAllocs := testing.AllocsPerRun(100, func() {
+				b := nbPoolGet(poolSize)
+				nbPoolPut(b)
+			})
 
-			// nbPoolPut on the re-sliced buffer: should NOT succeed.
-			nbPoolReturnCount.Store(0)
-			nbPoolPut(b)
-			require_Equal(t, nbPoolReturnCount.Load(), int64(0))
+			// Buggy usage: re-slice then put — buffer is silently discarded,
+			// so the next get must allocate a new one.
+			w = nbPoolGet(poolSize)
+			nbPoolPut(w)
 
-			// Now with the fix pattern: save original before re-slicing.
-			b = nbPoolGet(poolSize)
-			orig := b
-			b = b[:poolSize]
-			b = b[poolSize:]
+			buggyAllocs := testing.AllocsPerRun(100, func() {
+				b := nbPoolGet(poolSize)
+				b = b[:cap(b)]
+				b = b[cap(b):] // cap becomes 0
+				nbPoolPut(b)   // no-op: buffer leaked
+				// Pool is now empty, next get will allocate.
+			})
 
-			// nbPoolPut on the original: should succeed.
-			nbPoolReturnCount.Store(0)
-			nbPoolPut(orig)
-			require_Equal(t, nbPoolReturnCount.Load(), int64(1))
+			t.Logf("correct=%.1f allocs, buggy=%.1f allocs", correctAllocs, buggyAllocs)
+
+			// Correct usage recycles from pool (0 allocs).
+			// Buggy usage leaks the buffer (>=1 alloc per iteration).
+			require_Equal(t, correctAllocs, float64(0))
+			require_True(t, buggyAllocs >= 1)
 		})
 	}
 }
 
 func TestFlushOutboundS2CompressionPoolBufferRecycling(t *testing.T) {
 	// Verify that flushOutbound returns pool-backed buffers from
-	// c.out.nb before replacing them with S2-compressed output.
+	// c.out.nb after S2-compressing them, rather than leaking them
+	// when `collapsed` is reassigned to the compressed output.
 	//
-	// Bug: flushOutbound iterated the collapsed buffers to write them
-	// into the S2 compressor, then reassigned `collapsed` to the
-	// compressed output. The original pool-backed buffers were
-	// orphaned and never returned via nbPoolPut.
+	// The test measures allocations over many iterations. With the
+	// fix, input buffers are returned to the pool and reused on the
+	// next iteration (fewer allocs). Without the fix, input buffers
+	// leak and every iteration must allocate fresh ones from New.
 	opts := DefaultOptions()
 	opts.MaxPending = 1024
 	s := &Server{opts: opts}
@@ -3905,34 +3913,39 @@ func TestFlushOutboundS2CompressionPoolBufferRecycling(t *testing.T) {
 	fakeConn := &testConnWritePartial{}
 	c := &client{srv: s, nc: fakeConn, kind: ROUTER}
 	c.initClient()
-
-	// Enable S2 compression (as route/leafnode connections do).
 	c.out.cw = s2.NewWriter(nil, s2.WriterConcurrency(1))
 
-	// Queue data via queueOutbound so buffers come from the pool.
 	payload := make([]byte, 256)
 	for i := range payload {
 		payload[i] = byte(i)
 	}
 
-	c.mu.Lock()
-	c.queueOutbound(payload)
-	require_True(t, c.out.pb > 0)
-	require_True(t, len(c.out.nb) > 0)
+	// Warm up: run a few iterations to populate the pool.
+	for i := 0; i < 5; i++ {
+		c.mu.Lock()
+		c.queueOutbound(payload)
+		c.flushOutbound()
+		c.mu.Unlock()
+	}
 
-	// Count pool returns during flushOutbound.
-	nbPoolReturnCount.Store(0)
-	c.flushOutbound()
-	returns := nbPoolReturnCount.Load()
-	c.mu.Unlock()
+	allocs := testing.AllocsPerRun(100, func() {
+		c.mu.Lock()
+		c.queueOutbound(payload)
+		c.flushOutbound()
+		c.mu.Unlock()
+	})
 
-	t.Logf("Pool returns during S2 flushOutbound: %d", returns)
+	t.Logf("S2 flushOutbound allocs per iteration: %.1f", allocs)
 
-	// With the fix, the original pool buffers are returned after the
-	// compressor has consumed them (at least 1 for the input data).
-	// Before the fix, collapsed was reassigned without returning the
-	// originals, so the return count from the S2 path was 0.
-	if returns < 1 {
-		t.Fatalf("Expected at least 1 pool return during S2 flushOutbound, got %d", returns)
+	// With the fix, the input pool buffer is returned after S2
+	// compression, so the next queueOutbound reuses it from the
+	// pool (0 allocs for pool gets). Without the fix, each iteration
+	// leaks the input buffer, forcing a fresh allocation via New.
+	// Steady-state allocs include: S2 output bytes.Buffer, bb.Bytes()
+	// slice, net.Buffers for collapsed, wnb/orig slice growth, and
+	// testConn buf growth (~6 total). Without the fix there would be
+	// 1 more (the leaked pool buffer, 7 total).
+	if allocs > 6 {
+		t.Fatalf("Too many allocs per iteration (%.1f); pool buffers are likely being leaked", allocs)
 	}
 }

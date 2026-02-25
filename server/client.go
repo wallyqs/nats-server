@@ -410,24 +410,17 @@ func nbPoolPut(b []byte) {
 	case nbPoolSizeSmall:
 		b := (*[nbPoolSizeSmall]byte)(b[0:nbPoolSizeSmall])
 		nbPoolSmall.Put(b)
-		nbPoolReturnCount.Add(1)
 	case nbPoolSizeMedium:
 		b := (*[nbPoolSizeMedium]byte)(b[0:nbPoolSizeMedium])
 		nbPoolMedium.Put(b)
-		nbPoolReturnCount.Add(1)
 	case nbPoolSizeLarge:
 		b := (*[nbPoolSizeLarge]byte)(b[0:nbPoolSizeLarge])
 		nbPoolLarge.Put(b)
-		nbPoolReturnCount.Add(1)
 	default:
 		// Ignore frames that are the wrong size, this might happen
 		// with WebSocket/MQTT messages as they are framed
 	}
 }
-
-// nbPoolReturnCount tracks the number of successful pool returns
-// (i.e. calls to nbPoolPut where the capacity matched a pool size).
-var nbPoolReturnCount atomic.Int64
 
 type perm struct {
 	allow *Sublist
