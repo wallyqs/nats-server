@@ -3266,15 +3266,12 @@ func TestWSCompressionFrameSizeLimit(t *testing.T) {
 
 func TestWSCompressionPoolBufferRecycling(t *testing.T) {
 	// This test verifies that wsCollapsePtoNB's compression path
-	// returns the input pool buffer via nbPoolPut. Two bugs existed:
+	// returns the input pool buffer via nbPoolPut.
 	//
-	// 1. The compression loop re-sliced b via b = b[n:], then called
-	//    nbPoolPut(b). Since cap(b) no longer matched any pool size,
-	//    the put was a no-op and the buffer leaked.
-	// 2. bytes.NewBuffer(nbPoolGet(usz)) pulled a buffer from the pool
-	//    and embedded it inside a bytes.Buffer, where it was never
-	//    returned. After the fix, make([]byte, 0, usz) is used instead
-	//    so no pool buffer is consumed for the compression output.
+	// Bug: the compression loop re-sliced b via b = b[n:], then called
+	// nbPoolPut(b). Since cap(b) no longer matched any pool size,
+	// the put was a no-op and the buffer leaked. The fix uses nb[i]
+	// (the original unmodified slice) instead of the re-sliced b.
 	//
 	// We use nbPoolReturnCount to count how many buffers are actually
 	// returned to the pool during a single compression call.

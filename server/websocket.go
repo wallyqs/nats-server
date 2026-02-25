@@ -1393,7 +1393,7 @@ func (c *client) wsCollapsePtoNB() (net.Buffers, int64) {
 		if mfs > 0 && c.ws.nocompfrag {
 			mfs = 0
 		}
-		buf := bytes.NewBuffer(make([]byte, 0, usz))
+		buf := bytes.NewBuffer(nbPoolGet(usz))
 		cp := c.ws.compressor
 		if cp == nil {
 			c.ws.compressor, _ = flate.NewWriter(buf, flate.BestSpeed)
