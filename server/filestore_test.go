@@ -7731,12 +7731,19 @@ func TestFileStoreMsgBlockShouldCompact(t *testing.T) {
 	sblk := fs.blks[1]
 	fs.mu.RUnlock()
 
+	// Compaction happens asynchronously, so wait for it to complete.
+	checkFor(t, 5*time.Second, 10*time.Millisecond, func() error {
+		fblk.mu.RLock()
+		bytes, rbytes := fblk.bytes, fblk.rbytes
+		fblk.mu.RUnlock()
+		if bytes != rbytes {
+			return fmt.Errorf("compaction not yet complete: bytes=%d rbytes=%d", bytes, rbytes)
+		}
+		return nil
+	})
 	fblk.mu.RLock()
-	bytes, rbytes := fblk.bytes, fblk.rbytes
 	shouldCompact := fblk.shouldCompactInline()
 	fblk.mu.RUnlock()
-	// Should have tripped compaction already.
-	require_Equal(t, bytes, rbytes)
 	require_False(t, shouldCompact)
 
 	sblk.mu.RLock()

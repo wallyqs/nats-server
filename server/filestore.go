@@ -198,6 +198,7 @@ type fileStore struct {
 	hh          *highwayhash.Digest64
 	qch         chan struct{}
 	fsld        chan struct{}
+	cch         chan *msgBlock // Compact channel for async inline compaction.
 	cmu         sync.RWMutex
 	cfs         []ConsumerStore
 	sips        int
@@ -632,6 +633,10 @@ func newFileStoreWithCreated(fcfg FileStoreConfig, cfg StreamConfig, created tim
 
 	// Spin up the go routine that will write out our full state stream index.
 	go fs.flushStreamStateLoop(fs.qch, fs.fsld)
+
+	// Spin up the go routine that will handle async inline compaction requests.
+	fs.cch = make(chan *msgBlock, 64)
+	go fs.compactBlocksLoop(fs.qch, fs.cch)
 
 	return fs, nil
 }
@@ -5458,10 +5463,13 @@ func (fs *fileStore) removeMsgFromBlock(mb *msgBlock, seq uint64, secure, viaLim
 		// Out of order delete.
 		mb.dmap.Insert(seq)
 		// Rather than compacting inline while holding the fs write lock (which blocks all
-		// concurrent operations), spawn a goroutine that re-acquires with lighter locks:
-		// fs.mu.RLock + mb.mu.Lock, allowing concurrent reads and writes on other blocks.
+		// concurrent operations), signal the compaction goroutine to handle it with lighter
+		// locks: fs.mu.RLock + mb.mu.Lock, allowing concurrent reads and writes on other blocks.
 		if !isLastBlock && mb.shouldCompactInline() {
-			go fs.compactBlock(mb)
+			select {
+			case fs.cch <- mb:
+			default:
+			}
 		}
 	}
 
@@ -5561,34 +5569,50 @@ func (mb *msgBlock) shouldCompactSync() bool {
 	return mb.bytes*2 < mb.rbytes && !mb.noCompact
 }
 
-// compactBlock is called in a goroutine to compact a message block without
-// holding the fs write lock on the hot path. It acquires fs.mu as a read lock
-// and mb.mu as a write lock, matching the lock pattern used by syncBlocks.
-// This performs the same mb.compact() operation (no tombstone cleanup) but
-// without blocking concurrent operations on other blocks.
-func (fs *fileStore) compactBlock(mb *msgBlock) {
-	if fs.isClosed() {
-		return
-	}
-	fs.mu.RLock()
-	mb.mu.Lock()
-	if mb.closed {
-		mb.mu.Unlock()
-		fs.mu.RUnlock()
-		return
-	}
-	mb.compact()
-	shouldRemove := mb.rbytes == 0
-	mb.mu.Unlock()
-	fs.mu.RUnlock()
+// compactBlocksLoop is a long-running goroutine that services async inline
+// compaction requests. Blocks that need compaction are sent on cch from the
+// delete hot path (which only holds fs.mu as a write lock briefly). This
+// goroutine re-acquires with lighter locks (fs.mu.RLock + mb.mu.Lock),
+// matching the pattern used by syncBlocks, so concurrent reads and writes
+// on other blocks are not blocked.
+func (fs *fileStore) compactBlocksLoop(qch chan struct{}, cch chan *msgBlock) {
+	for {
+		select {
+		case mb := <-cch:
+			if fs.isClosed() {
+				return
+			}
+			fs.mu.RLock()
+			mb.mu.Lock()
+			if mb.closed {
+				mb.mu.Unlock()
+				fs.mu.RUnlock()
+				continue
+			}
+			// Re-check under lock since conditions may have changed.
+			// Also check that this is not the last block since it could
+			// have become the last block by the time we process it.
+			if mb == fs.lmb || !mb.shouldCompactInline() {
+				mb.mu.Unlock()
+				fs.mu.RUnlock()
+				continue
+			}
+			mb.compact()
+			shouldRemove := mb.rbytes == 0
+			mb.mu.Unlock()
+			fs.mu.RUnlock()
 
-	// If compaction emptied the block, remove it.
-	if shouldRemove {
-		fs.mu.Lock()
-		mb.mu.Lock()
-		fs.removeMsgBlock(mb)
-		mb.mu.Unlock()
-		fs.mu.Unlock()
+			// If compaction emptied the block, remove it.
+			if shouldRemove {
+				fs.mu.Lock()
+				mb.mu.Lock()
+				fs.removeMsgBlock(mb)
+				mb.mu.Unlock()
+				fs.mu.Unlock()
+			}
+		case <-qch:
+			return
+		}
 	}
 }
 
