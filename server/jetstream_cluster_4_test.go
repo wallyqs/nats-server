@@ -7409,9 +7409,9 @@ func BenchmarkEncodeStreamMsgBatch(b *testing.B) {
 	}
 }
 
-// BenchmarkCompressBufPool benchmarks the compression buffer pool in isolation
+// BenchmarkS2BufPool benchmarks the S2 buffer pool in isolation
 // to show the benefit of pooling vs. allocating fresh each time.
-func BenchmarkCompressBufPool(b *testing.B) {
+func BenchmarkS2BufPool(b *testing.B) {
 	sizes := []int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024}
 
 	for _, sz := range sizes {
@@ -7420,34 +7420,9 @@ func BenchmarkCompressBufPool(b *testing.B) {
 		b.Run(fmt.Sprintf("pool/%s", name), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				buf := getCompressBuf(sz)
+				buf := getS2Buf(sz)
 				_ = buf[sz-1] // touch the buffer
-				putCompressBuf(buf)
-			}
-		})
-
-		b.Run(fmt.Sprintf("nopool/%s", name), func(b *testing.B) {
-			b.ReportAllocs()
-			for b.Loop() {
-				buf := make([]byte, sz)
-				_ = buf[sz-1] // touch the buffer
-			}
-		})
-	}
-}
-
-func BenchmarkDecompressBufPool(b *testing.B) {
-	sizes := []int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024}
-
-	for _, sz := range sizes {
-		name := fmt.Sprintf("%dKB", sz/1024)
-
-		b.Run(fmt.Sprintf("pool/%s", name), func(b *testing.B) {
-			b.ReportAllocs()
-			for b.Loop() {
-				buf := getDecompressBuf(sz)
-				_ = buf[sz-1] // touch the buffer
-				putDecompressBuf(buf)
+				putS2Buf(buf)
 			}
 		})
 
@@ -7495,7 +7470,7 @@ func BenchmarkEncodeDecodeStreamMsg(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					putDecompressBuf(mbuf)
+					putS2Buf(mbuf)
 				}
 				_, _, _, _, _, _, _, err := decodeStreamMsg(mbuf)
 				if err != nil {

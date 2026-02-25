@@ -3768,7 +3768,7 @@ func (mset *stream) skipBatchIfRecovering(batch *batchApply, buf []byte) (bool, 
 		if mbuf, err = s2DecodeInto(mbuf); err != nil {
 			return false, err
 		}
-		defer putDecompressBuf(mbuf)
+		defer putS2Buf(mbuf)
 	}
 
 	_, _, _, _, lseq, _, _, err := decodeStreamMsg(mbuf)
@@ -3800,7 +3800,7 @@ func (js *jetStream) applyStreamMsgOp(mset *stream, op entryOp, mbuf []byte, isR
 		if err != nil {
 			panic(err.Error())
 		}
-		defer putDecompressBuf(mbuf)
+		defer putS2Buf(mbuf)
 	}
 
 	subject, reply, hdr, msg, lseq, ts, sourced, err := decodeStreamMsg(mbuf)
@@ -9054,76 +9054,49 @@ func encodeStreamMsgAllowCompress(subject, reply string, hdr, msg []byte, lseq u
 // TODO(dlc) - Eventually make configurable.
 const compressThreshold = 8192 // 8k
 
-// Maximum buffer size we'll keep in pools. Buffers larger than this
+// Maximum buffer size we'll keep in the pool. Buffers larger than this
 // are let go for GC to collect, avoiding pinning oversized memory
 // from rare large messages.
 const maxPoolBufSize = 256 * 1024
 
-// Pool for compression scratch buffers to reduce GC pressure.
-// These are only needed transiently during S2 compression and are
-// returned to the pool immediately after use.
-var compressBufPool = sync.Pool{
+// Shared pool for S2 compression and decompression scratch buffers.
+// Encode and decode never overlap in the same goroutine, so a single
+// pool gives better reuse than two separate ones.
+var s2BufPool = sync.Pool{
 	New: func() any {
 		return &[]byte{}
 	},
 }
 
-func getCompressBuf(sz int) []byte {
-	bp := compressBufPool.Get().(*[]byte)
+func getS2Buf(sz int) []byte {
+	bp := s2BufPool.Get().(*[]byte)
 	buf := *bp
 	if cap(buf) >= sz {
 		return buf[:sz]
 	}
 	// Return undersized buffer to pool, allocate a new one.
-	compressBufPool.Put(bp)
+	s2BufPool.Put(bp)
 	return make([]byte, sz)
 }
 
-func putCompressBuf(buf []byte) {
+func putS2Buf(buf []byte) {
 	if cap(buf) > maxPoolBufSize {
 		return
 	}
-	compressBufPool.Put(&buf)
-}
-
-// Pool for decompression buffers to reduce GC pressure on the decode side.
-// These hold the decompressed stream message and are returned to the pool
-// after the message contents have been copied into the store.
-var decompressBufPool = sync.Pool{
-	New: func() any {
-		return &[]byte{}
-	},
-}
-
-func getDecompressBuf(sz int) []byte {
-	bp := decompressBufPool.Get().(*[]byte)
-	buf := *bp
-	if cap(buf) >= sz {
-		return buf[:sz]
-	}
-	// Return undersized buffer to pool, allocate a new one.
-	decompressBufPool.Put(bp)
-	return make([]byte, sz)
-}
-
-func putDecompressBuf(buf []byte) {
-	if cap(buf) > maxPoolBufSize {
-		return
-	}
-	decompressBufPool.Put(&buf)
+	s2BufPool.Put(&buf)
 }
 
 // s2DecodeInto decodes S2-compressed src into a pooled buffer.
-// The caller must call putDecompressBuf on the returned buffer when done.
+// The caller must call putS2Buf on the returned buffer when done.
 func s2DecodeInto(src []byte) ([]byte, error) {
 	dLen, err := s2.DecodedLen(src)
 	if err != nil {
 		return nil, err
 	}
-	dst := getDecompressBuf(dLen)
+	dst := getS2Buf(dLen)
 	dst, err = s2.Decode(dst, src)
 	if err != nil {
-		putDecompressBuf(dst)
+		putS2Buf(dst)
 		return nil, err
 	}
 	return dst, nil
@@ -9185,7 +9158,7 @@ func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte
 
 	// Check if we should compress.
 	if shouldCompress {
-		nbuf := getCompressBuf(s2.MaxEncodedLen(elen))
+		nbuf := getS2Buf(s2.MaxEncodedLen(elen))
 		nbuf[0] = byte(compressedStreamMsgOp)
 		ebuf := s2.Encode(nbuf[1:], buf[opIndex+1:])
 		// Only pay the cost of decode on the other side if we compressed.
@@ -9195,7 +9168,7 @@ func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte
 			copy(buf[opIndex+1:], ebuf)
 			buf = buf[:len(ebuf)+opIndex+1]
 		}
-		putCompressBuf(nbuf)
+		putS2Buf(nbuf)
 	}
 
 	return buf
@@ -9977,7 +9950,7 @@ func (mset *stream) processCatchupMsg(msg []byte) (uint64, error) {
 		if err != nil {
 			panic(err.Error())
 		}
-		defer putDecompressBuf(mbuf)
+		defer putS2Buf(mbuf)
 	}
 
 	subj, _, hdr, msg, seq, ts, _, err := decodeStreamMsg(mbuf)
