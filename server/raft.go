@@ -228,7 +228,9 @@ type raft struct {
 	catchup  *catchupState               // For when we need to catch up as a follower.
 	progress map[string]*ipQueue[uint64] // For leader or server catching up a follower.
 
-	hcommit uint64 // The commit at the time that applies were paused
+	hcommit    uint64        // The commit at the time that applies were paused
+	dcommit    uint64        // Highest commit index deferred due to apply queue depth
+	applyDrain chan struct{} // Signal to replay deferred commits
 
 	prop  *ipQueue[*proposedEntry]       // Proposals
 	entry *ipQueue[*appendEntry]         // Append entries
@@ -337,6 +339,7 @@ var (
 	errLeaderLen         = fmt.Errorf("raft: leader should be exactly %d bytes", idLen)
 	errTooManyEntries    = errors.New("raft: append entry can contain a max of 64k entries")
 	errBadAppendEntry    = errors.New("raft: append entry corrupt")
+	errApplyQueueFull    = errors.New("raft: apply queue full")
 	errNoInternalClient  = errors.New("raft: no internal client")
 	errMembershipChange  = errors.New("raft: membership change in progress")
 	errRemoveLastNode    = errors.New("raft: cannot remove the last peer")
@@ -434,28 +437,29 @@ func (s *Server) initRaftNode(accName string, cfg *RaftConfig, labels pprofLabel
 
 	qpfx := fmt.Sprintf("[ACC:%s] RAFT '%s' ", accName, cfg.Name)
 	n := &raft{
-		created:  time.Now(),
-		id:       hash[:idLen],
-		group:    cfg.Name,
-		sd:       cfg.Store,
-		wal:      cfg.Log,
-		wtype:    cfg.Log.Type(),
-		track:    cfg.Track,
-		peers:    make(map[string]*lps),
-		acks:     make(map[uint64]map[string]struct{}),
-		pae:      make(map[uint64]*appendEntry),
-		s:        s,
-		js:       s.getJetStream(),
-		quit:     make(chan struct{}),
-		reqs:     newIPQueue[*voteRequest](s, qpfx+"vreq"),
-		votes:    newIPQueue[*voteResponse](s, qpfx+"vresp"),
-		prop:     newIPQueue[*proposedEntry](s, qpfx+"entry"),
-		entry:    newIPQueue[*appendEntry](s, qpfx+"appendEntry"),
-		resp:     newIPQueue[*appendEntryResponse](s, qpfx+"appendEntryResponse"),
-		apply:    newIPQueue[*CommittedEntry](s, qpfx+"committedEntry"),
-		accName:  accName,
-		leadc:    make(chan bool, 32),
-		observer: cfg.Observer,
+		created:    time.Now(),
+		id:         hash[:idLen],
+		group:      cfg.Name,
+		sd:         cfg.Store,
+		wal:        cfg.Log,
+		wtype:      cfg.Log.Type(),
+		track:      cfg.Track,
+		peers:      make(map[string]*lps),
+		acks:       make(map[uint64]map[string]struct{}),
+		pae:        make(map[uint64]*appendEntry),
+		s:          s,
+		js:         s.getJetStream(),
+		quit:       make(chan struct{}),
+		applyDrain: make(chan struct{}, 1),
+		reqs:       newIPQueue[*voteRequest](s, qpfx+"vreq"),
+		votes:      newIPQueue[*voteResponse](s, qpfx+"vresp"),
+		prop:       newIPQueue[*proposedEntry](s, qpfx+"entry"),
+		entry:      newIPQueue[*appendEntry](s, qpfx+"appendEntry"),
+		resp:       newIPQueue[*appendEntryResponse](s, qpfx+"appendEntryResponse"),
+		apply:      newIPQueue[*CommittedEntry](s, qpfx+"committedEntry"),
+		accName:    accName,
+		leadc:      make(chan bool, 32),
+		observer:   cfg.Observer,
 	}
 
 	// Setup our internal subscriptions for proposals, votes and append entries.
@@ -1126,7 +1130,14 @@ func (n *raft) ResumeApply() {
 		n.debug("Resuming %d replays", n.hcommit+1-n.commit)
 		for index := n.commit + 1; index <= n.hcommit; index++ {
 			if err := n.applyCommit(index); err != nil {
-				n.warn("Got error on apply commit during replay: %v", err)
+				if err == errApplyQueueFull {
+					// Transfer remaining to dcommit for incremental replay.
+					if n.hcommit > n.dcommit {
+						n.dcommit = n.hcommit
+					}
+				} else {
+					n.warn("Got error on apply commit during replay: %v", err)
+				}
 				break
 			}
 			// We want to unlock here to allow the upper layers to call Applied() without blocking.
@@ -1171,6 +1182,11 @@ func (n *raft) DrainAndReplaySnapshot() bool {
 	n.apply.drain()
 	// Cancel after draining, we might have sent EntryCatchup and need to get them the nil entry.
 	n.cancelCatchup()
+	n.dcommit = 0
+	select {
+	case <-n.applyDrain:
+	default:
+	}
 	n.commit = snap.lastIndex
 	n.apply.push(newCommittedEntry(n.commit, []*Entry{{EntrySnapshot, snap.data}}))
 	return true
@@ -1210,6 +1226,15 @@ func (n *raft) Processed(index uint64, applied uint64) (entries uint64, bytes ui
 	}
 	if applied > n.applied {
 		n.applied = applied
+	}
+
+	// Signal the raft run loop to replay deferred commits if the apply
+	// queue has drained enough to make progress.
+	if n.dcommit > n.commit {
+		select {
+		case n.applyDrain <- struct{}{}:
+		default:
+		}
 	}
 
 	// If it was set, and we reached the minimum processed index, reset and send signal to upper layer.
@@ -1346,6 +1371,7 @@ func (n *raft) installSnapshot(snap *snapshot) error {
 	n.wal.FastState(&state)
 	n.papplied = snap.lastIndex
 	n.bytes = state.Bytes
+	n.dcommit = 0
 	return nil
 }
 
@@ -1798,6 +1824,11 @@ func (n *raft) isCurrent(includeForwardProgress bool) bool {
 	if n.paused && n.hcommit > n.commit {
 		// We're currently paused, waiting to be resumed to apply pending commits.
 		n.debug("Not current, waiting to resume applies commit=%d, hcommit=%d", n.commit, n.hcommit)
+		return false
+	}
+	if n.dcommit > n.commit {
+		// We have deferred commits pending due to apply queue depth.
+		n.debug("Not current, deferred commits pending commit=%d, dcommit=%d", n.commit, n.dcommit)
 		return false
 	}
 
@@ -2491,6 +2522,11 @@ func (n *raft) runAsFollower() {
 			if voteReq, ok := n.reqs.popOne(); ok {
 				n.processVoteRequest(voteReq)
 			}
+		case <-n.applyDrain:
+			// The upper layer has drained the apply queue, replay deferred commits.
+			n.Lock()
+			n.replayDeferredCommits()
+			n.Unlock()
 		}
 	}
 }
@@ -3062,6 +3098,11 @@ func (n *raft) runAsLeader() {
 			}
 		case <-n.entry.ch:
 			n.processAppendEntries()
+		case <-n.applyDrain:
+			// The upper layer has drained the apply queue, replay deferred commits.
+			n.Lock()
+			n.replayDeferredCommits()
+			n.Unlock()
 		}
 	}
 }
@@ -3356,6 +3397,13 @@ func (n *raft) applyCommit(index uint64) error {
 		return nil
 	}
 
+	// Prevent unbounded apply queue growth. When the apply queue exceeds
+	// applyQueueLimit, defer further commits. The caller should record the
+	// deferred commit index in dcommit for later replay.
+	if n.apply.len() >= applyQueueLimit {
+		return errApplyQueueFull
+	}
+
 	if n.State() == Leader {
 		delete(n.acks, index)
 	}
@@ -3461,6 +3509,27 @@ func (n *raft) applyCommit(index uint64) error {
 	return nil
 }
 
+// replayDeferredCommits replays commits that were deferred due to apply queue
+// depth. Called from the raft run loop when signaled by the upper layer.
+// Lock should be held.
+func (n *raft) replayDeferredCommits() {
+	if n.dcommit <= n.commit || n.paused {
+		return
+	}
+	for index := n.commit + 1; index <= n.dcommit; index++ {
+		if err := n.applyCommit(index); err != nil {
+			if err == errApplyQueueFull {
+				return // Wait for next drain signal
+			}
+			n.warn("Error replaying deferred commit %d: %v", index, err)
+			break
+		}
+	}
+	if n.commit >= n.dcommit {
+		n.dcommit = 0
+	}
+}
+
 // Check if there is a quorum for the given index, and if
 // so, commit the corresponding entry.
 // Return true if the index was committed, false otherwise.
@@ -3477,6 +3546,12 @@ func (n *raft) tryCommit(index uint64) (bool, error) {
 	// We have a quorum
 	for i := n.commit + 1; i <= index; i++ {
 		if err := n.applyCommit(i); err != nil {
+			if err == errApplyQueueFull {
+				if index > n.dcommit {
+					n.dcommit = index
+				}
+				return false, nil
+			}
 			if err != errNodeClosed && err != errNodeRemoved {
 				n.error("Got an error applying commit for %d: %v", i, err)
 			}
@@ -3665,6 +3740,11 @@ func (n *raft) runAsCandidate() {
 			if voteReq, ok := n.reqs.popOne(); ok {
 				n.processVoteRequest(voteReq)
 			}
+		case <-n.applyDrain:
+			// The upper layer has drained the apply queue, replay deferred commits.
+			n.Lock()
+			n.replayDeferredCommits()
+			n.Unlock()
 		}
 	}
 }
@@ -3818,6 +3898,7 @@ func (n *raft) truncateWAL(term, index uint64) {
 // Lock should be held.
 func (n *raft) resetWAL() {
 	n.truncateWAL(0, 0)
+	n.dcommit = 0
 }
 
 // Lock should be held
@@ -4225,6 +4306,9 @@ CONTINUE:
 		} else {
 			for index := n.commit + 1; index <= aeCommit; index++ {
 				if err := n.applyCommit(index); err != nil {
+					if err == errApplyQueueFull && aeCommit > n.dcommit {
+						n.dcommit = aeCommit
+					}
 					break
 				}
 			}
@@ -4399,6 +4483,12 @@ const (
 	paeDropThreshold = 20_000
 	paeWarnThreshold = 10_000
 	paeWarnModulo    = 5_000
+
+	// applyQueueLimit is the maximum number of entries in the apply queue
+	// before we start deferring commits. This prevents unbounded growth of
+	// the apply queue which can cause GC pressure and a feedback loop where
+	// the apply goroutine falls further behind.
+	applyQueueLimit = 16_384
 )
 
 func (n *raft) sendAppendEntry(entries []*Entry) {
