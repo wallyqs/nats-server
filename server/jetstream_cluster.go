@@ -1800,15 +1800,13 @@ func (js *jetStream) metaSnapshot() ([]byte, error) {
 func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecovering bool) error {
 	var wsas []writeableStreamAssignment
 	if len(buf) > 0 {
-		jse, err := s2DecodeInto(buf)
+		jse, err := s2.Decode(nil, buf)
 		if err != nil {
 			return err
 		}
 		if err = json.Unmarshal(jse, &wsas); err != nil {
-			putDecompressBuf(jse)
 			return err
 		}
-		putDecompressBuf(jse)
 	}
 
 	// Build our new version here outside of js.
