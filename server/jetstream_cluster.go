@@ -5477,19 +5477,22 @@ func (js *jetStream) processConsumerAssignment(ca *consumerAssignment) {
 	// Check if this is for us..
 	if isMember {
 		js.processClusterCreateConsumer(ca, state, wasExisting)
-	} else if mset, _ := acc.lookupStream(sa.Config.Name); mset != nil {
-		if o := mset.lookupConsumer(ca.Name); o != nil {
-			// We have one here even though we are not a member. This can happen on re-assignment.
-			s.removeConsumer(o, ca)
-		} else {
-			// Consumer already gone from stream's map (e.g. via o.stop()),
-			// but ca.Group.node may still reference a stale raft node.
-			// Clear it to prevent alreadyRunning=true on a future scale-up.
-			js.mu.Lock()
-			ca.Group.node = nil
-			ca.err = nil
-			js.mu.Unlock()
+	} else {
+		mset, _ := acc.lookupStream(sa.Config.Name)
+		if mset != nil {
+			if o := mset.lookupConsumer(ca.Name); o != nil {
+				// We have one here even though we are not a member. This can happen on re-assignment.
+				s.removeConsumer(o, ca)
+				return
+			}
 		}
+		// Stream or consumer already gone (e.g. stream torn down, or consumer
+		// stopped via o.stop()), but ca.Group.node may still reference a stale
+		// raft node. Clear it to prevent alreadyRunning=true on a future scale-up.
+		js.mu.Lock()
+		ca.Group.node = nil
+		ca.err = nil
+		js.mu.Unlock()
 	}
 }
 

@@ -8126,11 +8126,22 @@ func TestJetStreamClusterStaleConsumerAssignmentNode(t *testing.T) {
 	require_True(t, staleNode)
 	t.Logf("Setup confirmed: ca.Group.node is stale on server %s", cf.Name())
 
+	// Connect to the consumer leader specifically for the update, since
+	// our map manipulation on cf can sometimes cause API timeouts.
+	cl := c.consumerLeader(globalAccountName, "TEST", "CONSUMER")
+	require_NotNil(t, cl)
+	ncl, jsl := jsClientConnect(t, cl)
+	defer ncl.Close()
+
 	// Now scale down to R1. This triggers processConsumerAssignment on cf
 	// where isMember=false. In the new code, since lookupConsumer returns nil,
 	// removeConsumer is skipped and ca.Group.node is NOT cleared.
-	_, err = js.UpdateConsumer("TEST", &nats.ConsumerConfig{Name: "CONSUMER", Replicas: 1})
-	require_NoError(t, err)
+	// Retry on timeout since our internal map manipulation can occasionally
+	// disrupt the consumer raft group's apply path transiently.
+	checkFor(t, 30*time.Second, 2*time.Second, func() error {
+		_, err = jsl.UpdateConsumer("TEST", &nats.ConsumerConfig{Name: "CONSUMER", Replicas: 1})
+		return err
+	})
 
 	// Wait long enough for all servers to process the assignment update.
 	// The meta raft apply is typically fast, but give generous time.
