@@ -3411,6 +3411,17 @@ func clampInt64ToInt32(v int64) int32 {
 	return int32(v)
 }
 
+// clampIntToInt32 is like clampInt64ToInt32 but accepts an int parameter.
+func clampIntToInt32(v int) int32 {
+	if v > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	if v < math.MinInt32 {
+		return math.MinInt32
+	}
+	return int32(v)
+}
+
 // parseAccountLimits is called to parse account limits in a server config.
 func parseAccountLimits(mv any, acc *Account, errors *[]error) error {
 	var lt token

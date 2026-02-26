@@ -404,9 +404,9 @@ func (a *Account) updateRemoteServer(m *AccountNumConns) []*client {
 	// This does not depend on receiving all updates since each one is idempotent.
 	// FIXME(dlc) - We should cleanup when these both go to zero.
 	prev := a.strack[m.Server.ID]
-	a.strack[m.Server.ID] = sconns{conns: int32(m.Conns), leafs: int32(m.LeafNodes)}
-	a.nrclients += int32(m.Conns) - prev.conns
-	a.nrleafs += int32(m.LeafNodes) - prev.leafs
+	a.strack[m.Server.ID] = sconns{conns: clampIntToInt32(m.Conns), leafs: clampIntToInt32(m.LeafNodes)}
+	a.nrclients += clampIntToInt32(m.Conns) - prev.conns
+	a.nrleafs += clampIntToInt32(m.LeafNodes) - prev.leafs
 
 	mtce := a.mconns != jwt.NoLimit && (len(a.clients)-int(a.sysclients)+int(a.nrclients) > int(a.mconns))
 	// If we are over here some have snuck in and we need to rebalance.

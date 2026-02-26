@@ -3255,7 +3255,7 @@ func (s *Server) createClientEx(conn net.Conn, inProcess bool) *client {
 	opts := s.getOpts()
 
 	maxPay := int32(opts.MaxPayload)
-	maxSubs := int32(opts.MaxSubs)
+	maxSubs := clampIntToInt32(opts.MaxSubs)
 	// For system, maxSubs of 0 means unlimited, so re-adjust here.
 	if maxSubs == 0 {
 		maxSubs = -1

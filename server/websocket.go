@@ -1274,7 +1274,7 @@ func (s *Server) createWSClient(conn net.Conn, ws *websocket) *client {
 	opts := s.getOpts()
 
 	maxPay := int32(opts.MaxPayload)
-	maxSubs := int32(opts.MaxSubs)
+	maxSubs := clampIntToInt32(opts.MaxSubs)
 	if maxSubs == 0 {
 		maxSubs = -1
 	}
