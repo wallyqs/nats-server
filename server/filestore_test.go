@@ -13299,3 +13299,66 @@ func TestFileStoreCorruptionSetsHbitWithoutHeaders(t *testing.T) {
 	t.Run("indexCacheBuf", func(t *testing.T) { test(t, KindIndexCacheBuf) })
 	t.Run("rebuildState", func(t *testing.T) { test(t, KindRebuildState) })
 }
+
+// Make sure that the Consumers() iterator uses the correct lock (cmu)
+// to be consistent with AddConsumer and RemoveConsumer. This test should
+// trigger the race detector if the wrong lock is used.
+func TestFileStoreConsumersIteratorLock(t *testing.T) {
+	fcfg := FileStoreConfig{StoreDir: t.TempDir()}
+	scfg := StreamConfig{Name: "zzz", Subjects: []string{"foo"}, Storage: FileStorage}
+
+	fs, err := newFileStoreWithCreated(fcfg, scfg, time.Now(), nil, nil)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	// Add some consumers.
+	for i := range 5 {
+		_, err := fs.ConsumerStore(fmt.Sprintf("c%d", i), time.Time{}, &ConsumerConfig{})
+		require_NoError(t, err)
+	}
+
+	// Now run concurrent add/remove operations alongside iteration.
+	// The race detector will catch if different locks are used.
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	// Iterator goroutine.
+	go func() {
+		defer wg.Done()
+		for range 100 {
+			count := 0
+			for range fs.Consumers() {
+				count++
+			}
+		}
+	}()
+
+	// Add goroutine.
+	go func() {
+		defer wg.Done()
+		for i := range 100 {
+			o, err := fs.ConsumerStore(fmt.Sprintf("add%d", i), time.Time{}, &ConsumerConfig{})
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+				return
+			}
+			// Remove it right away to keep the count manageable.
+			fs.RemoveConsumer(o)
+		}
+	}()
+
+	// Remove goroutine (operates on initial consumers).
+	go func() {
+		defer wg.Done()
+		for i := range 5 {
+			o, err := fs.ConsumerStore(fmt.Sprintf("rem%d", i), time.Time{}, &ConsumerConfig{})
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+				return
+			}
+			fs.RemoveConsumer(o)
+		}
+	}()
+
+	wg.Wait()
+}

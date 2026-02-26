@@ -12451,8 +12451,8 @@ func (fs *fileStore) RemoveConsumer(o ConsumerStore) error {
 
 func (fs *fileStore) Consumers() iter.Seq[ConsumerStore] {
 	return func(yield func(ConsumerStore) bool) {
-		fs.mu.RLock()
-		defer fs.mu.RUnlock()
+		fs.cmu.RLock()
+		defer fs.cmu.RUnlock()
 
 		for _, v := range fs.cfs {
 			if !yield(v) {

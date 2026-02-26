@@ -2236,7 +2236,17 @@ func checkStateAndErr(t *testing.T, c *cluster, accountName, streamName string) 
 	return streamLeader.State, nil
 }
 
+func performStreamBackupNoConsumers(t *testing.T, nc *nats.Conn, streamName string) (StreamConfig, StreamState, []byte) {
+	t.Helper()
+	return performStreamBackupOpts(t, nc, streamName, true)
+}
+
 func performStreamBackup(t *testing.T, nc *nats.Conn, streamName string) (StreamConfig, StreamState, []byte) {
+	t.Helper()
+	return performStreamBackupOpts(t, nc, streamName, false)
+}
+
+func performStreamBackupOpts(t *testing.T, nc *nats.Conn, streamName string, noConsumers bool) (StreamConfig, StreamState, []byte) {
 	t.Helper()
 	endpoint := fmt.Sprintf(JSApiStreamSnapshotT, streamName)
 	inbox := nc.NewRespInbox()
@@ -2244,9 +2254,10 @@ func performStreamBackup(t *testing.T, nc *nats.Conn, streamName string) (Stream
 	sub, err := nc.SubscribeSync(inbox)
 	require_NoError(t, err)
 
+	reqData := fmt.Appendf(nil, `{"deliver_subject": %q, "no_consumers": %v}`, inbox, noConsumers)
 	resp, err := nc.RequestMsg(&nats.Msg{
 		Subject: endpoint,
-		Data:    fmt.Appendf(nil, `{"deliver_subject": %q}`, inbox),
+		Data:    reqData,
 	}, 5*time.Second)
 	require_NoError(t, err)
 

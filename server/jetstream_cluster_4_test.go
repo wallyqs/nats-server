@@ -7331,6 +7331,73 @@ func TestJetStreamClusterMetaCompactSizeThreshold(t *testing.T) {
 	}
 }
 
+// Test that a snapshot with no_consumers:true can be restored successfully.
+// Specifically verifies that the consumer count in state.json is zeroed
+// so the restore path doesn't try to read consumer entries that don't exist.
+func TestJetStreamClusterStreamSnapshotNoConsumers(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3C", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.servers[0])
+	defer nc.Close()
+
+	jsStreamCreate(t, nc, &StreamConfig{
+		Name:     "test_stream",
+		Subjects: []string{"foo.>"},
+		Storage:  FileStorage,
+		Replicas: 3,
+	})
+
+	// Create consumers with some state.
+	for n := range 3 {
+		_, err := js.AddConsumer("test_stream", &nats.ConsumerConfig{
+			Name:      fmt.Sprintf("consumer_%d", n),
+			AckPolicy: nats.AckExplicitPolicy,
+			Replicas:  3,
+		})
+		require_NoError(t, err)
+	}
+
+	for range 50 {
+		_, err := js.Publish("foo.bar", nil)
+		require_NoError(t, err)
+	}
+
+	// Consume some messages to give consumers non-trivial state.
+	sub, err := js.PullSubscribe(_EMPTY_, _EMPTY_, nats.Bind("test_stream", "consumer_0"))
+	require_NoError(t, err)
+	msgs, err := sub.Fetch(10)
+	require_NoError(t, err)
+	for _, m := range msgs {
+		require_NoError(t, m.AckSync())
+	}
+
+	osi, err := js.StreamInfo("test_stream")
+	require_NoError(t, err)
+	require_Equal(t, osi.State.Consumers, 3)
+
+	// Take a snapshot WITHOUT consumers.
+	cfg, state, archive := performStreamBackupNoConsumers(t, nc, "test_stream")
+
+	require_NoError(t, js.DeleteStream("test_stream"))
+	require_True(t, performStreamRestore(t, nc, cfg, state, archive))
+
+	c.waitOnAllCurrent()
+	c.waitOnStreamLeader(globalAccountName, "test_stream")
+
+	nsi, err := js.StreamInfo("test_stream")
+	require_NoError(t, err)
+
+	// Messages should round-trip fine.
+	require_Equal(t, osi.State.FirstSeq, nsi.State.FirstSeq)
+	require_Equal(t, osi.State.LastSeq, nsi.State.LastSeq)
+	require_Equal(t, osi.State.Msgs, nsi.State.Msgs)
+	require_Equal(t, osi.State.Bytes, nsi.State.Bytes)
+
+	// Consumers should not have been restored.
+	require_Equal(t, nsi.State.Consumers, 0)
+}
+
 func TestJetStreamClusterStreamSnapshots(t *testing.T) {
 	workload := func(t *testing.T, setup func(t *testing.T, nc *nats.Conn, js nats.JetStreamContext)) {
 		c := createJetStreamClusterExplicit(t, "R3C", 3)

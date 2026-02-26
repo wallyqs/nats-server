@@ -114,7 +114,7 @@ func (js *jetStream) streamSnapshotV2(store StreamStore, state *StreamState, w i
 	var consumerAssignments map[string]*consumerAssignment
 	var streamState = *state
 	if !includeConsumers {
-		state.Consumers = 0
+		streamState.Consumers = 0
 	} else if clustered {
 		js.mu.RLock()
 		consumerAssignments = make(map[string]*consumerAssignment, len(sa.consumers))
