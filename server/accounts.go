@@ -419,7 +419,7 @@ func (a *Account) updateRemoteServer(m *AccountNumConns) []*client {
 		// Sort in reverse chronological.
 		slices.SortFunc(clients, func(i, j *client) int { return -i.start.Compare(j.start) })
 		over := (len(a.clients) - int(a.sysclients) + int(a.nrclients)) - int(a.mconns)
-		if over < len(clients) {
+		if over > 0 && over < len(clients) {
 			clients = clients[:over]
 		}
 	}
@@ -429,8 +429,10 @@ func (a *Account) updateRemoteServer(m *AccountNumConns) []*client {
 		// Take ones from the end.
 		a.lmu.RLock()
 		leafs := a.lleafs
-		over := int(a.nleafs + a.nrleafs - a.mleafs)
-		if over < len(leafs) {
+		// Use int64 arithmetic to avoid int32 overflow when mleafs is
+		// near the boundaries (e.g. from an overflowed config value).
+		over := int(int64(a.nleafs) + int64(a.nrleafs) - int64(a.mleafs))
+		if over > 0 && over < len(leafs) {
 			leafs = leafs[len(leafs)-over:]
 		}
 		clients = append(clients, leafs...)
@@ -3716,10 +3718,10 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 
 	// Now do limits if they are present.
 	a.mu.Lock()
-	a.msubs = int32(ac.Limits.Subs)
-	a.mpay = int32(ac.Limits.Payload)
-	a.mconns = int32(ac.Limits.Conn)
-	a.mleafs = int32(ac.Limits.LeafNodeConn)
+	a.msubs = clampInt64ToInt32(ac.Limits.Subs)
+	a.mpay = clampInt64ToInt32(ac.Limits.Payload)
+	a.mconns = clampInt64ToInt32(ac.Limits.Conn)
+	a.mleafs = clampInt64ToInt32(ac.Limits.LeafNodeConn)
 	a.disallowBearer = ac.Limits.DisallowBearer
 	// Check for any revocations
 	if len(ac.Revocations) > 0 {

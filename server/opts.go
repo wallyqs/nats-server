@@ -3397,6 +3397,20 @@ func parseAccountMappings(v any, acc *Account, errors *[]error) error {
 	return nil
 }
 
+// clampInt64ToInt32 clamps an int64 value to the int32 range to prevent
+// overflow when storing config values in int32 fields. Values exceeding
+// math.MaxInt32 are clamped to math.MaxInt32 and values below math.MinInt32
+// are clamped to math.MinInt32.
+func clampInt64ToInt32(v int64) int32 {
+	if v > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	if v < math.MinInt32 {
+		return math.MinInt32
+	}
+	return int32(v)
+}
+
 // parseAccountLimits is called to parse account limits in a server config.
 func parseAccountLimits(mv any, acc *Account, errors *[]error) error {
 	var lt token
@@ -3412,13 +3426,13 @@ func parseAccountLimits(mv any, acc *Account, errors *[]error) error {
 		tk, mv = unwrapValue(v, &lt)
 		switch strings.ToLower(k) {
 		case "max_connections", "max_conn":
-			acc.mconns = int32(mv.(int64))
+			acc.mconns = clampInt64ToInt32(mv.(int64))
 		case "max_subscriptions", "max_subs":
-			acc.msubs = int32(mv.(int64))
+			acc.msubs = clampInt64ToInt32(mv.(int64))
 		case "max_payload", "max_pay":
-			acc.mpay = int32(mv.(int64))
+			acc.mpay = clampInt64ToInt32(mv.(int64))
 		case "max_leafnodes", "max_leafs":
-			acc.mleafs = int32(mv.(int64))
+			acc.mleafs = clampInt64ToInt32(mv.(int64))
 		default:
 			if !tk.IsUsedVariable() {
 				err := &configErr{tk, fmt.Sprintf("Unknown field %q parsing account limits", k)}

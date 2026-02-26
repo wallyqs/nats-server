@@ -17,6 +17,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -4100,4 +4101,73 @@ func TestAccountServiceImportNoResponders(t *testing.T) {
 
 	_, err := nc.Request("foo", []byte("request"), 250*time.Millisecond)
 	require_Error(t, err, nats.ErrNoResponders)
+}
+
+func TestAccountLargeMaxLeafNodesDoesNotPanic(t *testing.T) {
+	// Setting max_leafnodes to a value larger than math.MaxInt32 (e.g. 10737418240)
+	// would overflow the int32 field and could cause a panic in updateRemoteServer
+	// due to incorrect arithmetic on the overflowed negative value.
+	cf := createConfFile(t, []byte(`
+		port: -1
+		accounts {
+			TEST {
+				users = [{user: dummy, password: foo}]
+				limits {
+					max_leafnodes: 10737418240
+				}
+			}
+		}
+	`))
+
+	s, _ := RunServerWithConfig(cf)
+	defer s.Shutdown()
+
+	acc, err := s.lookupAccount("TEST")
+	require_NoError(t, err)
+
+	// The max leaf nodes value should have been clamped to math.MaxInt32
+	// instead of overflowing to a negative value.
+	require_Equal(t, acc.MaxActiveLeafNodes(), math.MaxInt32)
+
+	// Simulate remote server reporting leaf node connections.
+	// Previously, the overflowed negative mleafs value caused a
+	// slice bounds panic in updateRemoteServer.
+	clients := acc.updateRemoteServer(&AccountNumConns{
+		Server: ServerInfo{
+			ID:   "fake-server-1",
+			Name: "fake-nats-1",
+		},
+		AccountStat: AccountStat{
+			Account:   "TEST",
+			LeafNodes: 1,
+		},
+	})
+	// With max_leafnodes clamped to MaxInt32, no clients should be
+	// disconnected since we're nowhere near the limit.
+	require_Equal(t, len(clients), 0)
+}
+
+func TestAccountLargeMaxConnectionsDoesNotPanic(t *testing.T) {
+	// Similarly, max_connections values larger than math.MaxInt32
+	// should be clamped to prevent overflow.
+	cf := createConfFile(t, []byte(`
+		port: -1
+		accounts {
+			TEST {
+				users = [{user: dummy, password: foo}]
+				limits {
+					max_connections: 10737418240
+				}
+			}
+		}
+	`))
+
+	s, _ := RunServerWithConfig(cf)
+	defer s.Shutdown()
+
+	acc, err := s.lookupAccount("TEST")
+	require_NoError(t, err)
+
+	// The max connections value should have been clamped to math.MaxInt32.
+	require_Equal(t, acc.MaxActiveConnections(), math.MaxInt32)
 }
