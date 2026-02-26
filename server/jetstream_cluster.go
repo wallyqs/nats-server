@@ -5481,6 +5481,14 @@ func (js *jetStream) processConsumerAssignment(ca *consumerAssignment) {
 		if o := mset.lookupConsumer(ca.Name); o != nil {
 			// We have one here even though we are not a member. This can happen on re-assignment.
 			s.removeConsumer(o, ca)
+		} else {
+			// Consumer already gone from stream's map (e.g. via o.stop()),
+			// but ca.Group.node may still reference a stale raft node.
+			// Clear it to prevent alreadyRunning=true on a future scale-up.
+			js.mu.Lock()
+			ca.Group.node = nil
+			ca.err = nil
+			js.mu.Unlock()
 		}
 	}
 }
