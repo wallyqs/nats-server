@@ -8039,3 +8039,119 @@ func TestJetStreamClusterScaleDownWaitsForMonitorRoutineQuit(t *testing.T) {
 		return nil
 	})
 }
+
+// TestJetStreamClusterStaleConsumerAssignmentNode reproduces a scenario where
+// ca.Group.node becomes stale after the PR #7883 refactor. The issue:
+//
+//  1. o.stop() removes the consumer from the stream's internal map but does NOT
+//     clear ca.Group.node (stopWithFlags only clears it when dflag=true).
+//  2. When a new consumer assignment arrives where this server is not a member,
+//     the new code skips removeConsumer because lookupConsumer returns nil.
+//  3. ca.Group.node stays stale. On a subsequent scale-up, processClusterCreateConsumer
+//     sees alreadyRunning=true and skips starting the monitor goroutine.
+//
+// This test directly simulates the condition by removing the consumer from the
+// stream's internal map while leaving ca.Group.node set, then triggers a
+// re-assignment to verify whether the stale node reference gets cleaned up.
+func TestJetStreamClusterStaleConsumerAssignmentNode(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Create R3 stream and consumer.
+	_, err := js.AddStream(&nats.StreamConfig{Name: "TEST", Subjects: []string{"foo"}, Replicas: 3})
+	require_NoError(t, err)
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{Name: "CONSUMER", Replicas: 3})
+	require_NoError(t, err)
+
+	// Wait for all servers to have the consumer assignment and a running consumer.
+	checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+		for _, s := range c.servers {
+			sjs := s.getJetStream()
+			if sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER") == nil {
+				return errors.New("consumer assignment not found")
+			}
+			mset, err := s.globalAccount().lookupStream("TEST")
+			if err != nil {
+				return err
+			}
+			if mset.lookupConsumer("CONSUMER") == nil {
+				return errors.New("consumer not found on server")
+			}
+		}
+		return nil
+	})
+
+	// Pick a non-consumer-leader server.
+	cf := c.randomNonConsumerLeader(globalAccountName, "TEST", "CONSUMER")
+	require_NotNil(t, cf)
+
+	// Verify the consumer assignment has a raft node set on that server.
+	sjs := cf.getJetStream()
+	sjs.mu.RLock()
+	ca := sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+	hasNode := ca != nil && ca.Group != nil && ca.Group.node != nil
+	sjs.mu.RUnlock()
+	require_True(t, hasNode)
+
+	// Simulate the race condition: remove the consumer from the stream's
+	// internal consumer map (as o.stop() would do) WITHOUT touching the
+	// raft node or the consumer assignment. This leaves ca.Group.node stale.
+	//
+	// In production, this can happen when o.stop() is called (e.g. during
+	// stream stop/reset): stopWithFlags(dflag=false) calls
+	// mset.removeConsumer(o) but only clears ca.Group.node when dflag=true.
+	mset, err := cf.globalAccount().lookupStream("TEST")
+	require_NoError(t, err)
+	o := mset.lookupConsumer("CONSUMER")
+	require_NotNil(t, o)
+
+	// Remove just from the stream's map, simulating what o.stop() does to the
+	// stream-level bookkeeping. We intentionally don't call o.stop() to avoid
+	// disrupting the raft group.
+	mset.mu.Lock()
+	delete(mset.consumers, "CONSUMER")
+	mset.mu.Unlock()
+
+	// Verify the consumer is now gone from the stream's map.
+	require_True(t, mset.lookupConsumer("CONSUMER") == nil)
+
+	// The assignment's Group.node is still set (stale).
+	sjs.mu.RLock()
+	ca = sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+	staleNode := ca != nil && ca.Group != nil && ca.Group.node != nil
+	sjs.mu.RUnlock()
+	require_True(t, staleNode)
+	t.Logf("Setup confirmed: ca.Group.node is stale on server %s", cf.Name())
+
+	// Now scale down to R1. This triggers processConsumerAssignment on cf
+	// where isMember=false. In the new code, since lookupConsumer returns nil,
+	// removeConsumer is skipped and ca.Group.node is NOT cleared.
+	_, err = js.UpdateConsumer("TEST", &nats.ConsumerConfig{Name: "CONSUMER", Replicas: 1})
+	require_NoError(t, err)
+
+	// Wait long enough for all servers to process the assignment update.
+	// The meta raft apply is typically fast, but give generous time.
+	time.Sleep(5 * time.Second)
+
+	// Check: ca.Group.node on cf should have been cleared by processConsumerAssignment.
+	// In the old code, it was always unconditionally cleared (ca.Group.node = nil).
+	// In the new code (PR #7883), it's only cleared inside removeConsumer(), which
+	// requires lookupConsumer to return non-nil. Since we removed the consumer from
+	// the stream's map, removeConsumer is never called and the node stays stale.
+	sjs.mu.RLock()
+	ca = sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+	stillStale := ca != nil && ca.Group != nil && ca.Group.node != nil
+	sjs.mu.RUnlock()
+
+	if stillStale {
+		t.Fatalf("BUG REPRODUCED: ca.Group.node is still stale after processConsumerAssignment "+
+			"on server %s (non-member). The old code would have unconditionally cleared "+
+			"ca.Group.node and ca.err. This stale node causes alreadyRunning=true "+
+			"(jetstream_cluster.go:5584) on a subsequent scale-up, preventing the monitor "+
+			"goroutine from starting (jetstream_cluster.go:5803).", cf.Name())
+	}
+	t.Log("ca.Group.node was properly cleared (no stale state)")
+}
