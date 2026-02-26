@@ -1525,16 +1525,25 @@ func (c *checkpoint) InstallSnapshot(data []byte) (uint64, error) {
 	if err != nil {
 		n.setWriteErrLocked(err)
 		return 0, err
-	} else if !n.snapshotting {
-		// The checkpoint can be aborted at any time, don't continue if that happened.
-		return 0, errSnapAborted
 	}
 
+	// Always update papplied and bytes after a successful compact, even if
+	// the snapshot was aborted. The WAL entries have been removed, so the
+	// tracked size must reflect that. Otherwise n.bytes and n.papplied can
+	// become stale, causing Size() to report incorrect values and
+	// loadEntry(n.applied) to fail for future snapshots.
 	compacted := n.bytes
 	var state StreamState
 	n.wal.FastState(&state)
-	n.papplied = snap.lastIndex
+	if snap.lastIndex > n.papplied {
+		n.papplied = snap.lastIndex
+	}
 	n.bytes = state.Bytes
+
+	if !n.snapshotting {
+		// The checkpoint can be aborted at any time, don't continue if that happened.
+		return 0, errSnapAborted
+	}
 
 	// Expose compacted size.
 	if n.bytes > compacted {

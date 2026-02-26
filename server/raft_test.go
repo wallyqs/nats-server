@@ -5304,3 +5304,63 @@ func TestNRGReplayAddPeerKeepsClusterSize(t *testing.T) {
 	n.WaitForStop()
 	fs.Stop()
 }
+
+func TestNRGCheckpointInstallSnapshotAbortedAfterCompact(t *testing.T) {
+	n, cleanup := initSingleMemRaftNode(t)
+	defer cleanup()
+
+	// Create a sample entry, the content doesn't matter, just that it's stored.
+	esm := encodeStreamMsgAllowCompress("foo", "_INBOX.foo", nil, nil, 0, 0, true)
+	entries := []*Entry{newEntry(EntryNormal, esm)}
+
+	nats0 := "S1Nunr6R" // "nats-0"
+
+	// Store two entries and apply them.
+	aeMsg1 := encode(t, &appendEntry{leader: nats0, term: 1, commit: 0, pterm: 0, pindex: 0, entries: entries})
+	aeMsg2 := encode(t, &appendEntry{leader: nats0, term: 1, commit: 1, pterm: 1, pindex: 1, entries: entries})
+	aeHeartbeat := encode(t, &appendEntry{leader: nats0, term: 1, commit: 2, pterm: 1, pindex: 2, entries: nil})
+
+	n.processAppendEntry(aeMsg1, n.aesub)
+	n.processAppendEntry(aeMsg2, n.aesub)
+	n.processAppendEntry(aeHeartbeat, n.aesub)
+	require_Equal(t, n.pindex, 2)
+	require_Equal(t, n.commit, 2)
+	n.Applied(2)
+	require_Equal(t, n.applied, 2)
+
+	// WAL has 2 entries with some bytes.
+	walEntries, walBytes := n.Size()
+	require_Equal(t, walEntries, 2)
+	require_True(t, walBytes > 0)
+
+	// Create a checkpoint for an async snapshot.
+	c, err := n.CreateSnapshotCheckpoint(false)
+	require_NoError(t, err)
+
+	// Simulate the snapshot being aborted before the checkpoint installs.
+	// This can happen when a catchup snapshot arrives from the leader,
+	// which calls installSnapshot and sets n.snapshotting = false.
+	n.Lock()
+	n.snapshotting = false
+	n.Unlock()
+
+	// Checkpoint install should return errSnapAborted since snapshotting was cleared.
+	// But importantly, the compact DOES happen. Before the fix, n.papplied and
+	// n.bytes were left stale after this abort.
+	_, err = c.InstallSnapshot(nil)
+	require_Error(t, err, errSnapAborted)
+
+	// After the fix: papplied and bytes should be updated even though the
+	// snapshot was aborted. The WAL was compacted, so the size must reflect that.
+	n.RLock()
+	papplied := n.papplied
+	bytesAfter := n.bytes
+	n.RUnlock()
+
+	require_Equal(t, papplied, 2)
+	require_Equal(t, bytesAfter, 0)
+
+	walEntries, walBytes = n.Size()
+	require_Equal(t, walEntries, 0)
+	require_Equal(t, walBytes, 0)
+}
