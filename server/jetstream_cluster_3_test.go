@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
+	"strconv"
 	"net"
 	"os"
 	"path/filepath"
@@ -8165,4 +8167,166 @@ func TestJetStreamClusterStaleConsumerAssignmentNode(t *testing.T) {
 			"goroutine from starting (jetstream_cluster.go:5803).", cf.Name())
 	}
 	t.Log("ca.Group.node was properly cleared (no stale state)")
+}
+
+// TestJetStreamClusterStaleConsumerNodeAfterUnsupportedStreamUpdate verifies that
+// ca.Group.node is cleaned up when a stream becomes unsupported and then the
+// consumer is reassigned away from this server.
+//
+// The flow that triggers the stale node in production:
+//  1. Stream + consumer are running normally on all R3 peers.
+//  2. A stream config update arrives that is unsupported (e.g., requires a higher
+//     API level). processStreamAssignment calls mset.stop(false, false), which stops
+//     all consumers via stopWithFlags(dflag=false). This removes consumers from the
+//     stream's internal map and stops raft nodes, but does NOT clear ca.Group.node.
+//  3. A consumer reassignment arrives where this server is no longer a member.
+//     processConsumerAssignment copies the stale ca.Group.node from the old CA,
+//     then tries acc.lookupStream() which returns nil (stream was removed from
+//     jsa.streams by mset.stop). Without the fix at the end of processConsumerAssignment,
+//     ca.Group.node remains stale, causing alreadyRunning=true on a future scale-up.
+func TestJetStreamClusterStaleConsumerNodeAfterUnsupportedStreamUpdate(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Step 1: Create a normal R3 stream and consumer.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Name:     "CONSUMER",
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Wait for all servers to have the consumer running with a raft node.
+	checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+		for _, s := range c.servers {
+			sjs := s.getJetStream()
+			sjs.mu.RLock()
+			ca := sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+			hasNode := ca != nil && ca.Group != nil && ca.Group.node != nil
+			sjs.mu.RUnlock()
+			if !hasNode {
+				return fmt.Errorf("server %s: consumer assignment missing or no raft node", s.Name())
+			}
+		}
+		return nil
+	})
+
+	// Pick a server that will become a non-member for the consumer.
+	// We'll use a non-meta-leader to avoid complications.
+	target := c.randomNonLeader()
+	require_NotNil(t, target)
+	t.Logf("Target server (will become non-member): %s", target.Name())
+
+	// Get the target server's peer ID so we can exclude it from the consumer group.
+	targetJS := target.getJetStream()
+	targetJS.mu.RLock()
+	targetPeerID := targetJS.cluster.meta.ID()
+	targetJS.mu.RUnlock()
+
+	// Step 2: Update the stream to be "unsupported" by setting a high API level.
+	// This triggers processStreamAssignment (update path) → mset.stop(false, false)
+	// on all servers, which stops consumers without clearing ca.Group.node.
+	ml := c.leader()
+	require_NotNil(t, ml)
+	mlJS := ml.getJetStream()
+
+	mlJS.mu.Lock()
+	cc := mlJS.cluster
+	sa := cc.streams[globalAccountName]["TEST"]
+	// Modify the stream config to require a future API level.
+	sa.Config.Metadata = map[string]string{
+		"_nats.req.level": strconv.Itoa(math.MaxInt),
+	}
+	err = cc.meta.Propose(encodeUpdateStreamAssignment(sa))
+	mlJS.mu.Unlock()
+	require_NoError(t, err)
+	c.waitOnAllCurrent()
+
+	// Wait for the unsupported stream update to be processed.
+	// After this, mset.stop(false, false) has been called on each server,
+	// removing the stream from jsa.streams and stopping consumers without
+	// clearing ca.Group.node.
+	checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+		for _, s := range c.servers {
+			acc, err := s.lookupAccount(globalAccountName)
+			if err != nil {
+				return err
+			}
+			if mset, _ := acc.lookupStream("TEST"); mset != nil && !mset.closed.Load() {
+				return fmt.Errorf("server %s: stream still running", s.Name())
+			}
+		}
+		return nil
+	})
+
+	// Verify ca.Group.node is still set (stale) on the target server.
+	targetJS.mu.RLock()
+	ca := targetJS.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+	staleNode := ca != nil && ca.Group != nil && ca.Group.node != nil
+	targetJS.mu.RUnlock()
+	require_True(t, staleNode)
+	t.Log("Confirmed: ca.Group.node is stale on target after unsupported stream update")
+
+	// Step 3: Propose a consumer reassignment that excludes the target server.
+	// Build a group with only the other two servers' peer IDs.
+	mlJS.mu.Lock()
+	cc = mlJS.cluster
+	sa = cc.streams[globalAccountName]["TEST"]
+	oldCA := sa.consumers["CONSUMER"]
+	var newPeers []string
+	for _, p := range oldCA.Group.Peers {
+		if p != targetPeerID {
+			newPeers = append(newPeers, p)
+		}
+	}
+	newCA := &consumerAssignment{
+		Config:  &ConsumerConfig{Name: "CONSUMER", Replicas: len(newPeers)},
+		Group:   &raftGroup{Name: oldCA.Group.Name, Peers: newPeers, Storage: oldCA.Group.Storage, Cluster: oldCA.Group.Cluster},
+		Stream:  "TEST",
+		Name:    "CONSUMER",
+		Created: oldCA.Created,
+		Client:  oldCA.Client,
+	}
+	err = cc.meta.Propose(encodeAddConsumerAssignment(newCA))
+	mlJS.mu.Unlock()
+	require_NoError(t, err)
+	c.waitOnAllCurrent()
+
+	// Wait for the consumer assignment to be processed on the target.
+	// processConsumerAssignment should detect that isMember=false and clear
+	// the stale ca.Group.node (via the fix at the end of the else branch).
+	checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+		targetJS.mu.RLock()
+		ca := targetJS.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+		targetJS.mu.RUnlock()
+		if ca == nil {
+			return fmt.Errorf("consumer assignment not found on target")
+		}
+		if !ca.Group.isMember(targetPeerID) {
+			return nil // Assignment updated, target is no longer a member
+		}
+		return fmt.Errorf("target still a member in consumer group")
+	})
+
+	// Verify that ca.Group.node has been cleared.
+	targetJS.mu.RLock()
+	ca = targetJS.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+	stillStale := ca != nil && ca.Group != nil && ca.Group.node != nil
+	targetJS.mu.RUnlock()
+
+	if stillStale {
+		t.Fatalf("BUG: ca.Group.node is still stale on server %s after processConsumerAssignment "+
+			"(non-member path). The stream was stopped via the unsupported stream update path "+
+			"(mset.stop(false, false)), which stopped consumers without clearing ca.Group.node. "+
+			"The subsequent consumer reassignment should have cleared it.", target.Name())
+	}
+	t.Log("ca.Group.node was properly cleared after unsupported stream update + consumer reassignment")
 }
