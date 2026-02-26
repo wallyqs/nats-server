@@ -2,6 +2,7 @@
 
 **Date:** 2026-02-26
 **Scope:** `server/gateway.go` (3,426 lines) and `server/gateway_test.go` (7,667 lines)
+**Focus Area:** Stale connection detection and reconnection recovery timing
 
 ---
 
@@ -9,7 +10,9 @@
 
 The gateway code is a mature, complex subsystem responsible for cross-cluster message routing in NATS. It implements a sophisticated interest propagation system with three modes (Optimistic, Transitioning, InterestOnly) and manages both inbound and outbound gateway connections with full-mesh topology via gossip.
 
-Overall, the code is well-structured with good concurrency primitives. However, this investigation identified several stability concerns across four categories: **race conditions**, **error handling gaps**, **test flakiness risks**, and **design-level concerns**.
+This investigation was prompted by reports that **gateway connections are prone to becoming stale and take too long to recover and reconnect**. The analysis found several concrete issues that explain this behavior, detailed in the new Section 5 below.
+
+Overall, the code is well-structured with good concurrency primitives. However, this investigation identified several stability concerns across five categories: **stale connection detection gaps**, **reconnection timing issues**, **race conditions**, **error handling gaps**, and **test flakiness risks**.
 
 ---
 
@@ -243,26 +246,211 @@ Line 2524-2528 and usage at 2593/2775: A `sync.Pool` is used for subscription ob
 
 ---
 
-## 5. Summary of Findings
+## 5. Stale Connections and Slow Recovery (Reported Issue)
 
-| Category | Issue | Severity | Status |
-|----------|-------|----------|--------|
-| Race Condition | TLS config race in `sendGatewayConnect` | High | Acknowledged (FIXME) |
-| Race Condition | outsim pointer validity window | Low | By design |
-| Race Condition | Mode transition message routing | Medium | By design |
-| Deadlock Risk | pasi.Lock → c.mu.Lock ordering | Low | Correct currently |
-| Error Handling | Panics on JSON marshal failure | Low probability, high impact | Open |
-| Error Handling | Missing protocol violation check | Low | Open (TODO) |
-| Error Handling | 0.0.0.0 address advertising | Medium | Open (TODO) |
-| Performance | Hardcoded interest-only threshold | Low | Open (TODO) |
-| Test Stability | 29 time.Sleep calls in tests | Medium | Ongoing risk |
-| Test Stability | Global state mutations in tests | Low | Managed via defer |
-| Test Stability | TestGatewayComplexSetup retry loop | Medium | Fragile pattern |
+This section directly addresses the reported behavior: **gateway connections becoming stale and taking too long to recover**.
 
-### Recommendations
+### 5.1 Stale Connection Detection Timeline
 
-1. **Fix the TLS config race** (line 959) by acquiring `cfg.RLock()` before reading `TLSConfig`.
-2. **Replace panics** with error returns and connection closure in `generateInfoJSON` and `sendGatewayConnect`.
-3. **Reduce test flakiness** by replacing `time.Sleep` patterns with channel-based synchronization where feasible.
-4. **Consider making the interest-only threshold configurable** or adaptive based on account activity.
-5. **Plan for optimistic mode removal** to simplify the codebase once backward compatibility is no longer needed.
+Gateway connections rely on the **ping/pong mechanism** to detect staleness. Here's how it works and where the delays accumulate:
+
+**Key parameters (defaults):**
+
+| Parameter | Default | Source |
+|-----------|---------|--------|
+| `PingInterval` | 2 minutes | `server/const.go:120` |
+| `gwMaxPingInterval` | 15 seconds | `server/gateway.go:58` — caps `PingInterval` for gateways |
+| `MaxPingsOut` | 2 | `server/const.go:123` |
+| `firstPingInterval` | 1 second | `server/server.go:58` — only for initial ping |
+| `WriteDeadline` | 10 seconds | `server/const.go:132` |
+
+**Stale detection formula:**
+
+For gateways, `adjustPingInterval()` (`server/client.go:5605`) caps the ping interval at `gwMaxPingInterval` (15s). With `MaxPingsOut=2`:
+
+```
+Time to detect stale = PingInterval * (MaxPingsOut + 1)
+                     = min(PingInterval, 15s) * 3
+                     = 15s * 3 = 45 seconds (worst case with defaults)
+```
+
+**However, the actual worst case is worse because:**
+
+1. **The ping timer fires every `PingInterval`** — so the first ping may not go out for up to 15 seconds after the connection goes stale
+2. **Each unanswered ping increments `ping.out`** but the connection is only closed when `ping.out + 1 > MaxPingsOut` (`server/client.go:5581`)
+3. **With `MaxPingsOut=2`**: first ping at T+15s, second at T+30s, detection at T+45s
+
+**Worst-case stale detection time: ~45 seconds** (with default settings).
+
+### 5.2 Outbound Connection: Pre-INFO Stale Detection
+
+For **outbound** gateway connections, there's a special stale detection path (`server/gateway.go:939-946`):
+
+```go
+// For outbound, we can't set the normal ping timer yet since the other
+// side would fail with a parse error should it receive anything but the
+// CONNECT protocol as the first protocol.
+if solicit {
+    c.watchForStaleConnection(adjustPingInterval(GATEWAY, opts.PingInterval), opts.MaxPingsOut)
+}
+```
+
+`watchForStaleConnection` (`server/client.go:5620-5627`) sets a single timer for `PingInterval * (MaxPingsOut + 1)`. This means if the remote never sends its INFO protocol, the connection sits for `15s * 3 = 45 seconds` before being detected as stale. The test `TestGatewayOutboundDetectsStaleConnectionIfNoInfo` (`server/gateway_test.go:7473`) specifically validates this path.
+
+**Problem:** During this 45-second window, the gateway appears connected but is completely non-functional. No messages flow and no alternative connection is attempted.
+
+### 5.3 Half-Open TCP Connection Scenario
+
+The most problematic scenario for stale connections is a **half-open TCP connection** (remote dies without sending FIN — e.g., network partition, VM crash, firewall drop):
+
+1. **Read side:** The `readLoop` blocks on `reader.Read(b)` (`server/client.go:1358`). Without TCP keepalive at the OS level or a read deadline, this can block indefinitely.
+2. **Write side:** Writes will eventually fail when the TCP send buffer fills, but only if messages are being sent. A gateway with no traffic won't detect the issue via writes.
+3. **Ping/pong:** This is the **only** mechanism to detect the half-open case. With 15s intervals, it takes **up to 45 seconds** to detect.
+
+**No read deadline is set on gateway connections.** Looking at `server/client.go:6361`, read deadlines are only set during TLS handshake, not during normal operation. This means detection relies entirely on the ping/pong cycle.
+
+### 5.4 Reconnection Delay Analysis
+
+Once a stale connection is **detected**, the reconnection path introduces further delays:
+
+**Step 1: `reconnectGateway`** (`server/gateway.go:689-702`)
+```go
+delay := time.Duration(rand.Intn(100)) * time.Millisecond  // 0-100ms jitter
+if !cfg.isImplicit() {
+    delay += gatewayReconnectDelay  // +1 second for explicit gateways
+}
+```
+
+- **Explicit gateways:** 1.0–1.1 seconds delay before first attempt
+- **Implicit gateways:** 0–100ms delay
+
+**Step 2: `solicitGateway` loop** (`server/gateway.go:706-785`)
+- **TCP dial timeout:** 1 second per URL (`DEFAULT_ROUTE_DIAL`, `server/const.go:156`)
+- **Between-attempt delay:** starts at 1 second (`gatewayConnectDelay`)
+- **Exponential backoff** (when `ConnectBackoff=true`): 1s → 2s → 4s → 8s → 16s → 30s (capped at `gatewayConnectMaxDelay`)
+- **No jitter on backoff delays** — only the initial reconnect has jitter
+
+**Worst-case reconnection timeline (explicit gateway, backoff enabled, remote unavailable):**
+
+| Step | Delay | Cumulative |
+|------|-------|------------|
+| Stale detection | 45s | 45s |
+| reconnectGateway delay | 1.1s | 46.1s |
+| Attempt 1: wait 1s + dial 1s | 2s | 48.1s |
+| Attempt 2: wait 2s + dial 1s | 3s | 51.1s |
+| Attempt 3: wait 4s + dial 1s | 5s | 56.1s |
+| Attempt 4: wait 8s + dial 1s | 9s | 65.1s |
+| Attempt 5: wait 16s + dial 1s | 17s | 82.1s |
+| Attempt 6+: wait 30s + dial 1s | 31s each | 113.1s+ |
+
+**Total time from connection going stale to reconnection (if remote comes back after attempt 5): ~82 seconds.**
+
+### 5.5 Specific Gaps Identified
+
+#### Gap 1: No Gateway-Specific Ping Configuration
+
+Unlike routes (`opts.Cluster.PingInterval`) and websocket (`opts.Websocket.PingInterval`), **gateways have no dedicated PingInterval setting** (`server/opts.go:114-140`). They rely on the global `PingInterval` capped at 15 seconds. Operators who want faster stale detection for gateways must lower the global `PingInterval`, which also affects all clients.
+
+**Location:** `server/client.go:5551` — gateway falls through to the global `opts.PingInterval` with no gateway-specific override.
+
+#### Gap 2: No Gateway-Specific MaxPingsOut Configuration
+
+Similarly, there is no `Gateway.MaxPingsOut` setting. Routes have `opts.Cluster.MaxPingsOut` (`server/client.go:5578-5579`), but gateways use the global `MaxPingsOut` (default: 2).
+
+**Location:** `server/client.go:5577` — uses global `opts.MaxPingsOut` for gateways.
+
+#### Gap 3: Exponential Backoff Has No Jitter
+
+The exponential backoff in `solicitGateway` (`server/gateway.go:776-782`) doubles the delay but adds **no jitter**:
+
+```go
+if opts.Gateway.ConnectBackoff {
+    attemptDelay *= 2
+    if attemptDelay > gatewayConnectMaxDelay {
+        attemptDelay = gatewayConnectMaxDelay
+    }
+}
+```
+
+When multiple gateways lose connectivity simultaneously (e.g., network partition recovery), they all retry at the same exponential intervals, creating **thundering herd** reconnection storms. Compare with `reconnectGateway` (line 692) which does add jitter for the initial delay, but this jitter doesn't carry into the backoff.
+
+#### Gap 4: Write Timeout Policy Defaults to Retry (Not Close)
+
+For gateways, the `WriteTimeoutPolicy` defaults to `WriteTimeoutPolicyRetry` (`server/client.go:731`):
+
+```go
+case GATEWAY:
+    if c.out.wtp = opts.Gateway.WriteTimeout; c.out.wtp == WriteTimeoutPolicyDefault {
+        c.out.wtp = WriteTimeoutPolicyRetry
+    }
+```
+
+This means when a write deadline is exceeded, the gateway connection is marked as a **slow consumer but NOT closed** (`server/client.go:1890-1895`). It stays open in a degraded state, retrying writes. For a truly stale connection, this means the write side may keep retrying for a long time before the ping/pong mechanism finally closes the connection.
+
+#### Gap 5: Implicit Gateway Removal After ConnectRetries
+
+For implicit (auto-discovered) gateways, if `ConnectRetries` is exceeded and there is no inbound connection, **the gateway is permanently deleted** (`server/gateway.go:767`):
+
+```go
+delete(s.gateway.remotes, cfg.Name)
+```
+
+This means if a network partition lasts longer than `ConnectRetries * backoff_delays`, the gateway is forgotten and won't automatically re-establish even when the network recovers. The only way to recover is if the remote side initiates a new connection.
+
+#### Gap 6: 1-Second Fixed Reconnect Delay for Explicit Gateways
+
+`reconnectGateway` adds a fixed 1-second `gatewayReconnectDelay` for explicit gateways (`server/gateway.go:693-694`). This is not configurable. For latency-sensitive deployments, this adds an unnecessary fixed floor to recovery time.
+
+### 5.6 Best-Case vs Worst-Case Recovery Summary
+
+| Scenario | Detection Time | Reconnection Time | Total |
+|----------|---------------|-------------------|-------|
+| Clean disconnect (FIN received) | Immediate | 1.0-1.1s + dial | ~2.2s |
+| Half-open TCP, no backoff | Up to 45s | 1.0-1.1s + dial | ~47s |
+| Half-open TCP, with backoff, remote comes back after 3 attempts | Up to 45s | 1.1s + 2s + 3s + 5s | ~56s |
+| Half-open TCP, with backoff, 30s cap reached | Up to 45s | 1.1s + 67s+ | ~113s+ |
+
+---
+
+## 6. Summary of Findings
+
+| # | Category | Issue | Severity | Status |
+|---|----------|-------|----------|--------|
+| 1 | **Stale Detection** | **No gateway-specific PingInterval setting** | **High** | Gap |
+| 2 | **Stale Detection** | **No gateway-specific MaxPingsOut setting** | **High** | Gap |
+| 3 | **Stale Detection** | **45s worst-case stale detection time** | **High** | By design |
+| 4 | **Reconnection** | **No jitter on exponential backoff (thundering herd)** | **High** | Gap |
+| 5 | **Reconnection** | **Fixed 1s reconnect delay for explicit gateways** | **Medium** | Gap |
+| 6 | **Reconnection** | **Implicit gateways deleted after ConnectRetries** | **Medium** | By design |
+| 7 | **Write Side** | **WriteTimeoutPolicy defaults to Retry, not Close** | **Medium** | By design |
+| 8 | Race Condition | TLS config race in `sendGatewayConnect` | High | Acknowledged (FIXME) |
+| 9 | Race Condition | outsim pointer validity window | Low | By design |
+| 10 | Race Condition | Mode transition message routing | Medium | By design |
+| 11 | Deadlock Risk | pasi.Lock → c.mu.Lock ordering | Low | Correct currently |
+| 12 | Error Handling | Panics on JSON marshal failure | Low probability, high impact | Open |
+| 13 | Error Handling | Missing protocol violation check | Low | Open (TODO) |
+| 14 | Error Handling | 0.0.0.0 address advertising | Medium | Open (TODO) |
+| 15 | Performance | Hardcoded interest-only threshold | Low | Open (TODO) |
+| 16 | Test Stability | 29 time.Sleep calls in tests | Medium | Ongoing risk |
+| 17 | Test Stability | Global state mutations in tests | Low | Managed via defer |
+| 18 | Test Stability | TestGatewayComplexSetup retry loop | Medium | Fragile pattern |
+
+### Recommendations (Ordered by Impact on Stale Connection / Slow Recovery Issues)
+
+1. **Add gateway-specific `PingInterval` and `MaxPingsOut` configuration** to `GatewayOpts` (like routes have `Cluster.PingInterval` and `Cluster.MaxPingsOut`). This would allow operators to tune stale detection independently. For example, setting `Gateway.PingInterval=5s` and `Gateway.MaxPingsOut=1` would reduce detection from 45s to ~10s.
+
+2. **Add jitter to the exponential backoff** in `solicitGateway` (line 776). When a network partition heals and multiple gateways reconnect simultaneously, the lack of jitter creates thundering herd behavior. Adding `rand.Intn(attemptDelay/4)` jitter would spread reconnection attempts.
+
+3. **Make `gatewayReconnectDelay` configurable** — the fixed 1-second delay before reconnection attempts begin adds latency to every explicit gateway recovery. Allowing operators to tune this (or set it to 0) would improve recovery time.
+
+4. **Consider defaulting `WriteTimeoutPolicy` to `Close` for gateways** instead of `Retry`. A gateway connection that repeatedly fails write deadlines is likely stale and should be replaced rather than retried indefinitely. At minimum, add a max-retry count before closure.
+
+5. **Fix the TLS config race** (line 959) by acquiring `cfg.RLock()` before reading `TLSConfig`.
+
+6. **Replace panics** with error returns and connection closure in `generateInfoJSON` and `sendGatewayConnect`.
+
+7. **Reduce test flakiness** by replacing `time.Sleep` patterns with channel-based synchronization where feasible.
+
+8. **Consider making the interest-only threshold configurable** or adaptive based on account activity.
+
+9. **Plan for optimistic mode removal** to simplify the codebase once backward compatibility is no longer needed.
