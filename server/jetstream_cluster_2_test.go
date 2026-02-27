@@ -5950,6 +5950,89 @@ func TestJetStreamClusterR1StreamPlacementUnevenStorage(t *testing.T) {
 	}
 }
 
+func TestJetStreamClusterR3StreamPlacementUnevenStorage(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "JSC", 5)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Phase 1: Create initial R3 streams and publish varying amounts of data
+	// to create uneven storage usage across nodes. Since each R3 stream has
+	// replicas on 3 of 5 nodes, this creates non-uniform storage consumption.
+	payload := make([]byte, 1024) // 1KB messages
+	for i := 0; i < 5; i++ {
+		sname := fmt.Sprintf("SEED-%d", i)
+		_, err := js.AddStream(&nats.StreamConfig{
+			Name:     sname,
+			Subjects: []string{fmt.Sprintf("seed.%d", i)},
+			Replicas: 3,
+		})
+		require_NoError(t, err)
+
+		// Publish increasing amounts of data per stream so the nodes
+		// hosting replicas end up with different storage usage.
+		for j := 0; j < (i+1)*200; j++ {
+			_, err := js.Publish(fmt.Sprintf("seed.%d", i), payload)
+			require_NoError(t, err)
+		}
+	}
+
+	// Force stats propagation so the meta leader sees updated storage.
+	for _, s := range c.servers {
+		s.sendStatszUpdate()
+	}
+	time.Sleep(time.Millisecond * 500)
+
+	// Verify storage is actually uneven across servers.
+	var storeUsage []uint64
+	for _, s := range c.servers {
+		jsz, err := s.Jsz(nil)
+		require_NoError(t, err)
+		storeUsage = append(storeUsage, jsz.JetStreamStats.Store)
+	}
+	t.Logf("Storage usage per server after seeding: %v", storeUsage)
+
+	// Snapshot stream replica counts per server before creating new streams.
+	before := make(map[string]int)
+	for _, s := range c.servers {
+		jsz, err := s.Jsz(nil)
+		require_NoError(t, err)
+		before[s.Name()] = jsz.Streams
+	}
+
+	// Phase 2: Create many R3 streams without maxBytes and verify the
+	// replicas are well-distributed despite the uneven storage.
+	totalStreams := 50
+	for i := 0; i < totalStreams; i++ {
+		sname := fmt.Sprintf("T-%d", i)
+		_, err := js.AddStream(&nats.StreamConfig{
+			Name:     sname,
+			Subjects: []string{fmt.Sprintf("test.%d", i)},
+			Replicas: 3,
+		})
+		require_NoError(t, err)
+	}
+
+	// Each R3 stream places 3 replicas across 5 servers.
+	// Total new replicas = 50 * 3 = 150, expected ~30 per server.
+	expectedPer := totalStreams * 3 / 5
+	sp := make(map[string]int)
+	for _, s := range c.servers {
+		jsz, err := s.Jsz(nil)
+		require_NoError(t, err)
+		sp[s.Name()] = jsz.Streams - before[s.Name()]
+	}
+
+	t.Logf("New replica distribution: %v", sp)
+	for serverName, num := range sp {
+		if num > 2*expectedPer {
+			t.Fatalf("Replicas not distributed, expected ~%d but got %d for server %q (distribution: %v)",
+				expectedPer, num, serverName, sp)
+		}
+	}
+}
+
 func TestJetStreamClusterConsumerAndStreamNamesWithPathSeparators(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "JSC", 3)
 	defer c.shutdown()
