@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1284,6 +1285,92 @@ func TestJWTAccountLimitsMaxPayloadButServerOverrides(t *testing.T) {
 	}
 	if !strings.Contains(l, "Maximum Payload") {
 		t.Fatalf("Expected an ERR for max payload violation, got: %v", l)
+	}
+}
+
+func TestJWTUserLimitsOverflowInt32(t *testing.T) {
+	const overflowVal int64 = 10737418240 // Exceeds math.MaxInt32
+
+	// Set user-level JWT limits that would overflow int32.
+	nuc := newJWTTestUserClaims()
+	nuc.Limits.Subs = overflowVal
+	nuc.Limits.Payload = overflowVal
+	s, c, _ := setupJWTTestWithUserClaims(t, nuc, "+OK")
+	defer s.Shutdown()
+	defer c.close()
+
+	// Verify the client limits were clamped properly rather than
+	// overflowing to a negative value. A negative msubs/mpay would either
+	// block all operations or cause panics downstream.
+	c.mu.Lock()
+	mpay := c.mpay
+	msubs := c.msubs
+	c.mu.Unlock()
+
+	// mpay is min(clamped_user_jwt=MaxInt32, server_default=1MB), so the
+	// server default wins. The key check is that it's positive (not
+	// overflowed to negative from the unclamped 10737418240).
+	if mpay <= 0 {
+		t.Fatalf("Expected client mpay to be positive, got %d (int32 overflow?)", mpay)
+	}
+	// msubs: server default is 0 (unlimited, encoded as -1), account is
+	// also unlimited, so the clamped user JWT value of MaxInt32 wins.
+	if msubs != math.MaxInt32 {
+		t.Fatalf("Expected client msubs to be clamped to MaxInt32 (%d), got %d", math.MaxInt32, msubs)
+	}
+}
+
+func TestJWTAccountLimitsOverflowInt32(t *testing.T) {
+	const overflowVal int64 = 10737418240 // Exceeds math.MaxInt32
+
+	// Set account-level JWT limits that would overflow int32.
+	fooAC := newJWTTestAccountClaims()
+	fooAC.Limits.Conn = overflowVal
+	fooAC.Limits.LeafNodeConn = overflowVal
+	fooAC.Limits.Subs = overflowVal
+	fooAC.Limits.Payload = overflowVal
+	s, fooKP, c, _ := setupJWTTestWitAccountClaims(t, fooAC, "+OK")
+	defer s.Shutdown()
+	defer c.close()
+
+	fooPub, _ := fooKP.PublicKey()
+	fooAcc, _ := s.LookupAccount(fooPub)
+	fooAcc.mu.RLock()
+	mconns := fooAcc.mconns
+	mleafs := fooAcc.mleafs
+	msubs := fooAcc.msubs
+	mpay := fooAcc.mpay
+	fooAcc.mu.RUnlock()
+
+	// All account limits should be clamped to math.MaxInt32.
+	if mconns != math.MaxInt32 {
+		t.Fatalf("Expected account mconns to be MaxInt32 (%d), got %d", math.MaxInt32, mconns)
+	}
+	if mleafs != math.MaxInt32 {
+		t.Fatalf("Expected account mleafs to be MaxInt32 (%d), got %d", math.MaxInt32, mleafs)
+	}
+	if msubs != math.MaxInt32 {
+		t.Fatalf("Expected account msubs to be MaxInt32 (%d), got %d", math.MaxInt32, msubs)
+	}
+	if mpay != math.MaxInt32 {
+		t.Fatalf("Expected account mpay to be MaxInt32 (%d), got %d", math.MaxInt32, mpay)
+	}
+
+	// Simulate a remote server update — previously this would panic
+	// due to int32 overflow arithmetic in the 'over' calculation.
+	clients := fooAcc.updateRemoteServer(&AccountNumConns{
+		Server: ServerInfo{
+			ID:   "fake-server-1",
+			Name: "fake-nats-1",
+		},
+		AccountStat: AccountStat{
+			Account:   fooPub,
+			Conns:     1,
+			LeafNodes: 1,
+		},
+	})
+	if len(clients) != 0 {
+		t.Fatalf("Expected no clients to disconnect, got %d", len(clients))
 	}
 }
 
