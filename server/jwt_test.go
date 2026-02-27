@@ -1287,6 +1287,47 @@ func TestJWTAccountLimitsMaxPayloadButServerOverrides(t *testing.T) {
 	}
 }
 
+// TestJWTAccountLimitsOverflowInt32Panic reproduces a panic caused by int32
+// overflow when account JWT claims set LeafNodeConn (or Conn, Subs, Payload)
+// to a value exceeding math.MaxInt32. The overflow causes negative limit
+// values which lead to a slice bounds out of range panic in updateRemoteServer.
+//
+// Expected on unfixed code:
+//   panic: runtime error: slice bounds out of range [2147483647:0]
+//   at server/accounts.go updateRemoteServer()
+func TestJWTAccountLimitsOverflowInt32Panic(t *testing.T) {
+	// 10737418240 exceeds int32 max (2147483647). When cast to int32
+	// without clamping, it wraps to -2147483648.
+	fooAC := newJWTTestAccountClaims()
+	fooAC.Limits.Conn = 10737418240
+	fooAC.Limits.LeafNodeConn = 10737418240
+	fooAC.Limits.Subs = 10737418240
+	fooAC.Limits.Payload = 10737418240
+	s, fooKP, c, _ := setupJWTTestWitAccountClaims(t, fooAC, "+OK")
+	defer s.Shutdown()
+	defer c.close()
+
+	fooPub, _ := fooKP.PublicKey()
+	fooAcc, _ := s.LookupAccount(fooPub)
+
+	// This call panics on unfixed code due to int32 overflow arithmetic
+	// in the 'over' calculation when computing leaf node disconnections.
+	clients := fooAcc.updateRemoteServer(&AccountNumConns{
+		Server: ServerInfo{
+			ID:   "fake-server-1",
+			Name: "fake-nats-1",
+		},
+		AccountStat: AccountStat{
+			Account:   fooPub,
+			Conns:     1,
+			LeafNodes: 1,
+		},
+	})
+	if len(clients) != 0 {
+		t.Fatalf("Expected no clients to disconnect, got %d", len(clients))
+	}
+}
+
 func TestJWTAccountLimitsMaxConns(t *testing.T) {
 	fooAC := newJWTTestAccountClaims()
 	fooAC.Limits.Conn = 8
