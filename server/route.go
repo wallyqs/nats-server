@@ -95,9 +95,10 @@ type route struct {
 
 // This contains the information required to create a new route.
 type routeInfo struct {
-	url        *url.URL
-	rtype      RouteType
-	gossipMode byte
+	url          *url.URL
+	rtype        RouteType
+	gossipMode   byte
+	resolvedAddr string // Pre-resolved IP:port for pool-filling chain
 }
 
 // Do not change the values/order since they are exchanged between servers.
@@ -2405,10 +2406,18 @@ func (s *Server) addRoute(c *client, didSolicit, sendDelayedInfo bool, gossipMod
 		// that we have proper authentication.
 		if pool && didSolicit && sz != effectivePoolSize {
 			c.mu.Lock()
+			// Capture the resolved remote address so that subsequent pool
+			// connections target the same server instead of re-resolving
+			// DNS and potentially landing on a different one.
+			var resolvedAddr string
+			if c.nc != nil {
+				resolvedAddr = c.nc.RemoteAddr().String()
+			}
 			c.route.startNewRoute = &routeInfo{
-				url:        url,
-				rtype:      rtype,
-				gossipMode: gossipMode,
+				url:          url,
+				rtype:        rtype,
+				gossipMode:   gossipMode,
+				resolvedAddr: resolvedAddr,
 			}
 			c.sendPing()
 			c.mu.Unlock()
@@ -2884,7 +2893,7 @@ func (s *Server) routeStillValid(rURL *url.URL) bool {
 	return false
 }
 
-func (s *Server) connectToRoute(rURL *url.URL, rtype RouteType, firstConnect bool, gossipMode byte, accName string) {
+func (s *Server) connectToRoute(rURL *url.URL, rtype RouteType, firstConnect bool, gossipMode byte, accName string, resolvedAddr ...string) {
 	defer s.grWG.Done()
 	if rURL == nil {
 		return
@@ -2903,6 +2912,15 @@ func (s *Server) connectToRoute(rURL *url.URL, rtype RouteType, firstConnect boo
 	excludedAddresses := s.routesToSelf
 	s.mu.RUnlock()
 
+	// If a pre-resolved address was provided (pool-filling chain), use it
+	// directly to ensure we connect to the same server we are filling pool
+	// slots for, rather than re-resolving DNS and potentially landing on a
+	// different server.
+	var targetAddr string
+	if len(resolvedAddr) > 0 {
+		targetAddr = resolvedAddr[0]
+	}
+
 	attemptDelay := routeConnectDelay
 	for attempts := 0; s.isRunning(); {
 		if tryForEver {
@@ -2919,10 +2937,16 @@ func (s *Server) connectToRoute(rURL *url.URL, rtype RouteType, firstConnect boo
 			}
 		}
 		var conn net.Conn
-		address, err := s.getRandomIP(resolver, rURL.Host, excludedAddresses)
-		if err == errNoIPAvail {
-			// This is ok, we are done.
-			return
+		var address string
+		var err error
+		if targetAddr != _EMPTY_ {
+			address = targetAddr
+		} else {
+			address, err = s.getRandomIP(resolver, rURL.Host, excludedAddresses)
+			if err == errNoIPAvail {
+				// This is ok, we are done.
+				return
+			}
 		}
 		if err == nil {
 			s.Debugf("Trying to connect to route on %s (%s)", rURL.Host, address)

@@ -2711,7 +2711,7 @@ func (c *client) processPong() {
 	}
 	if ri != nil {
 		srv.startGoRoutine(func() {
-			srv.connectToRoute(ri.url, ri.rtype, true, ri.gossipMode, _EMPTY_)
+			srv.connectToRoute(ri.url, ri.rtype, true, ri.gossipMode, _EMPTY_, ri.resolvedAddr)
 		})
 	}
 }
