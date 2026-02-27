@@ -1320,6 +1320,52 @@ func TestJWTUserLimitsOverflowInt32(t *testing.T) {
 	}
 }
 
+// TestJWTUserLimitsOverflowInt32SubPub verifies that a user JWT with int64
+// limits exceeding MaxInt32 does not break subscribe and publish operations.
+// Without clamping, the int64→int32 cast could overflow to a negative value
+// which would cause subsAtLimit() to always return true (blocking all
+// subscriptions) and every publish to trigger a max payload violation.
+func TestJWTUserLimitsOverflowInt32SubPub(t *testing.T) {
+	const overflowVal int64 = 10737418240 // Exceeds math.MaxInt32
+
+	nuc := newJWTTestUserClaims()
+	nuc.Limits.Subs = overflowVal
+	nuc.Limits.Payload = overflowVal
+	s, c, cr := setupJWTTestWithUserClaims(t, nuc, "+OK")
+	defer s.Shutdown()
+	defer c.close()
+
+	// Drain the PONG left in the buffer from the CONNECT handshake.
+	expectPong(t, cr)
+
+	// Helper to consume +OK (verbose mode) then PONG.
+	expectOKAndPong := func() {
+		t.Helper()
+		l, _ := cr.ReadString('\n')
+		if !strings.HasPrefix(l, "+OK") {
+			t.Fatalf("Expected +OK, got %q", l)
+		}
+		expectPong(t, cr)
+	}
+
+	// Subscriptions must succeed. Before the clamping fix, msubs would
+	// overflow to a negative int32, making subsAtLimit() return true for
+	// any number of subscriptions (len(c.subs) >= negative is always true).
+	c.parseAsync("SUB foo 1\r\nPING\r\n")
+	expectOKAndPong()
+
+	c.parseAsync("SUB bar 2\r\nPING\r\n")
+	expectOKAndPong()
+
+	// Publish must succeed. Before the fix, mpay would overflow to a
+	// negative int32, making the payload check int64(size) > int64(negative)
+	// always true, which would reject every message.
+	// Publish to a subject we're not subscribed to so the response stream
+	// is not interleaved with a delivered MSG.
+	c.parseAsync("PUB baz 5\r\nhello\r\nPING\r\n")
+	expectOKAndPong()
+}
+
 func TestJWTAccountLimitsOverflowInt32(t *testing.T) {
 	const overflowVal int64 = 10737418240 // Exceeds math.MaxInt32
 
