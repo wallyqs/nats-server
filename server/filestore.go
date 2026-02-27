@@ -11975,6 +11975,10 @@ func init() {
 func (o *consumerFileStore) writeState(buf []byte) error {
 	// Check if we have the index file open.
 	o.mu.Lock()
+	if o.closed {
+		o.mu.Unlock()
+		return ErrStoreClosed
+	}
 	if o.writing || len(buf) == 0 {
 		o.mu.Unlock()
 		return nil

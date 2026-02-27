@@ -13313,10 +13313,13 @@ func TestFileStoreNoDirectoryNotEmptyError(t *testing.T) {
 		AckPolicy:      AckExplicit,
 	}
 
+	// Test with SetStarting as the concurrent writer.
 	for i := range 100 {
 		oname := fmt.Sprintf("delcons_%d", i)
 		obs, err := fs.ConsumerStore(oname, time.Time{}, &oconfig)
 		require_NoError(t, err)
+
+		odir := filepath.Join(fcfg.StoreDir, consumerDir, oname)
 
 		wg := sync.WaitGroup{}
 		wg.Add(1)
@@ -13334,5 +13337,44 @@ func TestFileStoreNoDirectoryNotEmptyError(t *testing.T) {
 		err = obs.Delete()
 		require_NoError(t, err)
 		wg.Wait()
+
+		// Verify the consumer directory was actually removed.
+		_, statErr := os.Stat(odir)
+		require_True(t, os.IsNotExist(statErr))
+	}
+
+	// Test with UpdateDelivered (triggers flush loop) as the concurrent writer.
+	for i := range 100 {
+		oname := fmt.Sprintf("delcons_flush_%d", i)
+		obs, err := fs.ConsumerStore(oname, time.Time{}, &oconfig)
+		require_NoError(t, err)
+
+		odir := filepath.Join(fcfg.StoreDir, consumerDir, oname)
+
+		done := make(chan struct{})
+		wg := sync.WaitGroup{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := uint64(1); ; j++ {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				obs.UpdateDelivered(j, j, 1, time.Now().UnixNano())
+			}
+		}()
+
+		time.Sleep(time.Duration(rand.Intn(10)) * time.Millisecond)
+
+		err = obs.Delete()
+		require_NoError(t, err)
+		close(done)
+		wg.Wait()
+
+		// Verify the consumer directory was actually removed.
+		_, statErr := os.Stat(odir)
+		require_True(t, os.IsNotExist(statErr))
 	}
 }
