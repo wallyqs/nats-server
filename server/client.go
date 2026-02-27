@@ -1736,7 +1736,6 @@ func (c *client) flushOutbound() bool {
 		// can be tuned to a known maximum quantity (64MB).
 		nc.SetWriteDeadline(time.Now().Add(wdl))
 		wn, err = wnb.WriteTo(nc)
-		nc.SetWriteDeadline(time.Time{})
 
 		// Update accounting, move wnb slice onwards if needed, or stop
 		// if a write error was reported that wasn't a short write.
@@ -1746,6 +1745,10 @@ func (c *client) flushOutbound() bool {
 			break
 		}
 	}
+	// Clear the write deadline after the loop rather than on each iteration.
+	// The deadline is overwritten at the start of each iteration anyway, so
+	// clearing inside the loop was an unnecessary extra syscall per batch.
+	nc.SetWriteDeadline(time.Time{})
 
 	lft := time.Since(start)
 
