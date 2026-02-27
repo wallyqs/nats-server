@@ -3798,6 +3798,214 @@ func TestRoutePoolBadAuthNoRunawayCreateRoute(t *testing.T) {
 	checkClusterFormed(t, s1, s2)
 }
 
+// dnsPoolTrackingResolver is a mock DNS resolver that returns a fixed set of
+// IPs and tracks how many times LookupHost is called. Used to verify that
+// route pool filling does not re-resolve DNS on each chain step.
+type dnsPoolTrackingResolver struct {
+	mu      sync.Mutex
+	ips     []string
+	lookups int
+}
+
+func (r *dnsPoolTrackingResolver) LookupHost(_ context.Context, _ string) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lookups++
+	return r.ips, nil
+}
+
+func (r *dnsPoolTrackingResolver) getLookupCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lookups
+}
+
+// TestRoutePoolDNSDoesNotReResolveDuringPoolFilling verifies that when filling
+// route pool slots via the startNewRoute chain, the server reuses the resolved
+// IP address from the first successful connection instead of re-resolving DNS
+// on each step. Without the fix, each pool-filling step calls getRandomIP which
+// re-resolves the DNS name. With multiple servers behind a single DNS name
+// (e.g., Docker Compose replicas), this causes connections to wander across
+// different servers, leaving permanent nil gaps in s.routes[remoteID].
+func TestRoutePoolDNSDoesNotReResolveDuringPoolFilling(t *testing.T) {
+	const poolSize = 5
+
+	// Start S1 (the accepting server) with no routes configured.
+	// Disable the system account to avoid automatic pinned account routes
+	// which would add extra DNS lookups unrelated to pool filling.
+	o1 := DefaultOptions()
+	o1.ServerName = "S1"
+	o1.Cluster.Name = "local"
+	o1.Cluster.PoolSize = poolSize
+	o1.NoSystemAccount = true
+	s1 := RunServer(o1)
+	defer s1.Shutdown()
+
+	clusterPort := s1.ClusterAddr().Port
+
+	// Create a tracking resolver that resolves the DNS hostname to 127.0.0.1.
+	resolver := &dnsPoolTrackingResolver{
+		ips: []string{"127.0.0.1"},
+	}
+
+	// Start S2 (the soliciting server) with a DNS-based route URL.
+	// Using "routehost" as hostname forces DNS resolution through the mock resolver.
+	o2 := DefaultOptions()
+	o2.ServerName = "S2"
+	o2.Cluster.Name = "local"
+	o2.Cluster.PoolSize = poolSize
+	o2.NoSystemAccount = true
+	o2.Cluster.resolver = resolver
+	o2.Routes = RoutesFromStr(fmt.Sprintf("nats://routehost:%d", clusterPort))
+	s2 := RunServer(o2)
+	defer s2.Shutdown()
+
+	// Wait for the full cluster to form with all pool connections.
+	checkClusterFormed(t, s1, s2)
+
+	// Verify all pool slots are filled on S2 (no nil gaps).
+	s2.mu.RLock()
+	for id, conns := range s2.routes {
+		for i, r := range conns {
+			if r == nil {
+				s2.mu.RUnlock()
+				t.Fatalf("S2: pool slot %d for remote %q is nil (gap in route pool)", i, id)
+			}
+		}
+	}
+	s2.mu.RUnlock()
+
+	// Verify all pool slots are filled on S1.
+	s1.mu.RLock()
+	for id, conns := range s1.routes {
+		for i, r := range conns {
+			if r == nil {
+				s1.mu.RUnlock()
+				t.Fatalf("S1: pool slot %d for remote %q is nil (gap in route pool)", i, id)
+			}
+		}
+	}
+	s1.mu.RUnlock()
+
+	// The resolver should have been called exactly once: for the initial
+	// connection from S2 to S1. The subsequent pool-filling connections
+	// (4 more for poolSize=5) should reuse the resolved address from
+	// the first connection without calling the resolver again.
+	//
+	// Before the fix, the resolver would be called once per pool slot
+	// (i.e., poolSize times) because each startNewRoute chain step
+	// called connectToRoute which re-resolved DNS via getRandomIP.
+	// With multiple servers behind one DNS name, this random re-resolution
+	// would cause connections to land on different servers, creating nil
+	// gaps in the route pool.
+	lookups := resolver.getLookupCount()
+	if lookups != 1 {
+		t.Fatalf("Expected DNS resolver to be called 1 time (initial connection only), got %d", lookups)
+	}
+}
+
+// TestRoutePoolDNSPoolFillingTargetsSameServer verifies that all route pool
+// connections to a given remote are established to the same resolved address.
+// This ensures the pool-filling chain does not wander across different servers
+// when DNS returns multiple IPs.
+// dnsPoolWanderingResolver simulates a DNS resolver that returns the correct
+// server IP for the first connection but returns only unreachable IPs after
+// that. This reproduces the pool-filling bug: without the fix, subsequent
+// pool connections would re-resolve DNS and get unreachable IPs, failing to
+// fill the pool. With the fix, pool-filling connections reuse the resolved
+// address from the first connection and never call the resolver.
+type dnsPoolWanderingResolver struct {
+	mu      sync.Mutex
+	goodIP  string
+	badIP   string
+	lookups int
+}
+
+func (r *dnsPoolWanderingResolver) LookupHost(_ context.Context, _ string) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lookups++
+	if r.lookups == 1 {
+		return []string{r.goodIP}, nil
+	}
+	return []string{r.badIP}, nil
+}
+
+func (r *dnsPoolWanderingResolver) getLookupCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lookups
+}
+
+// TestRoutePoolDNSPoolFillingWithWanderingResolver verifies that pool filling
+// works even when subsequent DNS lookups would return a wrong/unreachable IP.
+// This simulates the Docker Compose scenario where DNS round-robin returns
+// different server IPs on each resolution.
+//
+// Without the fix, the pool-filling chain re-resolves DNS for each new pool
+// connection. If the resolver returns a different (unreachable) IP, the
+// connection fails and the pool never fills completely.
+//
+// With the fix, the first connection's resolved address is passed through the
+// chain, so pool-filling connections go directly to the correct server.
+func TestRoutePoolDNSPoolFillingWithWanderingResolver(t *testing.T) {
+	const poolSize = 5
+
+	o1 := DefaultOptions()
+	o1.ServerName = "S1"
+	o1.Cluster.Name = "local"
+	o1.Cluster.PoolSize = poolSize
+	o1.NoSystemAccount = true
+	s1 := RunServer(o1)
+	defer s1.Shutdown()
+
+	clusterPort := s1.ClusterAddr().Port
+
+	// Create a resolver that returns the correct IP on the first call
+	// but an unreachable IP on all subsequent calls. This simulates
+	// DNS round-robin returning a different server each time.
+	resolver := &dnsPoolWanderingResolver{
+		goodIP: "127.0.0.1",
+		badIP:  "198.51.100.1", // TEST-NET-2 (RFC 5737), unreachable
+	}
+
+	o2 := DefaultOptions()
+	o2.ServerName = "S2"
+	o2.Cluster.Name = "local"
+	o2.Cluster.PoolSize = poolSize
+	o2.NoSystemAccount = true
+	o2.Cluster.resolver = resolver
+	o2.Routes = RoutesFromStr(fmt.Sprintf("nats://routehost:%d", clusterPort))
+	s2 := RunServer(o2)
+	defer s2.Shutdown()
+
+	// If the fix works, the cluster forms fully because pool-filling
+	// connections reuse the resolved address (127.0.0.1) and never call
+	// the resolver again.
+	// Without the fix, pool filling would call the resolver, get
+	// 198.51.100.1 (unreachable), and fail to fill the remaining slots.
+	checkClusterFormed(t, s1, s2)
+
+	// Verify all pool slots are filled on S2 (no nil gaps).
+	s2.mu.RLock()
+	for id, conns := range s2.routes {
+		for i, r := range conns {
+			if r == nil {
+				s2.mu.RUnlock()
+				t.Fatalf("S2: pool slot %d for remote %q is nil (gap in route pool)", i, id)
+			}
+		}
+	}
+	s2.mu.RUnlock()
+
+	// The resolver should have been called exactly once (for the initial
+	// connection). Pool-filling used the resolved address directly.
+	lookups := resolver.getLookupCount()
+	if lookups != 1 {
+		t.Fatalf("Expected DNS resolver to be called 1 time, got %d", lookups)
+	}
+}
+
 func TestRouteCompressionOptions(t *testing.T) {
 	org := testDefaultClusterCompression
 	testDefaultClusterCompression = _EMPTY_
