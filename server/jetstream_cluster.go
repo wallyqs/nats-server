@@ -7466,6 +7466,8 @@ func (cc *jetStreamCluster) selectPeerGroup(r int, cluster string, cfg *StreamCo
 		return nil, &err
 	}
 	// Sort based on available from most to least, breaking ties by number of total streams assigned to the peer.
+	// When maxBytes is not set, sort by stream count first to ensure balanced distribution,
+	// since available storage won't change with stream placement and would create a static ordering.
 	slices.SortFunc(nodes, func(i, j wn) int {
 		// Prefer online servers to offline ones.
 		if i.off != j.off {
@@ -7474,6 +7476,12 @@ func (cc *jetStreamCluster) selectPeerGroup(r int, cluster string, cfg *StreamCo
 			} else {
 				return -1
 			}
+		}
+		if maxBytes == 0 {
+			if i.ns != j.ns {
+				return cmp.Compare(i.ns, j.ns)
+			}
+			return -cmp.Compare(i.avail, j.avail) // reverse
 		}
 		if i.avail == j.avail {
 			return cmp.Compare(i.ns, j.ns)

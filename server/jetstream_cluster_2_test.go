@@ -5860,14 +5860,15 @@ func TestJetStreamClusterNoRestartAdvisories(t *testing.T) {
 }
 
 func TestJetStreamClusterR1StreamPlacementNoReservation(t *testing.T) {
-	c := createJetStreamClusterExplicit(t, "JSC", 3)
+	c := createJetStreamClusterExplicit(t, "JSC", 5)
 	defer c.shutdown()
 
 	nc, js := jsClientConnect(t, c.randomServer())
 	defer nc.Close()
 
+	totalStreams := 100
 	sp := make(map[string]int)
-	for i := 0; i < 100; i++ {
+	for i := 0; i < totalStreams; i++ {
 		sname := fmt.Sprintf("T-%d", i)
 		_, err := js.AddStream(&nats.StreamConfig{
 			Name: sname,
@@ -5876,9 +5877,10 @@ func TestJetStreamClusterR1StreamPlacementNoReservation(t *testing.T) {
 		sp[c.streamLeader("$G", sname).Name()]++
 	}
 
+	expectedPer := totalStreams / 5 // 20 per server
 	for serverName, num := range sp {
-		if num > 60 {
-			t.Fatalf("Streams not distributed, expected ~30-35 but got %d for server %q", num, serverName)
+		if num > 2*expectedPer {
+			t.Fatalf("Streams not distributed, expected ~%d but got %d for server %q", expectedPer, num, serverName)
 		}
 	}
 }
