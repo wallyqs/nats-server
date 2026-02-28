@@ -168,8 +168,8 @@ type StreamConsumerLimits struct {
 
 // SubjectTransformConfig is for applying a subject transform (to matching messages) before doing anything else when a new message is received
 type SubjectTransformConfig struct {
-	Source      string `json:"src"`
-	Destination string `json:"dest"`
+	Source      string `json:"src,omitempty"`
+	Destination string `json:"dest,omitempty"`
 }
 
 // RePublish is for republishing messages once committed to a stream.
@@ -2703,13 +2703,16 @@ func (mset *stream) sourceInfo(si *sourceInfo) *StreamSourceInfo {
 
 	var ssi = StreamSourceInfo{Name: si.name, Lag: si.lag, Error: si.err, FilterSubject: si.sf}
 
-	trConfigs := make([]SubjectTransformConfig, len(si.sfs))
+	var trConfigs []SubjectTransformConfig
 	for i := range si.sfs {
 		var destination string
 		if si.trs[i] != nil {
 			destination = si.trs[i].dest
 		}
-		trConfigs[i] = SubjectTransformConfig{si.sfs[i], destination}
+		if si.sfs[i] == _EMPTY_ && destination == _EMPTY_ {
+			continue
+		}
+		trConfigs = append(trConfigs, SubjectTransformConfig{si.sfs[i], destination})
 	}
 
 	ssi.SubjectTransforms = trConfigs
