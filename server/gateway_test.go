@@ -7859,3 +7859,307 @@ func TestGatewayCrashRMsgSubjectNoInterestOnOutbound(t *testing.T) {
 	sa.mu.Unlock()
 	require_True(t, running)
 }
+
+// ===========================================================================
+// Super cluster topology tests: malicious leafnode trying to crash a server
+// that has both gateway and leafnode ports open.
+// ===========================================================================
+
+// TestSuperClusterLeafNodeGWReplySubjectInjection verifies that a malicious
+// leafnode sending messages with _GR_ prefixed subjects does not crash the
+// server. The _GR_ prefix is normally used for gateway reply routing but
+// leafnodes are not blocked from using it (unlike clients which are blocked
+// at client.go:4176). The message should be forwarded through gateways
+// without crashing.
+func TestSuperClusterLeafNodeGWReplySubjectInjection(t *testing.T) {
+	GatewayDoNotForceInterestOnlyMode(true)
+	defer GatewayDoNotForceInterestOnlyMode(false)
+
+	// Set up server B with both gateway and leafnode ports.
+	ob := testDefaultOptionsForGateway("B")
+	ob.NoSystemAccount = false
+	ob.Accounts = []*Account{NewAccount("SYS")}
+	ob.SystemAccount = "SYS"
+	ob.LeafNode.Host = "127.0.0.1"
+	ob.LeafNode.Port = -1
+	sb := runGatewayServer(ob)
+	defer sb.Shutdown()
+
+	// Set up server A connected to B via gateway.
+	oa := testGatewayOptionsFromToWithServers(t, "A", "B", sb)
+	sa := runGatewayServer(oa)
+	defer sa.Shutdown()
+
+	waitForOutboundGateways(t, sa, 1, time.Second)
+	waitForOutboundGateways(t, sb, 1, time.Second)
+
+	// Connect a "malicious" leafnode to B.
+	leafURL, _ := url.Parse(fmt.Sprintf("nats://127.0.0.1:%d", ob.LeafNode.Port))
+	lo := DefaultOptions()
+	lo.ServerName = "LEAF"
+	lo.NoSystemAccount = true
+	lo.Cluster.Name = _EMPTY_
+	lo.Gateway.Name = _EMPTY_
+	lo.LeafNode.Remotes = []*RemoteLeafOpts{{URLs: []*url.URL{leafURL}}}
+	lo.LeafNode.ReconnectInterval = 100 * time.Millisecond
+	sleaf := RunServer(lo)
+	defer sleaf.Shutdown()
+	checkLeafNodeConnected(t, sb)
+
+	// Connect a NATS client to the malicious leafnode.
+	ncLeaf := natsConnect(t, sleaf.ClientURL())
+	defer ncLeaf.Close()
+
+	// Get the gateway cluster hash so we can craft a valid _GR_ subject.
+	clusterHash := string(sb.gateway.getClusterHash())
+
+	// Send messages with _GR_ prefixed subjects.
+	// This should NOT crash any server.
+	for i := 0; i < 10; i++ {
+		subj := fmt.Sprintf("_GR_.%s.AAAAAA.test.subject.%d", clusterHash, i)
+		natsPub(t, ncLeaf, subj, []byte("malicious"))
+	}
+	natsFlush(t, ncLeaf)
+
+	// Give time for messages to propagate.
+	time.Sleep(250 * time.Millisecond)
+
+	// Both servers should still be running.
+	require_True(t, sa.Running())
+	require_True(t, sb.Running())
+}
+
+// TestSuperClusterLeafNodeSendsAccountSubUnsub verifies that a malicious
+// leafnode sending A+/A- (account subscribe/unsubscribe) protocols does
+// not crash the server. These are allowed by the parser for non-CLIENT
+// connections but silently ignored for LEAF connections.
+func TestSuperClusterLeafNodeSendsAccountSubUnsub(t *testing.T) {
+	GatewayDoNotForceInterestOnlyMode(true)
+	defer GatewayDoNotForceInterestOnlyMode(false)
+
+	// Set up server B with both gateway and leafnode ports.
+	ob := testDefaultOptionsForGateway("B")
+	ob.NoSystemAccount = false
+	ob.Accounts = []*Account{NewAccount("SYS")}
+	ob.SystemAccount = "SYS"
+	ob.LeafNode.Host = "127.0.0.1"
+	ob.LeafNode.Port = -1
+	sb := runGatewayServer(ob)
+	defer sb.Shutdown()
+
+	// Set up server A connected to B via gateway.
+	oa := testGatewayOptionsFromToWithServers(t, "A", "B", sb)
+	sa := runGatewayServer(oa)
+	defer sa.Shutdown()
+
+	waitForOutboundGateways(t, sa, 1, time.Second)
+	waitForOutboundGateways(t, sb, 1, time.Second)
+
+	// Connect a leafnode to B via raw TCP to send arbitrary protocol.
+	lc, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", ob.LeafNode.Port))
+	require_NoError(t, err)
+	defer lc.Close()
+
+	// Read INFO from server.
+	buf := make([]byte, 4096)
+	lc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := lc.Read(buf)
+	require_NoError(t, err)
+	require_True(t, n > 0)
+	lc.SetReadDeadline(time.Time{})
+
+	// Send CONNECT to complete handshake.
+	_, err = lc.Write([]byte("CONNECT {}\r\n"))
+	require_NoError(t, err)
+
+	// Wait for the leafnode to be registered.
+	checkLeafNodeConnected(t, sb)
+
+	// Now send A+ and A- protocols. The parser allows these for LEAF
+	// connections but the handler (processAccountSub/processAccountUnsub)
+	// ignores them for non-GATEWAY connections.
+	_, err = lc.Write([]byte("A+ $G\r\n"))
+	require_NoError(t, err)
+	_, err = lc.Write([]byte("A- $G\r\n"))
+	require_NoError(t, err)
+	_, err = lc.Write([]byte("A+ nonexistent\r\n"))
+	require_NoError(t, err)
+	_, err = lc.Write([]byte("A- nonexistent\r\n"))
+	require_NoError(t, err)
+	_, err = lc.Write([]byte("PING\r\n"))
+	require_NoError(t, err)
+
+	// Read PONG to confirm protocols were processed without crash.
+	lc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err = lc.Read(buf)
+	lc.SetReadDeadline(time.Time{})
+	require_NoError(t, err)
+	require_True(t, n > 0)
+
+	// Both servers should still be running.
+	require_True(t, sa.Running())
+	require_True(t, sb.Running())
+}
+
+// TestSuperClusterLeafNodeMsgForwardedToGateway tests that messages from a
+// leafnode are correctly forwarded through gateways without crashes,
+// including messages with unusual subjects. In a super cluster, a leafnode's
+// messages flow: leafnode -> hub server -> gateway -> remote cluster.
+func TestSuperClusterLeafNodeMsgForwardedToGateway(t *testing.T) {
+	// Set up server A (remote cluster).
+	aConf := createConfFile(t, []byte(`
+		server_name: "A"
+		listen: "127.0.0.1:-1"
+		accounts {
+			ACC { users: [{user: user, password: pwd}] }
+			SYS { users: [{user: sys, password: sys}] }
+		}
+		system_account: SYS
+		gateway {
+			name: "A"
+			listen: "127.0.0.1:-1"
+		}
+	`))
+	sa, oa := RunServerWithConfig(aConf)
+	defer sa.Shutdown()
+
+	// Set up server B (hub) with both gateway and leafnode ports.
+	bConf := createConfFile(t, fmt.Appendf(nil, `
+		server_name: "B"
+		listen: "127.0.0.1:-1"
+		accounts {
+			ACC { users: [{user: user, password: pwd}] }
+			SYS { users: [{user: sys, password: sys}] }
+		}
+		system_account: SYS
+		gateway {
+			name: "B"
+			listen: "127.0.0.1:-1"
+			gateways: [
+				{
+					name: "A"
+					urls: ["nats://127.0.0.1:%d"]
+				}
+			]
+		}
+		leafnodes {
+			listen: "127.0.0.1:-1"
+		}
+	`, oa.Gateway.Port))
+	sb, ob := RunServerWithConfig(bConf)
+	defer sb.Shutdown()
+
+	waitForOutboundGateways(t, sa, 1, 2*time.Second)
+	waitForOutboundGateways(t, sb, 1, 2*time.Second)
+	waitForInboundGateways(t, sa, 1, 2*time.Second)
+	waitForInboundGateways(t, sb, 1, 2*time.Second)
+
+	// Create a subscriber on A on the ACC account.
+	ncA := natsConnect(t, sa.ClientURL(), nats.UserInfo("user", "pwd"))
+	defer ncA.Close()
+	sub := natsSubSync(t, ncA, "test.>")
+	natsFlush(t, ncA)
+
+	// Wait for subscription interest to propagate through gateway.
+	checkGWInterestOnlyModeInterestOn(t, sb, "A", "ACC", "test.>")
+
+	// Connect a leafnode to B on the ACC account.
+	leafConf := createConfFile(t, fmt.Appendf(nil, `
+		server_name: "LEAF"
+		listen: "127.0.0.1:-1"
+		leafnodes {
+			remotes: [
+				{ url: "nats://user:pwd@127.0.0.1:%d" }
+			]
+		}
+	`, ob.LeafNode.Port))
+	sleaf, _ := RunServerWithConfig(leafConf)
+	defer sleaf.Shutdown()
+	checkLeafNodeConnected(t, sleaf)
+
+	// Connect a client to the leafnode and send messages.
+	ncLeaf := natsConnect(t, sleaf.ClientURL())
+	defer ncLeaf.Close()
+
+	// Send normal messages that get forwarded through gateway.
+	natsPub(t, ncLeaf, "test.normal", []byte("hello"))
+	// Send messages with reply subjects.
+	ncLeaf.PublishRequest("test.request", "reply.to.me", []byte("request"))
+	natsFlush(t, ncLeaf)
+
+	// Verify we received messages on A (through gateway).
+	for i := 0; i < 2; i++ {
+		msg := natsNexMsg(t, sub, 2*time.Second)
+		require_True(t, msg != nil)
+	}
+
+	// Both servers and leafnode should still be running.
+	require_True(t, sa.Running())
+	require_True(t, sb.Running())
+	require_True(t, sleaf.Running())
+}
+
+// TestSuperClusterGatewayPortCrashWithLeafNodePresent demonstrates that
+// in a super cluster topology where both gateway and leafnode ports are
+// open, the gateway port remains vulnerable to cross-direction protocol
+// injection. A malicious entity connecting to the gateway port can crash
+// the server even while leafnodes are connected and operational.
+// This is the real attack vector in a super cluster deployment.
+func TestSuperClusterGatewayPortCrashWithLeafNodePresent(t *testing.T) {
+	GatewayDoNotForceInterestOnlyMode(true)
+	defer GatewayDoNotForceInterestOnlyMode(false)
+
+	// Set up server B with both gateway and leafnode ports.
+	ob := testDefaultOptionsForGateway("B")
+	ob.NoSystemAccount = false
+	ob.Accounts = []*Account{NewAccount("SYS")}
+	ob.SystemAccount = "SYS"
+	ob.LeafNode.Host = "127.0.0.1"
+	ob.LeafNode.Port = -1
+	sb := runGatewayServer(ob)
+	defer sb.Shutdown()
+
+	// Set up server A connected to B via gateway.
+	oa := testGatewayOptionsFromToWithServers(t, "A", "B", sb)
+	sa := runGatewayServer(oa)
+	defer sa.Shutdown()
+
+	waitForOutboundGateways(t, sa, 1, time.Second)
+	waitForOutboundGateways(t, sb, 1, time.Second)
+	waitForInboundGateways(t, sa, 1, time.Second)
+	waitForInboundGateways(t, sb, 1, time.Second)
+
+	// Connect a legitimate leafnode to B.
+	leafURL, _ := url.Parse(fmt.Sprintf("nats://127.0.0.1:%d", ob.LeafNode.Port))
+	lo := DefaultOptions()
+	lo.ServerName = "LEAF"
+	lo.NoSystemAccount = true
+	lo.Cluster.Name = _EMPTY_
+	lo.Gateway.Name = _EMPTY_
+	lo.LeafNode.Remotes = []*RemoteLeafOpts{{URLs: []*url.URL{leafURL}}}
+	lo.LeafNode.ReconnectInterval = 100 * time.Millisecond
+	sleaf := RunServer(lo)
+	defer sleaf.Shutdown()
+	checkLeafNodeConnected(t, sb)
+
+	// Now simulate a malicious gateway peer. Get B's outbound connection
+	// to A and inject A+ on the wrong direction. This sends A+ from B's
+	// outbound to A's inbound (where outsim is nil).
+	gwBOut := sb.getOutboundGatewayConnection("A")
+	require_True(t, gwBOut != nil)
+
+	// This CRASHES server A's inbound gateway readLoop with nil pointer
+	// dereference on outsim.Load() in processGatewayAccountSub.
+	gwBOut.mu.Lock()
+	gwBOut.enqueueProto([]byte("A+ $G\r\n"))
+	gwBOut.mu.Unlock()
+
+	// Give the readLoop time to process.
+	time.Sleep(250 * time.Millisecond)
+
+	// Server A will have crashed from the gateway protocol violation.
+	sa.mu.Lock()
+	aRunning := sa.isRunning()
+	sa.mu.Unlock()
+	require_True(t, aRunning)
+}
