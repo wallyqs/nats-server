@@ -7665,3 +7665,197 @@ func TestGatewayProcessRSubNoBlockingAccountFetch(t *testing.T) {
 	require_Len(t, subs, 0)
 	require_LessThan(t, time.Since(start), 100*time.Millisecond)
 }
+
+// ===========================================================================
+// Reproduction tests for gateway nil pointer crashes caused by cross-direction
+// protocol violations (sending protocols to the wrong connection type).
+// ===========================================================================
+
+// TestGatewayCrashAccountSubOnInbound reproduces a nil pointer crash when
+// A+ (account subscribe) is received on an inbound gateway connection.
+// A+/A- protocols are meant to be processed by outbound connections (which
+// have outsim initialized). Inbound connections have outsim == nil,
+// so calling outsim.Load() panics.
+func TestGatewayCrashAccountSubOnInbound(t *testing.T) {
+	GatewayDoNotForceInterestOnlyMode(true)
+	defer GatewayDoNotForceInterestOnlyMode(false)
+
+	ob := testDefaultOptionsForGateway("B")
+	sb := runGatewayServer(ob)
+	defer sb.Shutdown()
+
+	oa := testGatewayOptionsFromToWithServers(t, "A", "B", sb)
+	sa := runGatewayServer(oa)
+	defer sa.Shutdown()
+
+	waitForOutboundGateways(t, sa, 1, time.Second)
+	waitForInboundGateways(t, sa, 1, time.Second)
+	waitForOutboundGateways(t, sb, 1, time.Second)
+	waitForInboundGateways(t, sb, 1, time.Second)
+
+	// Get B's outbound connection to A. Data enqueued here is read by
+	// A's inbound gateway readLoop (where outsim is nil).
+	gwBOut := sb.getOutboundGatewayConnection("A")
+	require_True(t, gwBOut != nil)
+
+	// Send A+ on the wrong direction. This should be handled gracefully,
+	// but currently causes a nil pointer dereference on outsim.Load()
+	// in processGatewayAccountSub (gateway.go line ~1910).
+	gwBOut.mu.Lock()
+	gwBOut.enqueueProto([]byte("A+ $G\r\n"))
+	gwBOut.mu.Unlock()
+
+	// Give the readLoop time to process the protocol.
+	time.Sleep(250 * time.Millisecond)
+
+	// Verify server A is still running (will fail if it crashed).
+	sa.mu.Lock()
+	running := sa.isRunning()
+	sa.mu.Unlock()
+	require_True(t, running)
+}
+
+// TestGatewayCrashAccountUnsubOnInbound reproduces a nil pointer crash when
+// A- (account unsubscribe) is received on an inbound gateway connection.
+// Same root cause as TestGatewayCrashAccountSubOnInbound — outsim is nil
+// on inbound connections and outsim.Load()/outsim.Store() panics.
+func TestGatewayCrashAccountUnsubOnInbound(t *testing.T) {
+	GatewayDoNotForceInterestOnlyMode(true)
+	defer GatewayDoNotForceInterestOnlyMode(false)
+
+	ob := testDefaultOptionsForGateway("B")
+	sb := runGatewayServer(ob)
+	defer sb.Shutdown()
+
+	oa := testGatewayOptionsFromToWithServers(t, "A", "B", sb)
+	sa := runGatewayServer(oa)
+	defer sa.Shutdown()
+
+	waitForOutboundGateways(t, sa, 1, time.Second)
+	waitForInboundGateways(t, sa, 1, time.Second)
+	waitForOutboundGateways(t, sb, 1, time.Second)
+	waitForInboundGateways(t, sb, 1, time.Second)
+
+	// Get B's outbound connection to A. Data enqueued here is read by
+	// A's inbound gateway readLoop (where outsim is nil).
+	gwBOut := sb.getOutboundGatewayConnection("A")
+	require_True(t, gwBOut != nil)
+
+	// Send A- on the wrong direction. This should be handled gracefully,
+	// but currently causes a nil pointer dereference on outsim.Load()
+	// in processGatewayAccountUnsub (gateway.go line ~1882).
+	gwBOut.mu.Lock()
+	gwBOut.enqueueProto([]byte("A- $G\r\n"))
+	gwBOut.mu.Unlock()
+
+	// Give the readLoop time to process the protocol.
+	time.Sleep(250 * time.Millisecond)
+
+	// Verify server A is still running (will fail if it crashed).
+	sa.mu.Lock()
+	running := sa.isRunning()
+	sa.mu.Unlock()
+	require_True(t, running)
+}
+
+// TestGatewayCrashRMsgOnOutbound reproduces a nil map write crash when
+// RMSG (routed message) is received on an outbound gateway connection.
+// RMSG is meant to be processed by inbound connections (which have insim
+// initialized). Outbound connections have insim == nil, so writing to
+// insim in sendAccountUnsubToGateway panics with "assignment to entry
+// in nil map".
+func TestGatewayCrashRMsgOnOutbound(t *testing.T) {
+	GatewayDoNotForceInterestOnlyMode(true)
+	defer GatewayDoNotForceInterestOnlyMode(false)
+
+	ob := testDefaultOptionsForGateway("B")
+	sb := runGatewayServer(ob)
+	defer sb.Shutdown()
+
+	oa := testGatewayOptionsFromToWithServers(t, "A", "B", sb)
+	sa := runGatewayServer(oa)
+	defer sa.Shutdown()
+
+	waitForOutboundGateways(t, sa, 1, time.Second)
+	waitForInboundGateways(t, sa, 1, time.Second)
+	waitForOutboundGateways(t, sb, 1, time.Second)
+	waitForInboundGateways(t, sb, 1, time.Second)
+
+	// Get B's inbound connection from A. Data enqueued here is read by
+	// A's outbound gateway readLoop (where insim is nil).
+	gwBIn := getInboundGatewayConnection(sb, "A")
+	require_True(t, gwBIn != nil)
+
+	// Send RMSG on the wrong direction with a nonexistent account.
+	// This triggers:
+	//   processInboundGatewayMsg -> acc==nil ->
+	//   gatewayHandleAccountNoInterest ->
+	//   sendAccountUnsubToGateway ->
+	//   c.gw.insim[...] = nil  (write to nil map -> panic!)
+	gwBIn.mu.Lock()
+	gwBIn.enqueueProto([]byte("RMSG $nonexistent foo 2\r\nok\r\n"))
+	gwBIn.mu.Unlock()
+
+	// Give the readLoop time to process the protocol.
+	time.Sleep(250 * time.Millisecond)
+
+	// Verify server A is still running (will fail if it crashed).
+	sa.mu.Lock()
+	running := sa.isRunning()
+	sa.mu.Unlock()
+	require_True(t, running)
+}
+
+// TestGatewayCrashRMsgSubjectNoInterestOnOutbound reproduces a nil map write
+// crash when RMSG is received on an outbound gateway connection and the
+// account exists but has no interest in the subject. This triggers
+// gatewayHandleSubjectNoInterest which writes to c.gw.insim (nil on
+// outbound connections).
+func TestGatewayCrashRMsgSubjectNoInterestOnOutbound(t *testing.T) {
+	GatewayDoNotForceInterestOnlyMode(true)
+	defer GatewayDoNotForceInterestOnlyMode(false)
+
+	ob := testDefaultOptionsForGateway("B")
+	sb := runGatewayServer(ob)
+	defer sb.Shutdown()
+
+	oa := testGatewayOptionsFromToWithServers(t, "A", "B", sb)
+	sa := runGatewayServer(oa)
+	defer sa.Shutdown()
+
+	waitForOutboundGateways(t, sa, 1, time.Second)
+	waitForInboundGateways(t, sa, 1, time.Second)
+	waitForOutboundGateways(t, sb, 1, time.Second)
+	waitForInboundGateways(t, sb, 1, time.Second)
+
+	// Create a subscription on A so the $G account has at least one sub
+	// (this causes processInboundGatewayMsg to find the account but detect
+	// no interest for our specific subject, triggering the second crash path).
+	ncA := natsConnect(t, fmt.Sprintf("nats://%s:%d", oa.Host, oa.Port))
+	defer ncA.Close()
+	natsSubSync(t, ncA, "some.other.subject")
+	natsFlush(t, ncA)
+
+	// Get B's inbound connection from A. Data enqueued here is read by
+	// A's outbound gateway readLoop (where insim is nil).
+	gwBIn := getInboundGatewayConnection(sb, "A")
+	require_True(t, gwBIn != nil)
+
+	// Send RMSG on the wrong direction with the global account but a subject
+	// that has no interest. This triggers:
+	//   processInboundGatewayMsg -> acc found, no interest ->
+	//   gatewayHandleSubjectNoInterest ->
+	//   c.gw.insim[...] = e  (write to nil map -> panic!)
+	gwBIn.mu.Lock()
+	gwBIn.enqueueProto([]byte("RMSG $G no.interest.subject 2\r\nok\r\n"))
+	gwBIn.mu.Unlock()
+
+	// Give the readLoop time to process the protocol.
+	time.Sleep(250 * time.Millisecond)
+
+	// Verify server A is still running (will fail if it crashed).
+	sa.mu.Lock()
+	running := sa.isRunning()
+	sa.mu.Unlock()
+	require_True(t, running)
+}
