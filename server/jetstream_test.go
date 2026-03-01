@@ -22668,3 +22668,132 @@ func TestJetStreamFlowControlCrossAccountFanOut(t *testing.T) {
 		}
 	}
 }
+
+func TestJetStreamEmptySubjectTransformsOmitted(t *testing.T) {
+	// Test that SubjectTransformConfig with empty fields uses omitempty properly.
+	t.Run("JSONOmitEmpty", func(t *testing.T) {
+		// Empty src and dest should produce "{}".
+		b, err := json.Marshal(SubjectTransformConfig{})
+		require_NoError(t, err)
+		require_Equal(t, string(b), "{}")
+
+		// Only src set.
+		b, err = json.Marshal(SubjectTransformConfig{Source: "foo"})
+		require_NoError(t, err)
+		require_Equal(t, string(b), `{"src":"foo"}`)
+
+		// Only dest set.
+		b, err = json.Marshal(SubjectTransformConfig{Destination: "bar"})
+		require_NoError(t, err)
+		require_Equal(t, string(b), `{"dest":"bar"}`)
+
+		// Both set.
+		b, err = json.Marshal(SubjectTransformConfig{Source: "foo", Destination: "bar"})
+		require_NoError(t, err)
+		require_Equal(t, string(b), `{"src":"foo","dest":"bar"}`)
+
+		// Roundtrip: deserializing back should produce the same struct.
+		var stc SubjectTransformConfig
+		err = json.Unmarshal([]byte(`{"src":"foo","dest":"bar"}`), &stc)
+		require_NoError(t, err)
+		require_Equal(t, stc.Source, "foo")
+		require_Equal(t, stc.Destination, "bar")
+
+		// Absent fields deserialize to empty strings.
+		err = json.Unmarshal([]byte(`{}`), &stc)
+		require_NoError(t, err)
+		require_Equal(t, stc.Source, "")
+		require_Equal(t, stc.Destination, "")
+	})
+
+	// Test that sourceInfo filters out empty transforms so that
+	// subject_transforms is omitted from the JSON response.
+	t.Run("SourceInfoFiltersEmpty", func(t *testing.T) {
+		s := RunBasicJetStreamServer(t)
+		defer s.Shutdown()
+
+		nc, js := jsClientConnect(t, s)
+		defer nc.Close()
+
+		// Create an origin stream.
+		_, err := js.AddStream(&nats.StreamConfig{
+			Name:     "ORIGIN",
+			Subjects: []string{"foo", "bar"},
+		})
+		require_NoError(t, err)
+
+		// Create a sourced stream without any subject transforms.
+		_, err = js.AddStream(&nats.StreamConfig{
+			Name:    "SOURCED",
+			Sources: []*nats.StreamSource{{Name: "ORIGIN"}},
+		})
+		require_NoError(t, err)
+
+		// Get raw stream info JSON and verify subject_transforms is not present.
+		resp, err := nc.Request(fmt.Sprintf(JSApiStreamInfoT, "SOURCED"), nil, time.Second)
+		require_NoError(t, err)
+		require_False(t, strings.Contains(string(resp.Data), "subject_transforms"))
+
+		// Now create a sourced stream with actual subject transforms.
+		_, err = js.AddStream(&nats.StreamConfig{
+			Name: "SOURCED_TR",
+			Sources: []*nats.StreamSource{
+				{
+					Name: "ORIGIN",
+					SubjectTransforms: []nats.SubjectTransformConfig{
+						{Source: "foo", Destination: "foo2"},
+					},
+				},
+			},
+		})
+		require_NoError(t, err)
+
+		resp, err = nc.Request(fmt.Sprintf(JSApiStreamInfoT, "SOURCED_TR"), nil, time.Second)
+		require_NoError(t, err)
+		require_True(t, strings.Contains(string(resp.Data), "subject_transforms"))
+		require_True(t, strings.Contains(string(resp.Data), `"src":"foo"`))
+		require_True(t, strings.Contains(string(resp.Data), `"dest":"foo2"`))
+	})
+
+	// Test that a mirror without subject transforms does not include subject_transforms.
+	t.Run("MirrorInfoFiltersEmpty", func(t *testing.T) {
+		s := RunBasicJetStreamServer(t)
+		defer s.Shutdown()
+
+		nc, js := jsClientConnect(t, s)
+		defer nc.Close()
+
+		_, err := js.AddStream(&nats.StreamConfig{
+			Name:     "ORIGIN",
+			Subjects: []string{"foo"},
+		})
+		require_NoError(t, err)
+
+		// Mirror without transforms.
+		_, err = js.AddStream(&nats.StreamConfig{
+			Name:   "MIRROR",
+			Mirror: &nats.StreamSource{Name: "ORIGIN"},
+		})
+		require_NoError(t, err)
+
+		resp, err := nc.Request(fmt.Sprintf(JSApiStreamInfoT, "MIRROR"), nil, time.Second)
+		require_NoError(t, err)
+		require_False(t, strings.Contains(string(resp.Data), "subject_transforms"))
+
+		// Mirror with transforms.
+		_, err = js.AddStream(&nats.StreamConfig{
+			Name: "MIRROR_TR",
+			Mirror: &nats.StreamSource{
+				Name: "ORIGIN",
+				SubjectTransforms: []nats.SubjectTransformConfig{
+					{Source: "foo", Destination: "bar"},
+				},
+			},
+		})
+		require_NoError(t, err)
+
+		resp, err = nc.Request(fmt.Sprintf(JSApiStreamInfoT, "MIRROR_TR"), nil, time.Second)
+		require_NoError(t, err)
+		require_True(t, strings.Contains(string(resp.Data), "subject_transforms"))
+	})
+}
