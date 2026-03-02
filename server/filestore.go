@@ -3855,97 +3855,32 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 		return total, validThrough, nil
 	}
 
-	// If we would need to scan more from the beginning, revert back to calculating directly here.
-	// TODO(dlc) - Redo properly with sublists etc for subject-based filtering.
-	if seqStart >= (len(fs.blks) / 2) {
-		for i := seqStart; i < len(fs.blks); i++ {
-			var shouldExpire bool
-			mb := fs.blks[i]
-			// Hold write lock in case we need to load cache.
-			mb.mu.Lock()
-			if isAll && sseq <= atomic.LoadUint64(&mb.first.seq) {
-				total += mb.msgs
-				mb.mu.Unlock()
-				continue
-			}
-			// If we are here we need to at least scan the subject fss.
-			// Make sure we have fss loaded.
-			if mb.fssNotLoaded() {
-				if err = mb.loadMsgsWithLock(); err != nil {
-					mb.mu.Unlock()
-					return 0, 0, err
-				}
-				shouldExpire = true
-			}
-			// Mark fss activity.
-			mb.lsts = ats.AccessTime()
+	// Use PSIM to partition matching subjects and minimize block scanning.
+	seqStartBI := fs.blks[seqStart].index
 
-			var t uint64
-			var havePartial bool
-			mb.fss.Match(stringToBytes(filter), func(bsubj []byte, ss *SimpleState) {
-				if havePartial {
-					// If we already found a partial then don't do anything else.
-					return
-				}
-				subj := bytesToString(bsubj)
-				if ss.firstNeedsUpdate || ss.lastNeedsUpdate {
-					mb.recalculateForSubj(subj, ss)
-				}
-				if sseq <= ss.First {
-					t += ss.Msgs
-				} else if sseq <= ss.Last {
-					// We matched but its a partial.
-					havePartial = true
-				}
-			})
-
-			// See if we need to scan msgs here.
-			if havePartial {
-				// Make sure we have the cache loaded.
-				if mb.cacheNotLoaded() {
-					if err = mb.loadMsgsWithLock(); err != nil {
-						mb.mu.Unlock()
-						return 0, 0, err
-					}
-					shouldExpire = true
-				}
-				// Clear on partial.
-				t = 0
-				start := sseq
-				if fseq := atomic.LoadUint64(&mb.first.seq); fseq > start {
-					start = fseq
-				}
-				var smv StoreMsg
-				for seq, lseq := start, atomic.LoadUint64(&mb.last.seq); seq <= lseq; seq++ {
-					if sm, _ := mb.cacheLookupNoCopy(seq, &smv); sm != nil && isMatch(sm.subj) {
-						t++
-					}
-				}
-			}
-			// If we loaded this block for this operation go ahead and expire it here.
-			if shouldExpire {
-				mb.tryForceExpireCacheLocked()
-			} else {
-				mb.finishedWithCache()
-			}
-			mb.mu.Unlock()
-			total += t
-		}
-		return total, validThrough, nil
-	}
-
-	// If we are here it's better to calculate totals from psim and adjust downward by scanning less blocks.
-	// TODO(dlc) - Eventually when sublist uses generics, make this sublist driven instead.
 	start := uint32(math.MaxUint32)
 	fs.psim.Match(stringToBytes(filter), func(_ []byte, psi *psi) {
-		total += psi.total
-		// Keep track of start index for this subject.
-		if psi.fblk < start {
-			start = psi.fblk
+		if psi.fblk > seqStartBI {
+			// Subject's first block is past seqStart. Since fblk is lazy
+			// (only behind, never ahead), all messages are after sseq.
+			total += psi.total
+		} else if psi.lblk >= seqStartBI {
+			// Subject straddles seqStart boundary. Add total now,
+			// subtract messages before sseq in the adjustment scan below.
+			total += psi.total
+			if psi.fblk < start {
+				start = psi.fblk
+			}
 		}
+		// psi.lblk < seqStartBI: entirely before sseq, skip.
 	})
 	// See if we were asked for all, if so we are done.
 	if sseq <= fs.state.FirstSeq {
+		return total, validThrough, nil
+	}
+
+	// No straddling subjects, all matching subjects are entirely after sseq.
+	if start == math.MaxUint32 {
 		return total, validThrough, nil
 	}
 
@@ -4185,106 +4120,33 @@ func (fs *fileStore) NumPendingMulti(sseq uint64, sl *gsl.SimpleSublist, lastPer
 		return total, validThrough, nil
 	}
 
-	// If we would need to scan more from the beginning, revert back to calculating directly here.
-	if seqStart >= (len(fs.blks) / 2) {
-		for i := seqStart; i < len(fs.blks); i++ {
-			var shouldExpire bool
-			mb := fs.blks[i]
-			// Hold write lock in case we need to load cache.
-			mb.mu.Lock()
-			if isAll && sseq <= atomic.LoadUint64(&mb.first.seq) {
-				total += mb.msgs
-				mb.mu.Unlock()
-				continue
-			}
-			// If we are here we need to at least scan the subject fss.
-			// Make sure we have fss loaded.
-			if mb.fssNotLoaded() {
-				if err = mb.loadMsgsWithLock(); err != nil {
-					mb.mu.Unlock()
-					return 0, 0, err
-				}
-				shouldExpire = true
-			}
-			// Mark fss activity.
-			mb.lsts = ats.AccessTime()
+	// Use PSIM to partition matching subjects and minimize block scanning.
+	seqStartBI := fs.blks[seqStart].index
 
-			var t uint64
-			var havePartial bool
-			var updateLLTS bool
-			stree.IntersectGSL[SimpleState](mb.fss, sl, func(bsubj []byte, ss *SimpleState) {
-				subj := bytesToString(bsubj)
-				if havePartial {
-					// If we already found a partial then don't do anything else.
-					return
-				}
-				if ss.firstNeedsUpdate || ss.lastNeedsUpdate {
-					mb.recalculateForSubj(subj, ss)
-				}
-				if sseq <= ss.First {
-					t += ss.Msgs
-				} else if sseq <= ss.Last {
-					// We matched but its a partial.
-					havePartial = true
-				}
-			})
-
-			// See if we need to scan msgs here.
-			if havePartial {
-				// Make sure we have the cache loaded.
-				if mb.cacheNotLoaded() {
-					if err = mb.loadMsgsWithLock(); err != nil {
-						mb.mu.Unlock()
-						return 0, 0, err
-					}
-					shouldExpire = true
-				}
-				// Clear on partial.
-				t = 0
-				start := sseq
-				if fseq := atomic.LoadUint64(&mb.first.seq); fseq > start {
-					start = fseq
-				}
-				var smv StoreMsg
-				for seq, lseq := start, atomic.LoadUint64(&mb.last.seq); seq <= lseq; seq++ {
-					if mb.dmap.Exists(seq) {
-						// Optimisation to avoid calling cacheLookup which hits time.Now().
-						updateLLTS = true
-						continue
-					}
-					if sm, _ := mb.cacheLookupNoCopy(seq, &smv); sm != nil && isMatch(sm.subj) {
-						t++
-						updateLLTS = false // cacheLookup already updated it.
-					}
-				}
-			}
-			// If we loaded this block for this operation go ahead and expire it here.
-			if shouldExpire {
-				mb.tryForceExpireCacheLocked()
-			} else {
-				mb.finishedWithCache()
-			}
-			if updateLLTS {
-				mb.llts = ats.AccessTime()
-			}
-			mb.mu.Unlock()
-			total += t
-		}
-		return total, validThrough, nil
-	}
-
-	// If we are here it's better to calculate totals from psim and adjust downward by scanning less blocks.
 	start := uint32(math.MaxUint32)
-	stree.IntersectGSL(fs.psim, sl, func(subj []byte, psi *psi) {
-		total += psi.total
-		// Keep track of start index for this subject.
-		if psi.fblk < start {
-			start = psi.fblk
+	stree.IntersectGSL(fs.psim, sl, func(_ []byte, psi *psi) {
+		if psi.fblk > seqStartBI {
+			// Subject's first block is past seqStart. Since fblk is lazy
+			// (only behind, never ahead), all messages are after sseq.
+			total += psi.total
+		} else if psi.lblk >= seqStartBI {
+			// Subject straddles seqStart boundary. Add total now,
+			// subtract messages before sseq in the adjustment scan below.
+			total += psi.total
+			if psi.fblk < start {
+				start = psi.fblk
+			}
 		}
+		// psi.lblk < seqStartBI: entirely before sseq, skip.
 	})
 
 	// See if we were asked for all, if so we are done.
 	if sseq <= fs.state.FirstSeq {
+		return total, validThrough, nil
+	}
+
+	// No straddling subjects, all matching subjects are entirely after sseq.
+	if start == math.MaxUint32 {
 		return total, validThrough, nil
 	}
 
