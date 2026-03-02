@@ -1539,11 +1539,8 @@ func (o *consumer) setLeader(isLeader bool) {
 			o.updateSkipped(o.sseq)
 		}
 
-		// Setup initial num pending only if not currently paused.
-		// If paused, this will be calculated when the pause expires.
-		if o.cfg.PauseUntil == nil || o.cfg.PauseUntil.IsZero() || !time.Now().Before(*o.cfg.PauseUntil) {
-			o.streamNumPending()
-		}
+		// Setup initial num pending.
+		o.streamNumPending()
 
 		// Cleanup lss when we take over in clustered mode.
 		if o.hasSkipListPending() && o.sseq >= o.lss.resume {
@@ -2408,7 +2405,10 @@ func (o *consumer) updateConfig(cfg *ConsumerConfig) error {
 			o.dtmr = time.AfterFunc(o.dthresh, o.deleteNotActive)
 		}
 	}
-	// Check whether the pause has changed
+	// Check whether the pause has changed. Track if we are transitioning
+	// from paused to unpaused so we can recalculate num pending after the
+	// config is updated (streamNumPending skips while paused).
+	var unpausing bool
 	{
 		var old, new time.Time
 		if o.cfg.PauseUntil != nil {
@@ -2418,13 +2418,9 @@ func (o *consumer) updateConfig(cfg *ConsumerConfig) error {
 			new = *cfg.PauseUntil
 		}
 		if !old.Equal(new) {
-			// If transitioning from paused to unpaused, ensure num pending
-			// is calculated since it may have been deferred during setLeader.
 			wasPaused := !old.IsZero() && time.Now().Before(old)
 			nowPaused := !new.IsZero() && time.Now().Before(new)
-			if wasPaused && !nowPaused {
-				o.streamNumPending()
-			}
+			unpausing = wasPaused && !nowPaused
 			o.updatePauseState(cfg)
 			if o.isLeader() {
 				o.sendPauseAdvisoryLocked(cfg)
@@ -2483,6 +2479,10 @@ func (o *consumer) updateConfig(cfg *ConsumerConfig) error {
 		}
 
 		// Re-calculate num pending on update.
+		o.streamNumPending()
+	} else if unpausing {
+		// Transitioning from paused to unpaused, recalculate num pending
+		// which may have been deferred while the consumer was paused.
 		o.streamNumPending()
 	}
 
@@ -5313,9 +5313,18 @@ func (o *consumer) streamNumPendingLocked() (uint64, error) {
 
 // Will force a set from the stream store of num pending.
 // Depends on delivery policy, for last per subject we calculate differently.
+// If the consumer is currently paused the expensive calculation is skipped
+// and npc/npf are zeroed out; they will be recomputed on unpause.
 // Lock should be held.
 func (o *consumer) streamNumPending() (uint64, error) {
 	if o.mset == nil || o.mset.store == nil {
+		o.npc, o.npf = 0, 0
+		return 0, nil
+	}
+	// Skip the expensive store calculation while the consumer is paused.
+	// The values will be populated when the consumer unpauses via
+	// updatePauseState timer callback or updateConfig.
+	if o.cfg.PauseUntil != nil && !o.cfg.PauseUntil.IsZero() && time.Now().Before(*o.cfg.PauseUntil) {
 		o.npc, o.npf = 0, 0
 		return 0, nil
 	}
