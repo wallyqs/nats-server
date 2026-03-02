@@ -4531,8 +4531,8 @@ func sliceHeader(key string, hdr []byte) []byte {
 	// Skip over the key and the : separator.
 	index += len(key) + 1
 	hdrLen := len(hdr)
-	// Skip over whitespace before the value.
-	for index < hdrLen && hdr[index] == ' ' {
+	// Skip over optional whitespace (spaces and tabs) before the value.
+	for index < hdrLen && (hdr[index] == ' ' || hdr[index] == '\t') {
 		index++
 	}
 	// Collect together the rest of the value until we hit a CRLF.
@@ -4543,7 +4543,12 @@ func sliceHeader(key string, hdr []byte) []byte {
 		}
 		index++
 	}
-	return hdr[start:index:index]
+	// Trim trailing optional whitespace (spaces and tabs) from the value.
+	end := index
+	for end > start && (hdr[end-1] == ' ' || hdr[end-1] == '\t') {
+		end--
+	}
+	return hdr[start:end:end]
 }
 
 // getHeaderKeyIndex returns an index into the header slice for the given key.

@@ -3374,6 +3374,50 @@ func TestSetHeaderOrderingSuffix(t *testing.T) {
 	}
 }
 
+func TestSliceHeaderWhitespaceHandling(t *testing.T) {
+	// Tab used as whitespace after colon should be stripped.
+	t.Run("TabAfterColon", func(t *testing.T) {
+		hdr := []byte("NATS/1.0\r\nNats-Msg-Id:\tabc123\r\n\r\n")
+		require_Equal(t, string(sliceHeader("Nats-Msg-Id", hdr)), "abc123")
+	})
+	// Multiple tabs and spaces after colon should all be stripped.
+	t.Run("MixedWhitespaceAfterColon", func(t *testing.T) {
+		hdr := []byte("NATS/1.0\r\nNats-Msg-Id: \t abc123\r\n\r\n")
+		require_Equal(t, string(sliceHeader("Nats-Msg-Id", hdr)), "abc123")
+	})
+	// Trailing spaces on value should be stripped.
+	t.Run("TrailingSpaces", func(t *testing.T) {
+		hdr := []byte("NATS/1.0\r\nNats-Msg-Id: abc123   \r\n\r\n")
+		require_Equal(t, string(sliceHeader("Nats-Msg-Id", hdr)), "abc123")
+	})
+	// Trailing tabs on value should be stripped.
+	t.Run("TrailingTabs", func(t *testing.T) {
+		hdr := []byte("NATS/1.0\r\nNats-Msg-Id: abc123\t\t\r\n\r\n")
+		require_Equal(t, string(sliceHeader("Nats-Msg-Id", hdr)), "abc123")
+	})
+	// Both leading and trailing whitespace should be stripped.
+	t.Run("LeadingAndTrailing", func(t *testing.T) {
+		hdr := []byte("NATS/1.0\r\nNats-Msg-Id:  \tabc123 \t \r\n\r\n")
+		require_Equal(t, string(sliceHeader("Nats-Msg-Id", hdr)), "abc123")
+	})
+	// Value that is only whitespace should result in empty slice.
+	t.Run("OnlyWhitespace", func(t *testing.T) {
+		hdr := []byte("NATS/1.0\r\nNats-Msg-Id:   \r\n\r\n")
+		require_Equal(t, len(sliceHeader("Nats-Msg-Id", hdr)), 0)
+	})
+	// No space after colon (compact format) should still work.
+	t.Run("NoSpaceAfterColon", func(t *testing.T) {
+		hdr := []byte("NATS/1.0\r\nNats-Msg-Id:abc123\r\n\r\n")
+		require_Equal(t, string(sliceHeader("Nats-Msg-Id", hdr)), "abc123")
+	})
+	// getHeader should return same trimmed value as sliceHeader.
+	t.Run("GetHeaderMatchesSliceHeader", func(t *testing.T) {
+		hdr := []byte("NATS/1.0\r\nNats-Msg-Id: abc123 \r\n\r\n")
+		require_Equal(t, string(getHeader("Nats-Msg-Id", hdr)), "abc123")
+		require_Equal(t, string(sliceHeader("Nats-Msg-Id", hdr)), "abc123")
+	})
+}
+
 func BenchmarkGenHeader(b *testing.B) {
 	hdr := []byte("NATS/1.0\r\nNats-Msg-Id: abc123\r\n\r\n")
 	b.ReportAllocs()
