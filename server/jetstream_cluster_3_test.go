@@ -2895,13 +2895,15 @@ func TestJetStreamClusterInterestPolicyEphemeral(t *testing.T) {
 			require_NoError(t, err)
 
 			// This happens only if we start publishing messages after consumer was created.
-			pubDone := make(chan struct{})
+			pubDone := make(chan error, 1)
 			go func(subject string) {
 				for i := 0; i < msgs; i++ {
-					_, err := js.Publish(subject, []byte("DATA"))
-					require_NoError(t, err)
+					if _, err := js.Publish(subject, []byte("DATA")); err != nil {
+						pubDone <- err
+						return
+					}
 				}
-				close(pubDone)
+				pubDone <- nil
 			}(test.subject)
 
 			// Wait for inactive threshold to expire and all messages to be published and received
@@ -2909,7 +2911,8 @@ func TestJetStreamClusterInterestPolicyEphemeral(t *testing.T) {
 			time.Sleep(3 * inactiveThreshold / 2)
 
 			select {
-			case <-pubDone:
+			case err := <-pubDone:
+				require_NoError(t, err)
 			case <-time.After(10 * time.Second):
 				t.Fatalf("Did not receive completion signal")
 			}
