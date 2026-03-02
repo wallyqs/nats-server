@@ -18,7 +18,10 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -754,5 +757,94 @@ func TestJetStreamMalformedHeaderClusterDirectGetAllNodes(t *testing.T) {
 				require_True(t, bytes.Equal(sm.Data, tt.payload))
 			}
 		})
+	}
+}
+
+// TestNatsClientPanicOnMalformedHeader is a minimal reproducer showing that the
+// nats.go client panics when it receives an HMSG whose version line has a
+// trailing space: "NATS/1.0 \r\n".
+//
+// The panic path in nats.go v1.49.0 DecodeHeadersMsg (nats.go:4155):
+//
+//  1. textproto.ReadLine() returns l = "NATS/1.0 " (9 chars, \r\n stripped).
+//  2. len(l)=9 > hdrPreEnd=8 → enters the status-parsing block.
+//  3. status = strings.TrimSpace(l[8:]) → TrimSpace(" ") → "" (empty).
+//  4. len("")=0 != statusLen=3 → enters the description branch.
+//  5. status[statusLen:] → ""[3:] → panic: slice bounds out of range [3:0].
+//
+// This panic occurs in nats.go's readLoop goroutine, so it cannot be recovered
+// by user code. Any nats.go subscriber receiving this message crashes the process.
+//
+// The test uses a subprocess to contain the panic so it doesn't crash the
+// test runner. The child process is expected to exit non-zero with the panic.
+func TestNatsClientPanicOnMalformedHeader(t *testing.T) {
+	// When running as the subprocess, actually trigger the panic.
+	if os.Getenv("TEST_NATS_PANIC_SUBPROCESS") == "1" {
+		s := RunBasicJetStreamServer(t)
+		defer s.Shutdown()
+
+		nc, _ := jsClientConnect(t, s)
+		defer nc.Close()
+
+		addStream(t, nc, &StreamConfig{
+			Name:     "TEST",
+			Subjects: []string{"foo"},
+			Storage:  MemoryStorage,
+		})
+
+		rawConn, rawCR := rawHPubConn(t, s)
+		defer rawConn.Close()
+
+		hdr := []byte("NATS/1.0 \r\nKey: val\r\n\r\n")
+		sendRawHPUB(t, rawConn, "foo", hdr, []byte("payload"))
+		flushRawConn(t, rawConn, rawCR)
+
+		acc := s.GlobalAccount()
+		mset, err := acc.lookupStream("TEST")
+		require_NoError(t, err)
+		waitForMsgs(t, mset, 1)
+
+		nc2, err := nats.Connect(s.ClientURL())
+		require_NoError(t, err)
+		defer nc2.Close()
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		_, err = nc2.Subscribe("deliver.test", func(msg *nats.Msg) {
+			wg.Done()
+		})
+		require_NoError(t, err)
+		nc2.Flush()
+
+		o, err := mset.addConsumer(&ConsumerConfig{DeliverSubject: "deliver.test"})
+		require_NoError(t, err)
+		defer o.delete()
+
+		// Wait for the panic to crash this process.
+		wg.Wait()
+		return
+	}
+
+	// Parent process: run ourselves as a subprocess and expect a panic crash.
+	cmd := exec.Command(os.Args[0],
+		"-test.run=^TestNatsClientPanicOnMalformedHeader$",
+		"-test.count=1",
+		"-test.timeout=30s",
+	)
+	cmd.Env = append(os.Environ(), "TEST_NATS_PANIC_SUBPROCESS=1")
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+
+	// The subprocess must exit non-zero (panic crashes the process).
+	if err == nil {
+		t.Fatalf("Expected subprocess to crash with panic, but it exited cleanly:\n%s", output)
+	}
+
+	// Verify the panic is the specific DecodeHeadersMsg slice-bounds panic.
+	if !strings.Contains(output, "slice bounds out of range [3:0]") {
+		t.Fatalf("Expected 'slice bounds out of range [3:0]' panic, got:\n%s", output)
+	}
+	if !strings.Contains(output, "DecodeHeadersMsg") {
+		t.Fatalf("Expected panic in DecodeHeadersMsg, got:\n%s", output)
 	}
 }
