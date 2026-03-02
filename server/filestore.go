@@ -3855,31 +3855,30 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 		return total, validThrough, nil
 	}
 
-	// Use PSIM to partition matching subjects and minimize block scanning.
+	// Use PSIM to calculate totals and minimize block scanning.
+	// We add all matching subjects' totals, but only track the adjustment
+	// scan start from subjects that may have messages before sseq.
 	seqStartBI := fs.blks[seqStart].index
 
 	start := uint32(math.MaxUint32)
 	fs.psim.Match(stringToBytes(filter), func(_ []byte, psi *psi) {
-		if psi.fblk > seqStartBI {
-			// Subject's first block is past seqStart. Since fblk is lazy
-			// (only behind, never ahead), all messages are after sseq.
-			total += psi.total
-		} else if psi.lblk >= seqStartBI {
-			// Subject straddles seqStart boundary. Add total now,
-			// subtract messages before sseq in the adjustment scan below.
-			total += psi.total
+		total += psi.total
+		// Only track start for subjects that may need adjustment.
+		// Subjects with fblk > seqStartBI have all messages after sseq
+		// (since fblk is lazy-behind, actual first block >= fblk > seqStartBI).
+		if psi.fblk <= seqStartBI {
 			if psi.fblk < start {
 				start = psi.fblk
 			}
 		}
-		// psi.lblk < seqStartBI: entirely before sseq, skip.
 	})
 	// See if we were asked for all, if so we are done.
 	if sseq <= fs.state.FirstSeq {
 		return total, validThrough, nil
 	}
 
-	// No straddling subjects, all matching subjects are entirely after sseq.
+	// All matching subjects' first blocks are past sseq's block.
+	// No messages before sseq to adjust for, total is correct.
 	if start == math.MaxUint32 {
 		return total, validThrough, nil
 	}
@@ -4120,24 +4119,22 @@ func (fs *fileStore) NumPendingMulti(sseq uint64, sl *gsl.SimpleSublist, lastPer
 		return total, validThrough, nil
 	}
 
-	// Use PSIM to partition matching subjects and minimize block scanning.
+	// Use PSIM to calculate totals and minimize block scanning.
+	// We add all matching subjects' totals, but only track the adjustment
+	// scan start from subjects that may have messages before sseq.
 	seqStartBI := fs.blks[seqStart].index
 
 	start := uint32(math.MaxUint32)
 	stree.IntersectGSL(fs.psim, sl, func(_ []byte, psi *psi) {
-		if psi.fblk > seqStartBI {
-			// Subject's first block is past seqStart. Since fblk is lazy
-			// (only behind, never ahead), all messages are after sseq.
-			total += psi.total
-		} else if psi.lblk >= seqStartBI {
-			// Subject straddles seqStart boundary. Add total now,
-			// subtract messages before sseq in the adjustment scan below.
-			total += psi.total
+		total += psi.total
+		// Only track start for subjects that may need adjustment.
+		// Subjects with fblk > seqStartBI have all messages after sseq
+		// (since fblk is lazy-behind, actual first block >= fblk > seqStartBI).
+		if psi.fblk <= seqStartBI {
 			if psi.fblk < start {
 				start = psi.fblk
 			}
 		}
-		// psi.lblk < seqStartBI: entirely before sseq, skip.
 	})
 
 	// See if we were asked for all, if so we are done.
@@ -4145,7 +4142,8 @@ func (fs *fileStore) NumPendingMulti(sseq uint64, sl *gsl.SimpleSublist, lastPer
 		return total, validThrough, nil
 	}
 
-	// No straddling subjects, all matching subjects are entirely after sseq.
+	// All matching subjects' first blocks are past sseq's block.
+	// No messages before sseq to adjust for, total is correct.
 	if start == math.MaxUint32 {
 		return total, validThrough, nil
 	}
