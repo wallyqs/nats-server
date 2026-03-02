@@ -3374,6 +3374,45 @@ func TestSetHeaderOrderingSuffix(t *testing.T) {
 	}
 }
 
+func BenchmarkGenHeader(b *testing.B) {
+	hdr := []byte("NATS/1.0\r\nNats-Msg-Id: abc123\r\n\r\n")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		genHeader(hdr, "Nats-Expected-Stream", "MY_STREAM")
+	}
+}
+
+func BenchmarkGetHeader(b *testing.B) {
+	hdr := []byte("NATS/1.0\r\nNats-Msg-Id: abc123\r\nNats-Expected-Stream: MY_STREAM\r\nNats-Expected-Last-Sequence: 42\r\n\r\n")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		getHeader(JSMsgId, hdr)
+	}
+}
+
+func BenchmarkSliceHeader(b *testing.B) {
+	hdr := []byte("NATS/1.0\r\nNats-Msg-Id: abc123\r\nNats-Expected-Stream: MY_STREAM\r\nNats-Expected-Last-Sequence: 42\r\n\r\n")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		sliceHeader(JSMsgId, hdr)
+	}
+}
+
+func BenchmarkMultipleHeaderLookups(b *testing.B) {
+	hdr := []byte("NATS/1.0\r\nNats-Msg-Id: abc123\r\nNats-Expected-Stream: MY_STREAM\r\nNats-Expected-Last-Sequence: 42\r\nNats-Rollup: sub\r\n\r\n")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		getMsgId(hdr)
+		getExpectedStream(hdr)
+		getExpectedLastSeq(hdr)
+		getRollup(hdr)
+	}
+}
+
 func TestInProcessAllowedConnectionType(t *testing.T) {
 	tmpl := `
 		listen: "127.0.0.1:-1"

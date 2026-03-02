@@ -4806,12 +4806,12 @@ func getMsgId(hdr []byte) string {
 
 // Fast lookup of expected last msgId.
 func getExpectedLastMsgId(hdr []byte) string {
-	return string(getHeader(JSExpectedLastMsgId, hdr))
+	return bytesToString(sliceHeader(JSExpectedLastMsgId, hdr))
 }
 
 // Fast lookup of expected stream.
 func getExpectedStream(hdr []byte) string {
-	return string(getHeader(JSExpectedStream, hdr))
+	return bytesToString(sliceHeader(JSExpectedStream, hdr))
 }
 
 // Fast lookup of expected last sequence.
@@ -4825,11 +4825,11 @@ func getExpectedLastSeq(hdr []byte) (uint64, bool) {
 
 // Fast lookup of rollups.
 func getRollup(hdr []byte) string {
-	r := getHeader(JSMsgRollup, hdr)
+	r := sliceHeader(JSMsgRollup, hdr)
 	if len(r) == 0 {
 		return _EMPTY_
 	}
-	return strings.ToLower(string(r))
+	return strings.ToLower(bytesToString(r))
 }
 
 // Fast lookup of expected stream sequence per subject.
@@ -4851,7 +4851,7 @@ func getExpectedLastSeqPerSubjectForSubject(hdr []byte) string {
 // - Zero return value: no TTL or parse error.
 // - Negative return value: never expires.
 func getMessageTTL(hdr []byte) (int64, error) {
-	ttl := getHeader(JSMessageTTL, hdr)
+	ttl := sliceHeader(JSMessageTTL, hdr)
 	if len(ttl) == 0 {
 		return 0, nil
 	}
@@ -4917,14 +4917,14 @@ func nextMessageSchedule(hdr []byte, ts int64) (time.Time, bool) {
 // Fast lookup of the message schedule TTL from headers.
 // The TTL is confirmed to be valid, but the raw TTL string is returned.
 func getMessageScheduleTTL(hdr []byte) (string, bool) {
-	ttl := getHeader(JSScheduleTTL, hdr)
+	ttl := sliceHeader(JSScheduleTTL, hdr)
 	if len(ttl) == 0 {
 		return _EMPTY_, true
 	}
 	if _, err := parseMessageTTL(bytesToString(ttl)); err != nil {
 		return _EMPTY_, false
 	}
-	return string(ttl), true
+	return bytesToString(ttl), true
 }
 
 // Fast lookup of message schedule target.
@@ -4932,7 +4932,7 @@ func getMessageScheduleTarget(hdr []byte) string {
 	if len(hdr) == 0 {
 		return _EMPTY_
 	}
-	return string(getHeader(JSScheduleTarget, hdr))
+	return bytesToString(sliceHeader(JSScheduleTarget, hdr))
 }
 
 // Fast lookup of message schedule source.
@@ -4940,7 +4940,7 @@ func getMessageScheduleSource(hdr []byte) string {
 	if len(hdr) == 0 {
 		return _EMPTY_
 	}
-	return string(getHeader(JSScheduleSource, hdr))
+	return bytesToString(sliceHeader(JSScheduleSource, hdr))
 }
 
 // Fast lookup of message scheduler.
@@ -4948,7 +4948,7 @@ func getMessageScheduler(hdr []byte) string {
 	if len(hdr) == 0 {
 		return _EMPTY_
 	}
-	return string(getHeader(JSScheduler, hdr))
+	return bytesToString(sliceHeader(JSScheduler, hdr))
 }
 
 // Fast lookup of batch ID.
@@ -4956,7 +4956,7 @@ func getBatchId(hdr []byte) string {
 	if len(hdr) == 0 {
 		return _EMPTY_
 	}
-	return string(getHeader(JSBatchId, hdr))
+	return bytesToString(sliceHeader(JSBatchId, hdr))
 }
 
 // Fast lookup of batch sequence.
@@ -5570,6 +5570,14 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	var rollupSub, rollupAll bool
 
 	if len(hdr) > 0 {
+		// Extract headers that are used multiple times up front to avoid redundant linear scans.
+		rollup := getRollup(hdr)
+		expectedStream := getExpectedStream(hdr)
+		expectedLastMsgId := getExpectedLastMsgId(hdr)
+		expectedLastSubjSeqSubj := getExpectedLastSeqPerSubjectForSubject(hdr)
+		expectedLastSeq, expectedLastSeqExists := getExpectedLastSeq(hdr)
+		expectedLastSeqPerSubj, expectedLastSeqPerSubjExists := getExpectedLastSeqPerSubject(hdr)
+
 		// Certain checks have already been performed if in clustered mode, so only check if not.
 		// Note, for cluster mode but with message tracing (without message delivery), we need
 		// to do this check here since it was not done in processClusteredInboundMsg().
@@ -5607,16 +5615,16 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 					}
 					return apiErr
 				} else {
-					// Check for incompatible headers.
+					// Check for incompatible headers using cached values.
 					var doErr bool
-					if getRollup(hdr) != _EMPTY_ ||
-						getExpectedStream(hdr) != _EMPTY_ ||
-						getExpectedLastMsgId(hdr) != _EMPTY_ ||
-						getExpectedLastSeqPerSubjectForSubject(hdr) != _EMPTY_ {
+					if rollup != _EMPTY_ ||
+						expectedStream != _EMPTY_ ||
+						expectedLastMsgId != _EMPTY_ ||
+						expectedLastSubjSeqSubj != _EMPTY_ {
 						doErr = true
-					} else if _, ok := getExpectedLastSeq(hdr); ok {
+					} else if expectedLastSeqExists {
 						doErr = true
-					} else if _, ok := getExpectedLastSeqPerSubject(hdr); ok {
+					} else if expectedLastSeqPerSubjExists {
 						doErr = true
 					}
 
@@ -5634,7 +5642,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 			}
 
 			// Expected stream.
-			if sname := getExpectedStream(hdr); sname != _EMPTY_ && sname != name {
+			if expectedStream != _EMPTY_ && expectedStream != name {
 				if canRespond {
 					resp.PubAck = &PubAck{Stream: name}
 					resp.Error = NewJSStreamNotMatchError()
@@ -5658,11 +5666,11 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 			}
 
 			// Expected last sequence per subject.
-			if seq, exists := getExpectedLastSeqPerSubject(hdr); exists {
+			if expectedLastSeqPerSubjExists {
 				// Allow override of the subject used for the check.
 				seqSubj := subject
-				if optSubj := getExpectedLastSeqPerSubjectForSubject(hdr); optSubj != _EMPTY_ {
-					seqSubj = optSubj
+				if expectedLastSubjSeqSubj != _EMPTY_ {
+					seqSubj = expectedLastSubjSeqSubj
 				}
 
 				// TODO(dlc) - We could make a new store func that does this all in one.
@@ -5672,19 +5680,19 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 				if sm != nil {
 					fseq = sm.seq
 				}
-				if err == ErrStoreMsgNotFound && seq == 0 {
+				if err == ErrStoreMsgNotFound && expectedLastSeqPerSubj == 0 {
 					fseq, err = 0, nil
 				}
-				if err != nil || fseq != seq {
+				if err != nil || fseq != expectedLastSeqPerSubj {
 					if canRespond {
 						resp.PubAck = &PubAck{Stream: name}
 						resp.Error = NewJSStreamWrongLastSequenceError(fseq)
 						b, _ := json.Marshal(resp)
 						outq.sendMsg(reply, b)
 					}
-					return fmt.Errorf("last sequence by subject mismatch: %d vs %d", seq, fseq)
+					return fmt.Errorf("last sequence by subject mismatch: %d vs %d", expectedLastSeqPerSubj, fseq)
 				}
-			} else if getExpectedLastSeqPerSubjectForSubject(hdr) != _EMPTY_ {
+			} else if expectedLastSubjSeqSubj != _EMPTY_ {
 				apiErr := NewJSStreamExpectedLastSeqPerSubjectInvalidError()
 				if canRespond {
 					resp.PubAck = &PubAck{Stream: name}
@@ -5696,7 +5704,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 			}
 
 			// Expected last sequence.
-			if seq, exists := getExpectedLastSeq(hdr); exists && seq != mset.lseq {
+			if expectedLastSeqExists && expectedLastSeq != mset.lseq {
 				mlseq := mset.lseq
 				if canRespond {
 					resp.PubAck = &PubAck{Stream: name}
@@ -5704,7 +5712,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 					b, _ := json.Marshal(resp)
 					outq.sendMsg(reply, b)
 				}
-				return fmt.Errorf("last sequence mismatch: %d vs %d", seq, mlseq)
+				return fmt.Errorf("last sequence mismatch: %d vs %d", expectedLastSeq, mlseq)
 			}
 
 			// Message scheduling.
@@ -5784,8 +5792,9 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 
 					// Add a rollup sub header if it doesn't already exist.
 					// Otherwise, it must exist already as a rollup on the subject.
-					if rollup := getRollup(hdr); rollup == _EMPTY_ {
+					if rollup == _EMPTY_ {
 						hdr = genHeader(hdr, JSMsgRollup, JSMsgRollupSubject)
+						rollup = JSMsgRollupSubject
 					} else if rollup != JSMsgRollupSubject {
 						apiErr := NewJSMessageSchedulesRollupInvalidError()
 						if canRespond {
@@ -5824,8 +5833,8 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		}
 
 		// Expected last msgId.
-		if lmsgId := getExpectedLastMsgId(hdr); lmsgId != _EMPTY_ {
-			if lmsgId != mset.lmsgId {
+		if expectedLastMsgId != _EMPTY_ {
+			if expectedLastMsgId != mset.lmsgId {
 				last := mset.lmsgId
 				bumpCLFS()
 				if canRespond {
@@ -5834,11 +5843,11 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 					b, _ := json.Marshal(resp)
 					outq.sendMsg(reply, b)
 				}
-				return fmt.Errorf("last msgid mismatch: %q vs %q", lmsgId, last)
+				return fmt.Errorf("last msgid mismatch: %q vs %q", expectedLastMsgId, last)
 			}
 		}
 		// Check for any rollups.
-		if rollup := getRollup(hdr); rollup != _EMPTY_ {
+		if rollup != _EMPTY_ {
 			if canConsistencyCheck && (!mset.cfg.AllowRollup || mset.cfg.DenyPurge) {
 				err := errors.New("rollup not permitted")
 				if canRespond {
@@ -6112,6 +6121,10 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 	}
 
 	// Find the message TTL if any.
+	// Note: getMessageTTL may have already been called during consistency checks above,
+	// but in that path we only checked whether TTL was non-zero for the allow check.
+	// Here we need the actual value for storage, and we also need to handle the error
+	// case for non-clustered mode where it wasn't checked above.
 	ttl, err := getMessageTTL(hdr)
 	if err != nil {
 		if canRespond {

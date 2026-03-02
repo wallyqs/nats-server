@@ -4444,15 +4444,26 @@ func removeHeaderIfPrefixPresent(hdr []byte, prefix string) []byte {
 // Generate a new header based on optional original header and key value.
 // More used in JetStream layers.
 func genHeader(hdr []byte, key, value string) []byte {
-	var bb bytes.Buffer
+	// Calculate needed capacity: existing header (minus trailing CRLF) + key + ": " + value + "\r\n" + trailing "\r\n"
+	var base int
 	if len(hdr) > LEN_CR_LF {
-		bb.Write(hdr[:len(hdr)-LEN_CR_LF])
+		base = len(hdr) - LEN_CR_LF
 	} else {
-		bb.WriteString(hdrLine)
+		base = len(hdrLine)
 	}
-	http.Header{key: []string{value}}.Write(&bb)
-	bb.WriteString(CR_LF)
-	return bb.Bytes()
+	needed := base + len(key) + 2 + len(value) + LEN_CR_LF + LEN_CR_LF
+	buf := make([]byte, 0, needed)
+	if len(hdr) > LEN_CR_LF {
+		buf = append(buf, hdr[:len(hdr)-LEN_CR_LF]...)
+	} else {
+		buf = append(buf, hdrLine...)
+	}
+	buf = append(buf, key...)
+	buf = append(buf, ':', ' ')
+	buf = append(buf, value...)
+	buf = append(buf, CR_LF...)
+	buf = append(buf, CR_LF...)
+	return buf
 }
 
 // This will set a header for the message.
@@ -4474,11 +4485,13 @@ func (c *client) setHeader(key, value string, msg []byte) []byte {
 	} else {
 		bb.WriteString(hdrLine)
 	}
-	http.Header{key: []string{value}}.Write(&bb)
+	bb.WriteString(key)
+	bb.WriteString(": ")
+	bb.WriteString(value)
+	bb.WriteString(CR_LF)
 	bb.WriteString(CR_LF)
 	nhdr := bb.Len()
 	// Put the original message back.
-	// FIXME(dlc) - This is inefficient.
 	bb.Write(msg[omi:])
 	nsize := bb.Len() - LEN_CR_LF
 	// MQTT producers don't have CRLF, so add it back.

@@ -252,6 +252,10 @@ func checkMsgHeadersPreClusteredProposal(
 			err := fmt.Errorf("JetStream header size exceeds limits for '%s > %s'", jsa.acc().Name, mset.cfg.Name)
 			return hdr, msg, 0, NewJSStreamHeaderExceedsMaximumError(), err
 		}
+
+		// Extract expected stream once, used both for incompatible header check and stream name validation.
+		expectedStream := getExpectedStream(hdr)
+
 		// Counter increments.
 		// Only supported on counter streams, and payload must be empty (if not coming from a source).
 		var ok bool
@@ -267,10 +271,10 @@ func checkMsgHeadersPreClusteredProposal(
 				apiErr := NewJSMessageIncrPayloadError()
 				return hdr, msg, 0, apiErr, apiErr
 			} else {
-				// Check for incompatible headers.
+				// Check for incompatible headers using cached expectedStream.
 				var doErr bool
 				if getRollup(hdr) != _EMPTY_ ||
-					getExpectedStream(hdr) != _EMPTY_ ||
+					expectedStream != _EMPTY_ ||
 					getExpectedLastMsgId(hdr) != _EMPTY_ ||
 					getExpectedLastSeqPerSubjectForSubject(hdr) != _EMPTY_ {
 					doErr = true
@@ -287,7 +291,7 @@ func checkMsgHeadersPreClusteredProposal(
 			}
 		}
 		// Expected stream name can also be pre-checked.
-		if sname := getExpectedStream(hdr); sname != _EMPTY_ && sname != name {
+		if expectedStream != _EMPTY_ && expectedStream != name {
 			return hdr, msg, 0, NewJSStreamNotMatchError(), errStreamMismatch
 		}
 		// TTL'd messages are rejected entirely if TTLs are not enabled on the stream, or if the TTL is invalid.
