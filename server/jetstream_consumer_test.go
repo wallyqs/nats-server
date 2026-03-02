@@ -11308,3 +11308,338 @@ func TestJetStreamConsumerSingleFilterSubjectInFilterSubjects(t *testing.T) {
 	require_Len(t, len(o.subjf), 1)
 	require_True(t, o.filters == nil)
 }
+
+// TestJetStreamConsumerMaxRedeliveryState tests that consumer info fields are
+// correctly updated when messages reach their maximum delivery count.
+//
+// The reported issues:
+// - NumRedelivered stays 0 even when messages are redelivered
+// - AckFloor does not advance when a message is dropped due to max deliveries
+// - NumAckPending is not updated after max deliveries
+// - AckFloor only gets corrected when a new message is subsequently acked
+// - NumPending (unprocessed) not updated properly
+func TestJetStreamConsumerMaxRedeliveryState(t *testing.T) {
+	for _, st := range []nats.StorageType{nats.MemoryStorage, nats.FileStorage} {
+		t.Run(st.String(), func(t *testing.T) {
+			s := RunBasicJetStreamServer(t)
+			defer s.Shutdown()
+
+			nc, js := jsClientConnect(t, s)
+			defer nc.Close()
+
+			// Create stream.
+			_, err := js.AddStream(&nats.StreamConfig{
+				Name:     "TEST",
+				Subjects: []string{"foo"},
+				Storage:  st,
+			})
+			require_NoError(t, err)
+
+			maxDeliver := 3
+			ackWait := 500 * time.Millisecond
+
+			sub, err := js.PullSubscribe(
+				"foo",
+				"CONSUMER",
+				nats.ManualAck(),
+				nats.AckExplicit(),
+				nats.AckWait(ackWait),
+				nats.MaxDeliver(maxDeliver),
+			)
+			require_NoError(t, err)
+
+			// Publish 2 messages.
+			_, err = js.Publish("foo", []byte("msg-1"))
+			require_NoError(t, err)
+			_, err = js.Publish("foo", []byte("msg-2"))
+			require_NoError(t, err)
+
+			// Fetch both messages.
+			msgs, err := sub.Fetch(2, nats.MaxWait(2*time.Second))
+			require_NoError(t, err)
+			require_Len(t, len(msgs), 2)
+
+			// Ack message 2, do NOT ack message 1.
+			require_NoError(t, msgs[1].Ack())
+
+			// Now let message 1 go through its remaining redeliveries.
+			// MaxDeliver=3 means we already used delivery 1 above, so we have 2 more.
+			for i := 1; i < maxDeliver; i++ {
+				redelivered, err := sub.Fetch(1, nats.MaxWait(ackWait+2*time.Second))
+				if err != nil {
+					// If no more messages, message 1 has been terminated.
+					break
+				}
+				// Don't ack - let it expire for redelivery.
+				_ = redelivered
+			}
+
+			// Wait for checkPending to process the max delivery expiration.
+			time.Sleep(ackWait + 500*time.Millisecond)
+
+			// At this point message 1 should have hit max deliveries and been
+			// removed from pending. Message 2 was acked. All messages processed.
+			//
+			// Expected consumer state:
+			// - AckFloor should reflect all messages processed (stream seq >= 2)
+			// - NumAckPending should be 0
+			// - NumPending should be 0
+			checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+				ci, err := js.ConsumerInfo("TEST", "CONSUMER")
+				if err != nil {
+					return err
+				}
+				if ci.NumAckPending != 0 {
+					return fmt.Errorf("expected NumAckPending=0 after max redelivery, got %d", ci.NumAckPending)
+				}
+				if ci.AckFloor.Stream < 2 {
+					return fmt.Errorf("expected AckFloor.Stream >= 2 (all messages processed), got %d", ci.AckFloor.Stream)
+				}
+				if ci.NumPending != 0 {
+					return fmt.Errorf("expected NumPending=0, got %d", ci.NumPending)
+				}
+				return nil
+			})
+
+			// Now verify the more subtle scenario: send a 3rd message and check
+			// that acking it properly advances the floor (not just then).
+			_, err = js.Publish("foo", []byte("msg-3"))
+			require_NoError(t, err)
+
+			msgs, err = sub.Fetch(1, nats.MaxWait(2*time.Second))
+			require_NoError(t, err)
+			require_Len(t, len(msgs), 1)
+			require_NoError(t, msgs[0].Ack())
+
+			checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+				ci, err := js.ConsumerInfo("TEST", "CONSUMER")
+				if err != nil {
+					return err
+				}
+				if ci.AckFloor.Stream != 3 {
+					return fmt.Errorf("expected AckFloor.Stream=3, got %d", ci.AckFloor.Stream)
+				}
+				if ci.NumAckPending != 0 {
+					return fmt.Errorf("expected NumAckPending=0, got %d", ci.NumAckPending)
+				}
+				if ci.NumPending != 0 {
+					return fmt.Errorf("expected NumPending=0, got %d", ci.NumPending)
+				}
+				return nil
+			})
+		})
+	}
+}
+
+// TestJetStreamConsumerMaxRedeliveryAckFloorHole tests that when an earlier
+// message hits max redelivery while a later message was already acked, the ack
+// floor properly advances past the terminated message without requiring another
+// ack to trigger the update.
+func TestJetStreamConsumerMaxRedeliveryAckFloorHole(t *testing.T) {
+	for _, st := range []nats.StorageType{nats.MemoryStorage, nats.FileStorage} {
+		t.Run(st.String(), func(t *testing.T) {
+			s := RunBasicJetStreamServer(t)
+			defer s.Shutdown()
+
+			nc, js := jsClientConnect(t, s)
+			defer nc.Close()
+
+			_, err := js.AddStream(&nats.StreamConfig{
+				Name:     "TEST",
+				Subjects: []string{"foo"},
+				Storage:  st,
+			})
+			require_NoError(t, err)
+
+			maxDeliver := 3
+			ackWait := 500 * time.Millisecond
+
+			sub, err := js.PullSubscribe(
+				"foo",
+				"CONSUMER",
+				nats.ManualAck(),
+				nats.AckExplicit(),
+				nats.AckWait(ackWait),
+				nats.MaxDeliver(maxDeliver),
+			)
+			require_NoError(t, err)
+
+			// Publish 3 messages.
+			for i := 1; i <= 3; i++ {
+				_, err = js.Publish("foo", []byte(fmt.Sprintf("msg-%d", i)))
+				require_NoError(t, err)
+			}
+
+			// Fetch all 3 messages.
+			msgs, err := sub.Fetch(3, nats.MaxWait(2*time.Second))
+			require_NoError(t, err)
+			require_Len(t, len(msgs), 3)
+
+			// Ack messages 2 and 3, do NOT ack message 1.
+			require_NoError(t, msgs[1].Ack())
+			require_NoError(t, msgs[2].Ack())
+
+			// After acking 2 and 3, ack floor should still be 0 because msg 1
+			// is not yet acked. Wait for the acks to be processed.
+			checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+				ci, err := js.ConsumerInfo("TEST", "CONSUMER")
+				if err != nil {
+					return err
+				}
+				if ci.AckFloor.Stream != 0 {
+					return fmt.Errorf("expected AckFloor.Stream=0 before msg 1 terminated, got %d", ci.AckFloor.Stream)
+				}
+				if ci.NumAckPending != 1 {
+					return fmt.Errorf("expected NumAckPending=1 (msg 1 pending), got %d", ci.NumAckPending)
+				}
+				return nil
+			})
+
+			// Let message 1 go through remaining redeliveries without acking.
+			for i := 1; i < maxDeliver; i++ {
+				redelivered, err := sub.Fetch(1, nats.MaxWait(ackWait+2*time.Second))
+				if err != nil {
+					break
+				}
+				_ = redelivered
+			}
+
+			// Wait for the last delivery to expire and be processed.
+			time.Sleep(ackWait + 500*time.Millisecond)
+
+			// After message 1 hits max deliveries, the ack floor should advance
+			// to stream seq 3 since messages 2 and 3 were already acked and
+			// message 1 has been terminated.
+			// BUG: Currently the ack floor stays at 0 until another message is
+			// acked because hasMaxDeliveries() removes from pending without
+			// updating the ack floor.
+			checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+				ci, err := js.ConsumerInfo("TEST", "CONSUMER")
+				if err != nil {
+					return err
+				}
+				if ci.AckFloor.Stream != 3 {
+					return fmt.Errorf("expected AckFloor.Stream=3 after msg 1 hit max deliveries, got %d (ack floor not updated)", ci.AckFloor.Stream)
+				}
+				if ci.NumAckPending != 0 {
+					return fmt.Errorf("expected NumAckPending=0 after max redelivery, got %d", ci.NumAckPending)
+				}
+				if ci.NumPending != 0 {
+					return fmt.Errorf("expected NumPending=0, got %d", ci.NumPending)
+				}
+				return nil
+			})
+		})
+	}
+}
+
+// TestJetStreamConsumerMaxRedeliveryWorkQueue tests that work queue retention
+// properly handles messages that hit max redelivery limits. Specifically tests
+// that after a message is terminated due to max redeliveries:
+// - The ack floor properly advances
+// - NumAckPending is correct
+// - NumPending (unprocessed) is correct
+func TestJetStreamConsumerMaxRedeliveryWorkQueue(t *testing.T) {
+	for _, st := range []nats.StorageType{nats.MemoryStorage, nats.FileStorage} {
+		t.Run(st.String(), func(t *testing.T) {
+			s := RunBasicJetStreamServer(t)
+			defer s.Shutdown()
+
+			nc, js := jsClientConnect(t, s)
+			defer nc.Close()
+
+			_, err := js.AddStream(&nats.StreamConfig{
+				Name:      "WQ",
+				Subjects:  []string{"work"},
+				Storage:   st,
+				Retention: nats.WorkQueuePolicy,
+			})
+			require_NoError(t, err)
+
+			maxDeliver := 3
+			ackWait := 500 * time.Millisecond
+
+			sub, err := js.PullSubscribe(
+				"work",
+				"WORKER",
+				nats.ManualAck(),
+				nats.AckExplicit(),
+				nats.AckWait(ackWait),
+				nats.MaxDeliver(maxDeliver),
+			)
+			require_NoError(t, err)
+
+			// Publish 3 messages.
+			for i := 1; i <= 3; i++ {
+				_, err = js.Publish("work", []byte(fmt.Sprintf("job-%d", i)))
+				require_NoError(t, err)
+			}
+
+			// Fetch all 3 messages.
+			msgs, err := sub.Fetch(3, nats.MaxWait(2*time.Second))
+			require_NoError(t, err)
+			require_Len(t, len(msgs), 3)
+
+			// Ack message 3 only. Messages 1 and 2 are not acked.
+			require_NoError(t, msgs[2].Ack())
+
+			// Let messages 1 and 2 hit max redeliveries.
+			for i := 1; i < maxDeliver; i++ {
+				redelivered, err := sub.Fetch(2, nats.MaxWait(ackWait+2*time.Second))
+				if err != nil {
+					break
+				}
+				// Don't ack any redeliveries.
+				_ = redelivered
+			}
+
+			// Wait for final delivery expiration.
+			time.Sleep(ackWait + 500*time.Millisecond)
+
+			// After messages 1 and 2 hit max deliveries:
+			// - NumAckPending should be 0 (all messages either acked or terminated)
+			// - AckFloor should advance to stream seq 3
+			// - NumPending should be 0
+			checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+				ci, err := js.ConsumerInfo("WQ", "WORKER")
+				if err != nil {
+					return err
+				}
+				if ci.NumAckPending != 0 {
+					return fmt.Errorf("expected NumAckPending=0, got %d", ci.NumAckPending)
+				}
+				if ci.AckFloor.Stream < 3 {
+					return fmt.Errorf("expected AckFloor.Stream >= 3 after all messages processed, got %d", ci.AckFloor.Stream)
+				}
+				if ci.NumPending != 0 {
+					return fmt.Errorf("expected NumPending=0, got %d", ci.NumPending)
+				}
+				return nil
+			})
+
+			// Now publish another message and ack it to verify state continues
+			// to work correctly after max redelivery events.
+			_, err = js.Publish("work", []byte("job-4"))
+			require_NoError(t, err)
+
+			msgs, err = sub.Fetch(1, nats.MaxWait(2*time.Second))
+			require_NoError(t, err)
+			require_Len(t, len(msgs), 1)
+			require_NoError(t, msgs[0].Ack())
+
+			checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+				ci, err := js.ConsumerInfo("WQ", "WORKER")
+				if err != nil {
+					return err
+				}
+				if ci.NumAckPending != 0 {
+					return fmt.Errorf("expected NumAckPending=0 after acking new message, got %d", ci.NumAckPending)
+				}
+				if ci.NumPending != 0 {
+					return fmt.Errorf("expected NumPending=0 after acking new message, got %d", ci.NumPending)
+				}
+				return nil
+			})
+		})
+	}
+}
