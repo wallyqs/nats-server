@@ -46,7 +46,8 @@ const (
 )
 
 var (
-	validGroupName = regexp.MustCompile(`^[a-zA-Z0-9/_=-]{1,16}$`)
+	validGroupName         = regexp.MustCompile(`^[a-zA-Z0-9/_=-]{1,16}$`)
+	errNumPendingCanceled  = errors.New("num pending calculation canceled")
 )
 
 // Headers sent when batch size was completed, but there were remaining bytes.
@@ -431,6 +432,7 @@ type consumer struct {
 	chkflr            uint64             // our check floor, interest streams only.
 	npc               int64              // Num Pending Count
 	npf               uint64             // Num Pending Floor Sequence
+	npcQuitCh         chan struct{}       // Quit channel to cancel in-flight streamNumPending
 	dsubj             string
 	qgroup            string
 	lss               *lastSeqSkipList
@@ -1682,6 +1684,11 @@ func (o *consumer) setLeader(isLeader bool) {
 		stopAndClearTimer(&o.dtmr)
 		// Stop any unpause timers. Should only be running on leaders.
 		stopAndClearTimer(&o.uptmr)
+		// Cancel any in-flight num pending calculation.
+		if o.npcQuitCh != nil {
+			close(o.npcQuitCh)
+			o.npcQuitCh = nil
+		}
 		// Make sure to clear out any re-deliver queues
 		o.stopAndClearPtmr()
 		o.rdq = nil
@@ -2421,6 +2428,12 @@ func (o *consumer) updateConfig(cfg *ConsumerConfig) error {
 			wasPaused := !old.IsZero() && time.Now().Before(old)
 			nowPaused := !new.IsZero() && time.Now().Before(new)
 			unpausing = wasPaused && !nowPaused
+			// If transitioning to paused, cancel any in-flight num
+			// pending calculation that may be running without the lock.
+			if nowPaused && o.npcQuitCh != nil {
+				close(o.npcQuitCh)
+				o.npcQuitCh = nil
+			}
 			o.updatePauseState(cfg)
 			if o.isLeader() {
 				o.sendPauseAdvisoryLocked(cfg)
@@ -5315,7 +5328,9 @@ func (o *consumer) streamNumPendingLocked() (uint64, error) {
 // Depends on delivery policy, for last per subject we calculate differently.
 // If the consumer is currently paused the expensive calculation is skipped
 // and npc/npf are zeroed out; they will be recomputed on unpause.
-// Lock should be held.
+// The store operation is run with the consumer lock released so that pause
+// requests can cancel it via the npcQuitCh. Lock should be held on entry
+// and will be held on return but may be released during execution.
 func (o *consumer) streamNumPending() (uint64, error) {
 	if o.mset == nil || o.mset.store == nil {
 		o.npc, o.npf = 0, 0
@@ -5328,11 +5343,70 @@ func (o *consumer) streamNumPending() (uint64, error) {
 		o.npc, o.npf = 0, 0
 		return 0, nil
 	}
-	npc, npf, err := o.calculateNumPending()
-	if err != nil {
-		return 0, err
+
+	// Cancel any previous in-flight calculation.
+	if o.npcQuitCh != nil {
+		close(o.npcQuitCh)
 	}
-	o.npc, o.npf = int64(npc), npf
+	qch := make(chan struct{})
+	o.npcQuitCh = qch
+
+	// Capture the values needed for the store call under the lock.
+	mset := o.mset
+	store := mset.store
+	sseq := o.sseq
+	isLastPerSubject := o.cfg.DeliverPolicy == DeliverLastPerSubject
+	filters, subjf := o.filters, o.subjf
+
+	// Release the lock so that pause/config updates can proceed while
+	// the potentially expensive store call is in flight.
+	o.mu.Unlock()
+
+	type result struct {
+		npc, npf uint64
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var npc, npf uint64
+		var err error
+		if filters != nil {
+			npc, npf, err = store.NumPendingMulti(sseq, filters, isLastPerSubject)
+		} else if len(subjf) > 0 {
+			npc, npf, err = store.NumPending(sseq, subjf[0].subject, isLastPerSubject)
+		} else {
+			npc, npf, err = store.NumPending(sseq, _EMPTY_, isLastPerSubject)
+		}
+		done <- result{npc, npf, err}
+	}()
+
+	// Wait for either the store call to finish or cancellation.
+	var r result
+	select {
+	case r = <-done:
+	case <-qch:
+		// Cancelled. Reacquire lock and return.
+		o.mu.Lock()
+		o.npc, o.npf = 0, 0
+		return 0, errNumPendingCanceled
+	}
+
+	o.mu.Lock()
+
+	// After reacquiring the lock, verify we haven't been cancelled in the
+	// meantime (e.g., consumer paused between goroutine completion and
+	// lock reacquisition).
+	select {
+	case <-qch:
+		o.npc, o.npf = 0, 0
+		return 0, errNumPendingCanceled
+	default:
+	}
+
+	if r.err != nil {
+		return 0, r.err
+	}
+	o.npc, o.npf = int64(r.npc), r.npf
 	return o.numPending(), nil
 }
 

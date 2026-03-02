@@ -8323,6 +8323,76 @@ func TestJetStreamConsumerPauseSkipsNumPendingSurvivesRestart(t *testing.T) {
 	require_Equal(t, ci.NumPending, uint64(5))
 }
 
+func TestJetStreamConsumerPauseCancelsNumPending(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+	})
+	require_NoError(t, err)
+
+	// Publish messages.
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish("foo", []byte("OK"))
+		require_NoError(t, err)
+	}
+
+	// Create an unpaused consumer, verify npc is calculated.
+	jsTestPause_CreateOrUpdateConsumer(t, nc, ActionCreate, "TEST", ConsumerConfig{
+		Name: "my_consumer",
+	})
+
+	acc, err := s.lookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+	o := mset.lookupConsumer("my_consumer")
+	require_True(t, o != nil)
+
+	// The consumer should have the correct npc.
+	o.mu.RLock()
+	npc := o.npc
+	o.mu.RUnlock()
+	require_Equal(t, npc, int64(10))
+
+	// Now pause the consumer. This should cancel any in-flight npc
+	// calculation and close the npcQuitCh.
+	deadline := time.Now().Add(time.Hour)
+	jsTestPause_PauseConsumer(t, nc, "TEST", "my_consumer", deadline)
+
+	// The quit channel should have been closed/nil'd.
+	o.mu.RLock()
+	qch := o.npcQuitCh
+	o.mu.RUnlock()
+	require_True(t, qch == nil)
+
+	// Now unpause and verify npc is recalculated.
+	jsTestPause_PauseConsumer(t, nc, "TEST", "my_consumer", time.Time{})
+
+	// After unpause, npc should be recalculated.
+	checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		o.mu.RLock()
+		npc := o.npc
+		o.mu.RUnlock()
+		if npc != 10 {
+			return fmt.Errorf("expected npc=10, got %d", npc)
+		}
+		return nil
+	})
+
+	// Verify messages can be consumed.
+	sub, err := js.PullSubscribe("foo", "", nats.Bind("TEST", "my_consumer"))
+	require_NoError(t, err)
+	msgs, err := sub.Fetch(10, nats.MaxWait(time.Second*3))
+	require_NoError(t, err)
+	require_Equal(t, len(msgs), 10)
+}
+
 func TestJetStreamConsumerInfoNumPending(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
