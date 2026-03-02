@@ -1375,6 +1375,10 @@ func (o *consumer) updatePauseState(cfg *ConsumerConfig) {
 		defer o.mu.Unlock()
 
 		stopAndClearTimer(&o.uptmr)
+		// Calculate num pending now that we are unpausing. This may have
+		// been deferred during setLeader to avoid the expensive store
+		// operation while the consumer was paused.
+		o.streamNumPending()
 		o.sendPauseAdvisoryLocked(&o.cfg)
 		o.signalNewMessages()
 	})
@@ -1535,8 +1539,11 @@ func (o *consumer) setLeader(isLeader bool) {
 			o.updateSkipped(o.sseq)
 		}
 
-		// Setup initial num pending.
-		o.streamNumPending()
+		// Setup initial num pending only if not currently paused.
+		// If paused, this will be calculated when the pause expires.
+		if o.cfg.PauseUntil == nil || o.cfg.PauseUntil.IsZero() || !time.Now().Before(*o.cfg.PauseUntil) {
+			o.streamNumPending()
+		}
 
 		// Cleanup lss when we take over in clustered mode.
 		if o.hasSkipListPending() && o.sseq >= o.lss.resume {
@@ -2411,6 +2418,13 @@ func (o *consumer) updateConfig(cfg *ConsumerConfig) error {
 			new = *cfg.PauseUntil
 		}
 		if !old.Equal(new) {
+			// If transitioning from paused to unpaused, ensure num pending
+			// is calculated since it may have been deferred during setLeader.
+			wasPaused := !old.IsZero() && time.Now().Before(old)
+			nowPaused := !new.IsZero() && time.Now().Before(new)
+			if wasPaused && !nowPaused {
+				o.streamNumPending()
+			}
 			o.updatePauseState(cfg)
 			if o.isLeader() {
 				o.sendPauseAdvisoryLocked(cfg)

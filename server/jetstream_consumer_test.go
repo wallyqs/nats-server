@@ -8192,6 +8192,137 @@ func TestJetStreamConsumerSurvivesRestart(t *testing.T) {
 	require_True(t, timer != nil)
 }
 
+func TestJetStreamConsumerPauseSkipsNumPending(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+	})
+	require_NoError(t, err)
+
+	// Publish some messages before creating the consumer.
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish("foo", []byte("OK"))
+		require_NoError(t, err)
+	}
+
+	// Create a paused consumer with a short pause duration.
+	pauseDur := 2 * time.Second
+	deadline := time.Now().Add(pauseDur)
+	jsTestPause_CreateOrUpdateConsumer(t, nc, ActionCreate, "TEST", ConsumerConfig{
+		Name:       "paused_consumer",
+		PauseUntil: &deadline,
+	})
+
+	acc, err := s.lookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+	o := mset.lookupConsumer("paused_consumer")
+	require_True(t, o != nil)
+
+	// While paused, npc should be 0 because streamNumPending was skipped.
+	o.mu.RLock()
+	npc := o.npc
+	o.mu.RUnlock()
+	require_Equal(t, npc, int64(0))
+
+	// After the pause expires, streamNumPending should be calculated and
+	// npc should reflect the actual number of pending messages.
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		o.mu.RLock()
+		npc := o.npc
+		o.mu.RUnlock()
+		if npc != 10 {
+			return fmt.Errorf("expected npc=10, got %d", npc)
+		}
+		return nil
+	})
+
+	// Verify the consumer info also reports correctly after unpause.
+	var ci ConsumerInfo
+	infoResp, err := nc.Request("$JS.API.CONSUMER.INFO.TEST.paused_consumer", nil, time.Second)
+	require_NoError(t, err)
+	err = json.Unmarshal(infoResp.Data, &ci)
+	require_NoError(t, err)
+	require_False(t, ci.Paused)
+	require_Equal(t, ci.NumPending, uint64(10))
+
+	// Verify messages can be consumed after unpause.
+	sub, err := js.PullSubscribe("foo", "", nats.Bind("TEST", "paused_consumer"))
+	require_NoError(t, err)
+	msgs, err := sub.Fetch(10, nats.MaxWait(time.Second*3))
+	require_NoError(t, err)
+	require_Equal(t, len(msgs), 10)
+}
+
+func TestJetStreamConsumerPauseSkipsNumPendingSurvivesRestart(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+	})
+	require_NoError(t, err)
+
+	// Publish messages.
+	for i := 0; i < 5; i++ {
+		_, err = js.Publish("foo", []byte("OK"))
+		require_NoError(t, err)
+	}
+
+	// Create a paused consumer with a long pause, restart, then unpause.
+	deadline := time.Now().Add(time.Hour)
+	jsTestPause_CreateOrUpdateConsumer(t, nc, ActionCreate, "TEST", ConsumerConfig{
+		Name:       "my_consumer",
+		PauseUntil: &deadline,
+	})
+	nc.Close()
+
+	sd := s.JetStreamConfig().StoreDir
+	s.Shutdown()
+	s = RunJetStreamServerOnPort(-1, sd)
+	defer s.Shutdown()
+
+	nc, js = jsClientConnect(t, s)
+	defer nc.Close()
+
+	// After restart, the consumer should still be paused with npc == 0.
+	stream, err := s.gacc.lookupStream("TEST")
+	require_NoError(t, err)
+	o := stream.lookupConsumer("my_consumer")
+	require_True(t, o != nil)
+
+	o.mu.RLock()
+	npc := o.npc
+	o.mu.RUnlock()
+	require_Equal(t, npc, int64(0))
+
+	// Now unpause via the endpoint.
+	jsTestPause_PauseConsumer(t, nc, "TEST", "my_consumer", time.Time{})
+
+	// After unpausing, npc should reflect the pending messages.
+	// The unpause path through updatePauseState won't trigger the timer callback
+	// since the deadline is in the past after clearing. But the consumer info
+	// should still correctly calculate num pending.
+	var ci ConsumerInfo
+	infoResp, err := nc.Request("$JS.API.CONSUMER.INFO.TEST.my_consumer", nil, time.Second)
+	require_NoError(t, err)
+	err = json.Unmarshal(infoResp.Data, &ci)
+	require_NoError(t, err)
+	require_False(t, ci.Paused)
+	require_Equal(t, ci.NumPending, uint64(5))
+}
+
 func TestJetStreamConsumerInfoNumPending(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
