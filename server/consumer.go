@@ -2183,10 +2183,26 @@ func (o *consumer) hasMaxDeliveries(seq uint64) bool {
 		if o.maxp > 0 && len(o.pending) >= o.maxp {
 			o.signalNewMessages()
 		}
-		// Make sure to remove from pending.
+		// Make sure to remove from pending and update ack floor.
 		if p, ok := o.pending[seq]; ok && p != nil {
 			delete(o.pending, seq)
 			o.updateDelivered(p.Sequence, seq, dc, p.Timestamp)
+			// Update ack floor since we removed from pending, similar
+			// to processAckMsg for explicit acks.
+			if len(o.pending) == 0 {
+				o.adflr = o.dseq - 1
+				o.asflr = o.sseq - 1
+			} else if p.Sequence == o.adflr+1 {
+				o.adflr, o.asflr = p.Sequence, seq
+				for ss := seq + 1; ss < o.sseq; ss++ {
+					if pp, ok := o.pending[ss]; ok {
+						if pp.Sequence > 0 {
+							o.adflr, o.asflr = pp.Sequence-1, ss-1
+						}
+						break
+					}
+				}
+			}
 		}
 		// Ensure redelivered state is set, if not already.
 		if o.rdc == nil {
@@ -4436,12 +4452,15 @@ func trackDownAccountAndInterest(acc *Account, interest string) (*Account, strin
 }
 
 // Return current delivery count for a given sequence.
+// The rdc map tracks redelivery attempts. A value of N in rdc means the
+// message was redelivered N times, so the total delivery count is N+1
+// (including the original delivery).
 func (o *consumer) deliveryCount(seq uint64) uint64 {
 	if o.rdc == nil {
 		return 1
 	}
 	if dc := o.rdc[seq]; dc >= 1 {
-		return dc
+		return dc + 1
 	}
 	return 1
 }
@@ -4544,6 +4563,7 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 	// Process redelivered messages before looking at possibly "skip list" (deliver last per subject)
 	if o.hasRedeliveries() {
 		var seq, dc uint64
+		var maxDeliveriesReached bool
 		for seq = o.getNextToRedeliver(); seq > 0; seq = o.getNextToRedeliver() {
 			dc = o.incDeliveryCount(seq)
 			if o.maxdc > 0 && dc > o.maxdc {
@@ -4551,11 +4571,27 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 				if dc == o.maxdc+1 {
 					o.notifyDeliveryExceeded(seq, dc-1)
 				}
-				// Make sure to remove from pending.
+				// Make sure to remove from pending and update ack floor.
 				if p, ok := o.pending[seq]; ok && p != nil {
 					delete(o.pending, seq)
 					o.updateDelivered(p.Sequence, seq, dc, p.Timestamp)
+					// Update ack floor since we removed from pending.
+					if len(o.pending) == 0 {
+						o.adflr = o.dseq - 1
+						o.asflr = o.sseq - 1
+					} else if p.Sequence == o.adflr+1 {
+						o.adflr, o.asflr = p.Sequence, seq
+						for ss := seq + 1; ss < o.sseq; ss++ {
+							if pp, ok := o.pending[ss]; ok {
+								if pp.Sequence > 0 {
+									o.adflr, o.asflr = pp.Sequence-1, ss-1
+								}
+								break
+							}
+						}
+					}
 				}
+				maxDeliveriesReached = true
 				continue
 			}
 			pmsg := getJSPubMsgFromPool()
@@ -4577,6 +4613,13 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 				continue
 			}
 			return pmsg, dc, err
+		}
+		// If any messages hit max deliveries, persist updated state.
+		if maxDeliveriesReached {
+			if err := o.writeStoreStateUnlocked(); err != nil && o.srv != nil && o.mset != nil && !o.closed {
+				s, acc, mset, name := o.srv, o.acc, o.mset, o.name
+				s.Warnf("Consumer '%s > %s > %s' error on write store state from max deliveries: %v", acc, mset.getCfgName(), name, err)
+			}
 		}
 	}
 
@@ -5721,8 +5764,12 @@ func (o *consumer) checkPending() {
 			// We will check if we have hit our max deliveries. Previously we would do this on getNextMsg() which
 			// worked well for push consumers, but with pull based consumers would require a new pull request to be
 			// present to process and redelivered could be reported incorrectly.
-			if !o.onRedeliverQueue(seq) && !o.hasMaxDeliveries(seq) {
-				expired = append(expired, seq)
+			if !o.onRedeliverQueue(seq) {
+				if o.hasMaxDeliveries(seq) {
+					shouldUpdateState = true
+				} else {
+					expired = append(expired, seq)
+				}
 			}
 		} else if deadline-elapsed < next {
 			// Update when we should fire next.

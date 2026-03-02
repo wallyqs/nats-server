@@ -2959,9 +2959,12 @@ func TestJetStreamConsumerDeliveryCount(t *testing.T) {
 	_, err = sub.Fetch(1, nats.MaxWait(250*time.Millisecond))
 	require_Error(t, err)
 
-	// This would previously report delivery count 0, because o.rdc!=nil
+	// This would previously report delivery count 0, because o.rdc!=nil.
+	// Message 1 was never redelivered so count is 1.
 	require_Equal(t, o.deliveryCount(1), 1)
-	require_Equal(t, o.deliveryCount(2), 1)
+	// Message 2 was nak'd and a redelivery was attempted (terminated by max deliver),
+	// so rdc[2]=1 and total delivery count is 2.
+	require_Equal(t, o.deliveryCount(2), 2)
 }
 
 func TestJetStreamConsumerCreate(t *testing.T) {
