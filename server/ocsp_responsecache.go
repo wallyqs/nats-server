@@ -436,10 +436,19 @@ func (c *LocalCache) saveCache(s *Server) {
 		s.Errorf(certidp.ErrSaveCacheFail, err)
 		return
 	}
+	tmpName := tmp.Name()
+	closed := false
+	renamed := false
 	defer func() {
-		tmp.Close()
-		os.Remove(tmp.Name())
-	}() // clean up any temp files
+		// Only close if not already explicitly closed on the success path.
+		if !closed {
+			tmp.Close()
+		}
+		// Only remove the temp file if it was not successfully renamed.
+		if !renamed {
+			os.Remove(tmpName)
+		}
+	}()
 
 	// RW lock here because we're going to snapshot the cache to disk and mark as clean if successful
 	c.mu.Lock()
@@ -464,12 +473,14 @@ func (c *LocalCache) saveCache(s *Server) {
 		s.Errorf(certidp.ErrSaveCacheFail, err)
 		return
 	}
+	closed = true
 	// do the final swap and overwrite any old saved peer cache
-	err = os.Rename(tmp.Name(), store)
+	err = os.Rename(tmpName, store)
 	if err != nil {
 		s.Errorf(certidp.ErrSaveCacheFail, err)
 		return
 	}
+	renamed = true
 	c.dirty = false
 	s.Debugf(certidp.DbgCacheSaved, cacheSize)
 }

@@ -608,7 +608,7 @@ func (s *Server) configureOCSP() []*tlsConfigKind {
 		configs = append(configs, o)
 	}
 	if config := sopts.MQTT.TLSConfig; config != nil {
-		opts := sopts.tlsConfigOpts
+		opts := sopts.MQTT.tlsConfigOpts
 		o := &tlsConfigKind{
 			kind:      kindStringMap[CLIENT],
 			tlsConfig: config,
@@ -754,7 +754,6 @@ func (s *Server) reloadOCSP() error {
 	s.mu.Lock()
 	s.ocspPeerVerify = false
 	s.mu.Unlock()
-	s.stopOCSPResponseCache()
 
 	for _, config := range configs {
 		// We do not staple Leaf Hub and Leaf Spokes, use ocsp_peer
@@ -767,8 +766,8 @@ func (s *Server) reloadOCSP() error {
 			if mon != nil {
 				ocspm = append(ocspm, mon)
 
-				// Apply latest TLS configuration after OCSP monitors have started.
-				defer config.apply(tc)
+				// Apply latest TLS configuration with OCSP stapling.
+				config.apply(tc)
 			}
 		}
 
@@ -779,8 +778,10 @@ func (s *Server) reloadOCSP() error {
 				return err
 			}
 			if plugged && tc != nil {
+				s.mu.Lock()
 				s.ocspPeerVerify = true
-				defer config.apply(tc)
+				s.mu.Unlock()
+				config.apply(tc)
 			}
 		}
 	}
@@ -979,11 +980,13 @@ func ocspStatusString(n int) string {
 func validOCSPResponse(r *ocsp.Response) error {
 	// Time validation not handled by ParseResponse.
 	// https://tools.ietf.org/html/rfc6960#section-4.2.2.1
-	if !r.NextUpdate.IsZero() && r.NextUpdate.Before(time.Now()) {
+	skew := certidp.DefaultAllowedClockSkew
+	now := time.Now()
+	if !r.NextUpdate.IsZero() && r.NextUpdate.Before(now.Add(-skew)) {
 		t := r.NextUpdate.Format(time.RFC3339Nano)
 		return fmt.Errorf("invalid ocsp NextUpdate, is past time: %s", t)
 	}
-	if r.ThisUpdate.After(time.Now()) {
+	if r.ThisUpdate.After(now.Add(skew)) {
 		t := r.ThisUpdate.Format(time.RFC3339Nano)
 		return fmt.Errorf("invalid ocsp ThisUpdate, is future time: %s", t)
 	}
