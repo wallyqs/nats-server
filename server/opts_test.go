@@ -4357,3 +4357,160 @@ func TestEnvVarFromIncludedFile(t *testing.T) {
 		t.Fatalf("Expected port 7890, found %d", opts.Port)
 	}
 }
+
+func TestTLSHSMConfigParsing(t *testing.T) {
+	// Test that HSM config block is parsed correctly.
+	confFileName := createConfFile(t, []byte(`
+		listen: "127.0.0.1:4222"
+		tls {
+			cert_file: "./configs/certs/server-cert.pem"
+			hsm {
+				provider:    "/usr/lib/softhsm/libsofthsm2.so"
+				pin:         "1234"
+				token_label: "my-token"
+				key_label:   "server-key"
+			}
+		}
+	`))
+	opts, err := ProcessConfigFile(confFileName)
+	if err != nil {
+		t.Fatalf("Received an error reading config file: %v", err)
+	}
+	if opts.tlsConfigOpts == nil {
+		t.Fatal("Expected tlsConfigOpts to be non-nil")
+	}
+	hsmCfg := opts.tlsConfigOpts.HSM
+	if hsmCfg == nil {
+		t.Fatal("Expected HSM config to be non-nil")
+	}
+	if hsmCfg.Provider != "/usr/lib/softhsm/libsofthsm2.so" {
+		t.Fatalf("Expected provider path, got %q", hsmCfg.Provider)
+	}
+	if hsmCfg.Pin != "1234" {
+		t.Fatalf("Expected pin '1234', got %q", hsmCfg.Pin)
+	}
+	if hsmCfg.TokenLabel != "my-token" {
+		t.Fatalf("Expected token_label 'my-token', got %q", hsmCfg.TokenLabel)
+	}
+	if hsmCfg.KeyLabel != "server-key" {
+		t.Fatalf("Expected key_label 'server-key', got %q", hsmCfg.KeyLabel)
+	}
+}
+
+func TestTLSHSMConfigWithKeyID(t *testing.T) {
+	// Test that key_id is parsed as an alternative to key_label.
+	confFileName := createConfFile(t, []byte(`
+		listen: "127.0.0.1:4222"
+		tls {
+			cert_file: "./configs/certs/server-cert.pem"
+			hsm {
+				provider:    "/usr/lib/softhsm/libsofthsm2.so"
+				pin:         "1234"
+				token_label: "my-token"
+				key_id:      "0102030405"
+			}
+		}
+	`))
+	opts, err := ProcessConfigFile(confFileName)
+	if err != nil {
+		t.Fatalf("Received an error reading config file: %v", err)
+	}
+	hsmCfg := opts.tlsConfigOpts.HSM
+	if hsmCfg == nil {
+		t.Fatal("Expected HSM config to be non-nil")
+	}
+	if hsmCfg.KeyID != "0102030405" {
+		t.Fatalf("Expected key_id '0102030405', got %q", hsmCfg.KeyID)
+	}
+	if hsmCfg.KeyLabel != "" {
+		t.Fatalf("Expected empty key_label, got %q", hsmCfg.KeyLabel)
+	}
+}
+
+func TestTLSHSMConfigWithEnvVar(t *testing.T) {
+	// Test that environment variables are resolved for HSM pin.
+	os.Setenv("_TEST_HSM_PIN_", "secret-pin-value")
+	defer os.Unsetenv("_TEST_HSM_PIN_")
+
+	confFileName := createConfFile(t, []byte(`
+		listen: "127.0.0.1:4222"
+		tls {
+			cert_file: "./configs/certs/server-cert.pem"
+			hsm {
+				provider:    "/usr/lib/softhsm/libsofthsm2.so"
+				pin:         $_TEST_HSM_PIN_
+				token_label: "my-token"
+				key_label:   "server-key"
+			}
+		}
+	`))
+	opts, err := ProcessConfigFile(confFileName)
+	if err != nil {
+		t.Fatalf("Received an error reading config file: %v", err)
+	}
+	hsmCfg := opts.tlsConfigOpts.HSM
+	if hsmCfg == nil {
+		t.Fatal("Expected HSM config to be non-nil")
+	}
+	if hsmCfg.Pin != "secret-pin-value" {
+		t.Fatalf("Expected pin from env var, got %q", hsmCfg.Pin)
+	}
+}
+
+func TestTLSHSMConfigConflicts(t *testing.T) {
+	// Test that HSM config conflicts with key_file.
+	confFileName := createConfFile(t, []byte(`
+		listen: "127.0.0.1:4222"
+		tls {
+			cert_file: "./configs/certs/server-cert.pem"
+			key_file:  "./configs/certs/server-key.pem"
+			hsm {
+				provider:    "/usr/lib/softhsm/libsofthsm2.so"
+				token_label: "my-token"
+				key_label:   "server-key"
+			}
+		}
+	`))
+	_, err := ProcessConfigFile(confFileName)
+	if err == nil || !strings.Contains(err.Error(), "cannot combine 'key_file' option with 'hsm'") {
+		t.Fatalf("Expected conflict error for key_file + hsm, got: %v", err)
+	}
+
+	// Test that HSM config conflicts with certs option.
+	confFileName = createConfFile(t, []byte(`
+		listen: "127.0.0.1:4222"
+		tls {
+			certs: [
+				{ cert_file: "./configs/certs/server-cert.pem", key_file: "./configs/certs/server-key.pem" }
+			]
+			hsm {
+				provider:    "/usr/lib/softhsm/libsofthsm2.so"
+				token_label: "my-token"
+				key_label:   "server-key"
+			}
+		}
+	`))
+	_, err = ProcessConfigFile(confFileName)
+	if err == nil || !strings.Contains(err.Error(), "cannot combine 'certs' option with 'hsm'") {
+		t.Fatalf("Expected conflict error for certs + hsm, got: %v", err)
+	}
+}
+
+func TestTLSHSMConfigUnknownField(t *testing.T) {
+	confFileName := createConfFile(t, []byte(`
+		listen: "127.0.0.1:4222"
+		tls {
+			cert_file: "./configs/certs/server-cert.pem"
+			hsm {
+				provider:      "/usr/lib/softhsm/libsofthsm2.so"
+				token_label:   "my-token"
+				key_label:     "server-key"
+				unknown_field: "value"
+			}
+		}
+	`))
+	_, err := ProcessConfigFile(confFileName)
+	if err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("Expected unknown field error, got: %v", err)
+	}
+}

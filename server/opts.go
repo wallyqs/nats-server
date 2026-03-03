@@ -18,6 +18,7 @@ import (
 	"crypto/fips140"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -38,6 +39,7 @@ import (
 	"github.com/nats-io/nats-server/v2/conf"
 	"github.com/nats-io/nats-server/v2/server/certidp"
 	"github.com/nats-io/nats-server/v2/server/certstore"
+	"github.com/nats-io/nats-server/v2/server/hsm"
 	"github.com/nats-io/nkeys"
 )
 
@@ -811,6 +813,7 @@ type TLSConfigOpts struct {
 	OCSPPeerConfig       *certidp.OCSPPeerConfig
 	Certificates         []*TLSCertPairOpt
 	MinVersion           uint16
+	HSM                  *hsm.Config
 }
 
 // TLSCertPairOpt are the paths to a certificate and private key.
@@ -5223,12 +5226,65 @@ func parseTLS(v any, isClientCtx bool) (t *TLSConfigOpts, retErr error) {
 				return nil, &configErr{tk, fmt.Sprintf("error parsing tls config: %v", err)}
 			}
 			tc.MinVersion = minVersion
+		case "hsm":
+			hsmm, ok := mv.(map[string]any)
+			if !ok {
+				return nil, &configErr{tk, "error parsing tls config, expected 'hsm' to be a map"}
+			}
+			hsmCfg := &hsm.Config{}
+			for hk, hv := range hsmm {
+				_, hv = unwrapValue(hv, &lt)
+				switch strings.ToLower(hk) {
+				case "provider":
+					v, ok := hv.(string)
+					if !ok {
+						return nil, &configErr{tk, "error parsing hsm config, expected 'provider' to be a string"}
+					}
+					hsmCfg.Provider = v
+				case "pin":
+					v, ok := hv.(string)
+					if !ok {
+						return nil, &configErr{tk, "error parsing hsm config, expected 'pin' to be a string"}
+					}
+					hsmCfg.Pin = v
+				case "token_label":
+					v, ok := hv.(string)
+					if !ok {
+						return nil, &configErr{tk, "error parsing hsm config, expected 'token_label' to be a string"}
+					}
+					hsmCfg.TokenLabel = v
+				case "key_label":
+					v, ok := hv.(string)
+					if !ok {
+						return nil, &configErr{tk, "error parsing hsm config, expected 'key_label' to be a string"}
+					}
+					hsmCfg.KeyLabel = v
+				case "key_id":
+					v, ok := hv.(string)
+					if !ok {
+						return nil, &configErr{tk, "error parsing hsm config, expected 'key_id' to be a string"}
+					}
+					hsmCfg.KeyID = v
+				default:
+					return nil, &configErr{tk, fmt.Sprintf("error parsing hsm config, unknown field %q", hk)}
+				}
+			}
+			tc.HSM = hsmCfg
 		default:
 			return nil, &configErr{tk, fmt.Sprintf("error parsing tls config, unknown field %q", mk)}
 		}
 	}
 	if len(tc.Certificates) > 0 && tc.CertFile != _EMPTY_ {
 		return nil, &configErr{tk, "error parsing tls config, cannot combine 'cert_file' option with 'certs' option"}
+	}
+	if tc.HSM != nil && tc.KeyFile != _EMPTY_ {
+		return nil, &configErr{tk, "error parsing tls config, cannot combine 'key_file' option with 'hsm' option"}
+	}
+	if tc.HSM != nil && tc.CertStore != certstore.STOREEMPTY {
+		return nil, &configErr{tk, "error parsing tls config, cannot combine 'cert_store' option with 'hsm' option"}
+	}
+	if tc.HSM != nil && len(tc.Certificates) > 0 {
+		return nil, &configErr{tk, "error parsing tls config, cannot combine 'certs' option with 'hsm' option"}
 	}
 
 	// If cipher suites were not specified then use the defaults
@@ -5647,6 +5703,42 @@ func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 	switch {
 	case tc.CertFile != _EMPTY_ && tc.CertStore != certstore.STOREEMPTY:
 		return nil, certstore.ErrConflictCertFileAndStore
+	case tc.HSM != nil && tc.CertFile == _EMPTY_:
+		return nil, fmt.Errorf("'cert_file' is required when using 'hsm' for the private key")
+	case tc.HSM != nil:
+		// Load certificate from file, private key operations from HSM via PKCS#11.
+		certPEMData, err := os.ReadFile(tc.CertFile)
+		if err != nil {
+			return nil, fmt.Errorf("error reading certificate file for HSM: %v", err)
+		}
+		var certDERs [][]byte
+		rest := certPEMData
+		for {
+			var block *pem.Block
+			block, rest = pem.Decode(rest)
+			if block == nil {
+				break
+			}
+			if block.Type == "CERTIFICATE" {
+				certDERs = append(certDERs, block.Bytes)
+			}
+		}
+		if len(certDERs) == 0 {
+			return nil, fmt.Errorf("no certificates found in %s", tc.CertFile)
+		}
+		leaf, err := x509.ParseCertificate(certDERs[0])
+		if err != nil {
+			return nil, fmt.Errorf("error parsing certificate: %v", err)
+		}
+		signer, err := hsm.GetSigner(tc.HSM, leaf.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("error initializing HSM signer: %v", err)
+		}
+		config.Certificates = []tls.Certificate{{
+			Certificate: certDERs,
+			PrivateKey:  signer,
+			Leaf:        leaf,
+		}}
 	case tc.CertFile != _EMPTY_ && tc.KeyFile == _EMPTY_:
 		return nil, fmt.Errorf("missing 'key_file' in TLS configuration")
 	case tc.CertFile == _EMPTY_ && tc.KeyFile != _EMPTY_:
