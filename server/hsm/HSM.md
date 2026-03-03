@@ -116,6 +116,26 @@ The `hsm` block cannot be combined with:
 - `cert_store` — Windows certificate store is a separate mechanism
 - `certs` — multiple certificate pairs (each would need its own HSM config)
 
+For example, the following will **not** work:
+
+```
+tls {
+    cert_file: "/path/to/server-cert.pem"
+    key_file:  "/path/to/key.pem"       # ERROR: can't use both key_file and hsm
+
+    hsm {
+        provider:    "/usr/lib/softhsm/libsofthsm2.so"
+        token_label: "nats-test"
+        key_label:   "nats-tls-key"
+        pin:         $HSM_PIN
+    }
+}
+```
+
+The server will refuse to start with:
+
+    error parsing tls config, cannot combine 'key_file' option with 'hsm' option
+
 ## Quick start with SoftHSM2 (testing)
 
 SoftHSM2 is a software PKCS#11 implementation for testing without real hardware.
