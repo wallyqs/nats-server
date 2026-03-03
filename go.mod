@@ -17,6 +17,8 @@ require (
 	golang.org/x/time v0.14.0
 )
 
+require github.com/miekg/pkcs11 v1.1.2 // indirect
+
 // We don't usually pin non-tagged commits but so far no release has
 // been made that includes https://github.com/minio/highwayhash/pull/29.
 // This will be updated if a new tag covers this in the future.
