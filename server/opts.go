@@ -398,6 +398,7 @@ type Options struct {
 	JsAccDefaultDomain         map[string]string `json:"-"` // account to domain name mapping
 	Websocket                  WebsocketOpts     `json:"-"`
 	MQTT                       MQTTOpts          `json:"-"`
+	A2A                        A2AOpts           `json:"-"`
 	ProfPort                   int               `json:"-"`
 	ProfBlockRate              int               `json:"-"`
 	PidFile                    string            `json:"-"`
@@ -704,6 +705,34 @@ type MQTTOpts struct {
 	// downgradeQOS2Sub tells the MQTT client to downgrade QoS2 SUBSCRIBE
 	// requests to QoS1.
 	downgradeQoS2Sub bool
+}
+
+// A2AOpts are options for A2A (Agent-to-Agent) protocol support
+type A2AOpts struct {
+	// Host/Port for the A2A HTTP listener.
+	Host string
+	Port int
+
+	// If no user name is provided when a client connects, will default to the
+	// matching user from the global list of users in `Options.Users`.
+	NoAuthUser string
+
+	// Authentication section. If anything is configured in this section,
+	// it will override the authorization configuration of regular clients.
+	Username string
+	Password string
+	Token    string
+
+	// Timeout for the authentication process.
+	AuthTimeout float64
+
+	// TLS configuration.
+	TLSConfig  *tls.Config
+	TLSMap     bool
+	TLSTimeout float64
+
+	// Snapshot of configured TLS options.
+	tlsConfigOpts *TLSConfigOpts
 }
 
 type netResolver interface {
@@ -1699,6 +1728,11 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		}
 	case "mqtt":
 		if err := parseMQTT(tk, o, errors, warnings); err != nil {
+			*errors = append(*errors, err)
+			return
+		}
+	case "a2a":
+		if err := parseA2A(tk, o, errors, warnings); err != nil {
 			*errors = append(*errors, err)
 			return
 		}
@@ -5526,6 +5560,69 @@ func parseMQTT(v any, o *Options, errors *[]error, warnings *[]error) error {
 		case "downgrade_qos2_subscribe":
 			o.MQTT.downgradeQoS2Sub = mv.(bool)
 
+		default:
+			if !tk.IsUsedVariable() {
+				err := &unknownConfigFieldErr{
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
+				}
+				*errors = append(*errors, err)
+				continue
+			}
+		}
+	}
+	return nil
+}
+
+func parseA2A(v any, o *Options, errors *[]error, warnings *[]error) error {
+	var lt token
+	defer convertPanicToErrorList(&lt, errors)
+
+	tk, v := unwrapValue(v, &lt)
+	gm, ok := v.(map[string]any)
+	if !ok {
+		return &configErr{tk, fmt.Sprintf("Expected a2a to be a map, got %T", v)}
+	}
+	for mk, mv := range gm {
+		tk, mv = unwrapValue(mv, &lt)
+		switch strings.ToLower(mk) {
+		case "listen":
+			hp, err := parseListen(mv)
+			if err != nil {
+				err := &configErr{tk, err.Error()}
+				*errors = append(*errors, err)
+				continue
+			}
+			o.A2A.Host = hp.host
+			o.A2A.Port = hp.port
+		case "port":
+			o.A2A.Port = int(mv.(int64))
+		case "host", "net":
+			o.A2A.Host = mv.(string)
+		case "tls":
+			tc, err := parseTLS(tk, true)
+			if err != nil {
+				*errors = append(*errors, err)
+				continue
+			}
+			if o.A2A.TLSConfig, err = GenTLSConfig(tc); err != nil {
+				err := &configErr{tk, err.Error()}
+				*errors = append(*errors, err)
+				continue
+			}
+			o.A2A.TLSTimeout = tc.Timeout
+			o.A2A.TLSMap = tc.Map
+			o.A2A.tlsConfigOpts = tc
+		case "authorization", "authentication":
+			auth := parseSimpleAuth(tk, errors)
+			o.A2A.Username = auth.user
+			o.A2A.Password = auth.pass
+			o.A2A.Token = auth.token
+			o.A2A.AuthTimeout = auth.timeout
+		case "no_auth_user":
+			o.A2A.NoAuthUser = mv.(string)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{

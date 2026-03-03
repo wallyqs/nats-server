@@ -1257,7 +1257,7 @@ func imposeOrder(value any) error {
 	case WebsocketOpts:
 		slices.Sort(value.AllowedOrigins)
 	case string, bool, uint8, uint16, uint64, int, int32, int64, time.Duration, float64, nil, LeafNodeOpts, ClusterOpts, *tls.Config, PinnedCertSet,
-		*URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication, MQTTOpts, jwt.TagList,
+		*URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication, MQTTOpts, A2AOpts, jwt.TagList,
 		*OCSPConfig, map[string]string, JSLimitOpts, StoreCipher, *OCSPResponseCacheConfig, *ProxiesConfig, WriteTimeoutPolicy:
 		// explicitly skipped types
 	case *AuthCallout:
@@ -1700,6 +1700,16 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			tmpNew.ConsumerReplicas = newValue.(MQTTOpts).ConsumerReplicas
 			tmpNew.ConsumerMemoryStorage = newValue.(MQTTOpts).ConsumerMemoryStorage
 			tmpNew.ConsumerInactiveThreshold = newValue.(MQTTOpts).ConsumerInactiveThreshold
+		case "a2a":
+			// For A2A, only TLS can be reloaded; fail if other fields changed.
+			tmpOld := oldValue.(A2AOpts)
+			tmpNew := newValue.(A2AOpts)
+			tmpOld.TLSConfig, tmpOld.tlsConfigOpts = nil, nil
+			tmpNew.TLSConfig, tmpNew.tlsConfigOpts = nil, nil
+			if !reflect.DeepEqual(tmpOld, tmpNew) {
+				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
+					field.Name, oldValue, newValue)
+			}
 		case "connecterrorreports":
 			diffOpts = append(diffOpts, &connectErrorReports{newValue: newValue.(int)})
 		case "reconnecterrorreports":

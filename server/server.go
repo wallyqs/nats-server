@@ -315,6 +315,9 @@ type Server struct {
 	// MQTT structure
 	mqtt srvMQTT
 
+	// A2A structure
+	a2a srvA2A
+
 	// OCSP monitoring
 	ocsps []*OCSPMonitor
 
@@ -2547,6 +2550,11 @@ func (s *Server) Start() {
 		s.startMQTT()
 	}
 
+	// A2A
+	if opts.A2A.Port != 0 {
+		s.startA2A()
+	}
+
 	// Start up routing as well if needed.
 	if opts.Cluster.Port != 0 {
 		s.startGoRoutine(func() {
@@ -2672,6 +2680,16 @@ func (s *Server) Shutdown() {
 		doneExpected++
 		s.mqtt.listener.Close()
 		s.mqtt.listener = nil
+	}
+
+	// Kick A2A HTTP server
+	if s.a2a.listener != nil {
+		doneExpected++
+		if s.a2a.server != nil {
+			s.a2a.server.Close()
+		}
+		s.a2a.listener.Close()
+		s.a2a.listener = nil
 	}
 
 	// Kick leafnodes AcceptLoop()
@@ -3166,6 +3184,8 @@ func (s *Server) startMonitoring(secure bool) error {
 	mux.HandleFunc(s.basePath(IPQueuesPath), s.HandleIPQueuesz)
 	// Raftz
 	mux.HandleFunc(s.basePath(RaftzPath), s.HandleRaftz)
+	// A2Az
+	mux.HandleFunc(s.basePath(A2AzPath), s.HandleA2Az)
 	// Expvarz
 	mux.Handle(s.basePath(ExpvarzPath), expvar.Handler())
 
@@ -3972,6 +3992,7 @@ func (s *Server) readyForConnections(d time.Duration) error {
 		chk["leafnode"] = info{ok: (opts.LeafNode.Port == 0 || s.leafNodeListener != nil), err: s.leafNodeListenerErr}
 		chk["websocket"] = info{ok: (opts.Websocket.Port == 0 || s.websocket.listener != nil), err: s.websocket.listenerErr}
 		chk["mqtt"] = info{ok: (opts.MQTT.Port == 0 || s.mqtt.listener != nil), err: s.mqtt.listenerErr}
+		chk["a2a"] = info{ok: (opts.A2A.Port == 0 || s.a2a.listener != nil), err: s.a2a.listenerErr}
 		s.mu.RUnlock()
 
 		var numOK int
