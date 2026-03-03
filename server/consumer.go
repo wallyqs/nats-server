@@ -5352,8 +5352,7 @@ func (o *consumer) streamNumPending() (uint64, error) {
 	o.npcQuitCh = qch
 
 	// Capture the values needed for the store call under the lock.
-	mset := o.mset
-	store := mset.store
+	store := o.mset.store
 	sseq := o.sseq
 	isLastPerSubject := o.cfg.DeliverPolicy == DeliverLastPerSubject
 	filters, subjf := o.filters, o.subjf
@@ -5362,51 +5361,32 @@ func (o *consumer) streamNumPending() (uint64, error) {
 	// the potentially expensive store call is in flight.
 	o.mu.Unlock()
 
-	type result struct {
-		npc, npf uint64
-		err      error
-	}
-	done := make(chan result, 1)
-	go func() {
-		var npc, npf uint64
-		var err error
-		if filters != nil {
-			npc, npf, err = store.NumPendingMulti(sseq, filters, isLastPerSubject)
-		} else if len(subjf) > 0 {
-			npc, npf, err = store.NumPending(sseq, subjf[0].subject, isLastPerSubject)
-		} else {
-			npc, npf, err = store.NumPending(sseq, _EMPTY_, isLastPerSubject)
-		}
-		done <- result{npc, npf, err}
-	}()
-
-	// Wait for either the store call to finish or cancellation.
-	var r result
-	select {
-	case r = <-done:
-	case <-qch:
-		// Cancelled. Reacquire lock and return.
-		o.mu.Lock()
-		o.npc, o.npf = 0, 0
-		return 0, errNumPendingCanceled
+	var npc, npf uint64
+	var err error
+	if filters != nil {
+		npc, npf, err = store.NumPendingMulti(sseq, filters, isLastPerSubject)
+	} else if len(subjf) > 0 {
+		npc, npf, err = store.NumPending(sseq, subjf[0].subject, isLastPerSubject)
+	} else {
+		npc, npf, err = store.NumPending(sseq, _EMPTY_, isLastPerSubject)
 	}
 
 	o.mu.Lock()
 
-	// After reacquiring the lock, verify we haven't been cancelled in the
-	// meantime (e.g., consumer paused between goroutine completion and
-	// lock reacquisition).
+	// Check if we were cancelled while the lock was released (e.g., the
+	// consumer was paused or a newer call superseded us). If so, discard
+	// the result without touching npc/npf — a newer call may have already
+	// set them correctly.
 	select {
 	case <-qch:
-		o.npc, o.npf = 0, 0
 		return 0, errNumPendingCanceled
 	default:
 	}
 
-	if r.err != nil {
-		return 0, r.err
+	if err != nil {
+		return 0, err
 	}
-	o.npc, o.npf = int64(r.npc), r.npf
+	o.npc, o.npf = int64(npc), npf
 	return o.numPending(), nil
 }
 
