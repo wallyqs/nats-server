@@ -6918,12 +6918,18 @@ func TestJWTAccountNATSResolverWrongCreds(t *testing.T) {
 
 	// startup cluster
 	checkClusterFormed(t, sA, sB, sC)
-	time.Sleep(1 * time.Second) // wait for the protocol to converge
-	// // Check all accounts
-	require_JWTPresent(t, dirA, apub) // was already present on startup
-	require_JWTPresent(t, dirB, apub) // was copied from server A
-	require_JWTPresent(t, dirA, bpub) // was copied from server B
-	require_JWTPresent(t, dirB, bpub) // was already present on startup
+	// Wait for JWTs to sync across the cluster.
+	checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+		for _, pair := range []struct{ dir, pub string }{
+			{dirA, apub}, {dirB, apub},
+			{dirA, bpub}, {dirB, bpub},
+		} {
+			if _, err := os.Stat(filepath.Join(pair.dir, pair.pub+".jwt")); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 
 	// There should be no state about the missing account.
 	require_JWTAbsent(t, dirA, cpub)
