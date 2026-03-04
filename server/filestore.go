@@ -9788,6 +9788,12 @@ func (fs *fileStore) purge(fseq uint64) (purged uint64, rerr error) {
 		fs.state.LastSeq = fseq - 1
 	}
 
+	// Save reference to old last message block before newMsgBlockForWrite
+	// replaces it. newMsgBlockForWrite will launch an async goroutine to
+	// recompress the old block when compression is enabled, and we need to
+	// synchronize with it before the directory rename below.
+	oldLmb := fs.lmb
+
 	// Make sure we have a lmb to write to.
 	if _, err := fs.newMsgBlockForWrite(); err != nil {
 		fs.mu.Unlock()
@@ -9826,6 +9832,16 @@ func (fs *fileStore) purge(fseq uint64) (purged uint64, rerr error) {
 	// Mark dirty.
 	fs.dirty++
 	fs.addMsgBlock(lmb)
+
+	// If compression is enabled, hold the old last message block's lock during
+	// the directory rename below. This prevents the async recompression goroutine
+	// (launched by newMsgBlockForWrite for the old block) from writing a compressed
+	// version of the old block file into the new msgs directory after the rename,
+	// which would create a phantom block visible during recovery.
+	if oldLmb != nil && fs.fcfg.Compression != NoCompression {
+		oldLmb.mu.Lock()
+		defer oldLmb.mu.Unlock()
+	}
 
 	// Move the msgs directory out of the way, will delete out of band.
 	// FIXME(dlc) - These can error and we need to change api above to propagate?
