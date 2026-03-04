@@ -11839,7 +11839,6 @@ func (fs *fileStore) streamSnapshot(w io.WriteCloser, includeConsumers bool, err
 		if err != nil {
 			mb.mu.Unlock()
 			recycleMsgBlockBuf(bbuf)
-			bbuf = nil
 			writeErr(fmt.Sprintf("Could not read message block [%d]: %v", mb.index, err))
 			return
 		}
@@ -11851,7 +11850,6 @@ func (fs *fileStore) streamSnapshot(w io.WriteCloser, includeConsumers bool, err
 			if err != nil {
 				mb.mu.Unlock()
 				recycleMsgBlockBuf(poolBuf)
-				bbuf = nil
 				writeErr(fmt.Sprintf("Could not create encryption key for message block [%d]: %v", mb.index, err))
 				return
 			}
@@ -11861,7 +11859,6 @@ func (fs *fileStore) streamSnapshot(w io.WriteCloser, includeConsumers bool, err
 		if bbuf, err = mb.decompressIfNeeded(bbuf); err != nil {
 			mb.mu.Unlock()
 			recycleMsgBlockBuf(poolBuf)
-			bbuf = nil
 			writeErr(fmt.Sprintf("Could not decompress message block [%d]: %v", mb.index, err))
 			return
 		}

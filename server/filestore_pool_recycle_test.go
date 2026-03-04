@@ -395,7 +395,6 @@ func TestFileStorePoolRecycleLastChecksum(t *testing.T) {
 
 				// Reopen triggers recovery which uses lastChecksum.
 				snap := resetBlkPoolCounters()
-				fcfg.StoreDir = fcfg.StoreDir // reuse same dir
 				fs, err = newFileStoreWithCreated(fcfg, cfg, created, prf(&fcfg), nil)
 				require_NoError(t, err)
 				err = fs.Stop()
