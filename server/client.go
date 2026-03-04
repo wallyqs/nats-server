@@ -1686,17 +1686,13 @@ func (c *client) flushOutbound() bool {
 
 		cw.Reset(&bb)
 		for _, buf := range collapsed {
-			if _, err = cw.Write(buf); err != nil {
-				break
+			if err == nil {
+				_, err = cw.Write(buf)
 			}
+			nbPoolPut(buf)
 		}
 		if err == nil {
 			err = cw.Close()
-		}
-		// Return the original pool buffers now that their contents have
-		// been consumed by the compressor (or the compressor has failed).
-		for _, buf := range collapsed {
-			nbPoolPut(buf)
 		}
 		if err != nil {
 			c.Errorf("Error compressing data: %v", err)
