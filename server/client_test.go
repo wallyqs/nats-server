@@ -3893,6 +3893,18 @@ func TestNBPoolPutReslicedBufferIsDiscarded(t *testing.T) {
 			// Buggy usage leaks the buffer (>=1 alloc per iteration).
 			require_Equal(t, correctAllocs, float64(0))
 			require_True(t, buggyAllocs >= 1)
+
+			// Confirm that b[cap(b):] zeroes the capacity while keeping the
+			// same data pointer. The zero capacity is what causes nbPoolPut
+			// to silently discard the buffer (falls through to default case).
+			b := nbPoolGet(poolSize)
+			b = b[:cap(b)]
+			capBefore := cap(b)
+			b = b[cap(b):]
+			require_Equal(t, capBefore, poolSize)
+			require_Equal(t, cap(b), 0)
+			require_Equal(t, len(b), 0)
+			nbPoolPut(b) // no-op: cap is 0, hits default case
 		})
 	}
 }
