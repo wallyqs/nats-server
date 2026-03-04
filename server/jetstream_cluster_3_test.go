@@ -5564,9 +5564,22 @@ func TestJetStreamClusterConsumerMaxDeliveryNumAckPendingBug(t *testing.T) {
 	cl.WaitForShutdown()
 	cl = c.restartServer(cl)
 	c.waitOnServerCurrent(cl)
+	c.waitOnConsumerLeader(globalAccountName, "TEST", "r1")
 
-	cib, err = js.ConsumerInfo("TEST", "r1")
-	require_NoError(t, err)
+	// After server restart, the consumer needs time to process pending entries
+	// via checkPending() and the stream needs to catch up its RAFT state.
+	// Poll until the consumer info matches the expected state.
+	checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+		cib, err = js.ConsumerInfo("TEST", "r1")
+		if err != nil {
+			return err
+		}
+		if cib.NumAckPending != cia.NumAckPending || cib.NumPending != cia.NumPending {
+			return fmt.Errorf("consumer info not yet converged: NumAckPending=%d (want %d), NumPending=%d (want %d)",
+				cib.NumAckPending, cia.NumAckPending, cib.NumPending, cia.NumPending)
+		}
+		return nil
+	})
 
 	// Created can skew a small bit due to server restart, this is expected.
 	now := time.Now()
