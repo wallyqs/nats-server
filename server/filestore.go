@@ -997,6 +997,12 @@ func (fs *fileStore) writeStreamMeta() error {
 }
 
 // Pools to recycle the blocks to help with memory pressure.
+// Atomic counters for tracking pool get/put balance in tests.
+var (
+	blkPoolGets atomic.Int64
+	blkPoolPuts atomic.Int64
+)
+
 var blkPoolTiny = &sync.Pool{
 	New: func() any {
 		b := [defaultTinyBlockSize]byte{}
@@ -1026,12 +1032,16 @@ var blkPoolBig = &sync.Pool{
 func getMsgBlockBuf(sz int) (buf []byte) {
 	switch {
 	case sz <= defaultTinyBlockSize:
+		blkPoolGets.Add(1)
 		return blkPoolTiny.Get().(*[defaultTinyBlockSize]byte)[:0]
 	case sz <= defaultSmallBlockSize:
+		blkPoolGets.Add(1)
 		return blkPoolSmall.Get().(*[defaultSmallBlockSize]byte)[:0]
 	case sz <= defaultMediumBlockSize:
+		blkPoolGets.Add(1)
 		return blkPoolMedium.Get().(*[defaultMediumBlockSize]byte)[:0]
 	case sz <= defaultLargeBlockSize:
+		blkPoolGets.Add(1)
 		return blkPoolBig.Get().(*[defaultLargeBlockSize]byte)[:0]
 	default:
 		// Ideally this should not happen, once we return a buffer that's
@@ -1047,15 +1057,19 @@ func recycleMsgBlockBuf(buf []byte) {
 	case defaultTinyBlockSize:
 		b := (*[defaultTinyBlockSize]byte)(buf[0:defaultTinyBlockSize])
 		blkPoolTiny.Put(b)
+		blkPoolPuts.Add(1)
 	case defaultSmallBlockSize:
 		b := (*[defaultSmallBlockSize]byte)(buf[0:defaultSmallBlockSize])
 		blkPoolSmall.Put(b)
+		blkPoolPuts.Add(1)
 	case defaultMediumBlockSize:
 		b := (*[defaultMediumBlockSize]byte)(buf[0:defaultMediumBlockSize])
 		blkPoolMedium.Put(b)
+		blkPoolPuts.Add(1)
 	case defaultLargeBlockSize:
 		b := (*[defaultLargeBlockSize]byte)(buf[0:defaultLargeBlockSize])
 		blkPoolBig.Put(b)
+		blkPoolPuts.Add(1)
 	default:
 		// Too large, let the GC collect it instead.
 	}
