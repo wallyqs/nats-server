@@ -5415,10 +5415,7 @@ sendToRoutesOrLeafs:
 	// already performed, otherwise we'd end up with a duplicate '@' suffix
 	// resulting in a protocol error.
 	if len(deliver) > 0 && len(reply) > 0 && !remapped {
-		// Use stack-allocated scratch buffer to avoid heap allocation
-		// when appending deliver subject to reply.
-		var _rply [256]byte
-		reply = append(append(_rply[:0], reply...), '@')
+		reply = append(reply, '@')
 		reply = append(reply, deliver...)
 	}
 
