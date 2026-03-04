@@ -13399,9 +13399,12 @@ func writeAtomically(name string, data []byte, perm fs.FileMode, sync bool) erro
 		_ = os.Remove(tmp)
 		return err
 	}
-	if sync {
+	if sync && runtime.GOOS != "windows" {
 		// To ensure that the file rename was persisted on all filesystems,
 		// also try to flush the directory metadata.
+		// Note: this is skipped on Windows since directories cannot be synced there.
+		// Windows does not support calling Sync on a directory handle, and opening
+		// a directory with O_RDWR fails with "is a directory".
 		var d *os.File
 		if d, err = os.Open(filepath.Dir(name)); err != nil {
 			return err
