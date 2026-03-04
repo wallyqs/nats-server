@@ -4743,7 +4743,7 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 		groupCreated := meta.Created()
 
 		js.mu.RLock()
-		isLeader, sa, ca := cc.isLeader(), js.streamAssignment(acc.Name, streamName), js.consumerAssignment(acc.Name, streamName, consumerName)
+		isLeader, sa, ca := cc.isLeader(), js.streamAssignment(acc.Name, streamName), js.consumerAssignmentOrInflight(acc.Name, streamName, consumerName)
 		var rg *raftGroup
 		var offline, isMember bool
 		if ca != nil {
