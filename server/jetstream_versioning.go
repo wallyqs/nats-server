@@ -17,7 +17,7 @@ import "strconv"
 
 const (
 	// JSApiLevel is the maximum supported JetStream API level for this server.
-	JSApiLevel int = 3
+	JSApiLevel int = 4
 
 	JSRequiredLevelMetadataKey = "_nats.req.level"
 	JSServerVersionMetadataKey = "_nats.ver"
