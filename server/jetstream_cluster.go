@@ -3020,6 +3020,10 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 				t.Reset(compactMinInterval)
 			}
 			failedSnapshots++
+		} else {
+			// Debug: log silently ignored errors that block compaction.
+			s.Debugf("Stream '%s > %s' [%s] doSnapshot silently ignored: %v (force=%v, failedSnaps=%d, ne=%d, nb=%d)",
+				mset.acc.Name, mset.name(), n.Group(), err, force, failedSnapshots, ne, nb)
 		}
 	}
 

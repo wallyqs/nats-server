@@ -4102,6 +4102,11 @@ type RaftzGroup struct {
 	PIndex        uint64                    `json:"pindex"`
 	SystemAcc     bool                      `json:"system_account"`
 	TrafficAcc    string                    `json:"traffic_account"`
+	PApplied      uint64                    `json:"papplied"`
+	Bytes         uint64                    `json:"bytes"`
+	Snapshotting  bool                      `json:"snapshotting,omitempty"`
+	HasSnapfile   bool                      `json:"has_snapfile"`
+	ProgressLen   int                       `json:"progress_len"`
 	IPQPropLen    int                       `json:"ipq_proposal_len"`
 	IPQEntryLen   int                       `json:"ipq_entry_len"`
 	IPQRespLen    int                       `json:"ipq_resp_len"`
@@ -4210,6 +4215,11 @@ func (s *Server) Raftz(opts *RaftzOptions) *RaftzStatus {
 			PIndex:        n.pindex,
 			SystemAcc:     n.IsSystemAccount(),
 			TrafficAcc:    n.acc.GetName(),
+			PApplied:      n.papplied,
+			Bytes:         n.bytes,
+			Snapshotting:  n.snapshotting,
+			HasSnapfile:   n.snapfile != _EMPTY_,
+			ProgressLen:   len(n.progress),
 			IPQPropLen:    n.prop.len(),
 			IPQEntryLen:   n.entry.len(),
 			IPQRespLen:    n.resp.len(),
