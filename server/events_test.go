@@ -1345,7 +1345,8 @@ func TestAccountReqMonitoring(t *testing.T) {
 	require_Contains(t, payload, respContentAcc...)
 
 	// Depending on timing, statz message could be accounted too.
-	receivedOK := strings.Contains(payload, `"received":{"msgs":1,"bytes":0`) || strings.Contains(payload, `"received":{"msgs":2,"bytes":0`)
+	// When msgs=2, bytes will be non-zero since the statz response itself carries payload.
+	receivedOK := strings.Contains(payload, `"received":{"msgs":1,"bytes":0`) || strings.Contains(payload, `"received":{"msgs":2,`)
 	require_True(t, receivedOK)
 	_, err = rSub.NextMsg(200 * time.Millisecond)
 	require_Error(t, err)

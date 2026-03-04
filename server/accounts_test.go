@@ -3830,6 +3830,7 @@ func TestAccountImportCycle(t *testing.T) {
 	defer ncA.Close()
 	// setup responder
 	natsSub(t, ncCp, "q1.>", func(m *nats.Msg) { m.Respond([]byte("reply")) })
+	natsFlush(t, ncCp)
 	// setup requestor
 	ib := "q2.inbox"
 	subAResp, err := ncA.SubscribeSync(ib)
