@@ -4743,7 +4743,7 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 		groupCreated := meta.Created()
 
 		js.mu.RLock()
-		isLeader, sa, ca := cc.isLeader(), js.streamAssignment(acc.Name, streamName), js.consumerAssignmentOrInflight(acc.Name, streamName, consumerName)
+		isLeader, sa, ca := cc.isLeader(), js.streamAssignment(acc.Name, streamName), js.consumerAssignment(acc.Name, streamName, consumerName)
 		var rg *raftGroup
 		var offline, isMember bool
 		if ca != nil {
@@ -4779,6 +4779,16 @@ func (s *Server) jsConsumerInfoRequest(sub *subscription, c *client, _ *Account,
 			}
 			if sa == nil {
 				resp.Error = NewJSStreamNotFoundError()
+				s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+				return
+			}
+			// Check if the consumer has an inflight create proposal that hasn't been applied yet.
+			// If so, return a temporary error instead of "not found" so clients know to retry.
+			js.mu.RLock()
+			caInflight := js.consumerAssignmentOrInflight(acc.Name, streamName, consumerName)
+			js.mu.RUnlock()
+			if caInflight != nil {
+				resp.Error = NewJSConsumerCreateInflightError()
 				s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 				return
 			}

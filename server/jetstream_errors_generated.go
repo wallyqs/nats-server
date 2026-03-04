@@ -92,6 +92,9 @@ const (
 	// JSConsumerCreateDurableAndNameMismatch Consumer Durable and Name have to be equal if both are provided
 	JSConsumerCreateDurableAndNameMismatch ErrorIdentifier = 10132
 
+	// JSConsumerCreateInflightErr Returned when consumer info is requested while the consumer create proposal is still being applied (consumer create inflight, retry later)
+	JSConsumerCreateInflightErr ErrorIdentifier = 10205
+
 	// JSConsumerCreateErrF General consumer creation failure string ({err})
 	JSConsumerCreateErrF ErrorIdentifier = 10012
 
@@ -646,6 +649,7 @@ var (
 		JSConsumerBadDurableNameErr:                  {Code: 400, ErrCode: 10103, Description: "durable name can not contain '.', '*', '>'"},
 		JSConsumerConfigRequiredErr:                  {Code: 400, ErrCode: 10078, Description: "consumer config required"},
 		JSConsumerCreateDurableAndNameMismatch:       {Code: 400, ErrCode: 10132, Description: "Consumer Durable and Name have to be equal if both are provided"},
+		JSConsumerCreateInflightErr:                  {Code: 503, ErrCode: 10205, Description: "consumer create inflight, retry later"},
 		JSConsumerCreateErrF:                         {Code: 500, ErrCode: 10012, Description: "{err}"},
 		JSConsumerCreateFilterSubjectMismatchErr:     {Code: 400, ErrCode: 10131, Description: "Consumer create request did not match filtered subject from create subject"},
 		JSConsumerDeliverCycleErr:                    {Code: 400, ErrCode: 10081, Description: "consumer deliver subject forms a cycle"},
@@ -1151,6 +1155,16 @@ func NewJSConsumerCreateDurableAndNameMismatchError(opts ...ErrorOption) *ApiErr
 	}
 
 	return ApiErrors[JSConsumerCreateDurableAndNameMismatch]
+}
+
+// NewJSConsumerCreateInflightError creates a new JSConsumerCreateInflightErr error: "consumer create inflight, retry later"
+func NewJSConsumerCreateInflightError(opts ...ErrorOption) *ApiError {
+	eopts := parseOpts(opts)
+	if ae, ok := eopts.err.(*ApiError); ok {
+		return ae
+	}
+
+	return ApiErrors[JSConsumerCreateInflightErr]
 }
 
 // NewJSConsumerCreateError creates a new JSConsumerCreateErrF error: "{err}"

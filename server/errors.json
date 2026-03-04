@@ -2028,5 +2028,15 @@
     "help": "",
     "url": "",
     "deprecates": ""
+  },
+  {
+    "constant": "JSConsumerCreateInflightErr",
+    "code": 503,
+    "error_code": 10205,
+    "description": "consumer create inflight, retry later",
+    "comment": "Returned when consumer info is requested while the consumer create proposal is still being applied",
+    "help": "",
+    "url": "",
+    "deprecates": ""
   }
 ]
