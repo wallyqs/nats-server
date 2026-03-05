@@ -5943,8 +5943,7 @@ func (o *consumer) purge(sseq uint64, slseq uint64, isWider bool) {
 			if isWider && store != nil {
 				// Our filtered subject, which could be all, is wider than the underlying purge.
 				// We need to check if the pending items left are still valid.
-				var smv StoreMsg
-				if _, err := store.LoadMsg(seq, &smv); err == errDeletedMsg || err == ErrStoreMsgNotFound {
+				if store.MsgMissing(seq) {
 					if p.Sequence > o.adflr {
 						o.adflr = p.Sequence
 						if o.adflr > o.dseq {

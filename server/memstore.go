@@ -1674,6 +1674,14 @@ func (ms *memStore) LoadMsg(seq uint64, smp *StoreMsg) (*StoreMsg, error) {
 	return ms.loadMsgLocked(seq, smp, true)
 }
 
+// MsgMissing reports whether the message for the given sequence is missing (deleted or never stored).
+func (ms *memStore) MsgMissing(seq uint64) bool {
+	ms.mu.RLock()
+	_, ok := ms.msgs[seq]
+	ms.mu.RUnlock()
+	return !ok
+}
+
 // loadMsgLocked will lookup the message by sequence number and return it if found.
 func (ms *memStore) loadMsgLocked(seq uint64, smp *StoreMsg, needMSLock bool) (*StoreMsg, error) {
 	if needMSLock {

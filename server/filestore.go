@@ -8203,6 +8203,23 @@ func (fs *fileStore) LoadMsg(seq uint64, sm *StoreMsg) (*StoreMsg, error) {
 	return fs.msgForSeq(seq, sm)
 }
 
+// MsgMissing reports whether the message for the given sequence is missing (deleted or never stored).
+func (fs *fileStore) MsgMissing(seq uint64) bool {
+	if fs.isClosed() {
+		return true
+	}
+	fs.mu.RLock()
+	mb := fs.selectMsgBlock(seq)
+	fs.mu.RUnlock()
+	if mb == nil {
+		return true
+	}
+	mb.mu.Lock()
+	missing := seq < atomic.LoadUint64(&mb.first.seq) || seq > atomic.LoadUint64(&mb.last.seq) || mb.dmap.Exists(seq)
+	mb.mu.Unlock()
+	return missing
+}
+
 // loadLast will load the last message for a subject. Subject should be non empty and not ">".
 func (fs *fileStore) loadLast(subj string, sm *StoreMsg) (lsm *StoreMsg, err error) {
 	if fs.isClosed() {

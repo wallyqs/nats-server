@@ -95,6 +95,7 @@ type StreamStore interface {
 	SkipMsgs(seq uint64, num uint64) error
 	FlushAllPending()
 	LoadMsg(seq uint64, sm *StoreMsg) (*StoreMsg, error)
+	MsgMissing(seq uint64) bool
 	LoadNextMsg(filter string, wc bool, start uint64, smp *StoreMsg) (sm *StoreMsg, skip uint64, err error)
 	LoadNextMsgMulti(sl *gsl.SimpleSublist, start uint64, smp *StoreMsg) (sm *StoreMsg, skip uint64, err error)
 	LoadLastMsg(subject string, sm *StoreMsg) (*StoreMsg, error)
