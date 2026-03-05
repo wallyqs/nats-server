@@ -5148,3 +5148,323 @@ func BenchmarkProcessLeafMsgArgs_Queues(b *testing.B) {
 		}
 	}
 }
+
+// routeErrLoggerWrapper wraps the parse error logger to satisfy the Logger interface.
+type routeErrLoggerWrapper struct {
+	DummyLogger
+	parseErrors *atomic.Int64
+	disconnects *atomic.Int64
+	errors      *sync.Map
+}
+
+func (l *routeErrLoggerWrapper) Errorf(format string, v ...any) {
+	l.checkMsg(format, v...)
+}
+
+func (l *routeErrLoggerWrapper) Debugf(format string, v ...any) {
+	l.checkMsg(format, v...)
+}
+
+func (l *routeErrLoggerWrapper) Noticef(format string, v ...any) {}
+func (l *routeErrLoggerWrapper) Warnf(format string, v ...any) {
+	l.checkMsg(format, v...)
+}
+func (l *routeErrLoggerWrapper) Tracef(format string, v ...any) {}
+
+func (l *routeErrLoggerWrapper) checkMsg(format string, v ...any) {
+	msg := fmt.Sprintf(format, v...)
+	if strings.Contains(msg, "Parse Error") ||
+		strings.Contains(msg, "parse error") {
+		l.parseErrors.Add(1)
+		l.errors.Store(msg, true)
+	}
+	if strings.Contains(msg, "route connection closed") ||
+		strings.Contains(msg, "Client connection closed") {
+		l.disconnects.Add(1)
+	}
+}
+
+// TestRouteParseErrorUnderLoad exercises high-throughput route messaging with
+// headers, concurrent subscription churn, and system events to try to reproduce
+// intermittent route parse errors seen in production. The error pattern is a
+// parser desync where the receiving node sees payload data at a protocol
+// position (e.g. RS+ args containing JSON, or MSG_END_R finding payload bytes).
+func TestRouteParseErrorUnderLoad(t *testing.T) {
+	newLogger := func() *routeErrLoggerWrapper {
+		return &routeErrLoggerWrapper{
+			parseErrors: &atomic.Int64{},
+			disconnects: &atomic.Int64{},
+			errors:      &sync.Map{},
+		}
+	}
+
+	// Set up a 2-node cluster with system account enabled (for advisories).
+	confA := createConfFile(t, []byte(`
+		port: -1
+		server_name: "node1"
+		system_account: SYS
+		accounts {
+			SYS { users: [{user: "sys", password: "sys"}] }
+			APP { users: [{user: "app", password: "app"}] }
+		}
+		cluster {
+			name: "test"
+			port: -1
+			pool_size: 3
+		}
+	`))
+	sA, oA := RunServerWithConfig(confA)
+	defer sA.Shutdown()
+
+	loggerA := newLogger()
+	sA.SetLogger(loggerA, true, false)
+
+	confB := createConfFile(t, []byte(fmt.Sprintf(`
+		port: -1
+		server_name: "node2"
+		system_account: SYS
+		accounts {
+			SYS { users: [{user: "sys", password: "sys"}] }
+			APP { users: [{user: "app", password: "app"}] }
+		}
+		cluster {
+			name: "test"
+			port: -1
+			pool_size: 3
+			routes: ["nats://127.0.0.1:%d"]
+		}
+	`, oA.Cluster.Port)))
+	sB, oB := RunServerWithConfig(confB)
+	defer sB.Shutdown()
+
+	loggerB := newLogger()
+	sB.SetLogger(loggerB, true, false)
+
+	checkClusterFormed(t, sA, sB)
+
+	// Connect clients to both nodes.
+	ncA, err := nats.Connect(fmt.Sprintf("nats://app:app@127.0.0.1:%d", oA.Port))
+	if err != nil {
+		t.Fatalf("Error connecting to A: %v", err)
+	}
+	defer ncA.Close()
+
+	ncB, err := nats.Connect(fmt.Sprintf("nats://app:app@127.0.0.1:%d", oB.Port))
+	if err != nil {
+		t.Fatalf("Error connecting to B: %v", err)
+	}
+	defer ncB.Close()
+
+	// System account client for advisory traffic.
+	ncSys, err := nats.Connect(fmt.Sprintf("nats://sys:sys@127.0.0.1:%d", oA.Port))
+	if err != nil {
+		t.Fatalf("Error connecting sys: %v", err)
+	}
+	defer ncSys.Close()
+
+	// Subscribe to system advisories to generate cross-route system traffic.
+	if _, err := ncSys.Subscribe(">", func(_ *nats.Msg) {}); err != nil {
+		t.Fatalf("Error subscribing: %v", err)
+	}
+	ncSys.Flush()
+
+	// Create a base set of subscriptions on node B that will receive routed msgs.
+	const numBaseSubs = 50
+	for i := 0; i < numBaseSubs; i++ {
+		subj := fmt.Sprintf("test.%d", i)
+		if _, err := ncB.Subscribe(subj, func(_ *nats.Msg) {}); err != nil {
+			t.Fatalf("Error subscribing: %v", err)
+		}
+	}
+	// Queue subscriptions too.
+	for i := 0; i < 10; i++ {
+		subj := fmt.Sprintf("queue.%d", i)
+		if _, err := ncB.QueueSubscribe(subj, "workers", func(_ *nats.Msg) {}); err != nil {
+			t.Fatalf("Error subscribing: %v", err)
+		}
+	}
+	ncB.Flush()
+
+	// Wait for subscriptions to propagate.
+	time.Sleep(200 * time.Millisecond)
+
+	// Stop signal.
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+
+	// Goroutine 1: High-throughput publishing WITH headers from node A.
+	// These generate HRMSG on routes (hasHeader=true path in msgHeaderForRouteOrLeaf).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Various payload sizes to exercise different parser buffer consumption patterns.
+		payloads := [][]byte{
+			bytes.Repeat([]byte("A"), 32),
+			bytes.Repeat([]byte("B"), 256),
+			bytes.Repeat([]byte("C"), 1024),
+			bytes.Repeat([]byte("D"), 4096),
+			bytes.Repeat([]byte("E"), 8192),
+		}
+		for i := 0; !stop.Load(); i++ {
+			subj := fmt.Sprintf("test.%d", i%numBaseSubs)
+			msg := nats.NewMsg(subj)
+			msg.Header.Set("X-Request-Id", fmt.Sprintf("req-%d", i))
+			msg.Header.Set("X-Timestamp", time.Now().String())
+			msg.Data = payloads[i%len(payloads)]
+			if err := ncA.PublishMsg(msg); err != nil {
+				return
+			}
+			if i%500 == 0 {
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	// Goroutine 2: High-throughput publishing WITHOUT headers (RMSG path).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		payload := bytes.Repeat([]byte("X"), 512)
+		for i := 0; !stop.Load(); i++ {
+			subj := fmt.Sprintf("test.%d", i%numBaseSubs)
+			if err := ncA.Publish(subj, payload); err != nil {
+				return
+			}
+			if i%500 == 0 {
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	// Goroutine 3: Queue group publishing (exercises queue weight RS+ updates).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		payload := bytes.Repeat([]byte("Q"), 128)
+		for i := 0; !stop.Load(); i++ {
+			subj := fmt.Sprintf("queue.%d", i%10)
+			if err := ncA.Publish(subj, payload); err != nil {
+				return
+			}
+			if i%200 == 0 {
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	// Goroutine 4: Rapid subscription churn on node B.
+	// This generates RS+/RS- protocol on the route connections concurrently with RMSG/HRMSG.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; !stop.Load(); i++ {
+			subj := fmt.Sprintf("churn.sub.%d.%d", i%100, rand.Intn(1000))
+			sub, err := ncB.Subscribe(subj, func(_ *nats.Msg) {})
+			if err != nil {
+				return
+			}
+			if i%3 == 0 {
+				time.Sleep(time.Millisecond)
+			}
+			sub.Unsubscribe()
+			if i%50 == 0 {
+				ncB.Flush()
+			}
+		}
+	}()
+
+	// Goroutine 5: Queue sub churn (changes queue weights, generates RS+ with weight updates).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; !stop.Load(); i++ {
+			subj := fmt.Sprintf("queue.%d", i%10)
+			sub, err := ncB.QueueSubscribe(subj, "workers", func(_ *nats.Msg) {})
+			if err != nil {
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+			sub.Unsubscribe()
+		}
+	}()
+
+	// Goroutine 6: Client connect/disconnect churn to generate system advisories.
+	// These produce internal messages that flow through internalSendLoop and get
+	// routed as RMSG/HRMSG to the system account.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for !stop.Load() {
+			nc, err := nats.Connect(
+				fmt.Sprintf("nats://app:app@127.0.0.1:%d", oB.Port),
+				nats.NoReconnect(),
+			)
+			if err != nil {
+				time.Sleep(5 * time.Millisecond)
+				continue
+			}
+			nc.Subscribe("advisory.test", func(_ *nats.Msg) {})
+			nc.Flush()
+			time.Sleep(5 * time.Millisecond)
+			nc.Close()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	// Goroutine 7: Request/reply pattern across routes (exercises reply subject handling).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sub, err := ncB.Subscribe("service.echo", func(m *nats.Msg) {
+			if m.Reply != "" {
+				m.Respond(m.Data)
+			}
+		})
+		if err != nil {
+			return
+		}
+		defer sub.Unsubscribe()
+		ncB.Flush()
+		time.Sleep(100 * time.Millisecond)
+
+		for i := 0; !stop.Load(); i++ {
+			msg := nats.NewMsg("service.echo")
+			msg.Header.Set("X-Req", fmt.Sprintf("%d", i))
+			msg.Data = []byte(fmt.Sprintf(`{"id":%d,"action":"echo"}`, i))
+			ncA.PublishMsg(msg)
+			if i%100 == 0 {
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	// Run the test for a duration.
+	time.Sleep(5 * time.Second)
+	stop.Store(true)
+	wg.Wait()
+
+	// Check for parse errors.
+	errCountA := loggerA.parseErrors.Load()
+	errCountB := loggerB.parseErrors.Load()
+	discoA := loggerA.disconnects.Load()
+	discoB := loggerB.disconnects.Load()
+
+	if errCountA > 0 || errCountB > 0 {
+		t.Errorf("Route parse errors detected: nodeA=%d, nodeB=%d", errCountA, errCountB)
+		loggerA.errors.Range(func(k, _ any) bool {
+			t.Logf("  NodeA error: %s", k)
+			return true
+		})
+		loggerB.errors.Range(func(k, _ any) bool {
+			t.Logf("  NodeB error: %s", k)
+			return true
+		})
+	}
+
+	if discoA > 0 || discoB > 0 {
+		t.Logf("Route disconnects: nodeA=%d, nodeB=%d", discoA, discoB)
+	}
+
+	// Verify routes are still intact.
+	checkClusterFormed(t, sA, sB)
+}
