@@ -6588,9 +6588,11 @@ func TestJetStreamClusterProcessSnapshotPanicAfterStreamDelete(t *testing.T) {
 }
 
 // Test that startClusterSubs does not panic when the stream assignment
-// is nil. During a node restart, streams are recovered from disk with
-// sa=nil, and a meta raft replay can call processClusterUpdateStream
-// -> startClusterSubs before the assignment is set.
+// is nil. During a node restart, streams are recovered from disk via
+// recoverStream() which sets sa=nil. Then the meta raft log is replayed,
+// and processClusterUpdateStream calls startClusterSubs. Before the fix,
+// setStreamAssignment was called after startClusterSubs, so mset.sa was
+// still nil when startClusterSubs tried to access mset.sa.Sync.
 // See https://github.com/nats-io/nats-server/issues/7229
 func TestJetStreamClusterStartClusterSubsNilStreamAssignment(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
@@ -6613,15 +6615,17 @@ func TestJetStreamClusterStartClusterSubsNilStreamAssignment(t *testing.T) {
 	mset, err := acc.lookupStream("TEST")
 	require_NoError(t, err)
 
-	// Simulate the state during node recovery: the stream exists on disk
-	// but the stream assignment has not yet been set from meta replay.
-	// This is what recoverStream() produces (sa=nil).
+	// Simulate the state that occurs during node recovery:
+	// recoverStream() creates the stream from disk with sa=nil.
+	// Then processClusterUpdateStream is called during meta replay.
+	// Before the fix, startClusterSubs was called before setStreamAssignment,
+	// causing a nil pointer dereference on mset.sa.Sync.
 	mset.mu.Lock()
 	savedSA := mset.sa
 	mset.sa = nil
-	// startClusterSubs must not panic when mset.sa is nil.
+	// This must not panic when mset.sa is nil.
 	mset.startClusterSubs()
-	// Restore the stream assignment so cleanup works properly.
+	// Restore so cleanup works.
 	mset.sa = savedSA
 	mset.mu.Unlock()
 }
