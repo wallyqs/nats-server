@@ -11171,7 +11171,11 @@ func TestJetStreamClusterMetaRecoveryRecreateConsumer(t *testing.T) {
 		if newConsumer {
 			// Need to wait for the consumer to be deleted on our selected server.
 			checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
-				if rs.getJetStream().consumerAssignment(globalAccountName, "TEST", "CONSUMER") != nil {
+				jsz := rs.getJetStream()
+				jsz.mu.RLock()
+				ca := jsz.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+				jsz.mu.RUnlock()
+				if ca != nil {
 					return errors.New("still assigned")
 				}
 				return nil
