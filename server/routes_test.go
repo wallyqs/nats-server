@@ -6043,6 +6043,7 @@ func TestRouteParseErrorJetStreamGatewayTrace(t *testing.T) {
 			if i%5 == 0 {
 				msg.Header.Set("Nats-Trace-Dest", "a.trace.subj")
 			}
+			msg.Header.Set("Nats-Msg-Id", fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", i, i%0xFFFF, (i*7)%0xFFFF, (i*13)%0xFFFF, i*31))
 			ncA.PublishMsg(msg)
 			if i%100 == 0 {
 				ncA.Flush()
@@ -6116,7 +6117,7 @@ func TestRouteParseErrorJetStreamGatewayTrace(t *testing.T) {
 		for i := 0; !stop.Load(); i++ {
 			msg := nats.NewMsg(fmt.Sprintf("svc.op.%d", i%20))
 			msg.Data = generateJSONPayload(pickMessageSize(), i)
-			msg.Reply = fmt.Sprintf("_INBOX.svc.client@cluster2.zone-eu-west.node.1.%d", i)
+			msg.Reply = fmt.Sprintf("_INBOX.CF4pDsWxqdzVqqgMiqQgeJ.CF4pDsWxqdzVqqgMiqyuzE9c2a.%d", i)
 			if i%2 == 0 {
 				msg.Header.Set("traceparent", traceParent)
 			}
