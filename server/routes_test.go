@@ -5537,8 +5537,9 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 	}
 	defer ncSvcA.Close()
 
-	// Service handler: responds to all svc.> requests
-	if _, err := ncSvcA.Subscribe("svc.>", func(m *nats.Msg) {
+	// Service handler: responds to all svc.> requests via queue subscription
+	// with a long queue name containing @ and . tokens (mimics production naming).
+	if _, err := ncSvcA.QueueSubscribe("svc.>", "svc.handler@cluster1.zone-us-east.v2", func(m *nats.Msg) {
 		m.Respond(m.Data)
 	}); err != nil {
 		t.Fatalf("Error subscribing svc handler: %v", err)
@@ -5553,7 +5554,7 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 	}
 	defer ncEvtA.Close()
 
-	if _, err := ncEvtA.Subscribe("events.>", func(_ *nats.Msg) {}); err != nil {
+	if _, err := ncEvtA.QueueSubscribe("events.>", "events.consumer@region.us-east-1.prod.v3", func(_ *nats.Msg) {}); err != nil {
 		t.Fatalf("Error subscribing events: %v", err)
 	}
 	ncEvtA.Flush()
@@ -5574,11 +5575,12 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 	}
 	defer ncClientB2.Close()
 
-	// Subscribe to imported events (stream import) and trace subjects
-	if _, err := ncClientB2.Subscribe("imports.events.>", func(_ *nats.Msg) {}); err != nil {
+	// Subscribe to imported events (stream import) and trace subjects using queue groups
+	// with long names containing @ and . tokens.
+	if _, err := ncClientB2.QueueSubscribe("imports.events.>", "imports.stream@cluster2.zone-eu-west.consumer.v1", func(_ *nats.Msg) {}); err != nil {
 		t.Fatalf("Error subscribing imported events: %v", err)
 	}
-	if _, err := ncClientB2.Subscribe("b.trace.subj", func(_ *nats.Msg) {}); err != nil {
+	if _, err := ncClientB2.QueueSubscribe("b.trace.subj", "trace.collector@monitoring.prod.region.us-east-1", func(_ *nats.Msg) {}); err != nil {
 		t.Fatalf("Error subscribing trace dest: %v", err)
 	}
 	ncClientB2.Flush()
@@ -5677,12 +5679,14 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 	// Goroutine 2: Publish events (stream export) with varying headers from cluster 1.
 	// These go through routes within cluster 1 and gateways to cluster 2.
 	// Uses JSON payloads with production-like size distribution.
+	// Always sets a Reply even though no response is expected (mimics production pattern).
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; !stop.Load(); i++ {
 			msg := nats.NewMsg(fmt.Sprintf("events.data.%d", i%30))
 			msg.Data = generateJSONPayload(pickMessageSize(), i)
+			msg.Reply = fmt.Sprintf("_INBOX.events.%s.%d", "pub@region.us-east-1.node.0", i)
 			// Alternate traceparent headers with different casing
 			switch i % 4 {
 			case 0:
@@ -5702,12 +5706,14 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 
 	// Goroutine 3: High-throughput messages with headers across routes.
 	// Uses JSON payloads with production-like size distribution.
+	// Always sets a Reply (mimics production clients that set reply-to even for fire-and-forget).
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; !stop.Load(); i++ {
 			msg := nats.NewMsg(fmt.Sprintf("svc.fast.%d", i%10))
 			msg.Data = generateJSONPayload(pickMessageSize(), i)
+			msg.Reply = fmt.Sprintf("_INBOX.fast.%s.%d", "client@cluster2.zone-eu-west.node.1", i)
 			msg.Header.Set("X-Request-Id", fmt.Sprintf("req-%d", i))
 			if i%3 == 0 {
 				msg.Header.Set("traceparent", traceParent)
@@ -5720,11 +5726,19 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 	}()
 
 	// Goroutine 4: Subscription churn on cluster 2 to generate RS+/RS- on routes and gateways.
+	// Uses queue subscriptions with long queue names containing @ and . tokens.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		queueNames := []string{
+			"worker@app.prod.region.us-east-1.shard.0",
+			"consumer@pipeline.staging.zone-eu-west.v2",
+			"handler@svc.payments.cluster2.node.3.v1",
+			"processor@ingest.metrics.region.ap-south.dc1",
+		}
 		for i := 0; !stop.Load(); i++ {
-			sub, err := ncClientB2.Subscribe(fmt.Sprintf("churn.%d", i%100), func(_ *nats.Msg) {})
+			qn := queueNames[i%len(queueNames)]
+			sub, err := ncClientB2.QueueSubscribe(fmt.Sprintf("churn.%d", i%100), qn, func(_ *nats.Msg) {})
 			if err != nil {
 				continue
 			}
