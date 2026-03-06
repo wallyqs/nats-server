@@ -5825,3 +5825,378 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 		t.Logf("Total route disconnects: %d", totalDisconnects)
 	}
 }
+
+// TestRouteParseErrorJetStreamGatewayTrace exercises a multi-cluster JetStream
+// topology where messages are published into streams with traceparent headers,
+// and consumers on different servers (including cross-gateway) pull those messages.
+// This targets the interaction between JetStream replication, gateway forwarding,
+// trace header manipulation, and the route protocol parser.
+func TestRouteParseErrorJetStreamGatewayTrace(t *testing.T) {
+	tmpl := `
+		listen: 127.0.0.1:-1
+		server_name: %s
+		jetstream: {max_mem_store: 256MB, max_file_store: 2GB, store_dir: '%s'}
+
+		cluster {
+			name: %s
+			listen: 127.0.0.1:%d
+			routes = [%s]
+		}
+		accounts {
+			A {
+				jetstream: enabled
+				users: [{user: a, password: pwd}]
+				exports: [
+					{ service: "svc.>", allow_trace: true }
+					{ stream: "events.>" }
+				]
+				trace_dest: "a.trace.subj"
+			}
+			B {
+				jetstream: enabled
+				users: [{user: b, password: pwd}]
+				imports: [
+					{ service: {account: "A", subject: "svc.>"} }
+					{ stream: {account: "A", subject: "events.>"}, to: "imports.events.>" }
+				]
+				trace_dest: "b.trace.subj"
+			}
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+	`
+	sc := createJetStreamSuperClusterWithTemplate(t, tmpl, 2, 2)
+	defer sc.shutdown()
+
+	// Install custom loggers on ALL servers to detect parse errors.
+	newLogger := func() *routeErrLoggerWrapper {
+		return &routeErrLoggerWrapper{
+			parseErrors: &atomic.Int64{},
+			disconnects: &atomic.Int64{},
+			errors:      &sync.Map{},
+		}
+	}
+	loggers := make([]*routeErrLoggerWrapper, 0)
+	for _, c := range sc.clusters {
+		for _, s := range c.servers {
+			l := newLogger()
+			loggers = append(loggers, l)
+			s.SetLogger(l, true, false)
+		}
+	}
+
+	c1 := sc.clusters[0]
+	c2 := sc.clusters[1]
+
+	// Create JetStream context on cluster 1, account A.
+	ncA, jsA := jsClientConnect(t, c1.servers[0], nats.UserInfo("a", "pwd"))
+	defer ncA.Close()
+
+	// Create a replicated stream in cluster 1 for account A.
+	_, err := jsA.AddStream(&nats.StreamConfig{
+		Name:      "EVENTS",
+		Subjects:  []string{"events.>"},
+		Replicas:  2,
+		Retention: nats.InterestPolicy,
+	})
+	require_NoError(t, err)
+	sc.waitOnStreamLeader("A", "EVENTS")
+
+	// Create push consumers for the EVENTS stream on both clusters.
+	// Consumer on cluster 1 server 1 (non-leader for variety).
+	_, err = jsA.AddConsumer("EVENTS", &nats.ConsumerConfig{
+		Durable:        "events-c1-consumer",
+		DeliverSubject: "deliver.events.c1",
+		DeliverGroup:   "events.consumer@cluster1.zone-us-east.v1",
+		AckPolicy:      nats.AckExplicitPolicy,
+		FilterSubject:  "events.>",
+	})
+	require_NoError(t, err)
+
+	// Create JetStream context on cluster 2, account A (cross-gateway).
+	ncA2, jsA2 := jsClientConnect(t, c2.servers[0], nats.UserInfo("a", "pwd"))
+	defer ncA2.Close()
+
+	// Create a stream in cluster 2 that sources from cluster 1's EVENTS stream.
+	_, err = jsA2.AddStream(&nats.StreamConfig{
+		Name:     "EVENTS_MIRROR",
+		Replicas: 2,
+		Mirror: &nats.StreamSource{
+			Name: "EVENTS",
+		},
+	})
+	require_NoError(t, err)
+	sc.waitOnStreamLeader("A", "EVENTS_MIRROR")
+
+	// Create a second stream in cluster 1 for direct publish with traceparent.
+	_, err = jsA.AddStream(&nats.StreamConfig{
+		Name:     "TRACE_STREAM",
+		Subjects: []string{"traced.>"},
+		Replicas: 2,
+	})
+	require_NoError(t, err)
+	sc.waitOnStreamLeader("A", "TRACE_STREAM")
+
+	// Pull consumer for TRACE_STREAM on cluster 2 (cross-gateway pull).
+	_, err = jsA2.AddConsumer("TRACE_STREAM", &nats.ConsumerConfig{
+		Durable:   "trace-puller-cluster2-zone-eu-west-v1",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Connect subscribers for the push consumer.
+	ncSub1, err := nats.Connect(c1.servers[1].ClientURL(), nats.UserInfo("a", "pwd"))
+	require_NoError(t, err)
+	defer ncSub1.Close()
+
+	_, err = ncSub1.QueueSubscribe("deliver.events.c1", "events.consumer@cluster1.zone-us-east.v1", func(m *nats.Msg) {
+		m.Ack()
+	})
+	require_NoError(t, err)
+	ncSub1.Flush()
+
+	// Connect subscriber on cluster 2 for trace destination and imported events.
+	ncSubB, err := nats.Connect(c2.servers[1].ClientURL(), nats.UserInfo("b", "pwd"))
+	require_NoError(t, err)
+	defer ncSubB.Close()
+
+	_, err = ncSubB.QueueSubscribe("imports.events.>", "imports.stream@cluster2.zone-eu-west.consumer.v1", func(_ *nats.Msg) {})
+	require_NoError(t, err)
+	_, err = ncSubB.QueueSubscribe("b.trace.subj", "trace.collector@monitoring.prod.region.us-east-1", func(_ *nats.Msg) {})
+	require_NoError(t, err)
+	ncSubB.Flush()
+
+	// Trace subscriber on cluster 1 account A.
+	ncTraceA, err := nats.Connect(c1.servers[0].ClientURL(), nats.UserInfo("a", "pwd"))
+	require_NoError(t, err)
+	defer ncTraceA.Close()
+	_, err = ncTraceA.QueueSubscribe("a.trace.subj", "trace.collector@monitoring.prod.region.us-east-1", func(_ *nats.Msg) {})
+	require_NoError(t, err)
+	ncTraceA.Flush()
+
+	// System account subscriber for advisory traffic.
+	ncSys, err := nats.Connect(c1.servers[0].ClientURL(), nats.UserInfo("admin", "s3cr3t!"))
+	require_NoError(t, err)
+	defer ncSys.Close()
+	_, err = ncSys.Subscribe(">", func(_ *nats.Msg) {})
+	require_NoError(t, err)
+	ncSys.Flush()
+
+	// Let subscriptions propagate across gateways and routes.
+	time.Sleep(500 * time.Millisecond)
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+
+	traceParent := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+	// generateJSONPayload creates a JSON payload of approximately the target size.
+	generateJSONPayload := func(targetSize int, id int) []byte {
+		base := fmt.Sprintf(`{"id":%d,"ts":%d,"type":"event","source":"svc-%d"`,
+			id, time.Now().UnixNano(), id%100)
+		if targetSize <= len(base)+2 {
+			return []byte(base + "}")
+		}
+		remaining := targetSize - len(base) - len(`,"data":""}`)
+		if remaining < 0 {
+			return []byte(base + "}")
+		}
+		fill := make([]byte, remaining)
+		for j := range fill {
+			fill[j] = byte('A' + (j % 26))
+		}
+		return []byte(base + `,"data":"` + string(fill) + `"}`)
+	}
+
+	pickMessageSize := func() int {
+		r := rand.Intn(100)
+		switch {
+		case r < 60:
+			return 260 + rand.Intn(4126-260+1)
+		case r < 75:
+			return 4127 + rand.Intn(7994-4127+1)
+		case r < 88:
+			return 7995 + rand.Intn(11862-7995+1)
+		case r < 94:
+			return 11863 + rand.Intn(15730-11863+1)
+		case r < 96:
+			return 15731 + rand.Intn(19598-15731+1)
+		case r < 98:
+			return 31202 + rand.Intn(35069-31202+1)
+		default:
+			return 73748 + rand.Intn(77616-73748+1)
+		}
+	}
+
+	// Goroutine 1: Publish into EVENTS stream (JetStream) with traceparent headers.
+	// Messages get replicated within cluster 1, mirrored to cluster 2, and
+	// delivered to push consumers - all crossing routes and gateways.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; !stop.Load(); i++ {
+			msg := nats.NewMsg(fmt.Sprintf("events.data.%d", i%30))
+			msg.Data = generateJSONPayload(pickMessageSize(), i)
+			msg.Reply = fmt.Sprintf("_INBOX.js.pub@region.us-east-1.node.0.%d", i)
+			if i%2 == 0 {
+				msg.Header.Set("traceparent", traceParent)
+			}
+			if i%5 == 0 {
+				msg.Header.Set("Nats-Trace-Dest", "a.trace.subj")
+			}
+			ncA.PublishMsg(msg)
+			if i%100 == 0 {
+				ncA.Flush()
+			}
+		}
+	}()
+
+	// Goroutine 2: Publish into TRACE_STREAM with traceparent from cluster 2 (cross-gateway).
+	// The stream is in cluster 1 so messages traverse the gateway.
+	ncPubC2, err := nats.Connect(c2.servers[0].ClientURL(), nats.UserInfo("a", "pwd"))
+	require_NoError(t, err)
+	defer ncPubC2.Close()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; !stop.Load(); i++ {
+			msg := nats.NewMsg(fmt.Sprintf("traced.op.%d", i%20))
+			msg.Data = generateJSONPayload(pickMessageSize(), i)
+			msg.Reply = fmt.Sprintf("_INBOX.traced.client@cluster2.zone-eu-west.%d", i)
+			msg.Header.Set("traceparent", traceParent)
+			if i%3 == 0 {
+				msg.Header.Set("Nats-Trace-Dest", "a.trace.subj")
+			}
+			ncPubC2.PublishMsg(msg)
+			if i%100 == 0 {
+				ncPubC2.Flush()
+			}
+		}
+	}()
+
+	// Goroutine 3: Pull consumer fetching from TRACE_STREAM on cluster 2.
+	// This causes the server to deliver stored messages (with trace headers)
+	// across the gateway from cluster 1 to cluster 2.
+	pullSub, err := jsA2.PullSubscribe("traced.>", "trace-puller-cluster2-zone-eu-west-v1", nats.BindStream("TRACE_STREAM"))
+	require_NoError(t, err)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for !stop.Load() {
+			msgs, err := pullSub.Fetch(10, nats.MaxWait(200*time.Millisecond))
+			if err != nil {
+				continue
+			}
+			for _, m := range msgs {
+				m.Ack()
+			}
+		}
+	}()
+
+	// Goroutine 4: Service requests from account B on cluster 2 with traceparent.
+	// These cross the gateway and go through service import into account A.
+	ncClientB, err := nats.Connect(c2.servers[0].ClientURL(), nats.UserInfo("b", "pwd"))
+	require_NoError(t, err)
+	defer ncClientB.Close()
+
+	// Service handler on cluster 1 account A.
+	ncSvcA, err := nats.Connect(c1.servers[0].ClientURL(), nats.UserInfo("a", "pwd"))
+	require_NoError(t, err)
+	defer ncSvcA.Close()
+	_, err = ncSvcA.QueueSubscribe("svc.>", "svc.handler@cluster1.zone-us-east.v2", func(m *nats.Msg) {
+		m.Respond(m.Data)
+	})
+	require_NoError(t, err)
+	ncSvcA.Flush()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; !stop.Load(); i++ {
+			msg := nats.NewMsg(fmt.Sprintf("svc.op.%d", i%20))
+			msg.Data = generateJSONPayload(pickMessageSize(), i)
+			msg.Reply = fmt.Sprintf("_INBOX.svc.client@cluster2.zone-eu-west.node.1.%d", i)
+			if i%2 == 0 {
+				msg.Header.Set("traceparent", traceParent)
+			}
+			if i%5 == 0 {
+				msg.Header.Set("Nats-Trace-Dest", "b.trace.subj")
+			}
+			ncClientB.PublishMsg(msg)
+			if i%100 == 0 {
+				ncClientB.Flush()
+			}
+		}
+	}()
+
+	// Goroutine 5: Subscription churn with long queue names.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		queueNames := []string{
+			"worker@app.prod.region.us-east-1.shard.0",
+			"consumer@pipeline.staging.zone-eu-west.v2",
+			"handler@svc.payments.cluster2.node.3.v1",
+			"processor@ingest.metrics.region.ap-south.dc1",
+		}
+		ncChurn, err := nats.Connect(c2.servers[1].ClientURL(), nats.UserInfo("b", "pwd"))
+		if err != nil {
+			return
+		}
+		defer ncChurn.Close()
+		for i := 0; !stop.Load(); i++ {
+			qn := queueNames[i%len(queueNames)]
+			sub, err := ncChurn.QueueSubscribe(fmt.Sprintf("churn.%d", i%100), qn, func(_ *nats.Msg) {})
+			if err != nil {
+				continue
+			}
+			ncChurn.Flush()
+			time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
+			sub.Unsubscribe()
+		}
+	}()
+
+	// Run for 5 seconds.
+	time.Sleep(5 * time.Second)
+	stop.Store(true)
+	wg.Wait()
+
+	// Flush all connections.
+	ncA.Flush()
+	ncA2.Flush()
+	ncPubC2.Flush()
+	ncClientB.Flush()
+	ncSvcA.Flush()
+	ncSub1.Flush()
+	ncSubB.Flush()
+	ncTraceA.Flush()
+	ncSys.Flush()
+	time.Sleep(200 * time.Millisecond)
+
+	// Check for parse errors across ALL servers.
+	var totalParseErrors int64
+	var totalDisconnects int64
+	for i, l := range loggers {
+		pe := l.parseErrors.Load()
+		dc := l.disconnects.Load()
+		totalParseErrors += pe
+		totalDisconnects += dc
+		if pe > 0 {
+			cluster := i / 2
+			server := i % 2
+			t.Errorf("Server C%d-S%d had %d parse errors:", cluster+1, server+1, pe)
+			l.errors.Range(func(k, _ any) bool {
+				t.Logf("  Error: %s", k)
+				return true
+			})
+		}
+	}
+
+	if totalParseErrors > 0 {
+		t.Errorf("Total route parse errors: %d", totalParseErrors)
+	}
+	if totalDisconnects > 0 {
+		t.Logf("Total route disconnects: %d", totalDisconnects)
+	}
+}
