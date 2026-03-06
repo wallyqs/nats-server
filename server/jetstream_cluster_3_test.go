@@ -6587,10 +6587,11 @@ func TestJetStreamClusterProcessSnapshotPanicAfterStreamDelete(t *testing.T) {
 	require_Error(t, mset.processSnapshot(&StreamReplicatedState{}, 0), errCatchupStreamStopped)
 }
 
-// Test that processClusterUpdateStream does not panic when a stream was
-// recovered from disk without a stream assignment and then receives a
-// meta update before the assignment is set. This reproduces the crash
-// in https://github.com/nats-io/nats-server/issues/7229
+// Test that startClusterSubs does not panic when the stream assignment
+// is nil. During a node restart, streams are recovered from disk with
+// sa=nil, and a meta raft replay can call processClusterUpdateStream
+// -> startClusterSubs before the assignment is set.
+// See https://github.com/nats-io/nats-server/issues/7229
 func TestJetStreamClusterStartClusterSubsNilStreamAssignment(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -6605,35 +6606,24 @@ func TestJetStreamClusterStartClusterSubsNilStreamAssignment(t *testing.T) {
 	})
 	require_NoError(t, err)
 
-	// Publish a message to ensure the stream is active.
-	_, err = js.Publish("foo", []byte("hello"))
+	// Pick any server and look up its stream.
+	s := c.randomServer()
+	acc, err := s.lookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
 	require_NoError(t, err)
 
-	// Restart a server. During recovery, the stream is recreated from disk
-	// with sa=nil, and then the meta raft log is replayed which triggers
-	// processClusterUpdateStream -> startClusterSubs. Previously this would
-	// panic due to nil mset.sa.
-	rs := c.randomServer()
-	rs.Shutdown()
-	rs.WaitForShutdown()
-	rs = c.restartServer(rs)
-
-	// Wait for the restarted server to be fully caught up.
-	c.waitOnServerCurrent(rs)
-
-	// Verify the stream is healthy on all servers.
-	c.waitOnStreamLeader(globalAccountName, "TEST")
-	for _, s := range c.servers {
-		acc, err := s.lookupAccount(globalAccountName)
-		require_NoError(t, err)
-		mset, err := acc.lookupStream("TEST")
-		require_NoError(t, err)
-		// Verify the stream assignment is set after recovery.
-		mset.mu.RLock()
-		sa := mset.sa
-		mset.mu.RUnlock()
-		require_True(t, sa != nil)
-	}
+	// Simulate the state during node recovery: the stream exists on disk
+	// but the stream assignment has not yet been set from meta replay.
+	// This is what recoverStream() produces (sa=nil).
+	mset.mu.Lock()
+	savedSA := mset.sa
+	mset.sa = nil
+	// startClusterSubs must not panic when mset.sa is nil.
+	mset.startClusterSubs()
+	// Restore the stream assignment so cleanup works properly.
+	mset.sa = savedSA
+	mset.mu.Unlock()
 }
 
 func TestJetStreamClusterDiscardNewPerSubjectRejectsWithoutCLFSBump(t *testing.T) {
