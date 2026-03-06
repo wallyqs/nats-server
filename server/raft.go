@@ -4088,7 +4088,7 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 	// incorrectly triggering this pause immediately after receiving a snapshot.
 	applied := max(n.applied, n.papplied)
 	commit := max(n.commit, n.papplied)
-	if isNew && (commit > applied || n.quorumPaused) {
+	if sub != nil && (commit > applied || n.quorumPaused) {
 		diff := commit - applied
 		if n.quorumPaused {
 			if diff > paeWarnThreshold {

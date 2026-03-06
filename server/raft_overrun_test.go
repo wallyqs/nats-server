@@ -618,18 +618,19 @@ func TestNRGQuorumPausedNoUnderflowWhenAppliedExceedsCommit(t *testing.T) {
 	require_True(t, ar.success)
 }
 
-// TestNRGQuorumPausedDoesNotBlockCatchupEntries verifies that when a follower
-// is quorumPaused, catchup entries (delivered on n.catchup.sub) are NOT blocked.
-// The quorum pause gate uses `isNew` (sub == n.aesub) so that only new entries
-// from the main append entry subscription are paused. Catchup entries are the
-// recovery mechanism — blocking them would be self-defeating.
-func TestNRGQuorumPausedDoesNotBlockCatchupEntries(t *testing.T) {
+// TestNRGQuorumPausedBlocksCatchupEntries verifies that when a follower is
+// quorumPaused, catchup entries (delivered on n.catchup.sub) are also blocked.
+// The pause gate uses `sub != nil` (not `isNew`) intentionally: blocking catchup
+// entries forces the leader to fall back to sending a snapshot, which compacts
+// the WAL and reduces memory. Allowing catchup entries through would grow the
+// WAL further while the follower is already unable to keep up with applies.
+func TestNRGQuorumPausedBlocksCatchupEntries(t *testing.T) {
 	n, cleanup := initSingleMemRaftNode(t)
 	defer cleanup()
 
 	nats0 := "S1Nunr6R"
 
-	// Set up the follower with an initial state so catchup entries can be stored.
+	// Set up the follower with an initial state so catchup entries could be stored.
 	n.Lock()
 	n.pterm = 1
 	n.pindex = 0
@@ -659,7 +660,7 @@ func TestNRGQuorumPausedDoesNotBlockCatchupEntries(t *testing.T) {
 	pindexBefore := n.pindex
 	n.Unlock()
 
-	// Send a catchup entry with actual data on the catchup sub.
+	// Send a catchup entry on the catchup sub — should be blocked by quorum pause.
 	catchupEntry := encode(t, &appendEntry{
 		leader:  nats0,
 		term:    1,
@@ -670,23 +671,20 @@ func TestNRGQuorumPausedDoesNotBlockCatchupEntries(t *testing.T) {
 	})
 	n.processAppendEntry(catchupEntry, catchupSub)
 
-	// The catchup entry must NOT be blocked: pindex should have advanced.
+	// pindex should NOT have advanced — the catchup entry was blocked.
+	// This forces the leader to send a snapshot instead, which compacts the WAL.
 	n.RLock()
 	pindexAfter := n.pindex
 	stillPaused := n.quorumPaused
 	n.RUnlock()
 
-	// pindex advanced means the entry was stored, not dropped.
-	require_True(t, pindexAfter > pindexBefore)
-	// quorumPaused is still true — it's only cleared when the gap shrinks,
-	// but the catchup entry was allowed through.
+	require_Equal(t, pindexBefore, pindexAfter)
 	require_True(t, stillPaused)
 }
 
-// TestNRGQuorumPausedStillBlocksNewEntries verifies that the quorum pause gate
-// still blocks entries arriving on the main append entry sub (n.aesub).
-// This is the complement to TestNRGQuorumPausedDoesNotBlockCatchupEntries.
-func TestNRGQuorumPausedStillBlocksNewEntries(t *testing.T) {
+// TestNRGQuorumPausedBlocksNewEntries verifies that the quorum pause gate
+// blocks entries arriving on the main append entry sub (n.aesub).
+func TestNRGQuorumPausedBlocksNewEntries(t *testing.T) {
 	n, cleanup := initSingleMemRaftNode(t)
 	defer cleanup()
 
@@ -724,6 +722,43 @@ func TestNRGQuorumPausedStillBlocksNewEntries(t *testing.T) {
 	pindexAfter := n.pindex
 	n.RUnlock()
 	require_Equal(t, pindexBefore, pindexAfter)
+}
+
+// TestNRGQuorumPauseDoesNotBlockReplayEntries verifies that WAL replay entries
+// (sub == nil) are never blocked by quorum pause. Replay happens on startup
+// and must always proceed.
+func TestNRGQuorumPauseDoesNotBlockReplayEntries(t *testing.T) {
+	n, cleanup := initSingleMemRaftNode(t)
+	defer cleanup()
+
+	nats0 := "S1Nunr6R"
+
+	n.Lock()
+	n.pterm = 1
+	n.pindex = 0
+	n.commit = pauseQuorumThreshold + 1
+	n.applied = 0
+	n.papplied = 0
+	n.quorumPaused = true
+	n.Unlock()
+
+	// Process a replay entry (sub == nil). This simulates WAL replay on startup.
+	replayEntry := encode(t, &appendEntry{
+		leader:  nats0,
+		term:    1,
+		commit:  0,
+		pterm:   1,
+		pindex:  0,
+		entries: []*Entry{newEntry(EntryNormal, []byte("replay-data"))},
+	})
+	n.processAppendEntry(replayEntry, nil)
+
+	// Replay entries use the else branch at line 4261 (pterm/pindex update without WAL store).
+	// pindex should have advanced since sub==nil bypasses the pause gate.
+	n.RLock()
+	pindex := n.pindex
+	n.RUnlock()
+	require_Equal(t, uint64(1), pindex)
 }
 
 // TestNRGQuorumPausedElectionTimeoutStillReset verifies that even when a follower
