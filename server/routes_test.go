@@ -5604,15 +5604,61 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 	// A valid traceparent header value with sampling flag set (01 = sampled).
 	traceParent := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 
+	// generateJSONPayload creates a JSON payload of approximately the target size.
+	// Mimics production workload where messages are JSON documents.
+	generateJSONPayload := func(targetSize int, id int) []byte {
+		// Build a JSON object with nested fields to reach the target size.
+		base := fmt.Sprintf(`{"id":%d,"ts":%d,"type":"event","source":"svc-%d"`,
+			id, time.Now().UnixNano(), id%100)
+		if targetSize <= len(base)+2 {
+			return []byte(base + "}")
+		}
+		// Fill with a data field containing repeated content to reach target size.
+		remaining := targetSize - len(base) - len(`,"data":""}`)
+		if remaining < 0 {
+			return []byte(base + "}")
+		}
+		// Use a mix of printable ASCII to simulate real JSON string content.
+		fill := make([]byte, remaining)
+		for j := range fill {
+			fill[j] = byte('A' + (j % 26))
+		}
+		return []byte(base + `,"data":"` + string(fill) + `"}`)
+	}
+
+	// pickMessageSize returns a message size matching the production distribution:
+	//   ~60% in [260, 4126], ~15% in [4127, 7994], ~13% in [7995, 11862],
+	//   ~6% in [11863, 15730], ~2% in [15731, 19598], ~2% in [31202, 35069],
+	//   ~1% in [73748, 77616]
+	pickMessageSize := func() int {
+		r := rand.Intn(100)
+		switch {
+		case r < 60:
+			return 260 + rand.Intn(4126-260+1)
+		case r < 75:
+			return 4127 + rand.Intn(7994-4127+1)
+		case r < 88:
+			return 7995 + rand.Intn(11862-7995+1)
+		case r < 94:
+			return 11863 + rand.Intn(15730-11863+1)
+		case r < 96:
+			return 15731 + rand.Intn(19598-15731+1)
+		case r < 98:
+			return 31202 + rand.Intn(35069-31202+1)
+		default:
+			return 73748 + rand.Intn(77616-73748+1)
+		}
+	}
+
 	// Goroutine 1: Service requests WITH traceparent header from cluster 2 to cluster 1.
+	// Uses JSON payloads with production-like size distribution.
 	// This exercises: gateway delivery + service import + trace header processing + route forwarding.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		payload := make([]byte, 256)
 		for i := 0; !stop.Load(); i++ {
 			msg := nats.NewMsg(fmt.Sprintf("svc.op.%d", i%20))
-			msg.Data = payload[:rand.Intn(256)]
+			msg.Data = generateJSONPayload(pickMessageSize(), i)
 			// Alternate between with and without traceparent
 			if i%2 == 0 {
 				msg.Header.Set("traceparent", traceParent)
@@ -5630,12 +5676,13 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 
 	// Goroutine 2: Publish events (stream export) with varying headers from cluster 1.
 	// These go through routes within cluster 1 and gateways to cluster 2.
+	// Uses JSON payloads with production-like size distribution.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; !stop.Load(); i++ {
 			msg := nats.NewMsg(fmt.Sprintf("events.data.%d", i%30))
-			msg.Data = []byte(fmt.Sprintf(`{"event":%d,"ts":%d}`, i, time.Now().UnixNano()))
+			msg.Data = generateJSONPayload(pickMessageSize(), i)
 			// Alternate traceparent headers with different casing
 			switch i % 4 {
 			case 0:
@@ -5653,13 +5700,14 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 		}
 	}()
 
-	// Goroutine 3: High-throughput plain messages with headers across routes.
+	// Goroutine 3: High-throughput messages with headers across routes.
+	// Uses JSON payloads with production-like size distribution.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; !stop.Load(); i++ {
 			msg := nats.NewMsg(fmt.Sprintf("svc.fast.%d", i%10))
-			msg.Data = make([]byte, 32+rand.Intn(4096))
+			msg.Data = generateJSONPayload(pickMessageSize(), i)
 			msg.Header.Set("X-Request-Id", fmt.Sprintf("req-%d", i))
 			if i%3 == 0 {
 				msg.Header.Set("traceparent", traceParent)
@@ -5703,12 +5751,13 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 	}()
 
 	// Goroutine 6: Request/reply with traceparent across gateways.
+	// Uses JSON payloads with production-like size distribution.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; !stop.Load(); i++ {
 			msg := nats.NewMsg(fmt.Sprintf("svc.reqreply.%d", i%10))
-			msg.Data = []byte(fmt.Sprintf(`{"id":%d}`, i))
+			msg.Data = generateJSONPayload(pickMessageSize(), i)
 			msg.Header.Set("traceparent", traceParent)
 			if i%3 == 0 {
 				msg.Header.Set("Nats-Trace-Dest", "b.trace.subj")
