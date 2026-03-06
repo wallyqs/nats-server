@@ -5468,3 +5468,297 @@ func TestRouteParseErrorUnderLoad(t *testing.T) {
 	// Verify routes are still intact.
 	checkClusterFormed(t, sA, sB)
 }
+
+// TestRouteParseErrorGatewayTraceServiceImport exercises a multi-cluster
+// topology with gateways, service imports between accounts, and messages
+// carrying traceparent headers (OpenTelemetry). This targets the code path
+// where initMsgTrace/disableTraceHeaders/enableTraceHeaders interact with
+// service import processing and route/gateway message forwarding.
+func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
+	// Template for servers in a super cluster.
+	// Account A exports a service, account B imports it.
+	// Both accounts have trace_dest configured to exercise message tracing code paths.
+	// Account B also has a sampling rate to exercise the sampling/disable path.
+	tmpl := `
+		listen: 127.0.0.1:-1
+		server_name: %s
+		jetstream: {max_mem_store: 256MB, max_file_store: 2GB, store_dir: '%s'}
+
+		cluster {
+			name: %s
+			listen: 127.0.0.1:%d
+			routes = [%s]
+		}
+		accounts {
+			A {
+				users: [{user: a, password: pwd}]
+				exports: [
+					{ service: "svc.>", allow_trace: true }
+					{ stream: "events.>" }
+				]
+				trace_dest: "a.trace.subj"
+			}
+			B {
+				users: [{user: b, password: pwd}]
+				imports: [
+					{ service: {account: "A", subject: "svc.>"} }
+					{ stream: {account: "A", subject: "events.>"}, to: "imports.events.>" }
+				]
+				trace_dest: "b.trace.subj"
+			}
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+	`
+	sc := createJetStreamSuperClusterWithTemplate(t, tmpl, 2, 2)
+	defer sc.shutdown()
+
+	// Install custom loggers on ALL servers to detect parse errors.
+	newLogger := func() *routeErrLoggerWrapper {
+		return &routeErrLoggerWrapper{
+			parseErrors: &atomic.Int64{},
+			disconnects: &atomic.Int64{},
+			errors:      &sync.Map{},
+		}
+	}
+	loggers := make([]*routeErrLoggerWrapper, 0)
+	for _, c := range sc.clusters {
+		for _, s := range c.servers {
+			l := newLogger()
+			loggers = append(loggers, l)
+			s.SetLogger(l, true, false)
+		}
+	}
+
+	// Cluster 1, server 0: connect service provider (account A)
+	s1c1 := sc.clusters[0].servers[0]
+	ncSvcA, err := nats.Connect(s1c1.ClientURL(), nats.UserInfo("a", "pwd"))
+	if err != nil {
+		t.Fatalf("Error connecting svc A: %v", err)
+	}
+	defer ncSvcA.Close()
+
+	// Service handler: responds to all svc.> requests
+	if _, err := ncSvcA.Subscribe("svc.>", func(m *nats.Msg) {
+		m.Respond(m.Data)
+	}); err != nil {
+		t.Fatalf("Error subscribing svc handler: %v", err)
+	}
+	ncSvcA.Flush()
+
+	// Cluster 1, server 1: connect event subscriber (account A)
+	s2c1 := sc.clusters[0].servers[1]
+	ncEvtA, err := nats.Connect(s2c1.ClientURL(), nats.UserInfo("a", "pwd"))
+	if err != nil {
+		t.Fatalf("Error connecting evt A: %v", err)
+	}
+	defer ncEvtA.Close()
+
+	if _, err := ncEvtA.Subscribe("events.>", func(_ *nats.Msg) {}); err != nil {
+		t.Fatalf("Error subscribing events: %v", err)
+	}
+	ncEvtA.Flush()
+
+	// Cluster 2, server 0: connect service consumer (account B) - cross-gateway
+	s1c2 := sc.clusters[1].servers[0]
+	ncClientB, err := nats.Connect(s1c2.ClientURL(), nats.UserInfo("b", "pwd"))
+	if err != nil {
+		t.Fatalf("Error connecting client B: %v", err)
+	}
+	defer ncClientB.Close()
+
+	// Cluster 2, server 1: another subscriber in account B
+	s2c2 := sc.clusters[1].servers[1]
+	ncClientB2, err := nats.Connect(s2c2.ClientURL(), nats.UserInfo("b", "pwd"))
+	if err != nil {
+		t.Fatalf("Error connecting client B2: %v", err)
+	}
+	defer ncClientB2.Close()
+
+	// Subscribe to imported events (stream import) and trace subjects
+	if _, err := ncClientB2.Subscribe("imports.events.>", func(_ *nats.Msg) {}); err != nil {
+		t.Fatalf("Error subscribing imported events: %v", err)
+	}
+	if _, err := ncClientB2.Subscribe("b.trace.subj", func(_ *nats.Msg) {}); err != nil {
+		t.Fatalf("Error subscribing trace dest: %v", err)
+	}
+	ncClientB2.Flush()
+
+	// System account subscriber for advisory traffic
+	ncSys, err := nats.Connect(s1c1.ClientURL(), nats.UserInfo("admin", "s3cr3t!"))
+	if err != nil {
+		t.Fatalf("Error connecting sys: %v", err)
+	}
+	defer ncSys.Close()
+	if _, err := ncSys.Subscribe(">", func(_ *nats.Msg) {}); err != nil {
+		t.Fatalf("Error subscribing sys: %v", err)
+	}
+	ncSys.Flush()
+
+	// Let subscriptions propagate across gateways and routes.
+	time.Sleep(500 * time.Millisecond)
+
+	// Stop signal
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+
+	// A valid traceparent header value with sampling flag set (01 = sampled).
+	traceParent := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+	// Goroutine 1: Service requests WITH traceparent header from cluster 2 to cluster 1.
+	// This exercises: gateway delivery + service import + trace header processing + route forwarding.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		payload := make([]byte, 256)
+		for i := 0; !stop.Load(); i++ {
+			msg := nats.NewMsg(fmt.Sprintf("svc.op.%d", i%20))
+			msg.Data = payload[:rand.Intn(256)]
+			// Alternate between with and without traceparent
+			if i%2 == 0 {
+				msg.Header.Set("traceparent", traceParent)
+			}
+			if i%5 == 0 {
+				msg.Header.Set("Nats-Trace-Dest", "b.trace.subj")
+			}
+			msg.Reply = fmt.Sprintf("_INBOX.reply.%d", i)
+			ncClientB.PublishMsg(msg)
+			if i%100 == 0 {
+				ncClientB.Flush()
+			}
+		}
+	}()
+
+	// Goroutine 2: Publish events (stream export) with varying headers from cluster 1.
+	// These go through routes within cluster 1 and gateways to cluster 2.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; !stop.Load(); i++ {
+			msg := nats.NewMsg(fmt.Sprintf("events.data.%d", i%30))
+			msg.Data = []byte(fmt.Sprintf(`{"event":%d,"ts":%d}`, i, time.Now().UnixNano()))
+			// Alternate traceparent headers with different casing
+			switch i % 4 {
+			case 0:
+				msg.Header.Set("traceparent", traceParent)
+			case 1:
+				msg.Header.Set("Traceparent", traceParent)
+			case 2:
+				msg.Header.Set("TRACEPARENT", traceParent)
+				// case 3: no trace header
+			}
+			ncEvtA.PublishMsg(msg)
+			if i%100 == 0 {
+				ncEvtA.Flush()
+			}
+		}
+	}()
+
+	// Goroutine 3: High-throughput plain messages with headers across routes.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; !stop.Load(); i++ {
+			msg := nats.NewMsg(fmt.Sprintf("svc.fast.%d", i%10))
+			msg.Data = make([]byte, 32+rand.Intn(4096))
+			msg.Header.Set("X-Request-Id", fmt.Sprintf("req-%d", i))
+			if i%3 == 0 {
+				msg.Header.Set("traceparent", traceParent)
+			}
+			ncClientB.PublishMsg(msg)
+			if i%200 == 0 {
+				ncClientB.Flush()
+			}
+		}
+	}()
+
+	// Goroutine 4: Subscription churn on cluster 2 to generate RS+/RS- on routes and gateways.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; !stop.Load(); i++ {
+			sub, err := ncClientB2.Subscribe(fmt.Sprintf("churn.%d", i%100), func(_ *nats.Msg) {})
+			if err != nil {
+				continue
+			}
+			ncClientB2.Flush()
+			time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
+			sub.Unsubscribe()
+		}
+	}()
+
+	// Goroutine 5: Client connect/disconnect churn to generate system advisories.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		servers := []*Server{s1c1, s2c1, s1c2, s2c2}
+		for i := 0; !stop.Load(); i++ {
+			s := servers[i%len(servers)]
+			nc, err := nats.Connect(s.ClientURL(), nats.UserInfo("b", "pwd"))
+			if err != nil {
+				continue
+			}
+			time.Sleep(time.Duration(rand.Intn(10)) * time.Millisecond)
+			nc.Close()
+		}
+	}()
+
+	// Goroutine 6: Request/reply with traceparent across gateways.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; !stop.Load(); i++ {
+			msg := nats.NewMsg(fmt.Sprintf("svc.reqreply.%d", i%10))
+			msg.Data = []byte(fmt.Sprintf(`{"id":%d}`, i))
+			msg.Header.Set("traceparent", traceParent)
+			if i%3 == 0 {
+				msg.Header.Set("Nats-Trace-Dest", "b.trace.subj")
+			}
+			resp, err := ncClientB.RequestMsg(msg, 200*time.Millisecond)
+			if err == nil {
+				_ = resp
+			}
+			if i%50 == 0 {
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+
+	// Run for 5 seconds.
+	time.Sleep(5 * time.Second)
+	stop.Store(true)
+	wg.Wait()
+
+	// Flush all connections.
+	ncSvcA.Flush()
+	ncEvtA.Flush()
+	ncClientB.Flush()
+	ncClientB2.Flush()
+	ncSys.Flush()
+	time.Sleep(200 * time.Millisecond)
+
+	// Check for parse errors across ALL servers.
+	var totalParseErrors int64
+	var totalDisconnects int64
+	for i, l := range loggers {
+		pe := l.parseErrors.Load()
+		dc := l.disconnects.Load()
+		totalParseErrors += pe
+		totalDisconnects += dc
+		if pe > 0 {
+			cluster := i / 2
+			server := i % 2
+			t.Errorf("Server C%d-S%d had %d parse errors:", cluster+1, server+1, pe)
+			l.errors.Range(func(k, _ any) bool {
+				t.Logf("  Error: %s", k)
+				return true
+			})
+		}
+	}
+
+	if totalParseErrors > 0 {
+		t.Errorf("Total route parse errors: %d", totalParseErrors)
+	}
+	if totalDisconnects > 0 {
+		t.Logf("Total route disconnects: %d", totalDisconnects)
+	}
+}
