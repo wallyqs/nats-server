@@ -6587,12 +6587,17 @@ func TestJetStreamClusterProcessSnapshotPanicAfterStreamDelete(t *testing.T) {
 	require_Error(t, mset.processSnapshot(&StreamReplicatedState{}, 0), errCatchupStreamStopped)
 }
 
-// Test that startClusterSubs does not panic when the stream assignment
-// is nil. During a node restart, streams are recovered from disk via
-// recoverStream() which sets sa=nil. Then the meta raft log is replayed,
-// and processClusterUpdateStream calls startClusterSubs. Before the fix,
-// setStreamAssignment was called after startClusterSubs, so mset.sa was
-// still nil when startClusterSubs tried to access mset.sa.Sync.
+// Test that startClusterSubs does not panic when mset.sa is nil.
+//
+// In processClusterUpdateStream, the code path for scaling up a stream
+// (e.g., R1 to R3) enters the block where !alreadyRunning && numReplicas > 1.
+// Before the fix, setStreamAssignment(sa) was called AFTER startClusterSubs(),
+// so if mset.sa was nil, startClusterSubs would dereference mset.sa.Sync and
+// panic. The fix moves setStreamAssignment before startClusterSubs and adds a
+// nil guard in startClusterSubs as defense-in-depth.
+//
+// To exercise this deterministically, we simulate the state that recoverStream()
+// produces (sa=nil) on a clustered stream and call startClusterSubs directly.
 // See https://github.com/nats-io/nats-server/issues/7229
 func TestJetStreamClusterStartClusterSubsNilStreamAssignment(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
@@ -6615,17 +6620,12 @@ func TestJetStreamClusterStartClusterSubsNilStreamAssignment(t *testing.T) {
 	mset, err := acc.lookupStream("TEST")
 	require_NoError(t, err)
 
-	// Simulate the state that occurs during node recovery:
-	// recoverStream() creates the stream from disk with sa=nil.
-	// Then processClusterUpdateStream is called during meta replay.
-	// Before the fix, startClusterSubs was called before setStreamAssignment,
-	// causing a nil pointer dereference on mset.sa.Sync.
+	// Simulate the state that recoverStream() produces: sa=nil.
+	// Without the nil guard in startClusterSubs, this panics on mset.sa.Sync.
 	mset.mu.Lock()
 	savedSA := mset.sa
 	mset.sa = nil
-	// This must not panic when mset.sa is nil.
 	mset.startClusterSubs()
-	// Restore so cleanup works.
 	mset.sa = savedSA
 	mset.mu.Unlock()
 }
