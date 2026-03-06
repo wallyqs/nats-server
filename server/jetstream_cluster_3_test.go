@@ -6493,3 +6493,68 @@ func TestJetStreamClusterAccountFileStoreLimits(t *testing.T) {
 		})
 	}
 }
+
+// Reproduces the nil pointer panic from https://github.com/nats-io/nats-server/issues/7229
+//
+// On release/v2.10.29, startClusterSubs dereferences mset.sa.Sync without a nil
+// check. During recovery, the following sequence leaves mset.sa == nil:
+//   1. recoverStream() creates stream from disk with sa=nil
+//   2. assignStreamOp -> ru.addStreams[key] = sa
+//   3. updateStreamOp -> ru.updateStreams[key] = sa; delete(ru.addStreams, key)
+//   4. Recovery: addStreams is empty, processStreamAssignment never runs, mset.sa stays nil
+//   5. updateStreams runs -> processClusterUpdateStream -> startClusterSubs -> PANIC
+//
+// This test confirms the panic by simulating state (4): a stream exists on disk
+// but mset.sa is nil (as recoverStream produces), then calling startClusterSubs.
+func TestJetStreamClusterStartClusterSubsNilStreamAssignment(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Pick any server and look up its stream.
+	s := c.randomServer()
+	acc, err := s.lookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+
+	// Simulate the state that recoverStream() produces: sa=nil.
+	// On v2.10.29 without a nil guard in startClusterSubs, this panics.
+	mset.mu.Lock()
+	savedSA := mset.sa
+	mset.sa = nil
+
+	defer func() {
+		// Restore sa so cleanup doesn't panic.
+		mset.sa = savedSA
+		mset.mu.Unlock()
+	}()
+
+	// This should panic on v2.10.29 because startClusterSubs does:
+	//   mset.srv.systemSubscribe(mset.sa.Sync, ...)
+	// and mset.sa is nil.
+	didPanic := true
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Logf("Got expected panic: %v", r)
+			} else {
+				didPanic = false
+			}
+		}()
+		mset.startClusterSubs()
+	}()
+
+	if !didPanic {
+		t.Fatal("Expected startClusterSubs to panic with nil mset.sa, but it did not")
+	}
+}
