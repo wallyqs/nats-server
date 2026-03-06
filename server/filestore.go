@@ -8214,9 +8214,9 @@ func (fs *fileStore) MsgMissing(seq uint64) bool {
 	if mb == nil {
 		return true
 	}
-	mb.mu.Lock()
+	mb.mu.RLock()
 	missing := seq < atomic.LoadUint64(&mb.first.seq) || seq > atomic.LoadUint64(&mb.last.seq) || mb.dmap.Exists(seq)
-	mb.mu.Unlock()
+	mb.mu.RUnlock()
 	return missing
 }
 
