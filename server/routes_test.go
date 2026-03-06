@@ -5659,7 +5659,7 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; !stop.Load(); i++ {
-			msg := nats.NewMsg(fmt.Sprintf("svc.op.%d", i%20))
+			msg := nats.NewMsg(fmt.Sprintf("svc.handler.region-ap-south-1.payments-v3.process.c29d64f3-7b88-41a7-ae62-3fcd8ea91b23.grpc-worker-svc-%02d", i%20))
 			msg.Data = generateJSONPayload(pickMessageSize(), i)
 			// Alternate between with and without traceparent
 			if i%2 == 0 {
@@ -5684,7 +5684,7 @@ func TestRouteParseErrorGatewayTraceServiceImport(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; !stop.Load(); i++ {
-			msg := nats.NewMsg(fmt.Sprintf("events.data.%d", i%30))
+			msg := nats.NewMsg(fmt.Sprintf("events.ingest.region-us-east-1.pipeline-v2.source.a06f57d1-9f99-4990-9f55-6fcfeac2d1ab.worker-node-grp-%02d", i%30))
 			msg.Data = generateJSONPayload(pickMessageSize(), i)
 			msg.Reply = fmt.Sprintf("_INBOX.events.%s.%d", "pub@region.us-east-1.node.0", i)
 			// Alternate traceparent headers with different casing
@@ -6034,7 +6034,7 @@ func TestRouteParseErrorJetStreamGatewayTrace(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; !stop.Load(); i++ {
-			msg := nats.NewMsg(fmt.Sprintf("events.data.%d", i%30))
+			msg := nats.NewMsg(fmt.Sprintf("events.ingest.region-us-east-1.pipeline-v2.source.a06f57d1-9f99-4990-9f55-6fcfeac2d1ab.worker-node-grp-%02d", i%30))
 			msg.Data = generateJSONPayload(pickMessageSize(), i)
 			msg.Reply = fmt.Sprintf("_INBOX.js.pub@region.us-east-1.node.0.%d", i)
 			if i%2 == 0 {
@@ -6061,7 +6061,7 @@ func TestRouteParseErrorJetStreamGatewayTrace(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; !stop.Load(); i++ {
-			msg := nats.NewMsg(fmt.Sprintf("traced.op.%d", i%20))
+			msg := nats.NewMsg(fmt.Sprintf("traced.stream.region-eu-west-1.processor-v1.relay.b17c83e2-4a55-4d22-8f31-9ecadb725f10.ingest-grp-node-%02d", i%20))
 			msg.Data = generateJSONPayload(pickMessageSize(), i)
 			msg.Reply = fmt.Sprintf("_INBOX.traced.client@cluster2.zone-eu-west.%d", i)
 			msg.Header.Set("traceparent", traceParent)
@@ -6115,7 +6115,7 @@ func TestRouteParseErrorJetStreamGatewayTrace(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; !stop.Load(); i++ {
-			msg := nats.NewMsg(fmt.Sprintf("svc.op.%d", i%20))
+			msg := nats.NewMsg(fmt.Sprintf("svc.handler.region-ap-south-1.payments-v3.process.c29d64f3-7b88-41a7-ae62-3fcd8ea91b23.grpc-worker-svc-%02d", i%20))
 			msg.Data = generateJSONPayload(pickMessageSize(), i)
 			msg.Reply = fmt.Sprintf("_INBOX.CF4pDsWxqdzVqqgMiqQgeJ.CF4pDsWxqdzVqqgMiqyuzE9c2a.%d", i)
 			if i%2 == 0 {
