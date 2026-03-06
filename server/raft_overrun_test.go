@@ -21,15 +21,16 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// TestNRGQuorumPausedNotResetOnStateTransition verifies that when a follower
+// TestNRGQuorumPausedResetOnCandidateTransition verifies that when a follower
 // has quorumPaused=true and then transitions to candidate (e.g. during a leader
-// election), the quorumPaused flag is NOT reset. This means the node could become
-// a leader while still having quorumPaused=true from its follower state. Since
-// quorumPaused only affects follower-side processAppendEntry logic, this might
-// not directly break things, but it is concerning for correctness: if a node
-// becomes a follower again, it would immediately resume with quorumPaused=true
-// without going through the threshold check.
-func TestNRGQuorumPausedNotResetOnStateTransition(t *testing.T) {
+// election), the quorumPaused flag is correctly reset. The PR added this reset
+// in switchToCandidate() since it has a similar prerequisite that all committed
+// entries have been applied.
+//
+// REMAINING CONCERN: switchToFollower does NOT reset quorumPaused. If a node
+// transitions directly back to follower without going through candidate (e.g. via
+// a leader telling it to step down), stale quorumPaused could persist.
+func TestNRGQuorumPausedResetOnCandidateTransition(t *testing.T) {
 	n, cleanup := initSingleMemRaftNode(t)
 	defer cleanup()
 
@@ -39,24 +40,25 @@ func TestNRGQuorumPausedNotResetOnStateTransition(t *testing.T) {
 	n.Unlock()
 
 	// Switch to candidate state (happens during elections).
+	// The PR fixed this: switchToCandidate now resets quorumPaused.
 	n.switchToCandidate()
 
 	n.RLock()
 	paused := n.quorumPaused
 	n.RUnlock()
-	// BUG: quorumPaused is not cleared on state transition to candidate.
-	// This means if the node becomes a follower again, it would remain paused
-	// even though conditions may have changed.
-	if paused {
-		t.Log("CONCERN: quorumPaused was NOT reset when transitioning to candidate state")
-	}
+	require_False(t, paused) // Fixed: quorumPaused is now reset in switchToCandidate.
 
-	// Now switch to leader state.
+	// Set it again and go through leader -> follower cycle.
+	n.Lock()
+	n.quorumPaused = true
+	n.Unlock()
+
 	n.switchToLeader()
 
 	n.RLock()
 	paused = n.quorumPaused
 	n.RUnlock()
+	// CONCERN: switchToLeader does NOT reset quorumPaused.
 	if paused {
 		t.Log("CONCERN: quorumPaused was NOT reset when transitioning to leader state")
 	}
@@ -67,12 +69,10 @@ func TestNRGQuorumPausedNotResetOnStateTransition(t *testing.T) {
 	n.RLock()
 	paused = n.quorumPaused
 	n.RUnlock()
-	// The node is now a follower with quorumPaused=true, but hasn't been through
-	// the threshold check. This could cause it to silently refuse quorum until
-	// the applied index catches up to within paeWarnThreshold of commit.
+	// CONCERN: switchToFollower does NOT reset quorumPaused either.
 	if paused {
-		t.Log("CONCERN: quorumPaused persists through follower->candidate->leader->follower transitions")
-		t.Log("This means a node could become a follower with stale quorumPaused=true, silently refusing to participate in quorum")
+		t.Log("CONCERN: quorumPaused persists through leader->follower transition")
+		t.Log("A node that becomes follower without going through candidate keeps stale quorumPaused=true")
 	}
 }
 
@@ -288,10 +288,10 @@ func TestNRGFollowerQuorumPauseReplayVsNew(t *testing.T) {
 	require_True(t, paused)
 }
 
-// TestNRGStepDownIfOverrunBoundaryConditions tests the exact boundary conditions
+// TestNRGIsLeaderOverrunBoundaryConditions tests the exact boundary conditions
 // of the overrun threshold. This is important to ensure we don't have off-by-one
 // errors that could cause either premature stepdowns or failure to step down.
-func TestNRGStepDownIfOverrunBoundaryConditions(t *testing.T) {
+func TestNRGIsLeaderOverrunBoundaryConditions(t *testing.T) {
 	n, cleanup := initSingleMemRaftNode(t)
 	defer cleanup()
 
@@ -301,7 +301,7 @@ func TestNRGStepDownIfOverrunBoundaryConditions(t *testing.T) {
 		n.pindex = pauseQuorumThreshold
 		n.commit = 0
 		n.applied = 0
-		result := n.stepDownIfOverrun()
+		result := n.isLeaderOverrun()
 		n.Unlock()
 		// pindex - commit == pauseQuorumThreshold, should NOT step down (uses > not >=).
 		require_False(t, result)
@@ -312,7 +312,7 @@ func TestNRGStepDownIfOverrunBoundaryConditions(t *testing.T) {
 		n.pindex = pauseQuorumThreshold + 1
 		n.commit = 0
 		n.applied = 0
-		result := n.stepDownIfOverrun()
+		result := n.isLeaderOverrun()
 		n.Unlock()
 		// pindex - commit == pauseQuorumThreshold + 1, should step down.
 		require_True(t, result)
@@ -324,7 +324,7 @@ func TestNRGStepDownIfOverrunBoundaryConditions(t *testing.T) {
 		n.pindex = pauseQuorumThreshold
 		n.commit = pauseQuorumThreshold
 		n.applied = 0
-		result := n.stepDownIfOverrun()
+		result := n.isLeaderOverrun()
 		n.Unlock()
 		// commit - applied == pauseQuorumThreshold, should NOT step down.
 		require_False(t, result)
@@ -335,7 +335,7 @@ func TestNRGStepDownIfOverrunBoundaryConditions(t *testing.T) {
 		n.pindex = pauseQuorumThreshold + 1
 		n.commit = pauseQuorumThreshold + 1
 		n.applied = 0
-		result := n.stepDownIfOverrun()
+		result := n.isLeaderOverrun()
 		n.Unlock()
 		// commit - applied == pauseQuorumThreshold + 1, should step down.
 		require_True(t, result)
@@ -347,7 +347,7 @@ func TestNRGStepDownIfOverrunBoundaryConditions(t *testing.T) {
 		n.pindex = 5
 		n.commit = 10
 		n.applied = 0
-		result := n.stepDownIfOverrun()
+		result := n.isLeaderOverrun()
 		n.Unlock()
 		// pindex < commit means the uncommitted check won't trigger (pindex > commit is false).
 		// But commit > applied with diff of 10, which is below threshold.
@@ -360,7 +360,7 @@ func TestNRGStepDownIfOverrunBoundaryConditions(t *testing.T) {
 		n.pindex = 10
 		n.commit = 5
 		n.applied = 10
-		result := n.stepDownIfOverrun()
+		result := n.isLeaderOverrun()
 		n.Unlock()
 		// commit < applied, so unapplied check won't trigger (commit > applied is false).
 		// pindex - commit = 5, below threshold.
@@ -501,9 +501,11 @@ func TestNRGLeaderOverrunStepdownIsWithoutTransfer(t *testing.T) {
 }
 
 // TestNRGQuorumPausedStuckAfterLeaderChange tests the scenario where a follower
-// has quorumPaused=true and then a new leader is elected. The follower should
-// eventually unpause when it catches up, but the quorumPaused flag persists
-// across leader changes which could delay recovery.
+// has quorumPaused=true and then a new leader is elected. The quorumPaused flag
+// persists across leader changes when the follower stays a follower (doesn't go
+// through candidate). Note: the PR added a reset in switchToCandidate, which helps
+// if the follower participates in an election, but if it simply receives an AE from
+// a new leader (higher term), it remains paused until applies catch up.
 func TestNRGQuorumPausedStuckAfterLeaderChange(t *testing.T) {
 	n, cleanup := initSingleMemRaftNode(t)
 	defer cleanup()
@@ -553,17 +555,14 @@ func TestNRGQuorumPausedStuckAfterLeaderChange(t *testing.T) {
 	sub.NextMsg(50 * time.Millisecond)
 }
 
-// TestNRGQuorumPausedUint64UnderflowWhenAppliedExceedsCommit tests a potential
-// uint64 underflow bug. When quorumPaused=true, the code enters the pause check
-// block due to the `|| n.quorumPaused` condition, even when n.commit <= applied.
-// Then `diff := n.commit - applied` underflows because both are uint64, producing
-// a huge value. This causes `diff > paeWarnThreshold` to be true, keeping the node
-// permanently paused even though it has caught up (or even moved ahead).
+// TestNRGQuorumPausedNoUnderflowWhenAppliedExceedsCommit verifies that the
+// uint64 underflow bug is fixed. Previously, when quorumPaused=true and
+// papplied > commit, `diff := n.commit - applied` would underflow (both uint64),
+// producing a huge value that kept the node permanently paused.
 //
-// Scenario: follower gets paused, then a snapshot is installed that sets papplied
-// well beyond commit (e.g. the snapshot is from a more recent state than what the
-// leader's current commit reflects in our local state).
-func TestNRGQuorumPausedUint64UnderflowWhenAppliedExceedsCommit(t *testing.T) {
+// The fix uses `commit := max(n.commit, n.papplied)` which ensures commit >= applied
+// after a snapshot install, preventing the underflow.
+func TestNRGQuorumPausedNoUnderflowWhenAppliedExceedsCommit(t *testing.T) {
 	n, cleanup := initSingleMemRaftNode(t)
 	defer cleanup()
 
@@ -601,30 +600,22 @@ func TestNRGQuorumPausedUint64UnderflowWhenAppliedExceedsCommit(t *testing.T) {
 	n.Unlock()
 
 	// Step 3: Process another heartbeat. Now max(applied, papplied) = papplied > commit.
-	// The code enters the block because quorumPaused=true.
-	// diff = n.commit - applied = (pauseQuorumThreshold+1) - (pauseQuorumThreshold+100)
-	// This is a uint64 subtraction that underflows to a huge number!
-	// The huge diff > paeWarnThreshold, so the node stays permanently paused.
+	// With the fix, commit := max(n.commit, n.papplied) = papplied, so diff = 0.
+	// The node should unpause since diff <= paeWarnThreshold.
 	n.processAppendEntry(aeHeartbeat, n.aesub)
 
 	n.RLock()
 	paused := n.quorumPaused
 	n.RUnlock()
 
-	// BUG: When quorumPaused=true and papplied > commit, the code computes:
-	//   applied := max(n.applied, n.papplied)  // = papplied = pauseQuorumThreshold + 100
-	//   diff := n.commit - applied             // = (pauseQuorumThreshold+1) - (pauseQuorumThreshold+100)
-	// Since these are uint64, the subtraction underflows to a massive number.
-	// This causes diff > paeWarnThreshold to be true, keeping the node permanently paused.
-	if paused {
-		t.Log("BUG CONFIRMED: uint64 underflow in quorum pause diff calculation")
-		t.Log("When papplied > commit and quorumPaused=true, diff = commit - papplied underflows")
-		t.Log("This causes the node to remain permanently paused even though it has caught up via snapshot")
-		t.Log("FIX: Add a guard `if n.commit > applied` before computing diff, or use signed arithmetic")
-	}
-	// This test documents the bug. The node SHOULD have unpaused since applied > commit.
-	// If the bug is fixed, require_False(t, paused) would pass.
-	require_Equal(t, paused, true) // Documenting current (buggy) behavior.
+	// Fixed: the node correctly unpauses after snapshot install brings papplied > commit.
+	require_False(t, paused)
+
+	// Verify we can receive messages again.
+	msg, err := sub.NextMsg(200 * time.Millisecond)
+	require_NoError(t, err)
+	ar := decodeAppendEntryResponse(msg.Data)
+	require_True(t, ar.success)
 }
 
 // TestNRGQuorumPauseCatchupSubAlsoBlocked tests that catchup entries (delivered
@@ -734,7 +725,7 @@ func TestNRGQuorumPausedElectionTimeoutStillReset(t *testing.T) {
 
 // TestNRGOverrunRecoveryAfterApplyCatchesUp verifies the recovery cycle:
 // 1. Leader gets overrun and steps down
-// 2. After catching up on applies, stepDownIfOverrun returns false
+// 2. After catching up on applies, isLeaderOverrun() returns false
 // 3. A re-elected leader can accept proposals again
 func TestNRGOverrunRecoveryAfterApplyCatchesUp(t *testing.T) {
 	n, cleanup := initSingleMemRaftNode(t)
@@ -757,8 +748,8 @@ func TestNRGOverrunRecoveryAfterApplyCatchesUp(t *testing.T) {
 	// Now simulate the node catching up on applies.
 	n.Lock()
 	n.applied = pauseQuorumThreshold + 1 // All committed entries applied.
-	// Verify that stepDownIfOverrun would now return false.
-	overrun := n.stepDownIfOverrun()
+	// Verify that isLeaderOverrun would now return false.
+	overrun := n.isLeaderOverrun()
 	n.Unlock()
 
 	require_False(t, overrun)
@@ -773,10 +764,10 @@ func TestNRGOverrunRecoveryAfterApplyCatchesUp(t *testing.T) {
 	require_NoError(t, err)
 }
 
-// TestNRGStepDownIfOverrunBothThresholds tests the case where BOTH uncommitted
+// TestNRGIsLeaderOverrunBothThresholds tests the case where BOTH uncommitted
 // and unapplied thresholds are exceeded simultaneously. The comment in the PR says
 // "worst-case we'll have 2x the threshold" - verify this is handled.
-func TestNRGStepDownIfOverrunBothThresholds(t *testing.T) {
+func TestNRGIsLeaderOverrunBothThresholds(t *testing.T) {
 	n, cleanup := initSingleMemRaftNode(t)
 	defer cleanup()
 

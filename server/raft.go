@@ -922,7 +922,7 @@ func (n *raft) Propose(data []byte) error {
 		return werr
 	}
 
-	if n.stepDownIfOverrun() {
+	if n.isLeaderOverrun() {
 		var state StreamState
 		n.wal.FastState(&state)
 		n.warn("Leader falling behind, stepping down: pindex %d, commit %d, applied %d, WAL size %s", n.pindex, n.commit, n.applied, friendlyBytes(state.Bytes))
@@ -950,7 +950,7 @@ func (n *raft) ProposeMulti(entries []*Entry) error {
 		return werr
 	}
 
-	if n.stepDownIfOverrun() {
+	if n.isLeaderOverrun() {
 		var state StreamState
 		n.wal.FastState(&state)
 		n.warn("Leader falling behind, stepping down: pindex %d, commit %d, applied %d, WAL size %s", n.pindex, n.commit, n.applied, friendlyBytes(state.Bytes))
@@ -964,12 +964,12 @@ func (n *raft) ProposeMulti(entries []*Entry) error {
 	return nil
 }
 
-// stepDownIfOverrun returns whether we should step down as leader due to continuously increasing
+// isLeaderOverrun returns whether we are overrun and should step down due to continuously increasing
 // uncommitted or unapplied entries. If triggered, this means we're being severely overrun by
 // incoming proposals or the system is degraded such that it's too slow (or unable) to process them.
 // Stepping down means the system gets to "breathe" for a bit, until a new leader can be elected.
 // Lock should be held.
-func (n *raft) stepDownIfOverrun() bool {
+func (n *raft) isLeaderOverrun() bool {
 	// We only do this past a high threshold to protect ourselves.
 	// Worst-case we'll have 2x the threshold, once in uncommitted and once in unapplied entries.
 	// Either the number of uncommitted entries is over the threshold: we're not getting quorum from our followers.
@@ -2924,7 +2924,7 @@ func (n *raft) handleForwardedProposal(sub *subscription, c *client, _ *Account,
 		return
 	}
 
-	if n.stepDownIfOverrun() {
+	if n.isLeaderOverrun() {
 		var state StreamState
 		n.wal.FastState(&state)
 		n.warn("Leader falling behind, stepping down: pindex %d, commit %d, applied %d, WAL size %s", n.pindex, n.commit, n.applied, friendlyBytes(state.Bytes))
@@ -4087,8 +4087,9 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 	// This encourages the leader to sync us via a snapshot instead. We use max(applied, papplied) to avoid
 	// incorrectly triggering this pause immediately after receiving a snapshot.
 	applied := max(n.applied, n.papplied)
-	if sub != nil && (n.commit > applied || n.quorumPaused) {
-		diff := n.commit - applied
+	commit := max(n.commit, n.papplied)
+	if sub != nil && (commit > applied || n.quorumPaused) {
+		diff := commit - applied
 		if n.quorumPaused {
 			if diff > paeWarnThreshold {
 				n.Unlock()
@@ -4099,13 +4100,13 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 			n.quorumPaused = false
 			var state StreamState
 			n.wal.FastState(&state)
-			n.warn("Quorum resumed: commit %d, applied %d, WAL size %s", n.commit, applied, friendlyBytes(state.Bytes))
+			n.warn("Quorum resumed: commit %d, applied %d, WAL size %s", commit, applied, friendlyBytes(state.Bytes))
 		} else if diff > pauseQuorumThreshold {
 			// It takes a while until we reach the pause threshold, but once we do we enter a "cooldown period".
 			n.quorumPaused = true
 			var state StreamState
 			n.wal.FastState(&state)
-			n.warn("Quorum paused, falling behind: commit %d != applied %d, WAL size %s", n.commit, applied, friendlyBytes(state.Bytes))
+			n.warn("Quorum paused, falling behind: commit %d != applied %d, WAL size %s", commit, applied, friendlyBytes(state.Bytes))
 			n.Unlock()
 			return
 		}
@@ -5116,6 +5117,8 @@ func (n *raft) switchToCandidate() {
 	}
 	// Increment the term.
 	n.term++
+	// Reset quorum paused. If it was previously set, we checked above that we've applied all committed entries.
+	n.quorumPaused = false
 	// Clear current Leader.
 	n.updateLeader(noLeader)
 	n.switchState(Candidate)
