@@ -3802,6 +3802,128 @@ func (w *writeTimeoutPolicyWriter) Write(b []byte) (int, error) {
 	return w.Conn.Write(b)
 }
 
+func TestSlowConsumerCompDowngrade(t *testing.T) {
+	opts := DefaultOptions()
+	s := &Server{opts: opts}
+
+	// Use a connection that returns a timeout error on the second write
+	// to simulate a slow consumer.
+	fakeConn := &testConnSlowConsumer{}
+	c := &client{srv: s, nc: fakeConn, kind: LEAF}
+	c.initClient()
+	c.out.wdl = 10 * time.Millisecond
+	c.out.wtp = WriteTimeoutPolicyRetry
+
+	originalMode := CompressionS2Fast
+	c.out.cw = s2.NewWriter(nil, s2WriterOptions(originalMode)...)
+	c.out.cm = originalMode
+
+	payload := make([]byte, 256)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	// First flush succeeds normally. Verify compression mode is unchanged.
+	c.mu.Lock()
+	c.queueOutbound(payload)
+	c.flushOutbound()
+	c.mu.Unlock()
+
+	c.mu.Lock()
+	if c.out.cm != originalMode {
+		t.Fatalf("Expected compression mode %q, got %q", originalMode, c.out.cm)
+	}
+	if c.flags.isSet(isSlowConsumer) {
+		t.Fatal("Should not be slow consumer yet")
+	}
+	c.mu.Unlock()
+
+	// Now make the connection time out on writes.
+	fakeConn.mu.Lock()
+	fakeConn.timeout = true
+	fakeConn.mu.Unlock()
+
+	c.mu.Lock()
+	c.queueOutbound(payload)
+	c.flushOutbound()
+	c.mu.Unlock()
+
+	// Verify compression was downgraded.
+	c.mu.Lock()
+	if !c.flags.isSet(isSlowConsumer) {
+		t.Fatal("Should be slow consumer")
+	}
+	if c.out.cm != CompressionS2Uncompressed {
+		t.Fatalf("Expected compression downgraded to %q, got %q", CompressionS2Uncompressed, c.out.cm)
+	}
+	if c.out.cms != originalMode {
+		t.Fatalf("Expected saved mode %q, got %q", originalMode, c.out.cms)
+	}
+	c.mu.Unlock()
+
+	// Allow writes to succeed again to simulate recovery.
+	fakeConn.mu.Lock()
+	fakeConn.timeout = false
+	fakeConn.mu.Unlock()
+
+	// Clear wnb since it has leftover data from the timeout.
+	c.mu.Lock()
+	c.out.wnb = nil
+	c.out.pb = 0
+	c.mu.Unlock()
+
+	c.mu.Lock()
+	c.queueOutbound(payload)
+	c.flushOutbound()
+	c.mu.Unlock()
+
+	// Verify compression was restored.
+	c.mu.Lock()
+	if c.flags.isSet(isSlowConsumer) {
+		t.Fatal("Should have recovered from slow consumer")
+	}
+	if c.out.cm != originalMode {
+		t.Fatalf("Expected compression restored to %q, got %q", originalMode, c.out.cm)
+	}
+	if c.out.cms != _EMPTY_ {
+		t.Fatalf("Expected saved mode to be cleared, got %q", c.out.cms)
+	}
+	c.mu.Unlock()
+}
+
+// testConnSlowConsumer simulates a connection that can be toggled to return
+// write timeout errors, used for testing slow consumer compression downgrade.
+type testConnSlowConsumer struct {
+	net.Conn
+	mu      sync.Mutex
+	timeout bool
+	buf     bytes.Buffer
+}
+
+func (c *testConnSlowConsumer) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	timeout := c.timeout
+	c.mu.Unlock()
+	if timeout {
+		// Write 1 byte before timing out so that handleWriteTimeout
+		// sees written > 0 and marks as slow consumer instead of closing.
+		c.buf.Write(p[:1])
+		return 1, &timeoutError{}
+	}
+	return c.buf.Write(p)
+}
+
+func (c *testConnSlowConsumer) RemoteAddr() net.Addr { return nil }
+func (c *testConnSlowConsumer) SetWriteDeadline(_ time.Time) error {
+	return nil
+}
+
+type timeoutError struct{}
+
+func (e *timeoutError) Error() string   { return "i/o timeout" }
+func (e *timeoutError) Timeout() bool   { return true }
+func (e *timeoutError) Temporary() bool { return true }
+
 func TestClientFlushOutboundWriteTimeoutPolicy(t *testing.T) {
 	for name, policy := range map[string]WriteTimeoutPolicy{
 		"Retry": WriteTimeoutPolicyRetry,

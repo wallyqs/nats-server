@@ -934,6 +934,7 @@ func (s *Server) negotiateRouteCompression(c *client, didSolicit bool, accName, 
 		// a route that did not solicit. It will make sure that that proto
 		// is sent with compression on.
 		c.out.cw = s2.NewWriter(nil, s2WriterOptions(cm)...)
+		c.out.cm = cm
 		if !didSolicit {
 			c.enqueueProto(infoProto)
 		}

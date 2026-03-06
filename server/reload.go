@@ -455,6 +455,7 @@ func (c *clusterOption) Apply(s *Server) {
 			} else {
 				// Simply change the compression writer
 				r.out.cw = s2.NewWriter(nil, s2WriterOptions(newMode)...)
+				r.out.cm = newMode
 				r.route.compression = newMode
 			}
 			r.mu.Unlock()
@@ -950,6 +951,7 @@ func (l *leafNodeOption) Apply(s *Server) {
 			} else {
 				// Simply change the compression writer
 				l.out.cw = s2.NewWriter(nil, s2WriterOptions(newMode)...)
+				l.out.cm = newMode
 				l.leaf.compression = newMode
 			}
 			l.mu.Unlock()

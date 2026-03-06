@@ -358,6 +358,9 @@ type outbound struct {
 	lft time.Duration      // Last flush time for Write.
 	stc chan struct{}      // Stall chan we create to slow down producers on overrun, e.g. fan-in.
 	cw  *s2.Writer
+	cm  string       // Current compression mode for cw.
+	cms string       // Saved compression mode before slow consumer downgrade.
+	cwb bytes.Buffer // Reusable buffer for compression output.
 }
 
 const nbMaxVectorSize = 1024 // == IOV_MAX on Linux/Darwin and most other Unices (except Solaris/AIX)
@@ -1682,9 +1685,8 @@ func (c *client) flushOutbound() bool {
 	// Compress outside of the lock
 	if cw != nil {
 		var err error
-		bb := bytes.Buffer{}
-
-		cw.Reset(&bb)
+		c.out.cwb.Reset()
+		cw.Reset(&c.out.cwb)
 		for _, buf := range collapsed {
 			if err == nil {
 				_, err = cw.Write(buf)
@@ -1702,8 +1704,14 @@ func (c *client) flushOutbound() bool {
 			c.markConnAsClosed(WriteError)
 			return false
 		}
-		collapsed = append(net.Buffers(nil), bb.Bytes())
-		attempted = int64(len(collapsed[0]))
+		// Copy compressed data out of the reusable buffer to avoid
+		// aliasing issues if a partial write leaves data in wnb
+		// when the buffer is reused on the next flush.
+		compressed := c.out.cwb.Bytes()
+		buf := make([]byte, len(compressed))
+		copy(buf, compressed)
+		collapsed = append(net.Buffers(nil), buf)
+		attempted = int64(len(buf))
 	}
 
 	// This is safe to do outside of the lock since "collapsed" is no longer
@@ -1833,6 +1841,7 @@ func (c *client) flushOutbound() bool {
 	if !gotWriteTimeout && c.flags.isSet(isSlowConsumer) {
 		c.Noticef("Slow Consumer Recovered: Flush took %.3fs with %d chunks of %d total bytes.", time.Since(start).Seconds(), len(orig), attempted)
 		c.flags.clear(isSlowConsumer)
+		c.restoreCompFromSlowConsumer()
 	}
 
 	return true
@@ -1893,9 +1902,42 @@ func (c *client) handleWriteTimeout(written, attempted int64, numChunks int) boo
 		c.markConnAsClosed(SlowConsumerWriteDeadline)
 		return true
 	} else {
-		c.flags.setIfNotSet(isSlowConsumer)
+		if c.flags.setIfNotSet(isSlowConsumer) {
+			// When first becoming a slow consumer, downgrade compression
+			// to S2 uncompressed to reduce CPU overhead. The actual
+			// compression is wasteful when the connection can't keep up.
+			c.downgradeCompForSlowConsumer()
+		}
 	}
 	return false
+}
+
+// downgradeCompForSlowConsumer switches the compression writer to S2
+// uncompressed mode to reduce CPU overhead when the connection is a slow
+// consumer. The original compression mode is saved so it can be restored
+// when the connection recovers.
+// Lock held on entry.
+func (c *client) downgradeCompForSlowConsumer() {
+	if c.out.cw == nil || c.out.cm == CompressionS2Uncompressed {
+		return
+	}
+	c.out.cms = c.out.cm
+	c.out.cm = CompressionS2Uncompressed
+	c.out.cw = s2.NewWriter(nil, s2WriterOptions(CompressionS2Uncompressed)...)
+	c.Debugf("Slow consumer: compression downgraded from %q to %q", c.out.cms, c.out.cm)
+}
+
+// restoreCompFromSlowConsumer restores the original compression mode after
+// a slow consumer has recovered.
+// Lock held on entry.
+func (c *client) restoreCompFromSlowConsumer() {
+	if c.out.cms == _EMPTY_ {
+		return
+	}
+	c.out.cm = c.out.cms
+	c.out.cw = s2.NewWriter(nil, s2WriterOptions(c.out.cm)...)
+	c.Debugf("Slow consumer recovered: compression restored to %q", c.out.cm)
+	c.out.cms = _EMPTY_
 }
 
 // Marks this connection has closed with the given reason.
@@ -2729,6 +2771,7 @@ func (c *client) updateS2AutoCompressionLevel(co *CompressionOpts, compression *
 	if cm := selectS2AutoModeBasedOnRTT(c.rtt, co.RTTThresholds); cm != *compression {
 		*compression = cm
 		c.out.cw = s2.NewWriter(nil, s2WriterOptions(cm)...)
+		c.out.cm = cm
 	}
 }
 
