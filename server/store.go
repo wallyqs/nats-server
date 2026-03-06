@@ -18,7 +18,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"time"
 	"unsafe"
@@ -435,7 +437,10 @@ func encodeConsumerState(state *ConsumerState) []byte {
 		// Write minimum timestamp we found from above.
 		n += binary.PutVarint(buf[n:], mints)
 
-		for k, v := range state.Pending {
+		// Sort keys to ensure deterministic encoding, which is needed
+		// for consistent hashing in snapshot change detection.
+		for _, k := range slices.Sorted(maps.Keys(state.Pending)) {
+			v := state.Pending[k]
 			n += binary.PutUvarint(buf[n:], k-asflr)
 			n += binary.PutUvarint(buf[n:], v.Sequence-adflr)
 			// Downsample to seconds to save on space.
@@ -450,9 +455,10 @@ func encodeConsumerState(state *ConsumerState) []byte {
 
 	// We expect these to be small.
 	if len(state.Redelivered) > 0 {
-		for k, v := range state.Redelivered {
+		// Sort keys to ensure deterministic encoding.
+		for _, k := range slices.Sorted(maps.Keys(state.Redelivered)) {
 			n += binary.PutUvarint(buf[n:], k-asflr)
-			n += binary.PutUvarint(buf[n:], v)
+			n += binary.PutUvarint(buf[n:], state.Redelivered[k])
 		}
 	}
 
