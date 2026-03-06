@@ -618,62 +618,112 @@ func TestNRGQuorumPausedNoUnderflowWhenAppliedExceedsCommit(t *testing.T) {
 	require_True(t, ar.success)
 }
 
-// TestNRGQuorumPauseCatchupSubAlsoBlocked tests that catchup entries (delivered
-// on a catchup sub, not the main aesub) also trigger the quorum pause logic.
-// The pause check uses `sub != nil` rather than `isNew` (which checks sub == n.aesub).
-// This means catchup entries are also blocked when quorumPaused=true.
-//
-// This is potentially problematic: the leader sends catchup entries specifically
-// to help a follower recover. If those entries are also blocked by quorum pause,
-// the follower can't catch up through catchup entries, defeating the purpose.
-// The follower would need a snapshot instead, which is more expensive.
-func TestNRGQuorumPauseCatchupSubAlsoBlocked(t *testing.T) {
+// TestNRGQuorumPausedDoesNotBlockCatchupEntries verifies that when a follower
+// is quorumPaused, catchup entries (delivered on n.catchup.sub) are NOT blocked.
+// The quorum pause gate uses `isNew` (sub == n.aesub) so that only new entries
+// from the main append entry subscription are paused. Catchup entries are the
+// recovery mechanism — blocking them would be self-defeating.
+func TestNRGQuorumPausedDoesNotBlockCatchupEntries(t *testing.T) {
 	n, cleanup := initSingleMemRaftNode(t)
 	defer cleanup()
 
-	aeReply := "$TEST"
-	nc, err := nats.Connect(n.s.ClientURL(), nats.UserInfo("admin", "s3cr3t!"))
-	require_NoError(t, err)
-	defer nc.Close()
-
-	sub, err := nc.SubscribeSync(aeReply)
-	require_NoError(t, err)
-	defer sub.Drain()
-	require_NoError(t, nc.Flush())
-
 	nats0 := "S1Nunr6R"
-	aeHeartbeat := encode(t, &appendEntry{leader: nats0, term: 1, commit: 0, pterm: 0, pindex: 0, entries: nil, reply: aeReply})
 
-	// Trigger quorum pause using the normal aesub.
+	// Set up the follower with an initial state so catchup entries can be stored.
 	n.Lock()
+	n.pterm = 1
+	n.pindex = 0
 	n.commit = pauseQuorumThreshold + 1
 	n.applied = 0
 	n.papplied = 0
 	n.Unlock()
 
+	// Trigger quorumPaused via the main aesub.
+	aeHeartbeat := encode(t, &appendEntry{leader: nats0, term: 1, commit: 0, pterm: 0, pindex: 0, entries: nil})
 	n.processAppendEntry(aeHeartbeat, n.aesub)
 	n.RLock()
 	require_True(t, n.quorumPaused)
 	n.RUnlock()
 
-	// Now create a fake catchup subscription (not nil, not aesub).
-	// This simulates what would happen if the leader sent catchup entries.
-	fakeCatchupSub := &subscription{}
+	// Simulate a catchup: set up catchup state with a subscription that is not n.aesub.
+	catchupSub := &subscription{}
+	n.Lock()
+	n.catchup = &catchupState{
+		cterm:  1,
+		cindex: 0,
+		pterm:  n.pterm,
+		pindex: n.pindex,
+		sub:    catchupSub,
+		active: time.Now(),
+	}
+	pindexBefore := n.pindex
+	n.Unlock()
 
-	// Process an entry on the catchup sub. The `sub != nil` check means
-	// the pause logic will also apply to catchup entries.
-	n.processAppendEntry(aeHeartbeat, fakeCatchupSub)
+	// Send a catchup entry with actual data on the catchup sub.
+	catchupEntry := encode(t, &appendEntry{
+		leader:  nats0,
+		term:    1,
+		commit:  0,
+		pterm:   1,
+		pindex:  pindexBefore,
+		entries: []*Entry{newEntry(EntryNormal, []byte("catchup-data"))},
+	})
+	n.processAppendEntry(catchupEntry, catchupSub)
 
+	// The catchup entry must NOT be blocked: pindex should have advanced.
 	n.RLock()
+	pindexAfter := n.pindex
 	stillPaused := n.quorumPaused
 	n.RUnlock()
 
-	// The entry on the catchup sub was also blocked.
-	if stillPaused {
-		t.Log("CONCERN: Catchup entries are also blocked by quorum pause")
-		t.Log("The pause check uses 'sub != nil' not 'isNew', so catchup subs are affected too")
-		t.Log("This means the follower can't recover through catchup - only snapshots will work")
-	}
+	// pindex advanced means the entry was stored, not dropped.
+	require_True(t, pindexAfter > pindexBefore)
+	// quorumPaused is still true — it's only cleared when the gap shrinks,
+	// but the catchup entry was allowed through.
+	require_True(t, stillPaused)
+}
+
+// TestNRGQuorumPausedStillBlocksNewEntries verifies that the quorum pause gate
+// still blocks entries arriving on the main append entry sub (n.aesub).
+// This is the complement to TestNRGQuorumPausedDoesNotBlockCatchupEntries.
+func TestNRGQuorumPausedStillBlocksNewEntries(t *testing.T) {
+	n, cleanup := initSingleMemRaftNode(t)
+	defer cleanup()
+
+	nats0 := "S1Nunr6R"
+
+	n.Lock()
+	n.pterm = 1
+	n.pindex = 0
+	n.commit = pauseQuorumThreshold + 1
+	n.applied = 0
+	n.papplied = 0
+	n.Unlock()
+
+	// Trigger quorumPaused.
+	aeHeartbeat := encode(t, &appendEntry{leader: nats0, term: 1, commit: 0, pterm: 0, pindex: 0, entries: nil})
+	n.processAppendEntry(aeHeartbeat, n.aesub)
+	n.RLock()
+	require_True(t, n.quorumPaused)
+	pindexBefore := n.pindex
+	n.RUnlock()
+
+	// Send a new entry on the main aesub — this should be blocked.
+	newEntry := encode(t, &appendEntry{
+		leader:  nats0,
+		term:    1,
+		commit:  0,
+		pterm:   1,
+		pindex:  pindexBefore,
+		entries: []*Entry{{Type: EntryNormal, Data: []byte("new-data")}},
+	})
+	n.processAppendEntry(newEntry, n.aesub)
+
+	// pindex should NOT have advanced — the entry was blocked.
+	n.RLock()
+	pindexAfter := n.pindex
+	n.RUnlock()
+	require_Equal(t, pindexBefore, pindexAfter)
 }
 
 // TestNRGQuorumPausedElectionTimeoutStillReset verifies that even when a follower
