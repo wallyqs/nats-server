@@ -6589,15 +6589,24 @@ func TestJetStreamClusterProcessSnapshotPanicAfterStreamDelete(t *testing.T) {
 
 // Test that startClusterSubs does not panic when mset.sa is nil.
 //
-// In processClusterUpdateStream, the code path for scaling up a stream
-// (e.g., R1 to R3) enters the block where !alreadyRunning && numReplicas > 1.
-// Before the fix, setStreamAssignment(sa) was called AFTER startClusterSubs(),
-// so if mset.sa was nil, startClusterSubs would dereference mset.sa.Sync and
-// panic. The fix moves setStreamAssignment before startClusterSubs and adds a
-// nil guard in startClusterSubs as defense-in-depth.
+// In processClusterUpdateStream, the code path where !alreadyRunning &&
+// numReplicas > 1 calls startClusterSubs(). Before the fix,
+// setStreamAssignment(sa) was called AFTER startClusterSubs(), so if
+// mset.sa was nil, startClusterSubs would dereference mset.sa.Sync and panic.
 //
-// To exercise this deterministically, we simulate the state that recoverStream()
-// produces (sa=nil) on a clustered stream and call startClusterSubs directly.
+// On release/v2.10.29 and earlier, the crash was triggered during node recovery:
+// 1. recoverStream() creates the stream from disk with sa=nil
+// 2. Meta raft recovery replays an assignStreamOp -> ru.addStreams[key] = sa
+// 3. Then an updateStreamOp -> ru.updateStreams[key] = sa; delete(ru.addStreams, key)
+//    This deletes the add entry, so processStreamAssignment never runs and
+//    mset.sa stays nil.
+// 4. Recovery processing runs updateStreams -> processClusterUpdateStream
+// 5. With osa.Group.node == nil (raft group not created) and mset.sa == nil,
+//    startClusterSubs panics on mset.sa.Sync.
+//
+// On main the delete(ru.addStreams, key) was removed, so both addStreams and
+// updateStreams run. The test exercises the nil guard directly since the
+// original crash path is no longer reachable on this branch.
 // See https://github.com/nats-io/nats-server/issues/7229
 func TestJetStreamClusterStartClusterSubsNilStreamAssignment(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
