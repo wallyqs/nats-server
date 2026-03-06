@@ -4865,6 +4865,10 @@ func (js *jetStream) processClusterUpdateStream(acc *Account, osa, sa *streamAss
 			js.mu.Unlock()
 		}
 
+		// Set the new stream assignment before starting cluster subs,
+		// so startClusterSubs uses the correct sync subject.
+		mset.setStreamAssignment(sa)
+
 		if !alreadyRunning && numReplicas > 1 {
 			if needsNode {
 				// Since we are scaling up we want to make sure our sync subject
@@ -4909,8 +4913,6 @@ func (js *jetStream) processClusterUpdateStream(acc *Account, osa, sa *streamAss
 			rg.node = nil
 			js.mu.Unlock()
 		}
-		// Set the new stream assignment.
-		mset.setStreamAssignment(sa)
 
 		// Call update.
 		if err = mset.updateWithAdvisory(cfg, !recovering, false); err != nil {

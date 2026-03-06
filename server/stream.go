@@ -1273,6 +1273,9 @@ func (mset *stream) setLeader(isLeader bool) error {
 
 // Lock should be held.
 func (mset *stream) startClusterSubs() {
+	if mset.sa == nil {
+		return
+	}
 	if mset.syncSub == nil {
 		mset.syncSub, _ = mset.srv.systemSubscribe(mset.sa.Sync, _EMPTY_, false, mset.sysc, mset.handleClusterSyncRequest)
 	}
