@@ -6587,32 +6587,53 @@ func TestJetStreamClusterProcessSnapshotPanicAfterStreamDelete(t *testing.T) {
 	require_Error(t, mset.processSnapshot(&StreamReplicatedState{}, 0), errCatchupStreamStopped)
 }
 
-// Test that startClusterSubs does not panic when the stream assignment is nil,
-// which can happen for non-clustered (R1) streams during node restarts.
-// See https://github.com/nats-io/nats-server/issues/7229
+// Test that processClusterUpdateStream does not panic when a stream was
+// recovered from disk without a stream assignment and then receives a
+// meta update before the assignment is set. This reproduces the crash
+// in https://github.com/nats-io/nats-server/issues/7229
 func TestJetStreamClusterStartClusterSubsNilStreamAssignment(t *testing.T) {
-	s := RunBasicJetStreamServer(t)
-	defer s.Shutdown()
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
 
-	nc, js := jsClientConnect(t, s)
+	nc, js := jsClientConnect(t, c.randomServer())
 	defer nc.Close()
 
-	_, err := js.AddStream(&nats.StreamConfig{Name: "TEST"})
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
 	require_NoError(t, err)
 
-	mset, err := s.globalAccount().lookupStream("TEST")
+	// Publish a message to ensure the stream is active.
+	_, err = js.Publish("foo", []byte("hello"))
 	require_NoError(t, err)
 
-	// Confirm that a standalone stream has no stream assignment.
-	mset.mu.RLock()
-	sa := mset.sa
-	mset.mu.RUnlock()
-	require_True(t, sa == nil)
+	// Restart a server. During recovery, the stream is recreated from disk
+	// with sa=nil, and then the meta raft log is replayed which triggers
+	// processClusterUpdateStream -> startClusterSubs. Previously this would
+	// panic due to nil mset.sa.
+	rs := c.randomServer()
+	rs.Shutdown()
+	rs.WaitForShutdown()
+	rs = c.restartServer(rs)
 
-	// startClusterSubs should not panic when mset.sa is nil.
-	mset.mu.Lock()
-	mset.startClusterSubs()
-	mset.mu.Unlock()
+	// Wait for the restarted server to be fully caught up.
+	c.waitOnServerCurrent(rs)
+
+	// Verify the stream is healthy on all servers.
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+	for _, s := range c.servers {
+		acc, err := s.lookupAccount(globalAccountName)
+		require_NoError(t, err)
+		mset, err := acc.lookupStream("TEST")
+		require_NoError(t, err)
+		// Verify the stream assignment is set after recovery.
+		mset.mu.RLock()
+		sa := mset.sa
+		mset.mu.RUnlock()
+		require_True(t, sa != nil)
+	}
 }
 
 func TestJetStreamClusterDiscardNewPerSubjectRejectsWithoutCLFSBump(t *testing.T) {
