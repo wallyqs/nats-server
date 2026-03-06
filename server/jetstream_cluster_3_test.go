@@ -6587,6 +6587,34 @@ func TestJetStreamClusterProcessSnapshotPanicAfterStreamDelete(t *testing.T) {
 	require_Error(t, mset.processSnapshot(&StreamReplicatedState{}, 0), errCatchupStreamStopped)
 }
 
+// Test that startClusterSubs does not panic when the stream assignment is nil,
+// which can happen for non-clustered (R1) streams during node restarts.
+// See https://github.com/nats-io/nats-server/issues/7229
+func TestJetStreamClusterStartClusterSubsNilStreamAssignment(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{Name: "TEST"})
+	require_NoError(t, err)
+
+	mset, err := s.globalAccount().lookupStream("TEST")
+	require_NoError(t, err)
+
+	// Confirm that a standalone stream has no stream assignment.
+	mset.mu.RLock()
+	sa := mset.sa
+	mset.mu.RUnlock()
+	require_True(t, sa == nil)
+
+	// startClusterSubs should not panic when mset.sa is nil.
+	mset.mu.Lock()
+	mset.startClusterSubs()
+	mset.mu.Unlock()
+}
+
 func TestJetStreamClusterDiscardNewPerSubjectRejectsWithoutCLFSBump(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
