@@ -307,6 +307,12 @@ func (s *Server) processClientOrLeafCallout(c *client, opts *Options, proxyRequi
 			return
 		}
 
+		// Propagate tags and name tag from the auth callout response.
+		c.mu.Lock()
+		c.tags = arc.Tags
+		c.nameTag = arc.Name
+		c.mu.Unlock()
+
 		// See if the response wants to override the username.
 		if arc.Name != _EMPTY_ {
 			c.mu.Lock()

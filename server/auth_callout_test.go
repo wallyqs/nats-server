@@ -2671,3 +2671,90 @@ func TestAuthCalloutLeafNodeOperatorModeMismatchedCreds(t *testing.T) {
 	// Verify the hub server is still running and healthy.
 	checkLeafNodeConnectedCount(t, at.srv, 1)
 }
+
+func TestAuthCalloutUserTags(t *testing.T) {
+	conf := `
+		listen: "127.0.0.1:-1"
+		server_name: A
+		accounts {
+			AUTH { users [ {user: "auth", password: "pwd"} ] }
+			FOO {}
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+		authorization {
+			auth_callout {
+				issuer: "ABJHLOVMPA4CI6R5KLNGOB4GSLNIY7IOUPAJC4YFNDLQVIOBYQGUWVLA"
+				account: AUTH
+				auth_users: [ auth, admin ]
+			}
+		}
+	`
+
+	handler := func(m *nats.Msg) {
+		user, si, _, opts, _ := decodeAuthRequest(t, m.Data)
+		if opts.Username == "dlc" && opts.Password == "zzz" {
+			// Create user JWT with tags.
+			akp, err := nkeys.FromSeed([]byte(authCalloutIssuerSeed))
+			require_NoError(t, err)
+			uc := jwt.NewUserClaims(user)
+			uc.Name = "dlc"
+			uc.Audience = "FOO"
+			uc.Tags.Add("my-tag:some-value")
+			uc.Tags.Add("env:test")
+			tok, err := uc.Encode(akp)
+			require_NoError(t, err)
+			m.Respond(serviceResponse(t, user, si.ID, tok, "", 0))
+		} else {
+			m.Respond(serviceResponse(t, user, si.ID, "", "BAD CREDS", 0))
+		}
+	}
+
+	ac := NewAuthTest(t, conf, handler, nats.UserInfo("auth", "pwd"))
+	defer ac.Cleanup()
+
+	// Setup system user to receive events.
+	snc := ac.Connect(nats.UserInfo("admin", "s3cr3t!"))
+	defer snc.Close()
+
+	// Allow this connect event to pass us by.
+	time.Sleep(250 * time.Millisecond)
+
+	// Watch for connect events.
+	csub, err := snc.SubscribeSync(fmt.Sprintf(connectEventSubj, "*"))
+	require_NoError(t, err)
+
+	// Watch for disconnect events.
+	dsub, err := snc.SubscribeSync(fmt.Sprintf(disconnectEventSubj, "*"))
+	require_NoError(t, err)
+
+	snc.Flush()
+
+	// Connect via auth callout with tags.
+	nc := ac.Connect(nats.UserInfo("dlc", "zzz"))
+
+	// Verify connect event has tags.
+	m, err := csub.NextMsg(time.Second)
+	require_NoError(t, err)
+
+	var cm ConnectEventMsg
+	err = json.Unmarshal(m.Data, &cm)
+	require_NoError(t, err)
+	require_True(t, cm.Client.User == "dlc")
+	require_True(t, cm.Client.Account == "FOO")
+	require_True(t, len(cm.Client.Tags) == 2)
+	require_True(t, cm.Client.Tags.Contains("my-tag:some-value"))
+	require_True(t, cm.Client.Tags.Contains("env:test"))
+
+	// Close connection and verify disconnect event also has tags.
+	nc.Close()
+
+	m, err = dsub.NextMsg(time.Second)
+	require_NoError(t, err)
+
+	var dm DisconnectEventMsg
+	err = json.Unmarshal(m.Data, &dm)
+	require_NoError(t, err)
+	require_True(t, len(dm.Client.Tags) == 2)
+	require_True(t, dm.Client.Tags.Contains("my-tag:some-value"))
+	require_True(t, dm.Client.Tags.Contains("env:test"))
+}
