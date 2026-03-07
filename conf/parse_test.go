@@ -1044,62 +1044,119 @@ func TestOptionalVariable(t *testing.T) {
 	test(t, `debug = $TEST_DEBUG ? true`, ex4)
 }
 
-func TestOptionalInclude(t *testing.T) {
-	// Create a temporary directory for test files
-	tmpDir := t.TempDir()
+func TestOptionalIncludeExistingFile(t *testing.T) {
+	dir := t.TempDir()
 
-	// Test case 1: Optional include with existing file
-	existingFile := filepath.Join(tmpDir, "existing.conf")
-	err := os.WriteFile(existingFile, []byte("test_value = 42"), 0644)
-	if err != nil {
+	clusterConf := `cluster_port: 6222`
+	if err := os.WriteFile(filepath.Join(dir, "cluster.conf"), []byte(clusterConf), 0666); err != nil {
 		t.Fatal(err)
 	}
 
-	// Test including existing file
-	configWithExisting := fmt.Sprintf(`
-		base_value = "base"
-		include? "%s"
-		other_value = "other"
-	`, "existing.conf")
+	cfg := `
+listen: 127.0.0.1:4222
+include? ./cluster.conf
+`
+	fp := filepath.Join(dir, "nats.conf")
+	if err := os.WriteFile(fp, []byte(cfg), 0666); err != nil {
+		t.Fatal(err)
+	}
 
-	// Parse from the temp directory
-	originalDir, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(originalDir)
-
-	result, err := Parse(configWithExisting)
+	m, err := ParseFile(fp)
 	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
+		t.Fatalf("Received err: %v\n", err)
+	}
+	if got := m["listen"]; got != "127.0.0.1:4222" {
+		t.Fatalf("Expected listen to be set, got: %v", got)
+	}
+	if got := m["cluster_port"]; got != int64(6222) {
+		t.Fatalf("Expected cluster_port from included file, got: %v", got)
 	}
 
-	expected := map[string]any{
-		"base_value":  "base",
-		"test_value":  int64(42),
-		"other_value": "other",
-	}
-
-	if !reflect.DeepEqual(result, expected) {
-		t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", result, expected)
-	}
-
-	// Test case 2: Optional include with non-existing file (should not error)
-	configWithNonExisting := `
-		base_value = "base"
-		include? "non-existing.conf"
-		other_value = "other"
-	`
-
-	result2, err := Parse(configWithNonExisting)
+	m, err = ParseFileWithChecks(fp)
 	if err != nil {
-		t.Fatalf("Optional include of non-existing file should not error: %v", err)
+		t.Fatalf("Received err: %v\n", err)
+	}
+	if got := m["listen"].(*token).Value(); got != "127.0.0.1:4222" {
+		t.Fatalf("Expected listen to be set, got: %v", got)
+	}
+	if got := m["cluster_port"].(*token).Value(); got != int64(6222) {
+		t.Fatalf("Expected cluster_port from included file, got: %v", got)
+	}
+}
+
+func TestOptionalIncludeMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `
+listen: 127.0.0.1:4222
+include? ./nats-cluster.conf
+`
+	fp := filepath.Join(dir, "nats.conf")
+	if err := os.WriteFile(fp, []byte(cfg), 0666); err != nil {
+		t.Fatal(err)
 	}
 
-	expected2 := map[string]any{
-		"base_value":  "base",
-		"other_value": "other",
+	m, err := ParseFile(fp)
+	if err != nil {
+		t.Fatalf("Received err: %v\n", err)
+	}
+	if got := m["listen"]; got != "127.0.0.1:4222" {
+		t.Fatalf("Expected listen to be set, got: %v", got)
 	}
 
-	if !reflect.DeepEqual(result2, expected2) {
-		t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", result2, expected2)
+	m, err = ParseFileWithChecks(fp)
+	if err != nil {
+		t.Fatalf("Received err: %v\n", err)
+	}
+	if got := m["listen"].(*token).Value(); got != "127.0.0.1:4222" {
+		t.Fatalf("Expected listen to be set, got: %v", got)
+	}
+}
+
+func TestOptionalIncludeInvalidFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `
+listen: 127.0.0.1:4222
+include? ./nats-cluster.conf
+`
+	fp := filepath.Join(dir, "nats.conf")
+	if err := os.WriteFile(fp, []byte(cfg), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "nats-cluster.conf"), []byte("?????????????"), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ParseFile(fp); err == nil {
+		t.Fatal("expected an error")
+	}
+	if _, err := ParseFileWithChecks(fp); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
+func TestOptionalIncludeNestedRequiredIncludeMissing(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `
+listen: 127.0.0.1:4222
+include? ./optional.conf
+`
+	fp := filepath.Join(dir, "nats.conf")
+	if err := os.WriteFile(fp, []byte(cfg), 0666); err != nil {
+		t.Fatal(err)
+	}
+	optional := `
+authorization {
+  include ./required.conf
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "optional.conf"), []byte(optional), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ParseFile(fp); err == nil {
+		t.Fatal("expected an error")
+	}
+	if _, err := ParseFileWithChecks(fp); err == nil {
+		t.Fatal("expected an error")
 	}
 }

@@ -1455,6 +1455,37 @@ func TestMapInclude(t *testing.T) {
 	expect(t, lx, expectedItems)
 }
 
+func TestOptionalInclude(t *testing.T) {
+	expectedItems := []item{
+		{itemOptionalInclude, "users.conf", 1, 10},
+		{itemEOF, "", 1, 0},
+	}
+	lx := lex("include? \"users.conf\"")
+	expect(t, lx, expectedItems)
+
+	lx = lex("include? 'users.conf'")
+	expect(t, lx, expectedItems)
+
+	expectedItems = []item{
+		{itemOptionalInclude, "users.conf", 1, 9},
+		{itemEOF, "", 1, 0},
+	}
+	lx = lex("include? users.conf")
+	expect(t, lx, expectedItems)
+}
+
+func TestMapOptionalInclude(t *testing.T) {
+	expectedItems := []item{
+		{itemKey, "foo", 1, 0},
+		{itemMapStart, "", 1, 5},
+		{itemOptionalInclude, "users.conf", 1, 15},
+		{itemMapEnd, "", 1, 27},
+		{itemEOF, "", 1, 0},
+	}
+	lx := lex("foo { include? users.conf }")
+	expect(t, lx, expectedItems)
+}
+
 func TestJSONCompat(t *testing.T) {
 	for _, test := range []struct {
 		name     string
