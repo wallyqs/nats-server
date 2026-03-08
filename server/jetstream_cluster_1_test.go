@@ -7846,8 +7846,9 @@ func TestJetStreamClusterConsumerHealthCheckDeleted(t *testing.T) {
 
 	// The health check gathers all assignments and does checking after.
 	// If the consumer was deleted in the meantime, it should not report an error.
+	// For R=1 consumers, node is always nil so the orphan guard skips the error.
 	require_NoError(t, js.DeleteConsumer("TEST", "CONSUMER"))
-	require_Error(t, sjs.isConsumerHealthy(mset, "CONSUMER", ca), errors.New("consumer not found"))
+	require_NoError(t, sjs.isConsumerHealthy(mset, "CONSUMER", ca))
 
 	// The health check could run earlier than we're able to create the consumer.
 	// In that case, wait before erroring.

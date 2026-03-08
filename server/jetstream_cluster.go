@@ -720,6 +720,17 @@ func (js *jetStream) isConsumerHealthy(mset *stream, consumer string, ca *consum
 			// We'll start erroring once we're sure this consumer is actually broken.
 			return nil
 		}
+		if node == nil {
+			// The consumer assignment exists in the meta layer but the consumer
+			// was never started so it may have become an orphaned assignment.
+			// Don't report it as a health error since there's nothing running
+			// to be unhealthy, otherwise can prevent boot from server since
+			// we do not recover automatically when running into orphaned consumer
+			// assignments.
+			// These consumers can still be detected as missing under consumer list
+			// and they can be cleaned up manually via consumer delete.
+			return nil
+		}
 		return errors.New("consumer not found")
 	}
 
