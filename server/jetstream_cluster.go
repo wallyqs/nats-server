@@ -5621,6 +5621,19 @@ func (js *jetStream) processClusterCreateConsumer(oca, ca *consumerAssignment, s
 	acc, err := s.LookupAccount(accName)
 	if err != nil {
 		s.Warnf("JetStream cluster failed to lookup account %q: %v", accName, err)
+		if !js.isMetaRecovering() {
+			js.mu.Lock()
+			ca.err = NewJSNoAccountError()
+			result := &consumerAssignmentResult{
+				Account:  accName,
+				Stream:   stream,
+				Consumer: consumer,
+				Response: &JSApiConsumerCreateResponse{ApiResponse: ApiResponse{Type: JSApiConsumerCreateResponseType}},
+			}
+			result.Response.Error = NewJSNoAccountError()
+			s.sendInternalMsgLocked(consumerAssignmentSubj, _EMPTY_, nil, result)
+			js.mu.Unlock()
+		}
 		return
 	}
 
