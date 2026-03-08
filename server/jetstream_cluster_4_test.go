@@ -7637,6 +7637,57 @@ func TestJetStreamClusterConsumerSetStoreStateOldUpdateRestart(t *testing.T) {
 // (e.g., due to a transient error). The processClusterCreateConsumer function
 // deletes the Raft group node on failure but the assignment remains in
 // cc.streams[acc][stream].consumers, permanently poisoning healthz.
+func TestJetStreamClusterConsumerCreateNoErrorResultDuringMetaRecovery(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	s := c.leader()
+	mjs := s.getJetStream()
+
+	// Use a non-existent account so that processClusterCreateConsumer fails
+	// at the LookupAccount step.
+	bogusAccount := "DOES_NOT_EXIST"
+	ca := &consumerAssignment{
+		Client: &ClientInfo{Account: bogusAccount},
+		Stream: "TEST",
+		Name:   "CONSUMER",
+		Group:  &raftGroup{Name: "test-group"},
+	}
+
+	// Case 1: During meta recovery, processClusterCreateConsumer should NOT
+	// set ca.err (the error result is suppressed to avoid acting on transient
+	// failures while the meta layer is still replaying).
+	mjs.mu.Lock()
+	mjs.metaRecovering = true
+	mjs.mu.Unlock()
+
+	mjs.processClusterCreateConsumer(nil, ca, nil, false)
+
+	mjs.mu.RLock()
+	errDuringRecovery := ca.err
+	mjs.mu.RUnlock()
+	if errDuringRecovery != nil {
+		t.Fatalf("Expected no error during meta recovery, got: %v", errDuringRecovery)
+	}
+
+	// Case 2: Outside meta recovery, the same failure should set ca.err.
+	mjs.mu.Lock()
+	mjs.metaRecovering = false
+	mjs.mu.Unlock()
+
+	mjs.processClusterCreateConsumer(nil, ca, nil, false)
+
+	mjs.mu.RLock()
+	errAfterRecovery := ca.err
+	mjs.mu.RUnlock()
+	if errAfterRecovery == nil {
+		t.Fatalf("Expected ca.err to be set outside of meta recovery")
+	}
+	if !IsNatsErr(errAfterRecovery, JSNoAccountErr) {
+		t.Fatalf("Expected JSNoAccountError, got: %v", errAfterRecovery)
+	}
+}
+
 func TestJetStreamClusterHealthzOrphanedConsumerAssignment(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
