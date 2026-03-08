@@ -7624,3 +7624,119 @@ func TestJetStreamClusterConsumerSetStoreStateOldUpdateRestart(t *testing.T) {
 		require_NoError(t, err)
 	}
 }
+
+// Test that an orphaned consumer assignment in the meta layer does not cause
+// healthz to permanently report "consumer not found". This reproduces the scenario
+// from https://github.com/nats-io/k8s/issues/1140 where a consumer assignment is
+// committed to the Raft meta layer but the actual consumer never materializes,
+// leaving an orphaned assignment that causes permanent healthz failures.
+//
+// In production this happens when a client times out during consumer creation:
+// the meta leader proposes the consumer assignment (committed to Raft and replicated
+// to all servers), but the actual consumer creation fails on the assigned servers
+// (e.g., due to a transient error). The processClusterCreateConsumer function
+// deletes the Raft group node on failure but the assignment remains in
+// cc.streams[acc][stream].consumers, permanently poisoning healthz.
+func TestJetStreamClusterHealthzOrphanedConsumerAssignment(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Create a real consumer first, then simulate the orphan state.
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "CONSUMER",
+		Replicas:  3,
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// All servers should be healthy.
+	for _, s := range c.servers {
+		hs := s.healthz(&HealthzOptions{})
+		require_Equal(t, hs.Error, _EMPTY_)
+	}
+
+	// On each server, simulate the orphaned consumer state that occurs when
+	// processClusterCreateConsumer fails: the consumer's Raft node is deleted
+	// (node set to nil) and the actual consumer is removed, but the consumer
+	// assignment persists in the meta layer.
+	for _, s := range c.servers {
+		acc, err := s.lookupAccount(globalAccountName)
+		require_NoError(t, err)
+		mset, err := acc.lookupStream("TEST")
+		require_NoError(t, err)
+		o := mset.lookupConsumer("CONSUMER")
+		if o == nil {
+			continue // Consumer not on this server (shouldn't happen with R3).
+		}
+
+		// Stop the consumer's Raft node and delete the consumer, simulating
+		// what processClusterCreateConsumer does on failure (lines 5778-5787).
+		if node := o.raftNode(); node != nil {
+			node.Delete()
+		}
+		o.stop()
+
+		// Clear the Raft node in the consumer assignment, just like
+		// processClusterCreateConsumer does at line 5781: rg.node = nil
+		sjs := s.getJetStream()
+		sjs.mu.Lock()
+		ca := sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+		require_True(t, ca != nil)
+		ca.Group.node = nil
+		// Set Created far in the past so the 5-second grace period is expired.
+		ca.Created = time.Time{}
+		sjs.mu.Unlock()
+
+		// Delete the actual consumer from the stream without going through
+		// the meta layer, leaving the assignment orphaned.
+		o.deleteWithoutAdvisory()
+	}
+
+	// Verify the actual consumer no longer exists on any server.
+	for _, s := range c.servers {
+		acc, err := s.lookupAccount(globalAccountName)
+		require_NoError(t, err)
+		mset, err := acc.lookupStream("TEST")
+		require_NoError(t, err)
+		require_True(t, mset.lookupConsumer("CONSUMER") == nil)
+	}
+
+	// Verify the consumer assignment still exists in the meta layer (orphaned).
+	for _, s := range c.servers {
+		sjs := s.getJetStream()
+		sjs.mu.RLock()
+		ca := sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+		sjs.mu.RUnlock()
+		require_True(t, ca != nil)
+	}
+
+	// Healthz should not report a permanent error for the orphaned consumer.
+	// Before the fix, this would permanently fail with:
+	//   "JetStream consumer '$G > TEST > CONSUMER' is not current: consumer not found"
+	for _, s := range c.servers {
+		hs := s.healthz(&HealthzOptions{})
+		if hs.Error != _EMPTY_ {
+			t.Fatalf("Server %s should be healthy with orphaned consumer, got: %s", s.Name(), hs.Error)
+		}
+	}
+
+	// Also test with details mode.
+	for _, s := range c.servers {
+		hs := s.healthz(&HealthzOptions{Details: true})
+		for _, e := range hs.Errors {
+			if e.Type == HealthzErrorConsumer && e.Consumer == "CONSUMER" {
+				t.Fatalf("Server %s should not report orphaned consumer as error in details mode, got: %s", s.Name(), e.Error)
+			}
+		}
+	}
+}

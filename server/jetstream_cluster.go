@@ -640,6 +640,13 @@ func (js *jetStream) isStreamHealthy(acc *Account, sa *streamAssignment) error {
 	// First lookup stream and make sure its there.
 	mset, err := acc.lookupStream(streamName)
 	if err != nil {
+		if node == nil && len(sa.Group.Peers) > 1 {
+			// The stream assignment exists in the meta layer but the Raft group
+			// node was never started. This is an orphaned assignment. Don't report
+			// it as a health error since there's nothing running to be unhealthy.
+			// Only applies to R>1 streams which require a Raft node.
+			return nil
+		}
 		return errors.New("stream not found")
 	}
 
@@ -718,6 +725,15 @@ func (js *jetStream) isConsumerHealthy(mset *stream, consumer string, ca *consum
 		if time.Since(created) < 5*time.Second {
 			// No further checks, consumer is not available yet but should be soon.
 			// We'll start erroring once we're sure this consumer is actually broken.
+			return nil
+		}
+		if node == nil && len(ca.Group.Peers) > 1 {
+			// The consumer assignment exists in the meta layer but the Raft group
+			// node was never started. This is an orphaned assignment, e.g. from a
+			// client that timed out during consumer creation. Don't report it as a
+			// health error since there's nothing running to be unhealthy.
+			// Only applies to R>1 consumers which require a Raft node; R=1 consumers
+			// don't have a Raft node so node==nil is expected for them.
 			return nil
 		}
 		return errors.New("consumer not found")
