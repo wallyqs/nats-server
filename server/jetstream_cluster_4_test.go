@@ -7791,3 +7791,134 @@ func TestJetStreamClusterHealthzOrphanedConsumerAssignment(t *testing.T) {
 		}
 	}
 }
+
+// Test that isConsumerHealthy returns "consumer not found" for an R=1
+// consumer that has disappeared but whose assignment remains.
+func TestJetStreamClusterHealthzConsumerNotFoundR1(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Create an R=1 consumer (no Raft node expected).
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "R1CONSUMER",
+		Replicas:  1,
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Find the server that owns the R=1 consumer.
+	var srv *Server
+	var mset *stream
+	for _, s := range c.servers {
+		acc, err := s.lookupAccount(globalAccountName)
+		require_NoError(t, err)
+		m, err := acc.lookupStream("TEST")
+		require_NoError(t, err)
+		if o := m.lookupConsumer("R1CONSUMER"); o != nil {
+			srv = s
+			mset = m
+			break
+		}
+	}
+	require_True(t, srv != nil)
+
+	// Delete the consumer without going through meta, leaving the assignment orphaned.
+	o := mset.lookupConsumer("R1CONSUMER")
+	require_True(t, o != nil)
+	o.deleteWithoutAdvisory()
+
+	// Verify the consumer is gone but the assignment remains.
+	require_True(t, mset.lookupConsumer("R1CONSUMER") == nil)
+	sjs := srv.getJetStream()
+	sjs.mu.RLock()
+	ca := sjs.consumerAssignment(globalAccountName, "TEST", "R1CONSUMER")
+	sjs.mu.RUnlock()
+	require_True(t, ca != nil)
+
+	// Set Created far in the past so the 5-second grace period is expired.
+	sjs.mu.Lock()
+	ca.Created = time.Time{}
+	sjs.mu.Unlock()
+
+	// For R=1: node==nil and len(Peers)==1, so the orphan guard does NOT apply.
+	// isConsumerHealthy should return "consumer not found".
+	err = sjs.isConsumerHealthy(mset, "R1CONSUMER", ca)
+	require_Error(t, err)
+	require_Equal(t, err.Error(), "consumer not found")
+}
+
+// Test that isConsumerHealthy returns "consumer not found" for an R>1
+// consumer whose Raft node is still set but the consumer has disappeared.
+func TestJetStreamClusterHealthzConsumerNotFoundR3WithNode(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "CONSUMER",
+		Replicas:  3,
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// On one server, remove the consumer but keep the Raft node in the
+	// assignment (simulating the consumer disappearing while the node is
+	// still referenced).
+	srv := c.servers[0]
+	acc, err := srv.lookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+	o := mset.lookupConsumer("CONSUMER")
+	require_True(t, o != nil)
+
+	// Save the Raft node reference before deleting the consumer,
+	// since deleteWithoutAdvisory clears it.
+	sjs := srv.getJetStream()
+	sjs.mu.RLock()
+	ca := sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+	savedNode := ca.Group.node
+	sjs.mu.RUnlock()
+	require_True(t, ca != nil)
+	require_True(t, savedNode != nil)
+
+	// Delete the consumer, which also clears the node.
+	o.deleteWithoutAdvisory()
+	require_True(t, mset.lookupConsumer("CONSUMER") == nil)
+
+	// Restore the node to simulate a scenario where the consumer
+	// disappeared but the assignment still references a Raft node.
+	sjs.mu.Lock()
+	ca.Group.node = savedNode
+	sjs.mu.Unlock()
+
+	// Set Created far in the past so the 5-second grace period is expired.
+	sjs.mu.Lock()
+	ca.Created = time.Time{}
+	sjs.mu.Unlock()
+
+	// For R>1 with node!=nil: the orphan guard does NOT apply.
+	// isConsumerHealthy should return "consumer not found".
+	err = sjs.isConsumerHealthy(mset, "CONSUMER", ca)
+	require_Error(t, err)
+	require_Equal(t, err.Error(), "consumer not found")
+}
