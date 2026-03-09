@@ -435,8 +435,8 @@ type Options struct {
 	AllowNonTLS               bool               `json:"-"`
 	// TLSTerminated indicates that TLS is being terminated by an upstream
 	// proxy (e.g. a load balancer or ingress controller). When set, the
-	// server accepts only plain-text connections and does not advertise
-	// tls_available or tls_required to clients.
+	// server accepts plain-text connections and advertises tls_available
+	// (but not tls_required) so clients know TLS is available upstream.
 	TLSTerminated             bool               `json:"-"`
 	WriteDeadline             time.Duration      `json:"-"`
 	WriteTimeout              WriteTimeoutPolicy `json:"-"`

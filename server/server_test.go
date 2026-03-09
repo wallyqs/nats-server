@@ -2397,7 +2397,7 @@ func TestTLSTerminatedOption(t *testing.T) {
 	require_NoError(t, err)
 	defer nc.Close()
 
-	// Verify INFO does not advertise TLS as available or required.
+	// Verify INFO advertises TLS as available (for upstream proxy) but not required.
 	nc2, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", o.Port))
 	require_NoError(t, err)
 	defer nc2.Close()
@@ -2413,8 +2413,8 @@ func TestTLSTerminatedOption(t *testing.T) {
 	if info.TLSRequired {
 		t.Fatal("Expected TLSRequired to be false with tls_terminated")
 	}
-	if info.TLSAvailable {
-		t.Fatal("Expected TLSAvailable to be false with tls_terminated")
+	if !info.TLSAvailable {
+		t.Fatal("Expected TLSAvailable to be true with tls_terminated")
 	}
 }
 

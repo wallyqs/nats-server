@@ -307,6 +307,14 @@ type tlsTerminatedOption struct {
 }
 
 func (t *tlsTerminatedOption) Apply(server *Server) {
+	server.mu.Lock()
+	if t.newValue {
+		server.info.TLSAvailable = true
+	} else if server.getOpts().TLSConfig == nil {
+		// Only clear TLSAvailable if there is no actual TLS config.
+		server.info.TLSAvailable = false
+	}
+	server.mu.Unlock()
 	if t.newValue {
 		server.Noticef("Reloaded: TLS termination by external proxy enabled")
 	} else {

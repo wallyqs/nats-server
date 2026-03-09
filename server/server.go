@@ -772,6 +772,12 @@ func NewServer(opts *Options) (*Server, error) {
 	if tlsReq && !info.TLSRequired {
 		info.TLSAvailable = true
 	}
+	// When TLS is terminated by an external proxy, advertise TLS as
+	// available so that clients know the connection is secured upstream,
+	// but do not set TLSRequired since the server itself accepts plain text.
+	if opts.TLSTerminated {
+		info.TLSAvailable = true
+	}
 
 	now := time.Now()
 
