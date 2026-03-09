@@ -39,7 +39,7 @@ import (
 	"github.com/nats-io/nats-server/v2/conf"
 	"github.com/nats-io/nats-server/v2/server/certidp"
 	"github.com/nats-io/nats-server/v2/server/certstore"
-	"github.com/nats-io/nats-server/v2/server/hsm"
+	"github.com/nats-io/nats-server/v2/server/keystore"
 	"github.com/nats-io/nkeys"
 )
 
@@ -813,7 +813,10 @@ type TLSConfigOpts struct {
 	OCSPPeerConfig       *certidp.OCSPPeerConfig
 	Certificates         []*TLSCertPairOpt
 	MinVersion           uint16
-	HSM                  *hsm.Config
+	KeyStore             keystore.StoreType
+	KeyMatchBy           keystore.MatchByType
+	KeyMatch             string
+	KeyStoreOpts         *keystore.StoreOpts
 }
 
 // TLSCertPairOpt are the paths to a certificate and private key.
@@ -5226,50 +5229,64 @@ func parseTLS(v any, isClientCtx bool) (t *TLSConfigOpts, retErr error) {
 				return nil, &configErr{tk, fmt.Sprintf("error parsing tls config: %v", err)}
 			}
 			tc.MinVersion = minVersion
-		case "hsm":
-			hsmm, ok := mv.(map[string]any)
-			if !ok {
-				return nil, &configErr{tk, "error parsing tls config, expected 'hsm' to be a map"}
+		case "key_store":
+			ksStr, ok := mv.(string)
+			if !ok || ksStr == _EMPTY_ {
+				return nil, &configErr{tk, keystore.ErrBadKeyStoreField.Error()}
 			}
-			hsmCfg := &hsm.Config{}
-			for hk, hv := range hsmm {
-				_, hv = unwrapValue(hv, &lt)
-				switch strings.ToLower(hk) {
+			ksType, err := keystore.ParseStoreType(ksStr)
+			if err != nil {
+				return nil, &configErr{tk, err.Error()}
+			}
+			tc.KeyStore = ksType
+		case "key_match_by":
+			kmStr, ok := mv.(string)
+			if !ok || kmStr == _EMPTY_ {
+				return nil, &configErr{tk, keystore.ErrBadKeyMatchByField.Error()}
+			}
+			kmType, err := keystore.ParseMatchBy(kmStr)
+			if err != nil {
+				return nil, &configErr{tk, err.Error()}
+			}
+			tc.KeyMatchBy = kmType
+		case "key_match":
+			km, ok := mv.(string)
+			if !ok || km == _EMPTY_ {
+				return nil, &configErr{tk, keystore.ErrBadKeyMatchField.Error()}
+			}
+			tc.KeyMatch = km
+		case "key_store_opts":
+			ksm, ok := mv.(map[string]any)
+			if !ok {
+				return nil, &configErr{tk, "error parsing tls config, expected 'key_store_opts' to be a map"}
+			}
+			ksOpts := &keystore.StoreOpts{}
+			for optKey, ov := range ksm {
+				_, ov = unwrapValue(ov, &lt)
+				switch strings.ToLower(optKey) {
 				case "provider":
-					v, ok := hv.(string)
-					if !ok {
-						return nil, &configErr{tk, "error parsing hsm config, expected 'provider' to be a string"}
+					v, isStr := ov.(string)
+					if !isStr {
+						return nil, &configErr{tk, "error parsing key_store_opts, expected 'provider' to be a string"}
 					}
-					hsmCfg.Provider = v
+					ksOpts.Provider = v
 				case "pin":
-					v, ok := hv.(string)
-					if !ok {
-						return nil, &configErr{tk, "error parsing hsm config, expected 'pin' to be a string"}
+					v, isStr := ov.(string)
+					if !isStr {
+						return nil, &configErr{tk, "error parsing key_store_opts, expected 'pin' to be a string"}
 					}
-					hsmCfg.Pin = v
+					ksOpts.Pin = v
 				case "token_label":
-					v, ok := hv.(string)
-					if !ok {
-						return nil, &configErr{tk, "error parsing hsm config, expected 'token_label' to be a string"}
+					v, isStr := ov.(string)
+					if !isStr {
+						return nil, &configErr{tk, "error parsing key_store_opts, expected 'token_label' to be a string"}
 					}
-					hsmCfg.TokenLabel = v
-				case "key_label":
-					v, ok := hv.(string)
-					if !ok {
-						return nil, &configErr{tk, "error parsing hsm config, expected 'key_label' to be a string"}
-					}
-					hsmCfg.KeyLabel = v
-				case "key_id":
-					v, ok := hv.(string)
-					if !ok {
-						return nil, &configErr{tk, "error parsing hsm config, expected 'key_id' to be a string"}
-					}
-					hsmCfg.KeyID = v
+					ksOpts.TokenLabel = v
 				default:
-					return nil, &configErr{tk, fmt.Sprintf("error parsing hsm config, unknown field %q", hk)}
+					return nil, &configErr{tk, fmt.Sprintf("error parsing key_store_opts, unknown field %q", optKey)}
 				}
 			}
-			tc.HSM = hsmCfg
+			tc.KeyStoreOpts = ksOpts
 		default:
 			return nil, &configErr{tk, fmt.Sprintf("error parsing tls config, unknown field %q", mk)}
 		}
@@ -5277,14 +5294,14 @@ func parseTLS(v any, isClientCtx bool) (t *TLSConfigOpts, retErr error) {
 	if len(tc.Certificates) > 0 && tc.CertFile != _EMPTY_ {
 		return nil, &configErr{tk, "error parsing tls config, cannot combine 'cert_file' option with 'certs' option"}
 	}
-	if tc.HSM != nil && tc.KeyFile != _EMPTY_ {
-		return nil, &configErr{tk, "error parsing tls config, cannot combine 'key_file' option with 'hsm' option"}
+	if tc.KeyStore != keystore.STOREEMPTY && tc.KeyFile != _EMPTY_ {
+		return nil, &configErr{tk, keystore.ErrConflictKeyFileAndStore.Error()}
 	}
-	if tc.HSM != nil && tc.CertStore != certstore.STOREEMPTY {
-		return nil, &configErr{tk, "error parsing tls config, cannot combine 'cert_store' option with 'hsm' option"}
+	if tc.KeyStore != keystore.STOREEMPTY && tc.CertStore != certstore.STOREEMPTY {
+		return nil, &configErr{tk, "error parsing tls config, cannot combine 'cert_store' option with 'key_store' option"}
 	}
-	if tc.HSM != nil && len(tc.Certificates) > 0 {
-		return nil, &configErr{tk, "error parsing tls config, cannot combine 'certs' option with 'hsm' option"}
+	if tc.KeyStore != keystore.STOREEMPTY && len(tc.Certificates) > 0 {
+		return nil, &configErr{tk, "error parsing tls config, cannot combine 'certs' option with 'key_store' option"}
 	}
 
 	// If cipher suites were not specified then use the defaults
@@ -5703,13 +5720,13 @@ func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 	switch {
 	case tc.CertFile != _EMPTY_ && tc.CertStore != certstore.STOREEMPTY:
 		return nil, certstore.ErrConflictCertFileAndStore
-	case tc.HSM != nil && tc.CertFile == _EMPTY_:
-		return nil, fmt.Errorf("'cert_file' is required when using 'hsm' for the private key")
-	case tc.HSM != nil:
-		// Load certificate from file, private key operations from HSM via PKCS#11.
+	case tc.KeyStore != keystore.STOREEMPTY && tc.CertFile == _EMPTY_:
+		return nil, keystore.ErrKeyStoreRequiresCertFile
+	case tc.KeyStore != keystore.STOREEMPTY:
+		// Load certificate from file, private key operations from key store (e.g., PKCS#11 HSM).
 		certPEMData, err := os.ReadFile(tc.CertFile)
 		if err != nil {
-			return nil, fmt.Errorf("error reading certificate file for HSM: %v", err)
+			return nil, fmt.Errorf("error reading certificate file for key_store: %v", err)
 		}
 		var certDERs [][]byte
 		rest := certPEMData
@@ -5730,9 +5747,9 @@ func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error parsing certificate: %v", err)
 		}
-		signer, err := hsm.GetSigner(tc.HSM, leaf.PublicKey)
+		signer, err := keystore.GetSigner(tc.KeyStore, tc.KeyMatchBy, tc.KeyMatch, tc.KeyStoreOpts, leaf.PublicKey)
 		if err != nil {
-			return nil, fmt.Errorf("error initializing HSM signer: %v", err)
+			return nil, fmt.Errorf("error initializing key store signer: %v", err)
 		}
 		config.Certificates = []tls.Certificate{{
 			Certificate: certDERs,

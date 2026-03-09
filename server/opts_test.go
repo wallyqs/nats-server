@@ -32,6 +32,7 @@ import (
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/conf"
+	"github.com/nats-io/nats-server/v2/server/keystore"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 )
@@ -4358,17 +4359,19 @@ func TestEnvVarFromIncludedFile(t *testing.T) {
 	}
 }
 
-func TestTLSHSMConfigParsing(t *testing.T) {
-	// Test that HSM config block is parsed correctly.
+func TestTLSKeyStoreConfigParsing(t *testing.T) {
+	// Test that key_store config fields are parsed correctly.
 	confFileName := createConfFile(t, []byte(`
 		listen: "127.0.0.1:4222"
 		tls {
 			cert_file: "./configs/certs/server-cert.pem"
-			hsm {
+			key_store: "PKCS11"
+			key_match_by: "Label"
+			key_match: "server-key"
+			key_store_opts {
 				provider:    "/usr/lib/softhsm/libsofthsm2.so"
 				pin:         "1234"
 				token_label: "my-token"
-				key_label:   "server-key"
 			}
 		}
 	`))
@@ -4379,35 +4382,43 @@ func TestTLSHSMConfigParsing(t *testing.T) {
 	if opts.tlsConfigOpts == nil {
 		t.Fatal("Expected tlsConfigOpts to be non-nil")
 	}
-	hsmCfg := opts.tlsConfigOpts.HSM
-	if hsmCfg == nil {
-		t.Fatal("Expected HSM config to be non-nil")
+	tc := opts.tlsConfigOpts
+	if tc.KeyStore != keystore.PKCS11 {
+		t.Fatalf("Expected KeyStore PKCS11, got %v", tc.KeyStore)
 	}
-	if hsmCfg.Provider != "/usr/lib/softhsm/libsofthsm2.so" {
-		t.Fatalf("Expected provider path, got %q", hsmCfg.Provider)
+	if tc.KeyMatchBy != keystore.MatchByLabel {
+		t.Fatalf("Expected KeyMatchBy Label, got %v", tc.KeyMatchBy)
 	}
-	if hsmCfg.Pin != "1234" {
-		t.Fatalf("Expected pin '1234', got %q", hsmCfg.Pin)
+	if tc.KeyMatch != "server-key" {
+		t.Fatalf("Expected KeyMatch 'server-key', got %q", tc.KeyMatch)
 	}
-	if hsmCfg.TokenLabel != "my-token" {
-		t.Fatalf("Expected token_label 'my-token', got %q", hsmCfg.TokenLabel)
+	if tc.KeyStoreOpts == nil {
+		t.Fatal("Expected KeyStoreOpts to be non-nil")
 	}
-	if hsmCfg.KeyLabel != "server-key" {
-		t.Fatalf("Expected key_label 'server-key', got %q", hsmCfg.KeyLabel)
+	if tc.KeyStoreOpts.Provider != "/usr/lib/softhsm/libsofthsm2.so" {
+		t.Fatalf("Expected provider path, got %q", tc.KeyStoreOpts.Provider)
+	}
+	if tc.KeyStoreOpts.Pin != "1234" {
+		t.Fatalf("Expected pin '1234', got %q", tc.KeyStoreOpts.Pin)
+	}
+	if tc.KeyStoreOpts.TokenLabel != "my-token" {
+		t.Fatalf("Expected token_label 'my-token', got %q", tc.KeyStoreOpts.TokenLabel)
 	}
 }
 
-func TestTLSHSMConfigWithKeyID(t *testing.T) {
-	// Test that key_id is parsed as an alternative to key_label.
+func TestTLSKeyStoreConfigWithKeyID(t *testing.T) {
+	// Test that key_match_by "ID" is parsed correctly.
 	confFileName := createConfFile(t, []byte(`
 		listen: "127.0.0.1:4222"
 		tls {
 			cert_file: "./configs/certs/server-cert.pem"
-			hsm {
+			key_store: "PKCS11"
+			key_match_by: "ID"
+			key_match: "0102030405"
+			key_store_opts {
 				provider:    "/usr/lib/softhsm/libsofthsm2.so"
 				pin:         "1234"
 				token_label: "my-token"
-				key_id:      "0102030405"
 			}
 		}
 	`))
@@ -4415,20 +4426,17 @@ func TestTLSHSMConfigWithKeyID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Received an error reading config file: %v", err)
 	}
-	hsmCfg := opts.tlsConfigOpts.HSM
-	if hsmCfg == nil {
-		t.Fatal("Expected HSM config to be non-nil")
+	tc := opts.tlsConfigOpts
+	if tc.KeyMatchBy != keystore.MatchByID {
+		t.Fatalf("Expected KeyMatchBy ID, got %v", tc.KeyMatchBy)
 	}
-	if hsmCfg.KeyID != "0102030405" {
-		t.Fatalf("Expected key_id '0102030405', got %q", hsmCfg.KeyID)
-	}
-	if hsmCfg.KeyLabel != "" {
-		t.Fatalf("Expected empty key_label, got %q", hsmCfg.KeyLabel)
+	if tc.KeyMatch != "0102030405" {
+		t.Fatalf("Expected KeyMatch '0102030405', got %q", tc.KeyMatch)
 	}
 }
 
-func TestTLSHSMConfigWithEnvVar(t *testing.T) {
-	// Test that environment variables are resolved for HSM pin.
+func TestTLSKeyStoreConfigWithEnvVar(t *testing.T) {
+	// Test that environment variables are resolved for key_store_opts pin.
 	os.Setenv("_TEST_HSM_PIN_", "secret-pin-value")
 	defer os.Unsetenv("_TEST_HSM_PIN_")
 
@@ -4436,11 +4444,13 @@ func TestTLSHSMConfigWithEnvVar(t *testing.T) {
 		listen: "127.0.0.1:4222"
 		tls {
 			cert_file: "./configs/certs/server-cert.pem"
-			hsm {
+			key_store: "PKCS11"
+			key_match_by: "Label"
+			key_match: "server-key"
+			key_store_opts {
 				provider:    "/usr/lib/softhsm/libsofthsm2.so"
 				pin:         $_TEST_HSM_PIN_
 				token_label: "my-token"
-				key_label:   "server-key"
 			}
 		}
 	`))
@@ -4448,63 +4458,57 @@ func TestTLSHSMConfigWithEnvVar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Received an error reading config file: %v", err)
 	}
-	hsmCfg := opts.tlsConfigOpts.HSM
-	if hsmCfg == nil {
-		t.Fatal("Expected HSM config to be non-nil")
+	if opts.tlsConfigOpts.KeyStoreOpts == nil {
+		t.Fatal("Expected KeyStoreOpts to be non-nil")
 	}
-	if hsmCfg.Pin != "secret-pin-value" {
-		t.Fatalf("Expected pin from env var, got %q", hsmCfg.Pin)
+	if opts.tlsConfigOpts.KeyStoreOpts.Pin != "secret-pin-value" {
+		t.Fatalf("Expected pin from env var, got %q", opts.tlsConfigOpts.KeyStoreOpts.Pin)
 	}
 }
 
-func TestTLSHSMConfigConflicts(t *testing.T) {
-	// Test that HSM config conflicts with key_file.
+func TestTLSKeyStoreConfigConflicts(t *testing.T) {
+	// Test that key_store conflicts with key_file.
 	confFileName := createConfFile(t, []byte(`
 		listen: "127.0.0.1:4222"
 		tls {
 			cert_file: "./configs/certs/server-cert.pem"
 			key_file:  "./configs/certs/server-key.pem"
-			hsm {
-				provider:    "/usr/lib/softhsm/libsofthsm2.so"
-				token_label: "my-token"
-				key_label:   "server-key"
-			}
+			key_store: "PKCS11"
+			key_match: "server-key"
 		}
 	`))
 	_, err := ProcessConfigFile(confFileName)
-	if err == nil || !strings.Contains(err.Error(), "cannot combine 'key_file' option with 'hsm'") {
-		t.Fatalf("Expected conflict error for key_file + hsm, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "key_file") {
+		t.Fatalf("Expected conflict error for key_file + key_store, got: %v", err)
 	}
 
-	// Test that HSM config conflicts with certs option.
+	// Test that key_store conflicts with certs option.
 	confFileName = createConfFile(t, []byte(`
 		listen: "127.0.0.1:4222"
 		tls {
 			certs: [
 				{ cert_file: "./configs/certs/server-cert.pem", key_file: "./configs/certs/server-key.pem" }
 			]
-			hsm {
-				provider:    "/usr/lib/softhsm/libsofthsm2.so"
-				token_label: "my-token"
-				key_label:   "server-key"
-			}
+			key_store: "PKCS11"
+			key_match: "server-key"
 		}
 	`))
 	_, err = ProcessConfigFile(confFileName)
-	if err == nil || !strings.Contains(err.Error(), "cannot combine 'certs' option with 'hsm'") {
-		t.Fatalf("Expected conflict error for certs + hsm, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "certs") {
+		t.Fatalf("Expected conflict error for certs + key_store, got: %v", err)
 	}
 }
 
-func TestTLSHSMConfigUnknownField(t *testing.T) {
+func TestTLSKeyStoreOptsUnknownField(t *testing.T) {
 	confFileName := createConfFile(t, []byte(`
 		listen: "127.0.0.1:4222"
 		tls {
 			cert_file: "./configs/certs/server-cert.pem"
-			hsm {
+			key_store: "PKCS11"
+			key_match: "server-key"
+			key_store_opts {
 				provider:      "/usr/lib/softhsm/libsofthsm2.so"
 				token_label:   "my-token"
-				key_label:     "server-key"
 				unknown_field: "value"
 			}
 		}

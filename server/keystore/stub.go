@@ -13,12 +13,12 @@
 
 //go:build !hsm
 
-package hsm
+package keystore
 
 import "crypto"
 
-// GetSigner returns ErrHSMNotAvailable when built without the hsm build tag.
+// GetSigner returns ErrNotAvailable when built without the hsm build tag.
 // Build with: go build -tags hsm
-func GetSigner(_ *Config, _ crypto.PublicKey) (Signer, error) {
-	return nil, ErrHSMNotAvailable
+func GetSigner(_ StoreType, _ MatchByType, _ string, _ *StoreOpts, _ crypto.PublicKey) (Signer, error) {
+	return nil, ErrNotAvailable
 }
