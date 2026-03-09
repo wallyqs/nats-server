@@ -513,6 +513,9 @@ type Options struct {
 
 	// configDigest represents the state of configuration.
 	configDigest string
+
+	// skippedOptionalIncludes tracks include? files that were not found.
+	skippedOptionalIncludes []string
 }
 
 // WebsocketOpts are options for websocket
@@ -977,11 +980,12 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	if configFile == _EMPTY_ {
 		return nil
 	}
-	m, digest, err := conf.ParseFileWithChecksDigest(configFile)
+	m, digest, skipped, err := conf.ParseFileWithChecksDigest(configFile)
 	if err != nil {
 		return err
 	}
 	o.configDigest = digest
+	o.skippedOptionalIncludes = skipped
 
 	return o.processConfigFile(configFile, m)
 }

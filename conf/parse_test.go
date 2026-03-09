@@ -1004,7 +1004,7 @@ func TestParseDigest(t *testing.T) {
 					}
 				}
 			}
-			_, digest, err := ParseFileWithChecksDigest(f.Name())
+			_, digest, _, err := ParseFileWithChecksDigest(f.Name())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1129,5 +1129,66 @@ authorization {
 	}
 	if _, err := ParseFileWithChecks(fp); err == nil {
 		t.Fatal("expected an error")
+	}
+}
+
+func TestOptionalIncludeSkippedFilesReported(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `
+listen: 127.0.0.1:4222
+include? ./missing1.conf
+include? ./missing2.conf
+`
+	fp := filepath.Join(dir, "nats.conf")
+	if err := os.WriteFile(fp, []byte(cfg), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, skipped, err := ParseFileWithChecksDigest(fp)
+	if err != nil {
+		t.Fatalf("Received err: %v", err)
+	}
+	if len(skipped) != 2 {
+		t.Fatalf("Expected 2 skipped includes, got: %d", len(skipped))
+	}
+	expected := []string{
+		filepath.Join(dir, "missing1.conf"),
+		filepath.Join(dir, "missing2.conf"),
+	}
+	for i, s := range skipped {
+		if s != expected[i] {
+			t.Fatalf("Expected skipped[%d] = %q, got: %q", i, expected[i], s)
+		}
+	}
+}
+
+func TestOptionalIncludeNestedSkippedFilesReported(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `
+listen: 127.0.0.1:4222
+include ./outer.conf
+`
+	fp := filepath.Join(dir, "nats.conf")
+	if err := os.WriteFile(fp, []byte(cfg), 0666); err != nil {
+		t.Fatal(err)
+	}
+	outer := `
+port: 6222
+include? ./nested-missing.conf
+`
+	if err := os.WriteFile(filepath.Join(dir, "outer.conf"), []byte(outer), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, skipped, err := ParseFileWithChecksDigest(fp)
+	if err != nil {
+		t.Fatalf("Received err: %v", err)
+	}
+	if len(skipped) != 1 {
+		t.Fatalf("Expected 1 skipped include, got: %d", len(skipped))
+	}
+	expected := filepath.Join(dir, "nested-missing.conf")
+	if skipped[0] != expected {
+		t.Fatalf("Expected skipped = %q, got: %q", expected, skipped[0])
 	}
 }

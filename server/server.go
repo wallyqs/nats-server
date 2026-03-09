@@ -2331,6 +2331,9 @@ func (s *Server) Start() {
 			cd = fmt.Sprintf("(%s)", opts.configDigest)
 		}
 		s.Noticef("Using configuration file: %s %s", opts.ConfigFile, cd)
+		for _, f := range opts.skippedOptionalIncludes {
+			s.Warnf("Skipped optional include file (not found): %s", f)
+		}
 	}
 
 	hasOperators := len(opts.TrustedOperators) > 0

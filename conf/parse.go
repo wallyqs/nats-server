@@ -64,6 +64,9 @@ type parser struct {
 
 	// Tracks environment variable references, to avoid cycles
 	envVarReferences map[string]bool
+
+	// Tracks optional includes that were skipped because the file was not found.
+	skippedOptionalIncludes []string
 }
 
 // Parse will return a map of keys to any, although concrete types
@@ -133,14 +136,14 @@ func cleanupUsedEnvVars(m map[string]any) {
 
 // ParseFileWithChecksDigest returns the processed config and a digest
 // that represents the configuration.
-func ParseFileWithChecksDigest(fp string) (map[string]any, string, error) {
+func ParseFileWithChecksDigest(fp string) (map[string]any, string, []string, error) {
 	data, err := os.ReadFile(fp)
 	if err != nil {
-		return nil, _EMPTY_, err
+		return nil, _EMPTY_, nil, err
 	}
 	p, err := parse(string(data), fp, true)
 	if err != nil {
-		return nil, _EMPTY_, err
+		return nil, _EMPTY_, nil, err
 	}
 	// Filter out any environment variables before taking the digest.
 	cleanupUsedEnvVars(p.mapping)
@@ -148,9 +151,9 @@ func ParseFileWithChecksDigest(fp string) (map[string]any, string, error) {
 	e := json.NewEncoder(digest)
 	err = e.Encode(p.mapping)
 	if err != nil {
-		return nil, _EMPTY_, err
+		return nil, _EMPTY_, nil, err
 	}
-	return p.mapping, fmt.Sprintf("sha256:%x", digest.Sum(nil)), nil
+	return p.mapping, fmt.Sprintf("sha256:%x", digest.Sum(nil)), p.skippedOptionalIncludes, nil
 }
 
 type token struct {
@@ -421,23 +424,22 @@ func (p *parser) processItem(it item, fp string) error {
 			p.setValue(value)
 		}
 	case itemInclude, itemOptionalInclude:
-		var (
-			m   map[string]any
-			err error
-		)
 		filePath := filepath.Join(p.fp, it.val)
-		if p.pedantic {
-			m, err = ParseFileWithChecks(filePath)
-		} else {
-			m, err = ParseFile(filePath)
-		}
+		data, err := os.ReadFile(filePath)
 		if err != nil {
 			if it.typ == itemOptionalInclude && errors.Is(err, os.ErrNotExist) {
+				p.skippedOptionalIncludes = append(p.skippedOptionalIncludes, filePath)
 				break
 			}
 			return fmt.Errorf("error parsing include file '%s', %v", it.val, err)
 		}
-		for k, v := range m {
+		cp, err := parse(string(data), filePath, p.pedantic)
+		if err != nil {
+			return fmt.Errorf("error parsing include file '%s', %v", it.val, err)
+		}
+		// Collect any skipped optional includes from the child parser.
+		p.skippedOptionalIncludes = append(p.skippedOptionalIncludes, cp.skippedOptionalIncludes...)
+		for k, v := range cp.mapping {
 			p.pushKey(k)
 
 			if p.pedantic {
