@@ -7793,7 +7793,10 @@ func TestJetStreamClusterHealthzOrphanedConsumerAssignment(t *testing.T) {
 }
 
 // Test that isConsumerHealthy returns "consumer not found" for an R=1
-// consumer that has disappeared but whose assignment remains.
+// consumer whose creation failed due to a store error. This reproduces the
+// scenario organically: the meta layer commits the consumer assignment, but
+// the actual consumer store creation fails (e.g. disk permission error),
+// leaving an assignment with no running consumer.
 func TestJetStreamClusterHealthzConsumerNotFoundR1(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
@@ -7808,23 +7811,45 @@ func TestJetStreamClusterHealthzConsumerNotFoundR1(t *testing.T) {
 	})
 	require_NoError(t, err)
 
-	// Create an R=1 consumer (no Raft node expected).
+	// Block consumer store creation on all servers by placing a regular file
+	// at the path where the consumer directory would be created. This causes
+	// os.MkdirAll to fail, simulating a disk/filesystem error.
+	for _, s := range c.servers {
+		acc, err := s.lookupAccount(globalAccountName)
+		require_NoError(t, err)
+		mset, err := acc.lookupStream("TEST")
+		require_NoError(t, err)
+		fs := mset.store.(*fileStore)
+		consumerPath := filepath.Join(fs.fcfg.StoreDir, consumerDir, "R1CONSUMER")
+		// Create the "obs" dir if it doesn't exist, then place a file where
+		// the consumer subdir would go, so MkdirAll fails.
+		require_NoError(t, os.MkdirAll(filepath.Dir(consumerPath), defaultDirPerms))
+		require_NoError(t, os.WriteFile(consumerPath, []byte("blocked"), 0644))
+		defer os.Remove(consumerPath)
+	}
+
+	// Attempt to create an R=1 consumer. This will fail because the store
+	// directory is unwritable, but the assignment will persist in the meta layer.
 	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
 		Durable:   "R1CONSUMER",
 		Replicas:  1,
 		AckPolicy: nats.AckExplicitPolicy,
 	})
-	require_NoError(t, err)
+	require_Error(t, err)
 
-	// Find the server that owns the R=1 consumer.
+	// Find the server that has the consumer assignment.
 	var srv *Server
 	var mset *stream
 	for _, s := range c.servers {
-		acc, err := s.lookupAccount(globalAccountName)
-		require_NoError(t, err)
-		m, err := acc.lookupStream("TEST")
-		require_NoError(t, err)
-		if o := m.lookupConsumer("R1CONSUMER"); o != nil {
+		sjs := s.getJetStream()
+		sjs.mu.RLock()
+		ca := sjs.consumerAssignment(globalAccountName, "TEST", "R1CONSUMER")
+		sjs.mu.RUnlock()
+		if ca != nil {
+			acc, err := s.lookupAccount(globalAccountName)
+			require_NoError(t, err)
+			m, err := acc.lookupStream("TEST")
+			require_NoError(t, err)
 			srv = s
 			mset = m
 			break
@@ -7832,12 +7857,7 @@ func TestJetStreamClusterHealthzConsumerNotFoundR1(t *testing.T) {
 	}
 	require_True(t, srv != nil)
 
-	// Delete the consumer without going through meta, leaving the assignment orphaned.
-	o := mset.lookupConsumer("R1CONSUMER")
-	require_True(t, o != nil)
-	o.deleteWithoutAdvisory()
-
-	// Verify the consumer is gone but the assignment remains.
+	// Verify the consumer does not exist but the assignment does.
 	require_True(t, mset.lookupConsumer("R1CONSUMER") == nil)
 	sjs := srv.getJetStream()
 	sjs.mu.RLock()
