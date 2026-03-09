@@ -318,6 +318,10 @@ type AuthCallout struct {
 	// AllowedAccounts that will be delegated to the auth service.
 	// If empty then all accounts will be delegated.
 	AllowedAccounts []string
+	// SPIFFE configuration for SPIFFE identity-based auth callout.
+	// When set, SPIFFE IDs from client TLS certificates are extracted
+	// and included in the auth callout request.
+	SPIFFE *SPIFFEConfig
 }
 
 // Options block for nats-server.
@@ -4638,6 +4642,12 @@ func parseAuthCallout(mv any, errors *[]error) (*AuthCallout, error) {
 				_, uv = unwrapValue(uv, &lt)
 				ac.AllowedAccounts = append(ac.AllowedAccounts, uv.(string))
 			}
+		case "spiffe":
+			sc, err := parseSPIFFEConfig(tk, errors)
+			if err != nil {
+				return nil, err
+			}
+			ac.SPIFFE = sc
 		default:
 			if !tk.IsUsedVariable() {
 				err := &configErr{tk, fmt.Sprintf("Unknown field %q parsing authorization callout", k)}
@@ -4657,6 +4667,45 @@ func parseAuthCallout(mv any, errors *[]error) (*AuthCallout, error) {
 		return nil, &configErr{tk, "Authorization callouts require authorized users to be specified"}
 	}
 	return ac, nil
+}
+
+func parseSPIFFEConfig(mv any, errors *[]error) (*SPIFFEConfig, error) {
+	var (
+		tk token
+		lt token
+		sc = &SPIFFEConfig{}
+	)
+	defer convertPanicToErrorList(&lt, errors)
+
+	tk, mv = unwrapValue(mv, &lt)
+	pm, ok := mv.(map[string]any)
+	if !ok {
+		return nil, &configErr{tk, fmt.Sprintf("Expected spiffe to be a map/struct, got %+v", mv)}
+	}
+	for k, v := range pm {
+		tk, mv = unwrapValue(v, &lt)
+
+		switch strings.ToLower(k) {
+		case "trust_domains", "trust_domain":
+			switch td := mv.(type) {
+			case string:
+				sc.TrustDomains = append(sc.TrustDomains, td)
+			case []any:
+				for _, dv := range td {
+					_, dv = unwrapValue(dv, &lt)
+					sc.TrustDomains = append(sc.TrustDomains, dv.(string))
+				}
+			default:
+				return nil, &configErr{tk, fmt.Sprintf("Expected trust_domains to be a string or array, got %T", v)}
+			}
+		default:
+			if !tk.IsUsedVariable() {
+				err := &configErr{tk, fmt.Sprintf("Unknown field %q parsing spiffe config", k)}
+				*errors = append(*errors, err)
+			}
+		}
+	}
+	return sc, nil
 }
 
 // Helper function to parse user/account permissions

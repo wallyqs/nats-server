@@ -2676,3 +2676,198 @@ func TestAuthCalloutLeafNodeOperatorModeMismatchedCreds(t *testing.T) {
 	// Verify the hub server is still running and healthy.
 	checkLeafNodeConnectedCount(t, at.srv, 1)
 }
+
+func TestAuthCalloutSPIFFEIdentity(t *testing.T) {
+	conf := `
+		listen: "localhost:-1"
+		server_name: T
+
+		tls {
+			cert_file = "../test/configs/certs/svid/server.pem"
+			key_file = "../test/configs/certs/svid/server.key"
+			ca_file = "../test/configs/certs/svid/ca.pem"
+			verify = true
+			insecure = true
+		}
+
+		accounts {
+			AUTH { users [ {user: "auth", password: "pwd"} ] }
+			FOO {}
+		}
+		authorization {
+			timeout: 1s
+			auth_callout {
+				issuer: "ABJHLOVMPA4CI6R5KLNGOB4GSLNIY7IOUPAJC4YFNDLQVIOBYQGUWVLA"
+				account: AUTH
+				auth_users: [ auth ]
+				spiffe {
+					trust_domains: ["localhost"]
+				}
+			}
+		}
+	`
+	handler := func(m *nats.Msg) {
+		ac, err := jwt.DecodeAuthorizationRequestClaims(string(m.Data))
+		require_NoError(t, err)
+
+		user := ac.UserNkey
+		si := &ac.Server
+		ci := &ac.ClientInformation
+
+		require_True(t, si.Name == "T")
+		require_True(t, ci.Host == "127.0.0.1")
+
+		// The SPIFFE ID should be set as the user when no other identity is provided.
+		require_True(t, ci.User == "spiffe://localhost/my-nats-service/user-a")
+
+		// The SPIFFE ID should be in the request tags with the spiffe-id: prefix.
+		require_True(t, ac.Tags.Contains("spiffe-id:spiffe://localhost/my-nats-service/user-a"))
+
+		// TLS info should be present.
+		require_True(t, ac.TLS != nil)
+
+		// Based on the SPIFFE ID, grant specific permissions.
+		limits := &jwt.UserPermissionLimits{}
+		limits.Pub.Allow.Add("payments.>")
+		limits.Sub.Allow.Add("_INBOX.>")
+		ujwt := createAuthUser(t, user, "spiffe-user-a", "FOO", "", nil, 0, limits)
+		m.Respond(serviceResponse(t, user, si.ID, ujwt, "", 0))
+	}
+
+	ac := NewAuthTest(t, conf, handler,
+		nats.UserInfo("auth", "pwd"),
+		nats.ClientCert("../test/configs/certs/svid/client-a.pem", "../test/configs/certs/svid/client-a.key"),
+		nats.RootCAs("../test/configs/certs/svid/ca.pem"))
+	defer ac.Cleanup()
+
+	// Connect with SPIFFE SVID cert (no username/password/nkey).
+	nc := ac.Connect(
+		nats.ClientCert("../test/configs/certs/svid/client-a.pem", "../test/configs/certs/svid/client-a.key"),
+		nats.RootCAs("../test/configs/certs/svid/ca.pem"),
+	)
+	defer nc.Close()
+
+	resp, err := nc.Request(userDirectInfoSubj, nil, time.Second)
+	require_NoError(t, err)
+	response := ServerAPIResponse{Data: &UserInfo{}}
+	err = json.Unmarshal(resp.Data, &response)
+	require_NoError(t, err)
+	userInfo := response.Data.(*UserInfo)
+
+	require_True(t, userInfo.UserID == "spiffe-user-a")
+	require_True(t, userInfo.Account == "FOO")
+}
+
+func TestAuthCalloutSPIFFETrustDomainRejection(t *testing.T) {
+	conf := `
+		listen: "localhost:-1"
+		server_name: T
+
+		tls {
+			cert_file = "../test/configs/certs/svid/server.pem"
+			key_file = "../test/configs/certs/svid/server.key"
+			ca_file = "../test/configs/certs/svid/ca.pem"
+			verify = true
+			insecure = true
+		}
+
+		accounts {
+			AUTH { users [ {user: "auth", password: "pwd"} ] }
+			FOO {}
+		}
+		authorization {
+			timeout: 1s
+			auth_callout {
+				issuer: "ABJHLOVMPA4CI6R5KLNGOB4GSLNIY7IOUPAJC4YFNDLQVIOBYQGUWVLA"
+				account: AUTH
+				auth_users: [ auth ]
+				spiffe {
+					trust_domains: ["example.org"]
+				}
+			}
+		}
+	`
+	handler := func(m *nats.Msg) {
+		// Should not be called since the trust domain is rejected.
+		t.Fatal("Auth callout handler should not be called for rejected trust domain")
+	}
+
+	ac := NewAuthTest(t, conf, handler,
+		nats.UserInfo("auth", "pwd"),
+		nats.ClientCert("../test/configs/certs/svid/client-a.pem", "../test/configs/certs/svid/client-a.key"),
+		nats.RootCAs("../test/configs/certs/svid/ca.pem"))
+	defer ac.Cleanup()
+
+	// Connect with SPIFFE cert from "localhost" trust domain, but only "example.org" is allowed.
+	_, err := ac.NewClient(
+		nats.ClientCert("../test/configs/certs/svid/client-a.pem", "../test/configs/certs/svid/client-a.key"),
+		nats.RootCAs("../test/configs/certs/svid/ca.pem"),
+	)
+	require_Error(t, err)
+}
+
+func TestAuthCalloutSPIFFEMultipleTrustDomains(t *testing.T) {
+	conf := `
+		listen: "localhost:-1"
+		server_name: T
+
+		tls {
+			cert_file = "../test/configs/certs/svid/server.pem"
+			key_file = "../test/configs/certs/svid/server.key"
+			ca_file = "../test/configs/certs/svid/ca.pem"
+			verify = true
+			insecure = true
+		}
+
+		accounts {
+			AUTH { users [ {user: "auth", password: "pwd"} ] }
+			FOO {}
+		}
+		authorization {
+			timeout: 1s
+			auth_callout {
+				issuer: "ABJHLOVMPA4CI6R5KLNGOB4GSLNIY7IOUPAJC4YFNDLQVIOBYQGUWVLA"
+				account: AUTH
+				auth_users: [ auth ]
+				spiffe {
+					trust_domains: ["example.org", "localhost"]
+				}
+			}
+		}
+	`
+	handler := func(m *nats.Msg) {
+		ac, err := jwt.DecodeAuthorizationRequestClaims(string(m.Data))
+		require_NoError(t, err)
+
+		user := ac.UserNkey
+		si := &ac.Server
+
+		// Verify SPIFFE ID is passed through.
+		require_True(t, ac.ClientInformation.User == "spiffe://localhost/my-nats-service/user-a")
+
+		ujwt := createAuthUser(t, user, "spiffe-user-multi", "FOO", "", nil, 0, nil)
+		m.Respond(serviceResponse(t, user, si.ID, ujwt, "", 0))
+	}
+
+	ac := NewAuthTest(t, conf, handler,
+		nats.UserInfo("auth", "pwd"),
+		nats.ClientCert("../test/configs/certs/svid/client-a.pem", "../test/configs/certs/svid/client-a.key"),
+		nats.RootCAs("../test/configs/certs/svid/ca.pem"))
+	defer ac.Cleanup()
+
+	nc := ac.Connect(
+		nats.ClientCert("../test/configs/certs/svid/client-a.pem", "../test/configs/certs/svid/client-a.key"),
+		nats.RootCAs("../test/configs/certs/svid/ca.pem"),
+	)
+	defer nc.Close()
+
+	resp, err := nc.Request(userDirectInfoSubj, nil, time.Second)
+	require_NoError(t, err)
+	response := ServerAPIResponse{Data: &UserInfo{}}
+	err = json.Unmarshal(resp.Data, &response)
+	require_NoError(t, err)
+	userInfo := response.Data.(*UserInfo)
+
+	require_True(t, userInfo.UserID == "spiffe-user-multi")
+	require_True(t, userInfo.Account == "FOO")
+}

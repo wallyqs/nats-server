@@ -323,6 +323,9 @@ type client struct {
 	tags    jwt.TagList
 	nameTag string
 
+	// SPIFFE ID extracted from client's TLS certificate URI SAN, if present.
+	spiffeID string
+
 	tlsTo *time.Timer
 
 	// Authentication error override. This is used because the authentication

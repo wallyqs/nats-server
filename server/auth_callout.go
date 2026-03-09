@@ -413,8 +413,41 @@ func (s *Server) processClientOrLeafCallout(c *client, opts *Options, proxyRequi
 			}
 		}
 		claim.TLS = &ct
+
+		// Extract SPIFFE IDs from client certificate if SPIFFE auth callout is configured.
+		if spiffeCfg := opts.AuthCallout; spiffeCfg != nil && spiffeCfg.SPIFFE != nil {
+			spiffeIDs := extractSPIFFEIDsFromChains(cs.VerifiedChains, cs.PeerCertificates)
+			if len(spiffeIDs) > 0 {
+				// Store primary SPIFFE ID on the client.
+				c.spiffeID = spiffeIDs[0]
+
+				// If the client has no other identity, use the SPIFFE ID.
+				if claim.ClientInformation.User == _EMPTY_ {
+					claim.ClientInformation.User = spiffeIDs[0]
+				}
+				// Add all SPIFFE IDs as tags on the request for the auth callout
+				// service. Tags are prefixed with "spiffe-id:" for easy identification.
+				for _, id := range spiffeIDs {
+					claim.Tags.Add("spiffe-id:" + id)
+				}
+			}
+		}
 	}
 	c.mu.Unlock()
+
+	// Validate SPIFFE trust domain if configured.
+	if opts.AuthCallout != nil && opts.AuthCallout.SPIFFE != nil && len(opts.AuthCallout.SPIFFE.TrustDomains) > 0 {
+		c.mu.Lock()
+		sid := c.spiffeID
+		c.mu.Unlock()
+		if sid != _EMPTY_ {
+			if err := validateSPIFFETrustDomain(sid, opts.AuthCallout.SPIFFE.TrustDomains); err != nil {
+				errStr = fmt.Sprintf("SPIFFE trust domain validation failed: %v", err)
+				s.Warnf(errStr)
+				return false, errStr
+			}
+		}
+	}
 
 	b, err := claim.Encode(s.kp)
 	if err != nil {
