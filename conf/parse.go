@@ -148,7 +148,29 @@ func cleanupUsedEnvVars(m map[string]any) {
 
 // ParseFileWithChecksDigest returns the processed config and a digest
 // that represents the configuration.
-func ParseFileWithChecksDigest(fp string) (map[string]any, string, []SkippedInclude, error) {
+func ParseFileWithChecksDigest(fp string) (map[string]any, string, error) {
+	data, err := os.ReadFile(fp)
+	if err != nil {
+		return nil, _EMPTY_, err
+	}
+	p, err := parse(string(data), fp, true)
+	if err != nil {
+		return nil, _EMPTY_, err
+	}
+	// Filter out any environment variables before taking the digest.
+	cleanupUsedEnvVars(p.mapping)
+	digest := sha256.New()
+	e := json.NewEncoder(digest)
+	err = e.Encode(p.mapping)
+	if err != nil {
+		return nil, _EMPTY_, err
+	}
+	return p.mapping, fmt.Sprintf("sha256:%x", digest.Sum(nil)), nil
+}
+
+// ParseFileWithChecksDigestSkipped is like ParseFileWithChecksDigest but also
+// returns any optional includes that were skipped because the file was not found.
+func ParseFileWithChecksDigestSkipped(fp string) (map[string]any, string, []SkippedInclude, error) {
 	data, err := os.ReadFile(fp)
 	if err != nil {
 		return nil, _EMPTY_, nil, err

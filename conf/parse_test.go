@@ -1005,7 +1005,7 @@ func TestParseDigest(t *testing.T) {
 					}
 				}
 			}
-			_, digest, _, err := ParseFileWithChecksDigest(f.Name())
+			_, digest, err := ParseFileWithChecksDigest(f.Name())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1145,7 +1145,7 @@ include? ./missing2.conf
 		t.Fatal(err)
 	}
 
-	_, _, skipped, err := ParseFileWithChecksDigest(fp)
+	_, _, skipped, err := ParseFileWithChecksDigestSkipped(fp)
 	if err != nil {
 		t.Fatalf("Received err: %v", err)
 	}
@@ -1184,7 +1184,7 @@ include? ./nested-missing.conf
 		t.Fatal(err)
 	}
 
-	_, _, skipped, err := ParseFileWithChecksDigest(fp)
+	_, _, skipped, err := ParseFileWithChecksDigestSkipped(fp)
 	if err != nil {
 		t.Fatalf("Received err: %v", err)
 	}
@@ -1210,7 +1210,7 @@ jetstream {
 		t.Fatal(err)
 	}
 
-	_, _, skipped, err := ParseFileWithChecksDigest(fp)
+	_, _, skipped, err := ParseFileWithChecksDigestSkipped(fp)
 	if err != nil {
 		t.Fatalf("Received err: %v", err)
 	}
