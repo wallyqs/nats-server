@@ -2,6 +2,7 @@ package conf
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1218,5 +1219,100 @@ jetstream {
 	}
 	if len(skipped[0].Block) != 1 || skipped[0].Block[0] != "jetstream" {
 		t.Fatalf("Expected block context [jetstream], got: %v", skipped[0].Block)
+	}
+}
+
+func TestOptionalIncludeWithDigestMissing(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `
+listen: 127.0.0.1:4222
+include? ./missing.conf "sha256:abcdef1234567890"
+`
+	fp := filepath.Join(dir, "nats.conf")
+	if err := os.WriteFile(fp, []byte(cfg), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseFile(fp)
+	if err == nil {
+		t.Fatal("Expected error for missing file with digest")
+	}
+	if !strings.Contains(err.Error(), "not found but expected with digest") {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+}
+
+func TestOptionalIncludeWithDigestMatch(t *testing.T) {
+	dir := t.TempDir()
+	includeContent := []byte("port: 6222\n")
+	h := sha256.Sum256(includeContent)
+	digest := fmt.Sprintf("sha256:%x", h[:])
+
+	cfg := fmt.Sprintf(`
+listen: 127.0.0.1:4222
+include? ./extra.conf "%s"
+`, digest)
+
+	fp := filepath.Join(dir, "nats.conf")
+	if err := os.WriteFile(fp, []byte(cfg), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "extra.conf"), includeContent, 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := ParseFile(fp)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if got := m["port"]; got != int64(6222) {
+		t.Fatalf("Expected port=6222, got: %v", got)
+	}
+}
+
+func TestOptionalIncludeWithDigestMismatch(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `
+listen: 127.0.0.1:4222
+include? ./extra.conf "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+`
+	fp := filepath.Join(dir, "nats.conf")
+	if err := os.WriteFile(fp, []byte(cfg), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "extra.conf"), []byte("port: 6222\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseFile(fp)
+	if err == nil {
+		t.Fatal("Expected error for digest mismatch")
+	}
+	if !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+}
+
+func TestOptionalIncludeWithoutDigestStillWorks(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `
+listen: 127.0.0.1:4222
+include? ./missing.conf
+port: 6222
+`
+	fp := filepath.Join(dir, "nats.conf")
+	if err := os.WriteFile(fp, []byte(cfg), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := ParseFile(fp)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if got := m["listen"]; got != "127.0.0.1:4222" {
+		t.Fatalf("Expected listen=127.0.0.1:4222, got: %v", got)
+	}
+	if got := m["port"]; got != int64(6222) {
+		t.Fatalf("Expected port=6222, got: %v", got)
 	}
 }

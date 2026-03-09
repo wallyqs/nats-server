@@ -55,6 +55,7 @@ const (
 	itemVariable
 	itemInclude
 	itemOptionalInclude
+	itemIncludeDigest
 )
 
 const (
@@ -524,7 +525,7 @@ func lexIncludeQuotedString(lx *lexer) stateFn {
 		lx.emit(lx.includeType)
 		lx.next()
 		lx.ignore()
-		return lx.pop()
+		return lx.popOrDigest()
 	case r == eof:
 		return lx.errorf("Unexpected EOF in quoted include")
 	}
@@ -542,7 +543,7 @@ func lexIncludeDubQuotedString(lx *lexer) stateFn {
 		lx.emit(lx.includeType)
 		lx.next()
 		lx.ignore()
-		return lx.pop()
+		return lx.popOrDigest()
 	case r == eof:
 		return lx.errorf("Unexpected EOF in double quoted include")
 	}
@@ -553,18 +554,82 @@ func lexIncludeDubQuotedString(lx *lexer) stateFn {
 func lexIncludeString(lx *lexer) stateFn {
 	r := lx.next()
 	switch {
-	case isNL(r) || r == eof || r == optValTerm || r == mapEnd || isWhitespace(r):
+	case isNL(r) || r == eof || r == optValTerm || r == mapEnd:
 		lx.backup()
 		lx.emit(lx.includeType)
 		return lx.pop()
+	case isWhitespace(r):
+		lx.backup()
+		lx.emit(lx.includeType)
+		return lx.popOrDigest()
 	case r == sqStringEnd:
 		lx.backup()
 		lx.emit(lx.includeType)
 		lx.next()
 		lx.ignore()
-		return lx.pop()
+		return lx.popOrDigest()
 	}
 	return lexIncludeString
+}
+
+// popOrDigest pops the state stack if the include type is not optional,
+// otherwise transitions to lexIncludeDigestStart to check for an optional digest.
+func (lx *lexer) popOrDigest() stateFn {
+	if lx.includeType != itemOptionalInclude {
+		return lx.pop()
+	}
+	return lexIncludeDigestStart
+}
+
+// lexIncludeDigestStart looks for an optional digest string after the include path.
+// If whitespace is followed by a quoted string, it's treated as a digest.
+// Otherwise, fall through back to the parent state.
+func lexIncludeDigestStart(lx *lexer) stateFn {
+	r := lx.next()
+	switch {
+	case isWhitespace(r):
+		lx.ignore()
+		return lexIncludeDigestStart
+	case r == dqStringStart:
+		lx.ignore()
+		return lexIncludeDigestDubQuotedString
+	case r == sqStringStart:
+		lx.ignore()
+		return lexIncludeDigestQuotedString
+	default:
+		lx.backup()
+		return lx.pop()
+	}
+}
+
+func lexIncludeDigestDubQuotedString(lx *lexer) stateFn {
+	r := lx.next()
+	switch {
+	case r == dqStringEnd:
+		lx.backup()
+		lx.emit(itemIncludeDigest)
+		lx.next()
+		lx.ignore()
+		return lx.pop()
+	case r == eof:
+		return lx.errorf("Unexpected EOF in include digest")
+	}
+	return lexIncludeDigestDubQuotedString
+}
+
+func lexIncludeDigestQuotedString(lx *lexer) stateFn {
+	r := lx.next()
+	switch {
+	case r == sqStringEnd:
+		lx.backup()
+		lx.emit(itemIncludeDigest)
+		lx.next()
+		lx.ignore()
+		return lx.pop()
+	case r == eof:
+		return lx.errorf("Unexpected EOF in include digest")
+	}
+	return lexIncludeDigestQuotedString
 }
 
 // lexInclude will consume the include value.
@@ -1316,6 +1381,8 @@ func (itype itemType) String() string {
 		return "Include"
 	case itemOptionalInclude:
 		return "OptionalInclude"
+	case itemIncludeDigest:
+		return "IncludeDigest"
 	}
 	panic(fmt.Sprintf("BUG: Unknown type '%s'.", itype.String()))
 }

@@ -67,6 +67,10 @@ type parser struct {
 
 	// Tracks optional includes that were skipped because the file was not found.
 	skippedOptionalIncludes []SkippedInclude
+
+	// peeked holds an item that was consumed during look-ahead but
+	// needs to be returned by the next call to next().
+	peeked *item
 }
 
 // SkippedInclude records an optional include that was skipped because the file was not found,
@@ -248,6 +252,11 @@ func (p *parser) parse(fp string) error {
 }
 
 func (p *parser) next() item {
+	if p.peeked != nil {
+		it := *p.peeked
+		p.peeked = nil
+		return it
+	}
 	return p.lx.nextItem()
 }
 
@@ -433,9 +442,24 @@ func (p *parser) processItem(it item, fp string) error {
 		}
 	case itemInclude, itemOptionalInclude:
 		filePath := filepath.Join(p.fp, it.val)
+		// For optional includes, peek to check if a digest follows.
+		var expectedDigest string
+		if it.typ == itemOptionalInclude {
+			next := p.next()
+			if next.typ == itemIncludeDigest {
+				expectedDigest = next.val
+			} else {
+				// Put the consumed item back for the main parse loop.
+				p.peeked = &next
+			}
+		}
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			if it.typ == itemOptionalInclude && errors.Is(err, os.ErrNotExist) {
+				if expectedDigest != "" {
+					return fmt.Errorf("optional include file '%s' not found but expected with digest %q",
+						it.val, expectedDigest)
+				}
 				block := make([]string, len(p.keys))
 				copy(block, p.keys)
 				p.skippedOptionalIncludes = append(p.skippedOptionalIncludes, SkippedInclude{
@@ -445,6 +469,15 @@ func (p *parser) processItem(it item, fp string) error {
 				break
 			}
 			return fmt.Errorf("error parsing include file '%s', %v", it.val, err)
+		}
+		// If a digest was specified, verify the file content matches.
+		if expectedDigest != "" {
+			h := sha256.Sum256(data)
+			actualDigest := fmt.Sprintf("sha256:%x", h[:])
+			if actualDigest != expectedDigest {
+				return fmt.Errorf("include file '%s' digest mismatch: expected %q, got %q",
+					it.val, expectedDigest, actualDigest)
+			}
 		}
 		cp, err := parse(string(data), filePath, p.pedantic)
 		if err != nil {
