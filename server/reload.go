@@ -300,6 +300,20 @@ func (t *tlsHandshakeFirstFallback) Apply(server *Server) {
 	server.Noticef("Reloaded: Client TLS handshake first fallback delay: %v", t.newValue)
 }
 
+// tlsTerminatedOption implements the option interface for the `tls_terminated` setting.
+type tlsTerminatedOption struct {
+	noopOption
+	newValue bool
+}
+
+func (t *tlsTerminatedOption) Apply(server *Server) {
+	if t.newValue {
+		server.Noticef("Reloaded: TLS termination by external proxy enabled")
+	} else {
+		server.Noticef("Reloaded: TLS termination by external proxy disabled")
+	}
+}
+
 // authOption is a base struct that provides default option behaviors.
 type authOption struct {
 	noopOption
@@ -1349,6 +1363,8 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			diffOpts = append(diffOpts, &tlsHandshakeFirst{newValue: newValue.(bool)})
 		case "tlshandshakefirstfallback":
 			diffOpts = append(diffOpts, &tlsHandshakeFirstFallback{newValue: newValue.(time.Duration)})
+		case "tlsterminated":
+			diffOpts = append(diffOpts, &tlsTerminatedOption{newValue: newValue.(bool)})
 		case "username":
 			diffOpts = append(diffOpts, &usernameOption{})
 		case "password":

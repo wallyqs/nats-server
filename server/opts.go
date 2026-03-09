@@ -433,6 +433,11 @@ type Options struct {
 	// require a TLS handshake first, and older clients that can't.
 	TLSHandshakeFirstFallback time.Duration      `json:"-"`
 	AllowNonTLS               bool               `json:"-"`
+	// TLSTerminated indicates that TLS is being terminated by an upstream
+	// proxy (e.g. a load balancer or ingress controller). When set, the
+	// server accepts only plain-text connections and does not advertise
+	// tls_available or tls_required to clients.
+	TLSTerminated             bool               `json:"-"`
 	WriteDeadline             time.Duration      `json:"-"`
 	WriteTimeout              WriteTimeoutPolicy `json:"-"`
 	MaxClosedClients          int                `json:"-"`
@@ -1035,6 +1040,11 @@ func (o *Options) processConfigFile(configFile string, m map[string]any) error {
 		}
 	}
 
+	// Validate tls_terminated is not used together with a tls block.
+	if o.TLSTerminated && o.TLSConfig != nil {
+		errors = append(errors, &configErr{nil, "'tls_terminated' and 'tls' options are mutually exclusive"})
+	}
+
 	if len(errors) > 0 || len(warnings) > 0 {
 		return &processConfigErr{
 			errors:   errors,
@@ -1363,6 +1373,8 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		}
 	case "allow_non_tls":
 		o.AllowNonTLS = v.(bool)
+	case "tls_terminated":
+		o.TLSTerminated = v.(bool)
 	case "write_deadline":
 		o.WriteDeadline = parseDuration("write_deadline", tk, v, errors, warnings)
 	case "write_timeout":

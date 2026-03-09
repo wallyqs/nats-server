@@ -1168,6 +1168,10 @@ func validateOptions(o *Options) error {
 	if o.ServerName != _EMPTY_ && strings.Contains(o.ServerName, " ") {
 		return errors.New("server name cannot contain spaces")
 	}
+	// Check that tls_terminated and tls are not both set.
+	if o.TLSTerminated && o.TLSConfig != nil {
+		return fmt.Errorf("'tls_terminated' and 'tls' options are mutually exclusive")
+	}
 	// Check that the trust configuration is correct.
 	if err := validateTrustedOperators(o); err != nil {
 		return err
@@ -2818,6 +2822,9 @@ func (s *Server) AcceptLoop(clr chan struct{}) {
 		if opts.TLSHandshakeFirst && opts.TLSHandshakeFirstFallback == 0 {
 			s.Warnf("Clients that are not using \"TLS Handshake First\" option will fail to connect")
 		}
+	}
+	if opts.TLSTerminated {
+		s.Noticef("TLS termination by external proxy enabled")
 	}
 
 	// If server was started with RANDOM_PORT (-1), opts.Port would be equal

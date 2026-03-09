@@ -2382,3 +2382,125 @@ func TestBuildinfoFormatRevision(t *testing.T) {
 		})
 	}
 }
+
+func TestTLSTerminatedOption(t *testing.T) {
+	// Test that tls_terminated works as a shorthand for proxy-based TLS termination.
+	conf := createConfFile(t, []byte(`
+		listen: "127.0.0.1:-1"
+		tls_terminated: true
+	`))
+	s, o := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	// Should be able to connect without TLS.
+	nc, err := nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", o.Port))
+	require_NoError(t, err)
+	defer nc.Close()
+
+	// Verify INFO does not advertise TLS as available or required.
+	nc2, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", o.Port))
+	require_NoError(t, err)
+	defer nc2.Close()
+
+	br := bufio.NewReader(nc2)
+	line, _, err := br.ReadLine()
+	require_NoError(t, err)
+
+	var info Info
+	err = json.Unmarshal(line[5:], &info) // Skip "INFO " prefix
+	require_NoError(t, err)
+
+	if info.TLSRequired {
+		t.Fatal("Expected TLSRequired to be false with tls_terminated")
+	}
+	if info.TLSAvailable {
+		t.Fatal("Expected TLSAvailable to be false with tls_terminated")
+	}
+}
+
+func TestTLSTerminatedMutuallyExclusiveWithTLS(t *testing.T) {
+	// Test that tls_terminated and tls block cannot be used together.
+	conf := createConfFile(t, []byte(`
+		listen: "127.0.0.1:-1"
+		tls {
+			cert_file: "../test/configs/certs/server-cert.pem"
+			key_file:  "../test/configs/certs/server-key.pem"
+			timeout: 1
+		}
+		tls_terminated: true
+	`))
+	opts := &Options{}
+	err := opts.ProcessConfigFile(conf)
+	if err == nil {
+		t.Fatal("Expected error when using tls_terminated with tls block")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("Expected mutually exclusive error, got: %v", err)
+	}
+}
+
+func TestTLSTerminatedReload(t *testing.T) {
+	// Test that tls_terminated can be reloaded.
+	tmpl := `
+		listen: "127.0.0.1:-1"
+		tls_terminated: %v
+	`
+	conf := createConfFile(t, []byte(fmt.Sprintf(tmpl, true)))
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	// Reload with tls_terminated disabled.
+	if err := os.WriteFile(conf, []byte(fmt.Sprintf(tmpl, false)), 0666); err != nil {
+		t.Fatalf("Error writing config: %v", err)
+	}
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Unexpected error on reload: %v", err)
+	}
+
+	// Reload back to enabled.
+	if err := os.WriteFile(conf, []byte(fmt.Sprintf(tmpl, true)), 0666); err != nil {
+		t.Fatalf("Error writing config: %v", err)
+	}
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Unexpected error on reload: %v", err)
+	}
+}
+
+func TestTLSTerminatedProgrammatic(t *testing.T) {
+	// Test that tls_terminated works when set programmatically.
+	opts := DefaultOptions()
+	opts.Host = "127.0.0.1"
+	opts.Port = -1
+	opts.TLSTerminated = true
+
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(fmt.Sprintf("nats://127.0.0.1:%d", s.Addr().(*net.TCPAddr).Port))
+	require_NoError(t, err)
+	nc.Close()
+}
+
+func TestTLSTerminatedProgrammaticMutualExclusion(t *testing.T) {
+	// Test that programmatically setting both TLSTerminated and TLSConfig fails.
+	tc := &TLSConfigOpts{
+		CertFile: "../test/configs/certs/server-cert.pem",
+		KeyFile:  "../test/configs/certs/server-key.pem",
+	}
+	tlsConfig, err := GenTLSConfig(tc)
+	require_NoError(t, err)
+
+	opts := DefaultOptions()
+	opts.Host = "127.0.0.1"
+	opts.Port = -1
+	opts.TLSConfig = tlsConfig
+	opts.TLSTerminated = true
+
+	_, err = NewServer(opts)
+	if err == nil {
+		t.Fatal("Expected error when setting both TLSTerminated and TLSConfig")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("Expected mutually exclusive error, got: %v", err)
+	}
+}
