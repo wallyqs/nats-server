@@ -2618,3 +2618,24 @@ func TestConfigCheckMultipleErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestTLSTerminatedMutuallyExclusiveWithTLS(t *testing.T) {
+	// Test that tls_terminated and tls block cannot be used together.
+	conf := createConfFile(t, []byte(`
+		listen: "127.0.0.1:-1"
+		tls {
+			cert_file: "../test/configs/certs/server-cert.pem"
+			key_file:  "../test/configs/certs/server-key.pem"
+			timeout: 1
+		}
+		tls_terminated: true
+	`))
+	opts := &Options{}
+	err := opts.ProcessConfigFile(conf)
+	if err == nil {
+		t.Fatal("Expected error when using tls_terminated with tls block")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("Expected mutually exclusive error, got: %v", err)
+	}
+}
