@@ -1,0 +1,34 @@
+{
+  "spiffe://localhost/payments/processor": {
+    "account": "APP",
+    "name": "payments-processor",
+    "permissions": {
+      "pub": { "allow": ["payments.>", "_INBOX.>"] },
+      "sub": { "allow": ["payments.>", "_INBOX.>"] }
+    }
+  },
+  "spiffe://localhost/orders/service": {
+    "account": "APP",
+    "name": "orders-service",
+    "permissions": {
+      "pub": { "allow": ["orders.>", "payments.process", "_INBOX.>"] },
+      "sub": { "allow": ["orders.>", "_INBOX.>"] }
+    }
+  },
+  "spiffe://localhost/my-nats-service/user-a": {
+    "account": "APP",
+    "name": "user-a",
+    "permissions": {
+      "pub": { "allow": ["demo.>", "_INBOX.>"] },
+      "sub": { "allow": ["demo.>", "_INBOX.>"] }
+    }
+  },
+  "spiffe://localhost/my-nats-service/user-b": {
+    "account": "APP",
+    "name": "user-b",
+    "permissions": {
+      "pub": { "allow": ["demo.received", "_INBOX.>"] },
+      "sub": { "allow": ["demo.>", "_INBOX.>"] }
+    }
+  }
+}
