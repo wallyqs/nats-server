@@ -66,7 +66,15 @@ type parser struct {
 	envVarReferences map[string]bool
 
 	// Tracks optional includes that were skipped because the file was not found.
-	skippedOptionalIncludes []string
+	skippedOptionalIncludes []SkippedInclude
+}
+
+// SkippedInclude records an optional include that was skipped because the file was not found,
+// along with the block context where it appeared.
+type SkippedInclude struct {
+	FilePath string
+	// Block is the key path context where the include appeared (e.g. ["jetstream"]).
+	Block []string
 }
 
 // Parse will return a map of keys to any, although concrete types
@@ -136,7 +144,7 @@ func cleanupUsedEnvVars(m map[string]any) {
 
 // ParseFileWithChecksDigest returns the processed config and a digest
 // that represents the configuration.
-func ParseFileWithChecksDigest(fp string) (map[string]any, string, []string, error) {
+func ParseFileWithChecksDigest(fp string) (map[string]any, string, []SkippedInclude, error) {
 	data, err := os.ReadFile(fp)
 	if err != nil {
 		return nil, _EMPTY_, nil, err
@@ -428,7 +436,12 @@ func (p *parser) processItem(it item, fp string) error {
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			if it.typ == itemOptionalInclude && errors.Is(err, os.ErrNotExist) {
-				p.skippedOptionalIncludes = append(p.skippedOptionalIncludes, filePath)
+				block := make([]string, len(p.keys))
+				copy(block, p.keys)
+				p.skippedOptionalIncludes = append(p.skippedOptionalIncludes, SkippedInclude{
+					FilePath: filePath,
+					Block:    block,
+				})
 				break
 			}
 			return fmt.Errorf("error parsing include file '%s', %v", it.val, err)

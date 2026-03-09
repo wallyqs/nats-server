@@ -1156,8 +1156,11 @@ include? ./missing2.conf
 		filepath.Join(dir, "missing2.conf"),
 	}
 	for i, s := range skipped {
-		if s != expected[i] {
-			t.Fatalf("Expected skipped[%d] = %q, got: %q", i, expected[i], s)
+		if s.FilePath != expected[i] {
+			t.Fatalf("Expected skipped[%d] = %q, got: %q", i, expected[i], s.FilePath)
+		}
+		if len(s.Block) != 0 {
+			t.Fatalf("Expected empty block context, got: %v", s.Block)
 		}
 	}
 }
@@ -1188,7 +1191,32 @@ include? ./nested-missing.conf
 		t.Fatalf("Expected 1 skipped include, got: %d", len(skipped))
 	}
 	expected := filepath.Join(dir, "nested-missing.conf")
-	if skipped[0] != expected {
-		t.Fatalf("Expected skipped = %q, got: %q", expected, skipped[0])
+	if skipped[0].FilePath != expected {
+		t.Fatalf("Expected skipped = %q, got: %q", expected, skipped[0].FilePath)
+	}
+}
+
+func TestOptionalIncludeBlockContext(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `
+listen: 127.0.0.1:4222
+jetstream {
+  include? ./js-store.conf
+}
+`
+	fp := filepath.Join(dir, "nats.conf")
+	if err := os.WriteFile(fp, []byte(cfg), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, skipped, err := ParseFileWithChecksDigest(fp)
+	if err != nil {
+		t.Fatalf("Received err: %v", err)
+	}
+	if len(skipped) != 1 {
+		t.Fatalf("Expected 1 skipped include, got: %d", len(skipped))
+	}
+	if len(skipped[0].Block) != 1 || skipped[0].Block[0] != "jetstream" {
+		t.Fatalf("Expected block context [jetstream], got: %v", skipped[0].Block)
 	}
 }
