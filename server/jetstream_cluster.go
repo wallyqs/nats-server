@@ -709,12 +709,19 @@ func (js *jetStream) isConsumerHealthy(mset *stream, consumer string, ca *consum
 		return errors.New("consumer assignment or group missing")
 	}
 	created := ca.Created
+	caErr := ca.err
 	node := ca.Group.node
 	js.mu.RUnlock()
 
 	// Check if not running at all.
 	o := mset.lookupConsumer(consumer)
 	if o == nil {
+		if caErr != nil {
+			// This is an orphaned consumer assignment from a failed consumer create.
+			// These will not recover on their own, a consumer delete would be needed
+			// to clean up the consumer assignment.
+			return nil
+		}
 		if time.Since(created) < 5*time.Second {
 			// No further checks, consumer is not available yet but should be soon.
 			// We'll start erroring once we're sure this consumer is actually broken.

@@ -7624,3 +7624,487 @@ func TestJetStreamClusterConsumerSetStoreStateOldUpdateRestart(t *testing.T) {
 		require_NoError(t, err)
 	}
 }
+
+// TestJetStreamClusterConsumerHealthCheckWithAssignmentErrors tests that isConsumerHealthy
+// correctly handles all conditions where ca.err is set. When a consumer assignment has an
+// error recorded from a failed creation attempt, the health check should report the consumer
+// as healthy (nil) since these orphaned assignments won't recover on their own.
+func TestJetStreamClusterConsumerHealthCheckWithAssignmentErrors(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Create R1 stream and consumer, then delete the consumer so we have
+	// a stream but no consumer running. We'll manipulate ca.err to simulate
+	// various failure conditions.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 1,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{Durable: "CONSUMER"})
+	require_NoError(t, err)
+
+	cl := c.consumerLeader(globalAccountName, "TEST", "CONSUMER")
+	require_NotNil(t, cl)
+	mset, err := cl.globalAccount().lookupStream("TEST")
+	require_NoError(t, err)
+
+	sjs := cl.getJetStream()
+	sjs.mu.Lock()
+	ca := sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+	require_True(t, ca != nil)
+	// Reset created time so we bypass the 5s grace period.
+	ca.Created = time.Time{}
+	sjs.mu.Unlock()
+
+	// Delete the actual consumer so lookupConsumer returns nil.
+	require_NoError(t, js.DeleteConsumer("TEST", "CONSUMER"))
+
+	// Wait for the consumer assignment to be removed.
+	checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+		sjs.mu.RLock()
+		defer sjs.mu.RUnlock()
+		if sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER") != nil {
+			return fmt.Errorf("consumer assignment still present")
+		}
+		return nil
+	})
+
+	// Now we'll use the saved ca (which is no longer in the cluster state)
+	// to simulate each error condition. The consumer object is gone, so
+	// lookupConsumer will return nil for all of these.
+
+	// Subtest helper: sets ca.err, calls isConsumerHealthy, expects nil (healthy).
+	checkHealthyWithErr := func(t *testing.T, errToSet error) {
+		t.Helper()
+		sjs.mu.Lock()
+		ca.err = errToSet
+		sjs.mu.Unlock()
+		err := sjs.isConsumerHealthy(mset, "CONSUMER", ca)
+		if err != nil {
+			t.Fatalf("Expected healthy (nil) with ca.err=%v, got: %v", errToSet, err)
+		}
+	}
+
+	// Subtest: verify that without ca.err set, we get "consumer not found".
+	t.Run("NoErrorSet", func(t *testing.T) {
+		sjs.mu.Lock()
+		ca.err = nil
+		sjs.mu.Unlock()
+		err := sjs.isConsumerHealthy(mset, "CONSUMER", ca)
+		require_Error(t, err, errors.New("consumer not found"))
+	})
+
+	// 1. Stream not found error — set during processClusterCreateConsumer when
+	// the parent stream cannot be looked up.
+	t.Run("StreamNotFound", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSStreamNotFoundError())
+	})
+
+	// 2. Cluster not assigned error — set during processConsumerAssignmentResults
+	// when a peer reports failure for a recently created consumer.
+	t.Run("ClusterNotAssigned", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSClusterNotAssignedError())
+	})
+
+	// 3. Consumer store failed — set during processClusterCreateConsumer when
+	// addConsumerWithAssignment fails with a store error.
+	t.Run("ConsumerStoreFailed", func(t *testing.T) {
+		checkHealthyWithErr(t, errConsumerStoreFailed)
+	})
+
+	// 4. Consumer store failed (API error variant) — the typed API error
+	// returned from addConsumerWithAssignment.
+	t.Run("ConsumerStoreFailedAPIError", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSConsumerStoreFailedError(errors.New("disk error")))
+	})
+
+	// 5. Stream invalid error — set when the stream is closed during consumer creation.
+	t.Run("StreamInvalid", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSStreamInvalidError())
+	})
+
+	// 6. Maximum consumers limit — set when addConsumerWithAssignment fails because
+	// the stream's MaxConsumers limit has been reached.
+	t.Run("MaximumConsumersLimit", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSMaximumConsumersLimitError())
+	})
+
+	// 7. WorkQueue requires explicit ack — config validation failure.
+	t.Run("WQRequiresExplicitAck", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSConsumerWQRequiresExplicitAckError())
+	})
+
+	// 8. Consumer already exists — name conflict during creation.
+	t.Run("ConsumerAlreadyExists", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSConsumerAlreadyExistsError())
+	})
+
+	// 9. Consumer name exists — duplicate consumer name.
+	t.Run("ConsumerNameExists", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSConsumerNameExistError())
+	})
+
+	// 10. No account error — set when account lookup fails.
+	t.Run("NoAccount", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSNoAccountError())
+	})
+
+	// 11. WorkQueue consumer not unique — overlapping filter subjects.
+	t.Run("WQConsumerNotUnique", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSConsumerWQConsumerNotUniqueError())
+	})
+
+	// 12. WorkQueue multiple unfiltered — multiple consumers without filter on WQ.
+	t.Run("WQMultipleUnfiltered", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSConsumerWQMultipleUnfilteredError())
+	})
+
+	// 13. WorkQueue not deliver all — WQ consumer with non-DeliverAll policy.
+	t.Run("WQNotDeliverAll", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSConsumerWQConsumerNotDeliverAllError())
+	})
+
+	// 14. Generic error — any arbitrary error that could come from
+	// addConsumerWithAssignment or setStoreState.
+	t.Run("GenericError", func(t *testing.T) {
+		checkHealthyWithErr(t, errors.New("some unexpected error"))
+	})
+
+	// 15. Out of space error — set when disk is full during consumer creation.
+	t.Run("OutOfSpace", func(t *testing.T) {
+		checkHealthyWithErr(t, errors.New("no space left on device"))
+	})
+
+	// 16. No limits error — account has no JetStream limits.
+	t.Run("NoLimits", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSNoLimitsError())
+	})
+
+	// 17. Consumer config required error.
+	t.Run("ConsumerConfigRequired", func(t *testing.T) {
+		checkHealthyWithErr(t, NewJSConsumerConfigRequiredError())
+	})
+
+	// Cleanup: clear ca.err so it doesn't leak.
+	sjs.mu.Lock()
+	ca.err = nil
+	sjs.mu.Unlock()
+}
+
+// TestJetStreamClusterConsumerHealthCheckErrClearedOnRecovery verifies that
+// when a consumer has ca.err set (failed creation) but the consumer is actually
+// running (e.g., after a successful retry), isConsumerHealthy still reports healthy.
+func TestJetStreamClusterConsumerHealthCheckErrClearedOnRecovery(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 1,
+	})
+	require_NoError(t, err)
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{Durable: "CONSUMER"})
+	require_NoError(t, err)
+
+	cl := c.consumerLeader(globalAccountName, "TEST", "CONSUMER")
+	require_NotNil(t, cl)
+	mset, err := cl.globalAccount().lookupStream("TEST")
+	require_NoError(t, err)
+
+	sjs := cl.getJetStream()
+	sjs.mu.Lock()
+	ca := sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+	require_True(t, ca != nil)
+	sjs.mu.Unlock()
+
+	// Consumer is running. Even if we set ca.err (simulating an inherited error
+	// from a previous failed attempt via ca.err = oca.err), the consumer is still
+	// found by lookupConsumer, so isConsumerHealthy should return nil.
+	sjs.mu.Lock()
+	ca.err = NewJSStreamNotFoundError()
+	sjs.mu.Unlock()
+	require_NoError(t, sjs.isConsumerHealthy(mset, "CONSUMER", ca))
+
+	sjs.mu.Lock()
+	ca.err = NewJSClusterNotAssignedError()
+	sjs.mu.Unlock()
+	require_NoError(t, sjs.isConsumerHealthy(mset, "CONSUMER", ca))
+
+	sjs.mu.Lock()
+	ca.err = errConsumerStoreFailed
+	sjs.mu.Unlock()
+	require_NoError(t, sjs.isConsumerHealthy(mset, "CONSUMER", ca))
+
+	// Cleanup.
+	sjs.mu.Lock()
+	ca.err = nil
+	sjs.mu.Unlock()
+}
+
+// TestJetStreamClusterHealthzWithOrphanedConsumerAssignmentErrors tests the full
+// healthz endpoint (not just isConsumerHealthy) with orphaned consumer assignments
+// that have errors set from various failure conditions. Ensures the healthz endpoint
+// does not report errors for these orphaned assignments.
+func TestJetStreamClusterHealthzWithOrphanedConsumerAssignmentErrors(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Create a stream without consumers initially.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 1,
+	})
+	require_NoError(t, err)
+
+	sl := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, sl)
+
+	sjs := sl.getJetStream()
+
+	// All servers should be healthy before we inject errors.
+	for _, s := range c.servers {
+		hs := s.healthz(&HealthzOptions{})
+		require_Equal(t, hs.StatusCode, 200)
+	}
+
+	// Now inject orphaned consumer assignments with errors directly into the
+	// stream assignment's consumer map. These simulate consumers that failed
+	// creation and left behind an assignment with an error.
+	errCases := []struct {
+		name string
+		err  error
+	}{
+		{"StreamNotFound", NewJSStreamNotFoundError()},
+		{"ClusterNotAssigned", NewJSClusterNotAssignedError()},
+		{"StoreFailed", errConsumerStoreFailed},
+		{"StreamInvalid", NewJSStreamInvalidError()},
+		{"MaxConsumers", NewJSMaximumConsumersLimitError()},
+		{"OutOfSpace", errors.New("no space left on device")},
+		{"GenericError", errors.New("failed to create consumer")},
+	}
+
+	sjs.mu.Lock()
+	sa := sjs.streamAssignment(globalAccountName, "TEST")
+	require_True(t, sa != nil)
+	if sa.consumers == nil {
+		sa.consumers = make(map[string]*consumerAssignment)
+	}
+
+	for i, ec := range errCases {
+		consName := fmt.Sprintf("ORPHAN_%d_%s", i, ec.name)
+		sa.consumers[consName] = &consumerAssignment{
+			Client:  &ClientInfo{Account: globalAccountName},
+			Created: time.Time{}, // Old creation time, past the 5s grace period.
+			Name:    consName,
+			Stream:  "TEST",
+			Config:  &ConsumerConfig{Name: consName},
+			Group: &raftGroup{
+				Name:  fmt.Sprintf("RG_%s", consName),
+				Peers: []string{sl.ID()},
+			},
+			err: ec.err,
+		}
+	}
+	sjs.mu.Unlock()
+
+	// The stream leader should still be healthy despite the orphaned assignments.
+	hs := sl.healthz(&HealthzOptions{})
+	if hs.StatusCode != 200 {
+		t.Fatalf("Expected healthy status (200), got %d: %s", hs.StatusCode, hs.Error)
+	}
+
+	// Also check with detailed healthz to make sure no consumer errors are reported.
+	hs = sl.healthz(&HealthzOptions{Details: true})
+	if hs.StatusCode != 200 {
+		t.Fatalf("Expected healthy status (200) with details, got %d", hs.StatusCode)
+	}
+	for _, he := range hs.Errors {
+		if he.Type == HealthzErrorConsumer {
+			t.Fatalf("Unexpected consumer health error: %s", he.Error)
+		}
+	}
+
+	// Cleanup: remove injected orphans.
+	sjs.mu.Lock()
+	for i, ec := range errCases {
+		consName := fmt.Sprintf("ORPHAN_%d_%s", i, ec.name)
+		delete(sa.consumers, consName)
+	}
+	sjs.mu.Unlock()
+}
+
+// TestJetStreamClusterConsumerHealthCheckR3WithAssignmentErrors tests the same
+// conditions as TestJetStreamClusterConsumerHealthCheckWithAssignmentErrors but
+// with R3 replicated consumers. When a consumer assignment has an error set
+// and the consumer is not running, isConsumerHealthy should return nil (healthy)
+// regardless of the replica count.
+func TestJetStreamClusterConsumerHealthCheckR3WithAssignmentErrors(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{Durable: "CONSUMER", Replicas: 3})
+	require_NoError(t, err)
+
+	// Wait for consumer assignment to be available on all servers.
+	checkFor(t, 5*time.Second, time.Second, func() error {
+		for _, s := range c.servers {
+			sjs := s.getJetStream()
+			sjs.mu.RLock()
+			ca := sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+			sjs.mu.RUnlock()
+			if ca == nil {
+				return fmt.Errorf("consumer assignment not found on %s", s.Name())
+			}
+		}
+		return nil
+	})
+
+	// Grab the assignment from a non-leader and delete the consumer.
+	rs := c.randomNonConsumerLeader(globalAccountName, "TEST", "CONSUMER")
+	require_NotNil(t, rs)
+
+	mset, err := rs.globalAccount().lookupStream("TEST")
+	require_NoError(t, err)
+
+	sjs := rs.getJetStream()
+	sjs.mu.Lock()
+	ca := sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+	require_True(t, ca != nil)
+	ca.Created = time.Time{}
+	sjs.mu.Unlock()
+
+	require_NoError(t, js.DeleteConsumer("TEST", "CONSUMER"))
+
+	// Wait for consumer assignment to be removed.
+	checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+		sjs.mu.RLock()
+		defer sjs.mu.RUnlock()
+		if sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER") != nil {
+			return fmt.Errorf("consumer assignment still present")
+		}
+		return nil
+	})
+
+	// Test each error condition with the saved ca (consumer no longer running).
+	errCases := []struct {
+		name string
+		err  error
+	}{
+		{"StreamNotFound", NewJSStreamNotFoundError()},
+		{"ClusterNotAssigned", NewJSClusterNotAssignedError()},
+		{"ConsumerStoreFailed", errConsumerStoreFailed},
+		{"StreamInvalid", NewJSStreamInvalidError()},
+		{"MaxConsumersLimit", NewJSMaximumConsumersLimitError()},
+		{"OutOfSpace", errors.New("no space left on device")},
+		{"GenericError", errors.New("unexpected error during consumer creation")},
+	}
+
+	for _, ec := range errCases {
+		t.Run(ec.name, func(t *testing.T) {
+			sjs.mu.Lock()
+			ca.err = ec.err
+			sjs.mu.Unlock()
+			err := sjs.isConsumerHealthy(mset, "CONSUMER", ca)
+			if err != nil {
+				t.Fatalf("Expected healthy (nil) with ca.err=%v, got: %v", ec.err, err)
+			}
+		})
+	}
+
+	// Without error set, should report "consumer not found".
+	sjs.mu.Lock()
+	ca.err = nil
+	sjs.mu.Unlock()
+	err = sjs.isConsumerHealthy(mset, "CONSUMER", ca)
+	require_Error(t, err, errors.New("consumer not found"))
+}
+
+// TestJetStreamClusterConsumerHealthCheckInheritedError tests the scenario
+// where ca.err is inherited from a previous assignment (oca.err) via the
+// ca.err = oca.err copy in processConsumerAssignment. Verifies that inherited
+// errors are also properly handled by isConsumerHealthy.
+func TestJetStreamClusterConsumerHealthCheckInheritedError(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 1,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{Durable: "CONSUMER"})
+	require_NoError(t, err)
+
+	cl := c.consumerLeader(globalAccountName, "TEST", "CONSUMER")
+	require_NotNil(t, cl)
+	mset, err := cl.globalAccount().lookupStream("TEST")
+	require_NoError(t, err)
+
+	sjs := cl.getJetStream()
+	sjs.mu.Lock()
+	ca := sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+	require_True(t, ca != nil)
+	ca.Created = time.Time{}
+	sjs.mu.Unlock()
+
+	// Delete consumer so it's no longer running.
+	require_NoError(t, js.DeleteConsumer("TEST", "CONSUMER"))
+	checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+		sjs.mu.RLock()
+		defer sjs.mu.RUnlock()
+		if sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER") != nil {
+			return fmt.Errorf("consumer assignment still present")
+		}
+		return nil
+	})
+
+	// Simulate the inheritance chain: oca had an error, new ca inherits it.
+	// This mirrors the ca.err = oca.err at line 5420 of jetstream_cluster.go.
+	sjs.mu.Lock()
+	ca.err = NewJSStreamNotFoundError() // Simulating inherited error.
+	sjs.mu.Unlock()
+	require_NoError(t, sjs.isConsumerHealthy(mset, "CONSUMER", ca))
+
+	// Change the inherited error type — should still be healthy.
+	sjs.mu.Lock()
+	ca.err = NewJSClusterNotAssignedError()
+	sjs.mu.Unlock()
+	require_NoError(t, sjs.isConsumerHealthy(mset, "CONSUMER", ca))
+
+	// Simulate clearing the error (as done during re-assignment at line 5523).
+	// Without consumer running, should now report "consumer not found".
+	sjs.mu.Lock()
+	ca.err = nil
+	sjs.mu.Unlock()
+	err = sjs.isConsumerHealthy(mset, "CONSUMER", ca)
+	require_Error(t, err, errors.New("consumer not found"))
+}
