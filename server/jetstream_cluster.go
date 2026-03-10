@@ -9397,19 +9397,20 @@ var compressBufPool = sync.Pool{
 	},
 }
 
-func getCompressBuf(sz int) []byte {
+func getCompressBuf(sz int) (*[]byte, []byte) {
 	bp := compressBufPool.Get().(*[]byte)
 	buf := *bp
 	if cap(buf) >= sz {
-		return buf[:sz]
+		return bp, buf[:sz]
 	}
 	// Return undersized buffer to pool, allocate a new one.
 	compressBufPool.Put(bp)
-	return make([]byte, sz)
+	buf = make([]byte, sz)
+	return &buf, buf
 }
 
-func putCompressBuf(buf []byte) {
-	compressBufPool.Put(&buf)
+func putCompressBuf(bp *[]byte) {
+	compressBufPool.Put(bp)
 }
 
 // If allowed and contents over the threshold we will compress.
@@ -9468,17 +9469,18 @@ func encodeStreamMsgAllowCompressAndBatch(subject, reply string, hdr, msg []byte
 
 	// Check if we should compress.
 	if shouldCompress {
-		nbuf := getCompressBuf(s2.MaxEncodedLen(elen))
-		nbuf[0] = byte(compressedStreamMsgOp)
-		ebuf := s2.Encode(nbuf[1:], buf[opIndex+1:])
+		bp, nbuf := getCompressBuf(s2.MaxEncodedLen(elen))
+		ebuf := s2.Encode(nbuf, buf[opIndex+1:])
 		// Only pay the cost of decode on the other side if we compressed.
 		// S2 will allow us to try without major penalty for non-compressable data.
-		if len(ebuf) < len(buf) {
+		// Compare against the payload window (excluding batch prefix) to avoid
+		// truncation or corruption when opIndex > 0 for batched messages.
+		if len(ebuf) < len(buf)-opIndex-1 {
 			buf[opIndex] = byte(compressedStreamMsgOp)
 			copy(buf[opIndex+1:], ebuf)
 			buf = buf[:len(ebuf)+opIndex+1]
 		}
-		putCompressBuf(nbuf)
+		putCompressBuf(bp)
 	}
 
 	return buf
