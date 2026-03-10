@@ -1797,6 +1797,62 @@ func TestJetStreamAtomicBatchPublishEncode(t *testing.T) {
 	t.Run("commit-compress", func(t *testing.T) { test(t, true, true) })
 }
 
+// Test that encodeStreamMsgAllowCompressAndBatch produces a valid decodable
+// message when used with a batch ID and a payload just above the compression
+// threshold. This exercises the critical path where opIndex > 0 and the
+// compressed-length comparison must account for the batch prefix.
+func TestJetStreamAtomicBatchPublishEncodeCompressRoundtrip(t *testing.T) {
+	ts := time.Now().UnixNano()
+	hdr := genHeader(nil, "Nats-Batch-Id", "test-batch")
+	hdr = genHeader(hdr, "Nats-Batch-Sequence", "1")
+
+	// Create a payload just above the compression threshold.
+	// Use repeating data so S2 will actually compress it.
+	msg := bytes.Repeat([]byte("ABCDEFGH"), compressThreshold/8+1)
+
+	for _, commit := range []bool{false, true} {
+		name := "normal"
+		if commit {
+			name = "commit"
+		}
+		t.Run(name, func(t *testing.T) {
+			esm := encodeStreamMsgAllowCompressAndBatch("foo.bar", "reply.to", hdr, msg, 42, ts, true, "test-batch", 7, commit)
+
+			// First byte is the batch op.
+			outerOp := entryOp(esm[0])
+			if commit {
+				require_Equal(t, outerOp, batchCommitMsgOp)
+			} else {
+				require_Equal(t, outerOp, batchMsgOp)
+			}
+
+			// Decode the batch envelope.
+			batchId, batchSeq, innerOp, mbuf, err := decodeBatchMsg(esm[1:])
+			require_NoError(t, err)
+			require_Equal(t, batchId, "test-batch")
+			require_Equal(t, batchSeq, 7)
+
+			// The inner op must be compressedStreamMsgOp since we're above threshold
+			// with compressible data.
+			require_Equal(t, innerOp, compressedStreamMsgOp)
+
+			// Decompress and decode the stream message.
+			mbuf, err = s2.Decode(nil, mbuf)
+			require_NoError(t, err)
+
+			subject, reply, dhdr, dmsg, lseq, dts, sourced, err := decodeStreamMsg(mbuf)
+			require_NoError(t, err)
+			require_Equal(t, subject, "foo.bar")
+			require_Equal(t, reply, "reply.to")
+			require_True(t, bytes.Equal(dhdr, hdr))
+			require_True(t, bytes.Equal(dmsg, msg))
+			require_Equal(t, lseq, 42)
+			require_Equal(t, dts, ts)
+			require_True(t, sourced)
+		})
+	}
+}
+
 // Test a batch within a single proposal, optionally combined with messages unrelated
 // to the batch but within the same proposal.
 func TestJetStreamAtomicBatchPublishProposeOne(t *testing.T) {
