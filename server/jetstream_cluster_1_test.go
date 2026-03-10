@@ -7857,6 +7857,60 @@ func TestJetStreamClusterConsumerHealthCheckDeleted(t *testing.T) {
 	require_NoError(t, sjs.isConsumerHealthy(mset, "CONSUMER", ca))
 }
 
+func TestJetStreamClusterConsumerHealthCheckShowsAssignmentError(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 1,
+	})
+	require_NoError(t, err)
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{Durable: "CONSUMER"})
+	require_NoError(t, err)
+
+	cl := c.consumerLeader(globalAccountName, "TEST", "CONSUMER")
+	require_NotNil(t, cl)
+	mset, err := cl.globalAccount().lookupStream("TEST")
+	require_NoError(t, err)
+
+	sjs := cl.getJetStream()
+	sjs.mu.Lock()
+	ca := sjs.consumerAssignment(globalAccountName, "TEST", "CONSUMER")
+	if ca == nil {
+		sjs.mu.Unlock()
+		t.Fatal("ca not found")
+	}
+	// Reset created time, simulating the consumer existed already for a while.
+	ca.Created = time.Time{}
+	sjs.mu.Unlock()
+
+	// Delete consumer so it's not found during health check.
+	require_NoError(t, js.DeleteConsumer("TEST", "CONSUMER"))
+
+	// Without ca.err set, we should get the plain "consumer not found" error.
+	require_Error(t, sjs.isConsumerHealthy(mset, "CONSUMER", ca), errors.New("consumer not found"))
+
+	// Now set ca.err to simulate an assignment error.
+	assignErr := errors.New("maximum consumers limit reached")
+	sjs.mu.Lock()
+	ca.err = assignErr
+	sjs.mu.Unlock()
+
+	// With ca.err set, the error should include the assignment error.
+	err = sjs.isConsumerHealthy(mset, "CONSUMER", ca)
+	require_Error(t, err)
+	require_Contains(t, err.Error(), "consumer not found")
+	require_Contains(t, err.Error(), "maximum consumers limit reached")
+
+	// Verify the assignment error is wrapped and can be unwrapped.
+	require_True(t, errors.Is(err, assignErr))
+}
+
 func TestJetStreamClusterRespectConsumerStartSeq(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
