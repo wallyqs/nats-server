@@ -7903,6 +7903,9 @@ func TestJetStreamClusterHealthzWithOrphanedConsumerAssignmentErrors(t *testing.
 	if sa.consumers == nil {
 		sa.consumers = make(map[string]*consumerAssignment)
 	}
+	// Use the same peers as the stream assignment so the healthz membership
+	// filter (ca.Group.isMember(ourID)) includes these orphaned consumers.
+	peerID := sa.Group.Peers[0]
 
 	for i, ec := range errCases {
 		consName := fmt.Sprintf("ORPHAN_%d_%s", i, ec.name)
@@ -7914,7 +7917,7 @@ func TestJetStreamClusterHealthzWithOrphanedConsumerAssignmentErrors(t *testing.
 			Config:  &ConsumerConfig{Name: consName},
 			Group: &raftGroup{
 				Name:  fmt.Sprintf("RG_%s", consName),
-				Peers: []string{sl.ID()},
+				Peers: []string{peerID},
 			},
 			err: ec.err,
 		}
