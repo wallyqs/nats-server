@@ -7942,3 +7942,82 @@ func TestJetStreamClusterHealthzConsumerNotFoundR3WithNode(t *testing.T) {
 	require_Error(t, err)
 	require_Equal(t, err.Error(), "consumer not found")
 }
+
+// Test that isStreamHealthy does not report an error for an orphaned R>1
+// stream assignment where the Raft group node was never started. This
+// reproduces the scenario organically by hitting the MaxHAAssets limit:
+// the meta layer commits the stream assignment, but createRaftGroup fails
+// on each peer because the HA asset limit is reached, leaving an assignment
+// with node==nil and no running stream.
+func TestJetStreamClusterHealthzOrphanedStreamAssignment(t *testing.T) {
+	tmpl := `
+	listen: 127.0.0.1:-1
+	server_name: %s
+	jetstream: {max_mem_store: 256MB, max_file_store: 2GB, store_dir: '%s', limits: {max_ha_assets: 1}}
+
+	leaf {
+		listen: 127.0.0.1:-1
+	}
+
+	cluster {
+		name: %s
+		listen: 127.0.0.1:%d
+		routes = [%s]
+	}
+
+	accounts { $SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] } }
+	`
+	c := createJetStreamClusterWithTemplate(t, tmpl, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// First R=3 stream succeeds (meta=1 raft node, check: 1 > 1 is false).
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST1",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	// Second R=3 stream will fail: meta + TEST1 = 2 raft nodes,
+	// check: 2 > 1 is true. The meta leader accepts the proposal (it
+	// doesn't enforce the limit), but createRaftGroup fails on each peer.
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "TEST2",
+		Subjects: []string{"bar"},
+		Replicas: 3,
+	})
+	require_Error(t, err)
+
+	// The assignment for TEST2 should exist in the meta layer on each server
+	// but with no Raft node (node==nil) since createRaftGroup failed.
+	for _, s := range c.servers {
+		sjs := s.getJetStream()
+		sjs.mu.RLock()
+		sa := sjs.streamAssignment(globalAccountName, "TEST2")
+		sjs.mu.RUnlock()
+		if sa == nil {
+			continue // This server may not be a member of the group.
+		}
+
+		sjs.mu.RLock()
+		node := sa.Group.node
+		peers := len(sa.Group.Peers)
+		sjs.mu.RUnlock()
+
+		// Verify this is the orphan condition: node==nil with R>1.
+		require_True(t, node == nil)
+		require_True(t, peers > 1)
+
+		// isStreamHealthy should return nil (not "stream not found")
+		// because the orphan guard recognizes this as a harmless state.
+		acc, err := s.lookupAccount(globalAccountName)
+		require_NoError(t, err)
+		err = sjs.isStreamHealthy(acc, sa)
+		if err != nil {
+			t.Fatalf("Server %s: expected no error for orphaned stream assignment, got: %v", s.Name(), err)
+		}
+	}
+}
