@@ -709,6 +709,7 @@ func (js *jetStream) isConsumerHealthy(mset *stream, consumer string, ca *consum
 		return errors.New("consumer assignment or group missing")
 	}
 	created := ca.Created
+	caErr := ca.err
 	node := ca.Group.node
 	js.mu.RUnlock()
 
@@ -719,6 +720,9 @@ func (js *jetStream) isConsumerHealthy(mset *stream, consumer string, ca *consum
 			// No further checks, consumer is not available yet but should be soon.
 			// We'll start erroring once we're sure this consumer is actually broken.
 			return nil
+		}
+		if caErr != nil {
+			return fmt.Errorf("consumer not found: %w", caErr)
 		}
 		return errors.New("consumer not found")
 	}
