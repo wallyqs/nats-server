@@ -7952,9 +7952,9 @@ func TestJetStreamClusterHealthzWithOrphanedConsumerAssignmentErrors(t *testing.
 
 // TestJetStreamClusterConsumerHealthCheckR3WithAssignmentErrors tests the same
 // conditions as TestJetStreamClusterConsumerHealthCheckWithAssignmentErrors but
-// with R3 replicated consumers. When a consumer assignment has an error set
-// and the consumer is not running, isConsumerHealthy should return nil (healthy)
-// regardless of the replica count.
+// with R3 replicated consumers. After the consumer is deleted, the raft group
+// node is cleaned up (set to nil), so the caErr != nil && node == nil condition
+// in isConsumerHealthy treats these as orphaned R1-like assignments.
 func TestJetStreamClusterConsumerHealthCheckR3WithAssignmentErrors(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()

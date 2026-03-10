@@ -716,8 +716,8 @@ func (js *jetStream) isConsumerHealthy(mset *stream, consumer string, ca *consum
 	// Check if not running at all.
 	o := mset.lookupConsumer(consumer)
 	if o == nil {
-		if caErr != nil {
-			// This is an orphaned consumer assignment from a failed consumer create.
+		if caErr != nil && node == nil {
+			// This is an orphaned R=1 consumer assignment from a failed consumer create.
 			// These will not recover on their own, a consumer delete would be needed
 			// to clean up the consumer assignment.
 			return nil
