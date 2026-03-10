@@ -514,8 +514,6 @@ type Options struct {
 	// configDigest represents the state of configuration.
 	configDigest string
 
-	// skippedOptionalIncludes tracks include? files that were not found.
-	skippedOptionalIncludes []conf.SkippedInclude
 }
 
 // WebsocketOpts are options for websocket
@@ -980,23 +978,11 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	if configFile == _EMPTY_ {
 		return nil
 	}
-	m, digest, skipped, err := conf.ParseFileWithChecksDigestSkipped(configFile)
+	m, digest, err := conf.ParseFileWithChecksDigest(configFile)
 	if err != nil {
 		return err
 	}
 	o.configDigest = digest
-	o.skippedOptionalIncludes = skipped
-
-	// Reject optional includes that were skipped inside critical blocks
-	// where missing configuration could lead to data loss or security issues.
-	for _, s := range skipped {
-		for _, key := range s.Block {
-			if strings.EqualFold(key, "jetstream") {
-				return fmt.Errorf("optional include file %q not found inside 'jetstream' block - "+
-					"optional includes are not allowed in jetstream configuration", s.FilePath)
-			}
-		}
-	}
 
 	return o.processConfigFile(configFile, m)
 }

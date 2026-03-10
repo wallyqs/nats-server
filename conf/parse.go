@@ -65,20 +65,9 @@ type parser struct {
 	// Tracks environment variable references, to avoid cycles
 	envVarReferences map[string]bool
 
-	// Tracks optional includes that were skipped because the file was not found.
-	skippedOptionalIncludes []SkippedInclude
-
 	// peeked holds an item that was consumed during look-ahead but
 	// needs to be returned by the next call to next().
 	peeked *item
-}
-
-// SkippedInclude records an optional include that was skipped because the file was not found,
-// along with the block context where it appeared.
-type SkippedInclude struct {
-	FilePath string
-	// Block is the key path context where the include appeared (e.g. ["jetstream"]).
-	Block []string
 }
 
 // Parse will return a map of keys to any, although concrete types
@@ -166,28 +155,6 @@ func ParseFileWithChecksDigest(fp string) (map[string]any, string, error) {
 		return nil, _EMPTY_, err
 	}
 	return p.mapping, fmt.Sprintf("sha256:%x", digest.Sum(nil)), nil
-}
-
-// ParseFileWithChecksDigestSkipped is like ParseFileWithChecksDigest but also
-// returns any optional includes that were skipped because the file was not found.
-func ParseFileWithChecksDigestSkipped(fp string) (map[string]any, string, []SkippedInclude, error) {
-	data, err := os.ReadFile(fp)
-	if err != nil {
-		return nil, _EMPTY_, nil, err
-	}
-	p, err := parse(string(data), fp, true)
-	if err != nil {
-		return nil, _EMPTY_, nil, err
-	}
-	// Filter out any environment variables before taking the digest.
-	cleanupUsedEnvVars(p.mapping)
-	digest := sha256.New()
-	e := json.NewEncoder(digest)
-	err = e.Encode(p.mapping)
-	if err != nil {
-		return nil, _EMPTY_, nil, err
-	}
-	return p.mapping, fmt.Sprintf("sha256:%x", digest.Sum(nil)), p.skippedOptionalIncludes, nil
 }
 
 type token struct {
@@ -482,12 +449,6 @@ func (p *parser) processItem(it item, fp string) error {
 					return fmt.Errorf("optional include file '%s' not found but expected with digest %q",
 						it.val, expectedDigest)
 				}
-				block := make([]string, len(p.keys))
-				copy(block, p.keys)
-				p.skippedOptionalIncludes = append(p.skippedOptionalIncludes, SkippedInclude{
-					FilePath: filePath,
-					Block:    block,
-				})
 				break
 			}
 			return fmt.Errorf("error parsing include file '%s', %v", it.val, err)
@@ -505,8 +466,6 @@ func (p *parser) processItem(it item, fp string) error {
 		if err != nil {
 			return fmt.Errorf("error parsing include file '%s', %v", it.val, err)
 		}
-		// Collect any skipped optional includes from the child parser.
-		p.skippedOptionalIncludes = append(p.skippedOptionalIncludes, cp.skippedOptionalIncludes...)
 		for k, v := range cp.mapping {
 			p.pushKey(k)
 
