@@ -7543,6 +7543,11 @@ func (mset *stream) internalLoop() {
 			}
 			// TODO: Move in the for-loop?
 			c.flushClients(0)
+			// Reset the total stall time for this batch. The JetStream internal
+			// client can be stalled when delivering to slow subscribers, similar
+			// to how client readLoops are stalled. Reset after each batch so the
+			// next batch gets a fresh stall budget.
+			c.in.tst = 0
 			outq.recycle(&pms)
 		case <-msgs.ch:
 			// This can possibly change now so needs to be checked here.

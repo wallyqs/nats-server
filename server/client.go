@@ -3809,10 +3809,13 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		return didDeliver
 	}
 
-	// If we are a client and we detect that the consumer we are
-	// sending to is in a stalled state, go ahead and wait here
-	// with a limit.
-	if c.kind == CLIENT && client.out.stc != nil {
+	// If we are a client or a JetStream internal client and we detect that the consumer we are
+	// sending to is in a stalled state, go ahead and wait here with a limit.
+	// JetStream internal clients must also respect the stall gate, otherwise they bypass
+	// the backpressure mechanism and keep flooding the subscriber's output buffer, preventing
+	// the stall gate from ever being released and causing regular client producers to stall
+	// indefinitely.
+	if (c.kind == CLIENT || c.kind == JETSTREAM) && client.out.stc != nil {
 		if srv.getOpts().NoFastProducerStall {
 			mt.addEgressEvent(client, sub, errMsgTraceFastProdNoStall)
 			client.mu.Unlock()
