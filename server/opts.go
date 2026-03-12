@@ -2799,6 +2799,17 @@ func parseLeafNodes(v any, opts *Options, errors *[]error, warnings *[]error) er
 				continue
 			}
 			opts.LeafNode.Remotes = remotes
+			// Validate that remote names are unique.
+			remoteNames := map[string]struct{}{}
+			for _, r := range remotes {
+				if r.Name != _EMPTY_ {
+					if _, exists := remoteNames[r.Name]; exists {
+						*errors = append(*errors, &configErr{tk, fmt.Sprintf(`duplicate remote name %q detected in leafnode configuration`, r.Name)})
+						continue
+					}
+					remoteNames[r.Name] = struct{}{}
+				}
+			}
 		case "reconnect", "reconnect_delay", "reconnect_interval":
 			opts.LeafNode.ReconnectInterval = parseDuration("reconnect", tk, mv, errors, warnings)
 		case "tls":

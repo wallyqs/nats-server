@@ -222,6 +222,17 @@ func validateLeafNode(o *Options) error {
 		return err
 	}
 
+	// Reject duplicate remote names since they are used as identity keys during reload.
+	remoteNames := map[string]struct{}{}
+	for _, r := range o.LeafNode.Remotes {
+		if r.Name != _EMPTY_ {
+			if _, exists := remoteNames[r.Name]; exists {
+				return fmt.Errorf("duplicate remote name %q detected in leafnode configuration", r.Name)
+			}
+			remoteNames[r.Name] = struct{}{}
+		}
+	}
+
 	// Users can bind to any local account, if its empty we will assume the $G account.
 	for _, r := range o.LeafNode.Remotes {
 		if r.LocalAccount == _EMPTY_ {

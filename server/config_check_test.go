@@ -1591,6 +1591,20 @@ func TestConfigCheck(t *testing.T) {
 			errorPos:  21,
 		},
 		{
+			name: "duplicate remote names in leafnode configuration",
+			config: `
+                leafnodes {
+                    remotes [
+                        {url: "nats-leaf://hub1:7422", name: "feed"}
+                        {url: "nats-leaf://hub2:7422", name: "feed"}
+                    ]
+                }
+              `,
+			err:       errors.New(`duplicate remote name "feed" detected in leafnode configuration`),
+			errorLine: 3,
+			errorPos:  21,
+		},
+		{
 			name: "mqtt bad type",
 			config: `
                 mqtt [
