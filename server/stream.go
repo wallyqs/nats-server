@@ -504,6 +504,7 @@ type stream struct {
 	sourceSetupSchedules map[string]*time.Timer
 	sourcesConsumerSetup *time.Timer
 	smsgs                *ipQueue[*inMsg] // Intra-process queue for all incoming sourced messages.
+	srcPaused            atomic.Int32     // Number of sources paused due to capacity limits.
 
 	// Indicates we have direct consumers.
 	directs int
@@ -595,12 +596,20 @@ type sourceInfo struct {
 	fails int                 // The number of times trying to setup the consumer failed.
 	last  atomic.Int64        // Time the consumer was created or of last message it received.
 	lreq  time.Time           // The last time setupMirrorConsumer/setupSourceConsumer was called.
-	qch   chan struct{}       // Quit channel.
+	qch   chan struct{}        // Quit channel.
 	sip   bool                // Setup in progress.
 	wg    sync.WaitGroup      // WaitGroup for the consumer's go routine.
 	sf    string              // The subject filter.
 	sfs   []string            // The subject filters.
 	trs   []*subjectTransform // The subject transforms.
+
+	// Flow control pause state. When the destination stream is at capacity (e.g. DiscardNew),
+	// we withhold FC replies to pause the source consumer instead of tearing it down and recreating.
+	// The consumer stays alive and resumes when space is freed.
+	fcPaused    bool   // Whether this source is paused due to capacity limits.
+	fcReply     string // Buffered flow control reply subject to send when unpausing.
+	fcCanResume bool   // Space has been freed; resume as soon as we receive the next FC reply.
+	fcPausedSeq uint64 // Source sequence at which we paused — consumer restarts from here.
 }
 
 // For mirrors and direct get
@@ -3569,6 +3578,46 @@ func (mset *stream) cancelSourceInfo(si *sourceInfo) {
 		t.Stop()
 		delete(mset.sourceSetupSchedules, si.iname)
 	}
+	// Clear any flow control pause state.
+	if si.fcPaused {
+		si.fcPaused = false
+		mset.srcPaused.Add(-1)
+	}
+	si.fcReply = _EMPTY_
+	si.fcCanResume = false
+	si.fcPausedSeq = 0
+}
+
+// resumePausedSources checks all sources and resumes any that were paused due to
+// the destination stream being at capacity. Called from storeUpdates when messages
+// are removed, meaning space may now be available.
+// This runs in a separate goroutine because storeUpdates may be called from within
+// processJetStreamMsg which holds mset.mu, and we need to acquire mset.mu here.
+// Lock should not be held.
+func (mset *stream) resumePausedSources() {
+	// Fast path: no sources are paused.
+	if mset.srcPaused.Load() <= 0 {
+		return
+	}
+	go func() {
+		mset.mu.Lock()
+		for _, si := range mset.sources {
+			if !si.fcPaused {
+				continue
+			}
+			pausedSeq := si.fcPausedSeq
+			si.fcPaused = false
+			si.fcCanResume = false
+			si.fcReply = _EMPTY_
+			si.fcPausedSeq = 0
+			mset.srcPaused.Add(-1)
+			// Reset sequence tracking to the pause point. While paused, we advanced
+			// si.sseq/si.dseq for messages we skipped; the consumer restart needs
+			// tracking to match the restart sequence.
+			mset.retrySourceConsumerAtSeq(si.iname, pausedSeq)
+		}
+		mset.mu.Unlock()
+	}()
 }
 
 const sourceConsumerRetryThreshold = 2 * time.Second
@@ -3907,6 +3956,11 @@ func (mset *stream) processAllSourceMsgs() {
 			var stalled []*sourceInfo
 			mset.mu.RLock()
 			for _, si := range mset.sources {
+				// Skip sources that are intentionally paused due to capacity limits.
+				// They will be resumed when space frees up via storeUpdates.
+				if si.fcPaused {
+					continue
+				}
 				if time.Since(time.Unix(0, si.last.Load())) > sourceHealthCheckInterval {
 					stalled = append(stalled, si)
 				}
@@ -3981,19 +4035,75 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 		var needsRetry bool
 		// Flow controls have reply subjects.
 		if m.rply != _EMPTY_ {
-			mset.handleFlowControl(m)
+			if si.fcPaused {
+				if si.fcCanResume {
+					// Space freed while we were waiting for FC — recreate consumer to resume.
+					pausedSeq := si.fcPausedSeq
+					si.fcPaused = false
+					si.fcCanResume = false
+					si.fcReply = _EMPTY_
+					si.fcPausedSeq = 0
+					mset.srcPaused.Add(-1)
+					needsRetry = true
+					mset.retrySourceConsumerAtSeq(si.iname, pausedSeq)
+				}
+				// Otherwise stay paused — don't reply to FC.
+			} else {
+				mset.handleFlowControl(m)
+			}
 		} else {
 			// For idle heartbeats make sure we did not miss anything.
-			if ldseq := parseInt64(getHeader(JSLastConsumerSeq, m.hdr)); ldseq > 0 && uint64(ldseq) != si.dseq {
+			if si.fcPaused && si.fcCanResume {
+				// Space has been freed and we're receiving a heartbeat, meaning the consumer
+				// has no pending FC to send. Recreate the consumer to restart delivery
+				// from the sequence where we paused.
+				pausedSeq := si.fcPausedSeq
+				si.fcPaused = false
+				si.fcCanResume = false
+				si.fcReply = _EMPTY_
+				si.fcPausedSeq = 0
+				mset.srcPaused.Add(-1)
 				needsRetry = true
-				mset.retrySourceConsumerAtSeq(si.iname, si.sseq+1)
+				mset.retrySourceConsumerAtSeq(si.iname, pausedSeq)
+			} else if ldseq := parseInt64(getHeader(JSLastConsumerSeq, m.hdr)); ldseq > 0 && uint64(ldseq) != si.dseq {
+				if !si.fcPaused {
+					needsRetry = true
+					mset.retrySourceConsumerAtSeq(si.iname, si.sseq+1)
+				}
+				// If paused, the sequence mismatch is expected since we stopped
+				// accepting messages. Don't retry — we'll resume via FC when unpaused.
 			} else if fcReply := getHeader(JSConsumerStalled, m.hdr); len(fcReply) > 0 {
-				// Other side thinks we are stalled, so send flow control reply.
-				mset.outq.sendMsg(string(fcReply), nil)
+				if si.fcPaused {
+					if si.fcCanResume {
+						// Space freed — recreate consumer to resume.
+						pausedSeq := si.fcPausedSeq
+						si.fcPaused = false
+						si.fcCanResume = false
+						si.fcReply = _EMPTY_
+						si.fcPausedSeq = 0
+						mset.srcPaused.Add(-1)
+						needsRetry = true
+						mset.retrySourceConsumerAtSeq(si.iname, pausedSeq)
+					}
+					// Otherwise stay paused — don't reply.
+				} else {
+					// Other side thinks we are stalled, so send flow control reply.
+					mset.outq.sendMsg(string(fcReply), nil)
+				}
 			}
 		}
+		// Keep updating last activity so the stall detector doesn't
+		// tear us down while we are intentionally paused.
+		si.last.Store(time.Now().UnixNano())
 		mset.mu.Unlock()
 		return !needsRetry
+	}
+
+	// If we are paused due to capacity limits, drop data messages from the old consumer.
+	// Don't advance tracking — we'll recreate the consumer from fcPausedSeq when unpaused.
+	if si.fcPaused {
+		mset.mu.Unlock()
+		return true
 	}
 
 	sseq, dseq, dc, _, pending := replyInfo(m.rply)
@@ -4073,14 +4183,20 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 			mset.mu.RLock()
 			accName, sname, iName := mset.acc.Name, mset.cfg.Name, si.iname
 			mset.mu.RUnlock()
-			// Can happen temporarily all the time during normal operations when the sourcing stream is discard new
-			// (example use case is for sourcing into a work queue)
-			// TODO - Maybe improve sourcing to WQ with limit and new to use flow control rather than re-creating the consumer.
+			// Can happen during normal operations when the destination stream is at capacity
+			// with discard new policy (example use case is sourcing into a work queue).
+			// Instead of tearing down and recreating the consumer, we pause by withholding
+			// flow control replies. The source consumer will stop delivering until we unpause
+			// in storeUpdates when space becomes available.
 			if errors.Is(err, ErrMaxMsgs) || errors.Is(err, ErrMaxBytes) || errors.Is(err, ErrMaxMsgsPerSubject) {
-				// Do not need to do a full retry that includes finding the last sequence in the stream
-				// for that source. Just re-create starting with the seq we couldn't store instead.
 				mset.mu.Lock()
-				mset.retrySourceConsumerAtSeq(iName, si.sseq)
+				if !si.fcPaused {
+					si.fcPaused = true
+					si.fcPausedSeq = si.sseq
+					mset.srcPaused.Add(1)
+				}
+				s.Debugf("Source %q for '%s > %s' paused: destination at capacity (%v)",
+					iName, accName, sname, err)
 				mset.mu.Unlock()
 			} else {
 				// Log some warning for errors other than errLastSeqMismatch.
@@ -4830,6 +4946,11 @@ func (mset *stream) storeUpdates(md, bd int64, seq uint64, subj string) {
 			o.streamNumPendingLocked()
 		}
 		mset.clsMu.RUnlock()
+	}
+
+	// Check if any paused sources can be resumed now that space has been freed.
+	if md < 0 {
+		mset.resumePausedSources()
 	}
 
 	if mset.jsa != nil {
