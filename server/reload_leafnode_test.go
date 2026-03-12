@@ -514,6 +514,91 @@ func TestConfigReloadLeafNodeNamedRemoteURLChange(t *testing.T) {
 	}
 }
 
+// TestLeafNodeRemoteNameInLeafz tests that when a leaf remote has a configured
+// "name", the hub's Leafz() endpoint includes it as RemoteName.
+func TestLeafNodeRemoteNameInLeafz(t *testing.T) {
+	confHub := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub, hubOpts := RunServerWithConfig(confHub)
+	defer hub.Shutdown()
+
+	url1 := fmt.Sprintf("nats://127.0.0.1:%d", hubOpts.LeafNode.Port)
+	confLeaf := createConfFile(t, []byte(fmt.Sprintf(`
+		port: -1
+		server_name: "leaf"
+		leafnodes {
+			remotes [
+				{ name: "my-hub-link", urls: ["%s"] }
+			]
+		}
+	`, url1)))
+	leafSrv, _ := RunServerWithConfig(confLeaf)
+	defer leafSrv.Shutdown()
+
+	checkLeafNodeConnected(t, hub)
+
+	// Check the hub's Leafz shows the remote name.
+	leafz, err := hub.Leafz(nil)
+	if err != nil {
+		t.Fatalf("Error getting leafz: %v", err)
+	}
+	if len(leafz.Leafs) != 1 {
+		t.Fatalf("Expected 1 leaf, got %d", len(leafz.Leafs))
+	}
+	li := leafz.Leafs[0]
+	if li.RemoteName != "my-hub-link" {
+		t.Fatalf("Expected RemoteName %q, got %q", "my-hub-link", li.RemoteName)
+	}
+	if li.Name != "leaf" {
+		t.Fatalf("Expected Name %q, got %q", "leaf", li.Name)
+	}
+}
+
+// TestLeafNodeRemoteNameNotSetInLeafz tests that when a leaf remote does NOT
+// have a configured "name", RemoteName is empty in Leafz.
+func TestLeafNodeRemoteNameNotSetInLeafz(t *testing.T) {
+	confHub := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub, hubOpts := RunServerWithConfig(confHub)
+	defer hub.Shutdown()
+
+	url1 := fmt.Sprintf("nats://127.0.0.1:%d", hubOpts.LeafNode.Port)
+	confLeaf := createConfFile(t, []byte(fmt.Sprintf(`
+		port: -1
+		server_name: "leaf"
+		leafnodes {
+			remotes [
+				{ urls: ["%s"] }
+			]
+		}
+	`, url1)))
+	leafSrv, _ := RunServerWithConfig(confLeaf)
+	defer leafSrv.Shutdown()
+
+	checkLeafNodeConnected(t, hub)
+
+	leafz, err := hub.Leafz(nil)
+	if err != nil {
+		t.Fatalf("Error getting leafz: %v", err)
+	}
+	if len(leafz.Leafs) != 1 {
+		t.Fatalf("Expected 1 leaf, got %d", len(leafz.Leafs))
+	}
+	if leafz.Leafs[0].RemoteName != "" {
+		t.Fatalf("Expected empty RemoteName, got %q", leafz.Leafs[0].RemoteName)
+	}
+}
+
 // TestConfigReloadLeafNodeAddRemoveSameAccountDifferentURLs tests that two
 // remotes with the same local account but different URLs are handled correctly
 // during add/remove operations.
