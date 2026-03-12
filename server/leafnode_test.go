@@ -118,9 +118,18 @@ func TestLeafNodeRandomRemotes(t *testing.T) {
 	s := RunServer(o)
 	defer s.Shutdown()
 
+	var r1, r2 *leafNodeCfg
 	s.mu.Lock()
-	r1 := s.leafRemoteCfgs[0]
-	r2 := s.leafRemoteCfgs[1]
+	for cfg := range s.leafRemoteCfgs {
+		cfg.RLock()
+		nr := cfg.NoRandomize
+		cfg.RUnlock()
+		if nr {
+			r1 = cfg
+		} else {
+			r2 = cfg
+		}
+	}
 	s.mu.Unlock()
 
 	r1.RLock()

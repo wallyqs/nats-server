@@ -1418,9 +1418,13 @@ func TestJetStreamLeafNodeJSClusterMigrateRecoveryWithDelay(t *testing.T) {
 
 	// Make sure all delay timers in remotes are disabled
 	for _, s := range lnc.servers {
-		for _, r := range s.leafRemoteCfgs {
+		s.mu.RLock()
+		for r := range s.leafRemoteCfgs {
+			r.RLock()
 			require_True(t, r.jsMigrateTimer == nil)
+			r.RUnlock()
 		}
+		s.mu.RUnlock()
 	}
 
 	// Previously nodes would have left observer mode but then would

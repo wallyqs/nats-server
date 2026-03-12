@@ -188,11 +188,12 @@ func TestConfigReloadLeafNodeDataPathAfterReload(t *testing.T) {
 	}
 
 	// Now test the reverse direction: hub -> leaf.
+	hubSubsBefore := hub.NumSubscriptions()
 	subLeaf := natsSubSync(t, ncLeaf, "reverse.subject")
 	natsFlush(t, ncLeaf)
 
 	checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
-		if n := hub.NumSubscriptions(); n == 0 {
+		if n := hub.NumSubscriptions(); n <= hubSubsBefore {
 			return fmt.Errorf("no subscriptions propagated to hub yet")
 		}
 		return nil
@@ -540,15 +541,22 @@ func TestConfigReloadLeafNodeConnectionStableOnNoChange(t *testing.T) {
 // TestConfigReloadLeafNodeAddWithAccounts tests adding a remote with a
 // specific local account via config reload.
 func TestConfigReloadLeafNodeAddWithAccounts(t *testing.T) {
+	// Hub with two accounts and leafnode authorization per account.
 	confHub := createConfFile(t, []byte(`
 		port: -1
 		server_name: "hub"
-		leafnodes {
-			port: -1
-		}
 		accounts {
 			ACCT_A { users: [{user: "a", password: "a"}] }
 			ACCT_B { users: [{user: "b", password: "b"}] }
+		}
+		leafnodes {
+			port: -1
+			authorization {
+				users: [
+					{user: "leaf_a", password: "leaf_a", account: "ACCT_A"}
+					{user: "leaf_b", password: "leaf_b", account: "ACCT_B"}
+				]
+			}
 		}
 	`))
 	hub, hubOpts := RunServerWithConfig(confHub)
@@ -569,7 +577,7 @@ func TestConfigReloadLeafNodeAddWithAccounts(t *testing.T) {
 	`
 	// Start with remote for ACCT_A only.
 	remoteA := fmt.Sprintf(`{
-		url: "nats://127.0.0.1:%d"
+		url: "nats://leaf_a:leaf_a@127.0.0.1:%d"
 		account: "ACCT_A"
 	}`, hubOpts.LeafNode.Port)
 
@@ -581,7 +589,7 @@ func TestConfigReloadLeafNodeAddWithAccounts(t *testing.T) {
 
 	// Add a second remote for ACCT_B.
 	remoteB := fmt.Sprintf(`{
-		url: "nats://127.0.0.1:%d"
+		url: "nats://leaf_b:leaf_b@127.0.0.1:%d"
 		account: "ACCT_B"
 	}`, hubOpts.LeafNode.Port)
 	reloadUpdateConfig(t, leafSrv, confLeaf, fmt.Sprintf(tmpl, remoteA+"\n"+remoteB))
