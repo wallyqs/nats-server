@@ -342,10 +342,24 @@ func TestConfigReloadLeafNodeURLChangeTriggersReconnect(t *testing.T) {
 	// Should be connected to one of the two hubs.
 	checkLeafNodeConnected(t, leafSrv)
 
+	// Helper to collect leaf connection CIDs from the leaf server.
+	collectCIDs := func(s *Server) map[uint64]struct{} {
+		m := make(map[uint64]struct{})
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		for _, l := range s.leafs {
+			l.mu.Lock()
+			m[l.cid] = struct{}{}
+			l.mu.Unlock()
+		}
+		return m
+	}
+
 	// Now reload: change URLs from [hub1, hub2] to [hub1, hub3].
 	// Since URLs are part of the remote identity, this is treated as
 	// a remove of the old remote + add of a new remote, causing a
 	// full disconnect and reconnect cycle.
+	cidsBefore := collectCIDs(leafSrv)
 	reloadUpdateConfig(t, leafSrv, confLeaf, fmt.Sprintf(tmpl, url1+", "+url3))
 
 	// The leaf should reconnect (to either hub1 or hub3 now).
@@ -353,12 +367,29 @@ func TestConfigReloadLeafNodeURLChangeTriggersReconnect(t *testing.T) {
 	// hub2 should no longer have any leaf connections.
 	checkLeafNodeConnectedCount(t, hub2, 0)
 
+	// Verify the connection was replaced (new CID), not kept alive.
+	cidsAfter := collectCIDs(leafSrv)
+	for cid := range cidsBefore {
+		if _, ok := cidsAfter[cid]; ok {
+			t.Fatalf("Expected leaf connection %d to be replaced after URL change, but it survived", cid)
+		}
+	}
+
 	// Now test adding a URL: [hub1, hub3] -> [hub1, hub2, hub3].
 	// This also triggers a remove+add cycle since URLs changed.
+	cidsBefore = collectCIDs(leafSrv)
 	reloadUpdateConfig(t, leafSrv, confLeaf, fmt.Sprintf(tmpl, url1+", "+url2+", "+url3))
 	checkLeafNodeConnected(t, leafSrv)
 
+	cidsAfter = collectCIDs(leafSrv)
+	for cid := range cidsBefore {
+		if _, ok := cidsAfter[cid]; ok {
+			t.Fatalf("Expected leaf connection %d to be replaced after adding URL, but it survived", cid)
+		}
+	}
+
 	// Now test removing a URL: [hub1, hub2, hub3] -> [hub1].
+	cidsBefore = collectCIDs(leafSrv)
 	reloadUpdateConfig(t, leafSrv, confLeaf, fmt.Sprintf(tmpl, url1))
 	checkLeafNodeConnected(t, leafSrv)
 	// After reload, should only be connected to hub1.
@@ -366,6 +397,12 @@ func TestConfigReloadLeafNodeURLChangeTriggersReconnect(t *testing.T) {
 	checkLeafNodeConnectedCount(t, hub2, 0)
 	checkLeafNodeConnectedCount(t, hub3, 0)
 
+	cidsAfter = collectCIDs(leafSrv)
+	for cid := range cidsBefore {
+		if _, ok := cidsAfter[cid]; ok {
+			t.Fatalf("Expected leaf connection %d to be replaced after removing URLs, but it survived", cid)
+		}
+	}
 }
 
 // TestConfigReloadLeafNodeAddRemoveSameAccountDifferentURLs tests that two
