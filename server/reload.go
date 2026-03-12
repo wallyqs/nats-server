@@ -1140,6 +1140,7 @@ func getLeafNodeOptionsChanges(s *Server, old, new *LeafNodeOpts) (*leafNodeOpti
 	s.mu.RLock()
 	// Track whether any existing remote was not found (i.e. removed).
 	var removed bool
+	var removedRemotes []*RemoteLeafOpts
 	// Go through the list of existing remote configurations.
 	for lrc := range s.leafRemoteCfgs {
 		var rlo *RemoteLeafOpts
@@ -1151,13 +1152,15 @@ func getLeafNodeOptionsChanges(s *Server, old, new *LeafNodeOpts) (*leafNodeOpti
 		if rlo == nil {
 			// Not found, will be removed in leafNodeOption.Apply().
 			removed = true
+			if lrc.Name != _EMPTY_ {
+				removedRemotes = append(removedRemotes, lrc.RemoteLeafOpts)
+			}
 			lrc.RUnlock()
 			continue
 		}
 		// Now we need to make sure that there are no changes that we don't
 		// support for a RemoteLeafOpts.
 		err := checkConfigsEqual(lrc.RemoteLeafOpts, rlo, []string{
-			"Name",
 			"Compression",
 			"Disabled",
 			"LocalAccount",
@@ -1188,6 +1191,28 @@ func getLeafNodeOptionsChanges(s *Server, old, new *LeafNodeOpts) (*leafNodeOpti
 		nlo.changed[lrc] = lnro
 	}
 	s.mu.RUnlock()
+
+	// If there are removed named remotes and added remotes, check if any share
+	// URLs which would indicate a rename attempt. Renaming is not allowed since
+	// the name is the identity key used for matching across reloads.
+	if len(removedRemotes) > 0 && len(nlo.added) > 0 {
+		for _, old := range removedRemotes {
+			oldAcc := old.LocalAccount
+			if oldAcc == _EMPTY_ {
+				oldAcc = globalAccountName
+			}
+			for _, added := range nlo.added {
+				addedAcc := added.LocalAccount
+				if addedAcc == _EMPTY_ {
+					addedAcc = globalAccountName
+				}
+				if oldAcc == addedAcc && reflect.DeepEqual(old.URLs, added.URLs) {
+					return nil, fmt.Errorf("remote name %q cannot be changed to %q, remote names are not reloadable",
+						old.Name, added.Name)
+				}
+			}
+		}
+	}
 
 	// Now we want to make sure that there were actual changes, so that we don't
 	// cause a reload of leafnodes for nothing. However, if one has (or all have)

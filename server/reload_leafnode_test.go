@@ -15,6 +15,8 @@ package server
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -944,4 +946,50 @@ func TestConfigReloadLeafNodeAddWithAccounts(t *testing.T) {
 	if err != nats.ErrTimeout {
 		t.Fatalf("Expected timeout on ACCT_B sub, got err=%v", err)
 	}
+}
+
+// TestConfigReloadLeafNodeRemoteNameNotReloadable tests that changing the name
+// of a remote leafnode is rejected during reload, since the name is used as the
+// identity key for matching remotes across reloads.
+func TestConfigReloadLeafNodeRemoteNameNotReloadable(t *testing.T) {
+	confHub := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub, hubOpts := RunServerWithConfig(confHub)
+	defer hub.Shutdown()
+
+	tmpl := `
+		port: -1
+		server_name: "leaf"
+		leafnodes {
+			remotes [
+				{ url: "nats://127.0.0.1:%d", name: "%s" }
+			]
+		}
+	`
+	confLeaf := createConfFile(t, []byte(fmt.Sprintf(tmpl, hubOpts.LeafNode.Port, "original")))
+	leafSrv, _ := RunServerWithConfig(confLeaf)
+	defer leafSrv.Shutdown()
+
+	checkLeafNodeConnected(t, leafSrv)
+
+	// Attempt to change the remote name via reload — should fail.
+	newConf := fmt.Sprintf(tmpl, hubOpts.LeafNode.Port, "renamed")
+	if err := os.WriteFile(confLeaf, []byte(newConf), 0666); err != nil {
+		t.Fatalf("Error writing config file: %v", err)
+	}
+	err := leafSrv.Reload()
+	if err == nil {
+		t.Fatal("Expected reload to fail when changing remote name, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "remote names are not reloadable") {
+		t.Fatalf("Expected error about remote names not being reloadable, got: %v", err)
+	}
+
+	// Connection should still be up.
+	checkLeafNodeConnected(t, leafSrv)
 }
