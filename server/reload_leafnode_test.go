@@ -15,6 +15,8 @@ package server
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -405,6 +407,200 @@ func TestConfigReloadLeafNodeURLChangeTriggersReconnect(t *testing.T) {
 	}
 }
 
+// TestConfigReloadLeafNodeNamedRemoteURLChange tests that when a remote has
+// a "name", changing URLs does NOT cause a disconnect/reconnect. The existing
+// connection survives and the URL list is updated in-place.
+func TestConfigReloadLeafNodeNamedRemoteURLChange(t *testing.T) {
+	confHub1 := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub1"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub1, hub1Opts := RunServerWithConfig(confHub1)
+	defer hub1.Shutdown()
+
+	confHub2 := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub2"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub2, _ := RunServerWithConfig(confHub2)
+	defer hub2.Shutdown()
+
+	// Start leaf with a named remote pointing at hub1.
+	tmpl := `
+		port: -1
+		server_name: "leaf"
+		leafnodes {
+			remotes [
+				{ name: "my-hub", urls: [%s] }
+			]
+		}
+	`
+	url1 := fmt.Sprintf(`"nats://127.0.0.1:%d"`, hub1Opts.LeafNode.Port)
+
+	confLeaf := createConfFile(t, []byte(fmt.Sprintf(tmpl, url1)))
+	leafSrv, _ := RunServerWithConfig(confLeaf)
+	defer leafSrv.Shutdown()
+
+	checkLeafNodeConnected(t, leafSrv)
+
+	// Collect CIDs before reload.
+	collectCIDs := func(s *Server) map[uint64]struct{} {
+		m := make(map[uint64]struct{})
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		for _, l := range s.leafs {
+			l.mu.Lock()
+			m[l.cid] = struct{}{}
+			l.mu.Unlock()
+		}
+		return m
+	}
+	cidsBefore := collectCIDs(leafSrv)
+
+	// Reload: add hub2's URL to the list. Because the remote has a name,
+	// the server should match it and update URLs in-place without reconnecting.
+	url2 := fmt.Sprintf(`"nats://127.0.0.1:%d"`, hub2.opts.LeafNode.Port)
+	reloadUpdateConfig(t, leafSrv, confLeaf, fmt.Sprintf(tmpl, url1+", "+url2))
+
+	// Still connected.
+	checkLeafNodeConnected(t, leafSrv)
+
+	// Verify the connection was NOT replaced (same CID).
+	cidsAfter := collectCIDs(leafSrv)
+	for cid := range cidsBefore {
+		if _, ok := cidsAfter[cid]; !ok {
+			t.Fatalf("Expected leaf connection %d to survive URL update on named remote, but it was replaced", cid)
+		}
+	}
+
+	// Verify the URL list was actually updated on the remote config.
+	leafSrv.mu.RLock()
+	var urlCount int
+	for lrc := range leafSrv.leafRemoteCfgs {
+		lrc.RLock()
+		urlCount = len(lrc.urls)
+		lrc.RUnlock()
+	}
+	leafSrv.mu.RUnlock()
+	if urlCount != 2 {
+		t.Fatalf("Expected 2 URLs after reload, got %d", urlCount)
+	}
+
+	// Now remove a URL: [hub1, hub2] -> [hub1]. Still no reconnect.
+	cidsBefore = collectCIDs(leafSrv)
+	reloadUpdateConfig(t, leafSrv, confLeaf, fmt.Sprintf(tmpl, url1))
+	checkLeafNodeConnected(t, leafSrv)
+
+	cidsAfter = collectCIDs(leafSrv)
+	for cid := range cidsBefore {
+		if _, ok := cidsAfter[cid]; !ok {
+			t.Fatalf("Expected leaf connection %d to survive URL removal on named remote, but it was replaced", cid)
+		}
+	}
+
+	leafSrv.mu.RLock()
+	for lrc := range leafSrv.leafRemoteCfgs {
+		lrc.RLock()
+		urlCount = len(lrc.urls)
+		lrc.RUnlock()
+	}
+	leafSrv.mu.RUnlock()
+	if urlCount != 1 {
+		t.Fatalf("Expected 1 URL after reload, got %d", urlCount)
+	}
+}
+
+// TestLeafNodeRemoteNameInLeafz tests that when a leaf remote has a configured
+// "name", the hub's Leafz() endpoint includes it as RemoteName.
+func TestLeafNodeRemoteNameInLeafz(t *testing.T) {
+	confHub := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub, hubOpts := RunServerWithConfig(confHub)
+	defer hub.Shutdown()
+
+	url1 := fmt.Sprintf("nats://127.0.0.1:%d", hubOpts.LeafNode.Port)
+	confLeaf := createConfFile(t, []byte(fmt.Sprintf(`
+		port: -1
+		server_name: "leaf"
+		leafnodes {
+			remotes [
+				{ name: "my-hub-link", urls: ["%s"] }
+			]
+		}
+	`, url1)))
+	leafSrv, _ := RunServerWithConfig(confLeaf)
+	defer leafSrv.Shutdown()
+
+	checkLeafNodeConnected(t, hub)
+
+	// Check the hub's Leafz shows the remote name.
+	leafz, err := hub.Leafz(nil)
+	if err != nil {
+		t.Fatalf("Error getting leafz: %v", err)
+	}
+	if len(leafz.Leafs) != 1 {
+		t.Fatalf("Expected 1 leaf, got %d", len(leafz.Leafs))
+	}
+	li := leafz.Leafs[0]
+	if li.RemoteName != "my-hub-link" {
+		t.Fatalf("Expected RemoteName %q, got %q", "my-hub-link", li.RemoteName)
+	}
+	if li.Name != "leaf" {
+		t.Fatalf("Expected Name %q, got %q", "leaf", li.Name)
+	}
+}
+
+// TestLeafNodeRemoteNameNotSetInLeafz tests that when a leaf remote does NOT
+// have a configured "name", RemoteName is empty in Leafz.
+func TestLeafNodeRemoteNameNotSetInLeafz(t *testing.T) {
+	confHub := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub, hubOpts := RunServerWithConfig(confHub)
+	defer hub.Shutdown()
+
+	url1 := fmt.Sprintf("nats://127.0.0.1:%d", hubOpts.LeafNode.Port)
+	confLeaf := createConfFile(t, []byte(fmt.Sprintf(`
+		port: -1
+		server_name: "leaf"
+		leafnodes {
+			remotes [
+				{ urls: ["%s"] }
+			]
+		}
+	`, url1)))
+	leafSrv, _ := RunServerWithConfig(confLeaf)
+	defer leafSrv.Shutdown()
+
+	checkLeafNodeConnected(t, hub)
+
+	leafz, err := hub.Leafz(nil)
+	if err != nil {
+		t.Fatalf("Error getting leafz: %v", err)
+	}
+	if len(leafz.Leafs) != 1 {
+		t.Fatalf("Expected 1 leaf, got %d", len(leafz.Leafs))
+	}
+	if leafz.Leafs[0].RemoteName != "" {
+		t.Fatalf("Expected empty RemoteName, got %q", leafz.Leafs[0].RemoteName)
+	}
+}
+
 // TestConfigReloadLeafNodeAddRemoveSameAccountDifferentURLs tests that two
 // remotes with the same local account but different URLs are handled correctly
 // during add/remove operations.
@@ -750,4 +946,50 @@ func TestConfigReloadLeafNodeAddWithAccounts(t *testing.T) {
 	if err != nats.ErrTimeout {
 		t.Fatalf("Expected timeout on ACCT_B sub, got err=%v", err)
 	}
+}
+
+// TestConfigReloadLeafNodeRemoteNameNotReloadable tests that changing the name
+// of a remote leafnode is rejected during reload, since the name is used as the
+// identity key for matching remotes across reloads.
+func TestConfigReloadLeafNodeRemoteNameNotReloadable(t *testing.T) {
+	confHub := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub, hubOpts := RunServerWithConfig(confHub)
+	defer hub.Shutdown()
+
+	tmpl := `
+		port: -1
+		server_name: "leaf"
+		leafnodes {
+			remotes [
+				{ url: "nats://127.0.0.1:%d", name: "%s" }
+			]
+		}
+	`
+	confLeaf := createConfFile(t, []byte(fmt.Sprintf(tmpl, hubOpts.LeafNode.Port, "original")))
+	leafSrv, _ := RunServerWithConfig(confLeaf)
+	defer leafSrv.Shutdown()
+
+	checkLeafNodeConnected(t, leafSrv)
+
+	// Attempt to change the remote name via reload — should fail.
+	newConf := fmt.Sprintf(tmpl, hubOpts.LeafNode.Port, "renamed")
+	if err := os.WriteFile(confLeaf, []byte(newConf), 0666); err != nil {
+		t.Fatalf("Error writing config file: %v", err)
+	}
+	err := leafSrv.Reload()
+	if err == nil {
+		t.Fatal("Expected reload to fail when changing remote name, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "remote names are not reloadable") {
+		t.Fatalf("Expected error about remote names not being reloadable, got: %v", err)
+	}
+
+	// Connection should still be up.
+	checkLeafNodeConnected(t, leafSrv)
 }

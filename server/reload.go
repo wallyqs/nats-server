@@ -18,6 +18,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"reflect"
 	"slices"
@@ -883,6 +884,7 @@ type remoteLeafOption struct {
 	tlsFirstChanged    bool
 	compressionChanged bool
 	disabledChanged    bool
+	urlsChanged        bool
 	opts               *RemoteLeafOpts
 }
 
@@ -933,6 +935,19 @@ func (l *leafNodeOption) Apply(s *Server) {
 			lrc.Disabled = rlo.opts.Disabled
 			s.Noticef("Reloaded: LeafNode Remote %s Disabled value is: %v",
 				getLeafNodeRemoteName(lrc.RemoteLeafOpts), rlo.opts.Disabled)
+		}
+		if rlo.urlsChanged {
+			lrc.URLs = rlo.opts.URLs
+			// Rebuild the internal url list, preserving randomization preference.
+			lrc.urls = make([]*url.URL, len(rlo.opts.URLs))
+			copy(lrc.urls, rlo.opts.URLs)
+			if !lrc.NoRandomize {
+				rand.Shuffle(len(lrc.urls), func(i, j int) {
+					lrc.urls[i], lrc.urls[j] = lrc.urls[j], lrc.urls[i]
+				})
+			}
+			s.Noticef("Reloaded: LeafNode Remote %s URLs updated",
+				getLeafNodeRemoteName(lrc.RemoteLeafOpts))
 		}
 		lrc.Unlock()
 	}
@@ -1009,6 +1024,9 @@ func applyCompressionChanges(c *client, co *CompressionOpts) bool {
 }
 
 func getLeafNodeRemoteName(rlo *RemoteLeafOpts) string {
+	if rlo.Name != _EMPTY_ {
+		return fmt.Sprintf("%q", rlo.Name)
+	}
 	acc := rlo.LocalAccount
 	if acc == _EMPTY_ {
 		acc = globalAccountName
@@ -1122,6 +1140,7 @@ func getLeafNodeOptionsChanges(s *Server, old, new *LeafNodeOpts) (*leafNodeOpti
 	s.mu.RLock()
 	// Track whether any existing remote was not found (i.e. removed).
 	var removed bool
+	var removedRemotes []*RemoteLeafOpts
 	// Go through the list of existing remote configurations.
 	for lrc := range s.leafRemoteCfgs {
 		var rlo *RemoteLeafOpts
@@ -1133,6 +1152,9 @@ func getLeafNodeOptionsChanges(s *Server, old, new *LeafNodeOpts) (*leafNodeOpti
 		if rlo == nil {
 			// Not found, will be removed in leafNodeOption.Apply().
 			removed = true
+			if lrc.Name != _EMPTY_ {
+				removedRemotes = append(removedRemotes, lrc.RemoteLeafOpts)
+			}
 			lrc.RUnlock()
 			continue
 		}
@@ -1145,6 +1167,7 @@ func getLeafNodeOptionsChanges(s *Server, old, new *LeafNodeOpts) (*leafNodeOpti
 			"TLS",
 			"TLSHandshakeFirst",
 			"TLSConfig",
+			"URLs",
 		})
 		if err != nil {
 			lrc.RUnlock()
@@ -1161,12 +1184,35 @@ func getLeafNodeOptionsChanges(s *Server, old, new *LeafNodeOpts) (*leafNodeOpti
 			tlsFirstChanged:    lrc.TLSHandshakeFirst != rlo.TLSHandshakeFirst,
 			compressionChanged: !lrc.Compression.equals(&rlo.Compression),
 			disabledChanged:    lrc.Disabled != rlo.Disabled,
+			urlsChanged:        !reflect.DeepEqual(lrc.URLs, rlo.URLs),
 			opts:               rlo,
 		}
 		lrc.RUnlock()
 		nlo.changed[lrc] = lnro
 	}
 	s.mu.RUnlock()
+
+	// If there are removed named remotes and added remotes, check if any share
+	// URLs which would indicate a rename attempt. Renaming is not allowed since
+	// the name is the identity key used for matching across reloads.
+	if len(removedRemotes) > 0 && len(nlo.added) > 0 {
+		for _, old := range removedRemotes {
+			oldAcc := old.LocalAccount
+			if oldAcc == _EMPTY_ {
+				oldAcc = globalAccountName
+			}
+			for _, added := range nlo.added {
+				addedAcc := added.LocalAccount
+				if addedAcc == _EMPTY_ {
+					addedAcc = globalAccountName
+				}
+				if oldAcc == addedAcc && reflect.DeepEqual(old.URLs, added.URLs) {
+					return nil, fmt.Errorf("remote name %q cannot be changed to %q, remote names are not reloadable",
+						old.Name, added.Name)
+				}
+			}
+		}
+	}
 
 	// Now we want to make sure that there were actual changes, so that we don't
 	// cause a reload of leafnodes for nothing. However, if one has (or all have)

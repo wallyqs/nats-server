@@ -245,6 +245,10 @@ type SignatureHandler func([]byte) (string, []byte, error)
 
 // RemoteLeafOpts are options for connecting to a remote server as a leaf node.
 type RemoteLeafOpts struct {
+	// Name is an optional identifier for this remote. When set, it is used
+	// to match remotes across config reloads instead of comparing URLs.
+	// This allows URLs to be added/removed without forcing a reconnect.
+	Name              string           `json:"name,omitempty"`
 	LocalAccount      string           `json:"local_account,omitempty"`
 	NoRandomize       bool             `json:"-"`
 	URLs              []*url.URL       `json:"urls,omitempty"`
@@ -314,8 +318,10 @@ type RemoteLeafOpts struct {
 	Disabled bool `json:"-"`
 }
 
-// Returns true if `r`'s `LocalAccount`, `Credentials` and `URLs` are equal to
-// the `other`'s ones.
+// Returns true if `r` matches `other` for reload-identity purposes.
+// When both remotes have a Name set, matching is done by Name, LocalAccount
+// and Credentials (URLs are allowed to change). Otherwise, URLs are included
+// in the comparison as before.
 // Note that for `LocalAccount`, having one empty and the other being the global
 // account name means that the `LocalAccount`'s are the same.
 func (r *RemoteLeafOpts) matches(other *RemoteLeafOpts) bool {
@@ -327,7 +333,15 @@ func (r *RemoteLeafOpts) matches(other *RemoteLeafOpts) bool {
 	if acc2 == _EMPTY_ {
 		acc2 = globalAccountName
 	}
-	return acc1 == acc2 && r.Credentials == other.Credentials && reflect.DeepEqual(r.URLs, other.URLs)
+	if acc1 != acc2 || r.Credentials != other.Credentials {
+		return false
+	}
+	// When both sides have a name, use it as the identity key and
+	// allow URLs to change across reloads.
+	if r.Name != _EMPTY_ && other.Name != _EMPTY_ {
+		return r.Name == other.Name
+	}
+	return reflect.DeepEqual(r.URLs, other.URLs)
 }
 
 // JSLimitOpts are active limits for the meta cluster
@@ -2785,6 +2799,17 @@ func parseLeafNodes(v any, opts *Options, errors *[]error, warnings *[]error) er
 				continue
 			}
 			opts.LeafNode.Remotes = remotes
+			// Validate that remote names are unique.
+			remoteNames := map[string]struct{}{}
+			for _, r := range remotes {
+				if r.Name != _EMPTY_ {
+					if _, exists := remoteNames[r.Name]; exists {
+						*errors = append(*errors, &configErr{tk, fmt.Sprintf(`duplicate remote name %q detected in leafnode configuration`, r.Name)})
+						continue
+					}
+					remoteNames[r.Name] = struct{}{}
+				}
+			}
 		case "reconnect", "reconnect_delay", "reconnect_interval":
 			opts.LeafNode.ReconnectInterval = parseDuration("reconnect", tk, mv, errors, warnings)
 		case "tls":
@@ -3002,6 +3027,8 @@ func parseRemoteLeafNodes(v any, errors *[]error, warnings *[]error) ([]*RemoteL
 		for k, v := range rm {
 			tk, v = unwrapValue(v, &lt)
 			switch strings.ToLower(k) {
+			case "name":
+				remote.Name = v.(string)
 			case "no_randomize", "dont_randomize":
 				remote.NoRandomize = v.(bool)
 			case "url", "urls":

@@ -77,6 +77,8 @@ type leaf struct {
 	remoteCluster string
 	// remoteServer holds onto the remote server's name or ID.
 	remoteServer string
+	// remoteName is the configured name of the remote leafnode entry on the other side.
+	remoteName string
 	// domain name of remote server
 	remoteDomain string
 	// account name of remote server
@@ -218,6 +220,17 @@ func (s *Server) remoteLeafNodeStillValid(remote *leafNodeCfg) bool {
 func validateLeafNode(o *Options) error {
 	if err := validateLeafNodeAuthOptions(o); err != nil {
 		return err
+	}
+
+	// Reject duplicate remote names since they are used as identity keys during reload.
+	remoteNames := map[string]struct{}{}
+	for _, r := range o.LeafNode.Remotes {
+		if r.Name != _EMPTY_ {
+			if _, exists := remoteNames[r.Name]; exists {
+				return fmt.Errorf("duplicate remote name %q detected in leafnode configuration", r.Name)
+			}
+			remoteNames[r.Name] = struct{}{}
+		}
 	}
 
 	// Users can bind to any local account, if its empty we will assume the $G account.
@@ -963,6 +976,7 @@ func (c *client) sendLeafConnect(clusterName string, headers bool) error {
 		RemoteAccount: c.acc.GetName(),
 		Proto:         c.srv.getServerProto(),
 		Isolate:       c.leaf.remote.RequestIsolation,
+		RemoteName:    c.leaf.remote.Name,
 	}
 
 	// If a signature callback is specified, this takes precedence over anything else.
@@ -2009,6 +2023,9 @@ type leafConnectInfo struct {
 	// Tells the accept side which account the remote is binding to.
 	RemoteAccount string `json:"remote_account,omitempty"`
 
+	// RemoteName is the configured name of the remote leafnode entry.
+	RemoteName string `json:"remote_name,omitempty"`
+
 	// The accept side of a LEAF connection, unlike ROUTER and GATEWAY, receives
 	// only the CONNECT protocol, and no INFO. So we need to send the protocol
 	// version as part of the CONNECT. It will indicate if a connection supports
@@ -2104,6 +2121,8 @@ func (c *client) processLeafNodeConnect(s *Server, arg []byte, lang string) erro
 
 	// Remember the remote server.
 	c.leaf.remoteServer = proto.Name
+	// Remember the configured remote name (if any).
+	c.leaf.remoteName = proto.RemoteName
 	// Remember the remote account name
 	c.leaf.remoteAccName = proto.RemoteAccount
 	// Remember if the leafnode requested isolation.
