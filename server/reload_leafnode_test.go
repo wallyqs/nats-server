@@ -287,6 +287,87 @@ func TestConfigReloadLeafNodeMultipleSequentialReloads(t *testing.T) {
 	checkLeafNodeConnectedCount(t, hubs[1], 0)
 }
 
+// TestConfigReloadLeafNodeURLChangeTriggersReconnect tests that modifying
+// the URL list of an existing remote causes a disconnect and reconnect, since
+// URLs are part of the remote's identity used for matching old and new configs.
+func TestConfigReloadLeafNodeURLChangeTriggersReconnect(t *testing.T) {
+	confHub1 := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub1"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub1, hub1Opts := RunServerWithConfig(confHub1)
+	defer hub1.Shutdown()
+
+	confHub2 := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub2"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub2, hub2Opts := RunServerWithConfig(confHub2)
+	defer hub2.Shutdown()
+
+	confHub3 := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub3"
+		leafnodes {
+			port: -1
+		}
+	`))
+	hub3, hub3Opts := RunServerWithConfig(confHub3)
+	defer hub3.Shutdown()
+
+	// Start leaf with a single remote that has two URLs.
+	tmpl := `
+		port: -1
+		server_name: "leaf"
+		leafnodes {
+			remotes [
+				{ urls: [%s] }
+			]
+		}
+	`
+	url1 := fmt.Sprintf(`"nats://127.0.0.1:%d"`, hub1Opts.LeafNode.Port)
+	url2 := fmt.Sprintf(`"nats://127.0.0.1:%d"`, hub2Opts.LeafNode.Port)
+	url3 := fmt.Sprintf(`"nats://127.0.0.1:%d"`, hub3Opts.LeafNode.Port)
+
+	confLeaf := createConfFile(t, []byte(fmt.Sprintf(tmpl, url1+", "+url2)))
+	leafSrv, _ := RunServerWithConfig(confLeaf)
+	defer leafSrv.Shutdown()
+
+	// Should be connected to one of the two hubs.
+	checkLeafNodeConnected(t, leafSrv)
+
+	// Now reload: change URLs from [hub1, hub2] to [hub1, hub3].
+	// Since URLs are part of the remote identity, this is treated as
+	// a remove of the old remote + add of a new remote, causing a
+	// full disconnect and reconnect cycle.
+	reloadUpdateConfig(t, leafSrv, confLeaf, fmt.Sprintf(tmpl, url1+", "+url3))
+
+	// The leaf should reconnect (to either hub1 or hub3 now).
+	checkLeafNodeConnected(t, leafSrv)
+	// hub2 should no longer have any leaf connections.
+	checkLeafNodeConnectedCount(t, hub2, 0)
+
+	// Now test adding a URL: [hub1, hub3] -> [hub1, hub2, hub3].
+	// This also triggers a remove+add cycle since URLs changed.
+	reloadUpdateConfig(t, leafSrv, confLeaf, fmt.Sprintf(tmpl, url1+", "+url2+", "+url3))
+	checkLeafNodeConnected(t, leafSrv)
+
+	// Now test removing a URL: [hub1, hub2, hub3] -> [hub1].
+	reloadUpdateConfig(t, leafSrv, confLeaf, fmt.Sprintf(tmpl, url1))
+	checkLeafNodeConnected(t, leafSrv)
+	// After reload, should only be connected to hub1.
+	checkLeafNodeConnectedCount(t, hub1, 1)
+	checkLeafNodeConnectedCount(t, hub2, 0)
+	checkLeafNodeConnectedCount(t, hub3, 0)
+
+}
+
 // TestConfigReloadLeafNodeAddRemoveSameAccountDifferentURLs tests that two
 // remotes with the same local account but different URLs are handled correctly
 // during add/remove operations.
