@@ -18,6 +18,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"reflect"
 	"slices"
@@ -883,6 +884,7 @@ type remoteLeafOption struct {
 	tlsFirstChanged    bool
 	compressionChanged bool
 	disabledChanged    bool
+	urlsChanged        bool
 	opts               *RemoteLeafOpts
 }
 
@@ -933,6 +935,19 @@ func (l *leafNodeOption) Apply(s *Server) {
 			lrc.Disabled = rlo.opts.Disabled
 			s.Noticef("Reloaded: LeafNode Remote %s Disabled value is: %v",
 				getLeafNodeRemoteName(lrc.RemoteLeafOpts), rlo.opts.Disabled)
+		}
+		if rlo.urlsChanged {
+			lrc.URLs = rlo.opts.URLs
+			// Rebuild the internal url list, preserving randomization preference.
+			lrc.urls = make([]*url.URL, len(rlo.opts.URLs))
+			copy(lrc.urls, rlo.opts.URLs)
+			if !lrc.NoRandomize {
+				rand.Shuffle(len(lrc.urls), func(i, j int) {
+					lrc.urls[i], lrc.urls[j] = lrc.urls[j], lrc.urls[i]
+				})
+			}
+			s.Noticef("Reloaded: LeafNode Remote %s URLs updated",
+				getLeafNodeRemoteName(lrc.RemoteLeafOpts))
 		}
 		lrc.Unlock()
 	}
@@ -1009,6 +1024,9 @@ func applyCompressionChanges(c *client, co *CompressionOpts) bool {
 }
 
 func getLeafNodeRemoteName(rlo *RemoteLeafOpts) string {
+	if rlo.Name != _EMPTY_ {
+		return fmt.Sprintf("%q", rlo.Name)
+	}
 	acc := rlo.LocalAccount
 	if acc == _EMPTY_ {
 		acc = globalAccountName
@@ -1139,12 +1157,14 @@ func getLeafNodeOptionsChanges(s *Server, old, new *LeafNodeOpts) (*leafNodeOpti
 		// Now we need to make sure that there are no changes that we don't
 		// support for a RemoteLeafOpts.
 		err := checkConfigsEqual(lrc.RemoteLeafOpts, rlo, []string{
+			"Name",
 			"Compression",
 			"Disabled",
 			"LocalAccount",
 			"TLS",
 			"TLSHandshakeFirst",
 			"TLSConfig",
+			"URLs",
 		})
 		if err != nil {
 			lrc.RUnlock()
@@ -1161,6 +1181,7 @@ func getLeafNodeOptionsChanges(s *Server, old, new *LeafNodeOpts) (*leafNodeOpti
 			tlsFirstChanged:    lrc.TLSHandshakeFirst != rlo.TLSHandshakeFirst,
 			compressionChanged: !lrc.Compression.equals(&rlo.Compression),
 			disabledChanged:    lrc.Disabled != rlo.Disabled,
+			urlsChanged:        !reflect.DeepEqual(lrc.URLs, rlo.URLs),
 			opts:               rlo,
 		}
 		lrc.RUnlock()
