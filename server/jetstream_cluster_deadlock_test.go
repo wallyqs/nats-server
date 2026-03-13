@@ -388,6 +388,7 @@ func TestJetStreamClusterWorkqueueConcurrentPeerRemoveAndPublish(t *testing.T) {
 		Subjects:  []string{"cwork.>"},
 		Replicas:  3,
 		Retention: nats.WorkQueuePolicy,
+		// No MaxMsgs limit - we'll create deletions through out-of-order acking
 	})
 	require_NoError(t, err)
 	c.waitOnStreamLeader(globalAccountName, streamName)
@@ -399,43 +400,110 @@ func TestJetStreamClusterWorkqueueConcurrentPeerRemoveAndPublish(t *testing.T) {
 	require_NoError(t, err)
 	c.waitOnConsumerLeader(globalAccountName, streamName, "worker")
 
-	// Publish initial messages.
-	numMessages := 2000
-	t.Logf("Publishing %d initial messages...", numMessages)
+	// Start periodic stream state monitoring.
+	stopMonitor := make(chan struct{})
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopMonitor:
+				return
+			case <-ticker.C:
+				if si, err := js.StreamInfo(streamName); err == nil {
+					t.Logf("[MONITOR] Msgs=%d, Deleted=%d, FirstSeq=%d, LastSeq=%d",
+						si.State.Msgs, si.State.NumDeleted, si.State.FirstSeq, si.State.LastSeq)
+				}
+			}
+		}
+	}()
+	defer func() {
+		close(stopMonitor)
+		<-monitorDone
+	}()
+
+	// Publish initial messages to TWO different subject patterns.
+	// Strategy: Interleave subjects "keep" and "delete" so that when we consume
+	// only "delete" subjects, we create gaps (deletions) in the sequence.
+	numMessages := 500000
+	t.Logf("Publishing %d messages (interleaving keep/delete subjects)...", numMessages)
+
 	for i := 0; i < numMessages; i++ {
-		_, err := js.Publish(fmt.Sprintf("cwork.item.%d", i%30), []byte(fmt.Sprintf("data-%d", i)))
+		var subject string
+		// Interleave: 40% "keep" subjects, 60% "delete" subjects
+		// This will create ~300K deletions when we consume "delete" messages
+		if i%5 < 2 {
+			// 40% - These messages will stay (keep)
+			subject = fmt.Sprintf("cwork.keep.%d", i%50)
+		} else {
+			// 60% - These messages will be deleted (consumed and acked)
+			subject = fmt.Sprintf("cwork.delete.%d", i%50)
+		}
+
+		_, err := js.Publish(subject, []byte(fmt.Sprintf("data-%d", i)))
 		if err != nil {
 			t.Fatalf("Publish error: %v", err)
 		}
-	}
 
-	// Consume and ack most messages.
-	sub, err := js.PullSubscribe("cwork.>", "worker")
+		if i > 0 && i%25000 == 0 {
+			t.Logf("Published %d/%d messages (%.1f%%)...", i, numMessages, float64(i)/float64(numMessages)*100)
+		}
+	}
+	t.Logf("Completed publishing all %d messages (40%% keep, 60%% delete subjects)", numMessages)
+
+	// Consume and ack only the "delete" subject messages.
+	// Since these are interleaved with "keep" messages, acking them creates
+	// gaps in the sequence, which increases NumDeleted.
+	// Expected: ~300K deletions (60% of 500K messages)
+
+	sub, err := js.PullSubscribe("cwork.delete.>", "delete_worker")
 	require_NoError(t, err)
 
 	ackedCount := 0
-	toAck := numMessages - 50
-	for ackedCount < toAck {
-		batch := toAck - ackedCount
-		if batch > 100 {
-			batch = 100
+	expectedAcks := int(float64(numMessages) * 0.6) // 60% of messages
+	t.Logf("Consuming and acking 'delete' subject messages (expect ~%d)...", expectedAcks)
+
+	for ackedCount < expectedAcks {
+		batchSize := expectedAcks - ackedCount
+		if batchSize > 5000 {
+			batchSize = 5000
 		}
-		msgs, err := sub.Fetch(batch, nats.MaxWait(5*time.Second))
+
+		msgs, err := sub.Fetch(batchSize, nats.MaxWait(20*time.Second))
 		if err != nil {
+			t.Logf("Fetch error at %d acks: %v", ackedCount, err)
 			break
 		}
-		for _, m := range msgs {
-			m.Ack()
+
+		for _, msg := range msgs {
+			msg.Ack()
 			ackedCount++
 		}
-	}
-	t.Logf("Acked %d messages", ackedCount)
 
-	// Let deletions settle.
-	time.Sleep(2 * time.Second)
+		if ackedCount%25000 == 0 {
+			t.Logf("Acked %d/%d messages (%.1f%%)...", ackedCount, expectedAcks,
+				float64(ackedCount)/float64(expectedAcks)*100)
+		}
+	}
+	t.Logf("Completed acking: %d 'delete' subject messages (creates gaps = deletions)", ackedCount)
+
+	// Let deletions settle - increased time for large volume.
+	time.Sleep(10 * time.Second)
 
 	si, _ := js.StreamInfo(streamName)
-	t.Logf("State: Msgs=%d, Deleted=%d", si.State.Msgs, si.State.NumDeleted)
+	t.Logf("State before shutdown: Msgs=%d, Deleted=%d (FirstSeq=%d, LastSeq=%d)",
+		si.State.Msgs, si.State.NumDeleted, si.State.FirstSeq, si.State.LastSeq)
+
+	// Verify we have the required deletion volume
+	if si.State.NumDeleted < 200000 {
+		t.Fatalf("Expected at least 200K deletions, got %d (Msgs=%d, FirstSeq=%d, LastSeq=%d)",
+			si.State.NumDeleted, si.State.Msgs, si.State.FirstSeq, si.State.LastSeq)
+	}
+	t.Logf("✓ Deletion requirement met: %d deletions (required >= 200K)", si.State.NumDeleted)
+	t.Logf("  NumDeleted = (LastSeq - FirstSeq + 1) - Msgs = (%d - %d + 1) - %d = %d",
+		si.State.LastSeq, si.State.FirstSeq, si.State.Msgs, si.State.NumDeleted)
 
 	// Pick target for removal.
 	target := c.randomNonStreamLeader(globalAccountName, streamName)
@@ -454,40 +522,91 @@ func TestJetStreamClusterWorkqueueConcurrentPeerRemoveAndPublish(t *testing.T) {
 	nc, js = jsClientConnect(t, c.leader())
 	defer nc.Close()
 
-	// Start concurrent operations.
-	var wg sync.WaitGroup
-	errCh := make(chan error, 100)
+	// Create another consumer subscription for concurrent acking during chaos
+	// This will consume from the remaining "keep" messages
+	sub2, err := js.PullSubscribe("cwork.>", "chaos_worker")
+	require_NoError(t, err)
 
-	// Goroutine 1: Keep publishing.
+	// Start concurrent operations - MADE MORE AGGRESSIVE.
+	var wg sync.WaitGroup
+	errCh := make(chan error, 1000)
+
+	// Multiple publisher goroutines for increased concurrency.
+	numPublishers := 10
+	messagesPerPublisher := 500
+	for p := 0; p < numPublishers; p++ {
+		wg.Add(1)
+		publisherID := p
+		go func() {
+			defer wg.Done()
+			for i := 0; i < messagesPerPublisher; i++ {
+				_, err := js.Publish(
+					fmt.Sprintf("cwork.new.p%d.%d", publisherID, i),
+					[]byte(fmt.Sprintf("new-p%d-%d", publisherID, i)),
+				)
+				if err != nil {
+					errCh <- fmt.Errorf("publisher %d error: %v", publisherID, err)
+					return
+				}
+				// NO SLEEP - maximum pressure
+			}
+		}()
+	}
+
+	// Concurrent consumer/acker to create deletion pressure during recovery.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		time.Sleep(10 * time.Millisecond) // Brief wait for messages to appear
 		for i := 0; i < 500; i++ {
-			_, err := js.Publish(fmt.Sprintf("cwork.new.%d", i), []byte(fmt.Sprintf("new-%d", i)))
+			msgs, err := sub2.Fetch(20, nats.MaxWait(100*time.Millisecond))
 			if err != nil {
-				errCh <- fmt.Errorf("publish error during recovery: %v", err)
-				return
+				// Expected to fail sometimes during chaos
+				continue
 			}
-			time.Sleep(time.Millisecond)
+			for _, m := range msgs {
+				m.Ack() // Create more deletions during recovery
+			}
 		}
 	}()
 
-	// Goroutine 2: Restart the server (triggers recovery).
+	// Continuously add consumers during recovery and peer-remove.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		// Small delay to let publishes start.
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // Brief delay to let recovery start
+		for i := 0; i < 50; i++ {
+			consumerName := fmt.Sprintf("chaos_consumer_%d", i)
+			_, err := js.AddConsumer(streamName, &nats.ConsumerConfig{
+				Durable:   consumerName,
+				AckPolicy: nats.AckExplicitPolicy,
+			})
+			if err != nil {
+				// Expected to fail during peer-remove and recovery chaos
+				t.Logf("Consumer creation failed (expected during chaos): %v", err)
+			} else {
+				t.Logf("Created consumer %s during recovery chaos", consumerName)
+			}
+			time.Sleep(100 * time.Millisecond) // Create consumers every 100ms
+		}
+	}()
+
+	// Restart the server (triggers recovery) - REDUCED DELAY.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Minimal delay - start recovery ASAP while publishers are active.
+		time.Sleep(5 * time.Millisecond)
 		target = c.restartServer(target)
 		t.Logf("Server %s restarted", targetName)
 	}()
 
-	// Goroutine 3: Issue peer-remove after a brief delay.
+	// Issue peer-remove with REDUCED DELAY to hit recovery window.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		// Wait a bit for the server to start recovering.
-		time.Sleep(200 * time.Millisecond)
+		// Shorter delay to hit the recovery path more reliably.
+		time.Sleep(50 * time.Millisecond)
 
 		removeSub := fmt.Sprintf(JSApiStreamRemovePeerT, streamName)
 		resp, err := nc.Request(removeSub, []byte(`{"peer":"`+targetName+`"}`), 10*time.Second)
@@ -510,7 +629,7 @@ func TestJetStreamClusterWorkqueueConcurrentPeerRemoveAndPublish(t *testing.T) {
 	select {
 	case <-done:
 		t.Log("All concurrent operations completed")
-	case <-time.After(60 * time.Second):
+	case <-time.After(120 * time.Second):
 		t.Fatal("TIMEOUT: Concurrent operations deadlocked!")
 	}
 
