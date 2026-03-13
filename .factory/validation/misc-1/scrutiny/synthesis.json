@@ -1,0 +1,31 @@
+{
+  "milestone": "misc-1",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "go test ./conf/v2/... -count=1 -v", "exitCode": 0 },
+    "typecheck": { "passed": true, "command": "go vet ./conf/v2/...", "exitCode": 0 },
+    "lint": { "passed": true, "command": "go build ./conf/v2/...", "exitCode": 0 }
+  },
+  "baselineValidation": {
+    "test": { "passed": true, "command": "go test ./conf/... -count=1", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "misc-parser-polish",
+      "severity": "non_blocking",
+      "description": "Residual casing inconsistency: parse.go:336 error message says 'expected Zulu formatted DateTime' (capital T) while all other references were aligned to 'Datetime'. Cosmetic only, not API surface."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [],
+  "previousRound": null
+}

@@ -1,0 +1,22 @@
+{
+  "featureId": "misc-parser-polish",
+  "reviewedAt": "2026-03-13T05:15:00.000Z",
+  "commitId": "45f32b882a6838441a2aa72e61165290b589ecef",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "All 5 polish fixes are correctly implemented, well-tested, and follow existing codebase conventions. Each fix targets a specific issue identified in prior scrutiny reviews. The changes are minimal and focused, touching only the necessary files (parse.go, token.go, unmarshal.go, ast_test.go) plus a new polish_test.go with 8 test cases covering all fixes. All assignMap call sites (5 total) were correctly updated to propagate the strict parameter. The Unmarshaler check in assignSliceFromArray correctly prioritizes pointer-receiver checks before value-receiver checks, matching the existing pattern used in assignValue and assignPointerValue.",
+    "issues": [
+      {
+        "file": "conf/v2/parse.go",
+        "line": 336,
+        "severity": "non_blocking",
+        "description": "Residual casing inconsistency: error message says 'expected Zulu formatted DateTime' (capital T) while the fix aligned all other references to 'Datetime'. This is a user-facing error string, not API surface, so it's non-blocking but could be cleaned up for full consistency."
+      }
+    ]
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": null,
+  "summary": "All 5 polish fixes pass review: (1) sepKnown=true correctly prevents parent lexer from overwriting included file key separators, (2) DateTime→Datetime casing is now consistent between ItemType.String() and DatetimeNode.Type(), (3) all three enum String() methods use safe fmt.Sprintf fallback instead of panicking, (4) strict mode is properly propagated through all 5 assignMap call sites to unmarshalMap for nested structs in maps, (5) Unmarshaler interface check in assignSliceFromArray correctly handles both pointer and value receiver cases before kind-based branching. Tests are comprehensive with 8 new test cases in polish_test.go plus one updated test in ast_test.go. One non-blocking observation: parse.go:336 still has 'DateTime' casing in an error message string."
+}
