@@ -267,36 +267,45 @@ func buildFieldIndexRecursive(t reflect.Type, parentIndex []int, fields map[stri
 			continue
 		}
 
-		// Determine the config key name for this field.
-		name := configFieldName(sf)
-		if name == "-" {
+		// Determine the config key name(s) for this field.
+		// Aliases allow multiple config keys to map to the same struct field
+		// (e.g., conf:"host|net" maps both "host" and "net").
+		aliases := configFieldAliases(sf)
+		if len(aliases) == 1 && aliases[0] == "-" {
 			continue
 		}
 
-		fields[strings.ToLower(name)] = &fieldInfo{index: index}
+		fi := &fieldInfo{index: index}
+		for _, alias := range aliases {
+			fields[strings.ToLower(alias)] = fi
+		}
 	}
 }
 
-// configFieldName returns the config key name for a struct field.
-// If the field has a conf tag, the tag name is used. Otherwise,
-// the lowercased Go field name is used.
-func configFieldName(sf reflect.StructField) string {
+// configFieldAliases returns the list of config key aliases for a struct
+// field. If the field has a conf tag with pipe-separated aliases (e.g.,
+// conf:"host|net"), all aliases are returned. The first alias is the
+// primary name used by Marshal. If there is no tag or the tag name is
+// empty, the Go field name is returned as the single alias.
+// A tag of "-" returns ["-"] to signal the field should be skipped.
+func configFieldAliases(sf reflect.StructField) []string {
 	tag := sf.Tag.Get("conf")
 	if tag == "" {
-		return sf.Name
+		return []string{sf.Name}
 	}
 
-	// Parse the tag: "name,omitempty" -> name
+	// Parse the tag: "name1|name2,omitempty" -> "name1|name2"
 	name := tag
 	if idx := strings.Index(tag, ","); idx != -1 {
 		name = tag[:idx]
 	}
 
 	if name == "" {
-		return sf.Name
+		return []string{sf.Name}
 	}
 
-	return name
+	// Split on pipe to get aliases.
+	return strings.Split(name, "|")
 }
 
 // fieldByIndex traverses the struct value to reach a field at the given

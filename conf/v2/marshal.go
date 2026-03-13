@@ -205,7 +205,9 @@ type tagOptions struct {
 }
 
 // parseTag parses the conf struct tag for a field, returning the config
-// key name and options.
+// key name and options. For tags with pipe-separated aliases (e.g.,
+// conf:"host|net"), only the first (primary) alias is returned as the
+// output key name. This ensures Marshal always uses the primary alias.
 func parseTag(sf reflect.StructField) (string, tagOptions) {
 	tag := sf.Tag.Get("conf")
 	var opts tagOptions
@@ -225,6 +227,12 @@ func parseTag(sf reflect.StructField) (string, tagOptions) {
 
 	if name == "" {
 		return strings.ToLower(sf.Name), opts
+	}
+
+	// For pipe-separated aliases (e.g., "host|net"), use only the
+	// first (primary) alias as the output key.
+	if idx := strings.Index(name, "|"); idx != -1 {
+		name = name[:idx]
 	}
 
 	return name, opts
