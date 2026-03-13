@@ -1,0 +1,196 @@
+{
+  "groupId": "cross-area",
+  "testedAt": "2026-03-13T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "surface": "go test output analysis (read-only)",
+    "testFiles": ["conf/v2/cross_test.go", "conf/v2/marshal_test.go"]
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-CROSS-001",
+      "title": "Unmarshal then Marshal produces valid config",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test -run TestCrossUnmarshalMarshalClusterConfig",
+          "expected": "PASS - Parse->Unmarshal->Marshal->re-Parse succeeds for cluster config with nested maps, arrays, multiple value types",
+          "observed": "PASS - Cluster config with port, authorization block, and routes array round-trips correctly"
+        },
+        {
+          "action": "Run go test -run TestCrossUnmarshalMarshalSimpleConf",
+          "expected": "PASS - Simple config with listen address and authorization timeout round-trips",
+          "observed": "PASS - listen=127.0.0.1:4222 and authorization.timeout=0.5 preserved through round-trip"
+        },
+        {
+          "action": "Run go test -run TestCrossUnmarshalMarshalMixedTypes",
+          "expected": "PASS - All scalar types (string, int, float, bool, duration, time) round-trip correctly",
+          "observed": "PASS - All 6 scalar types round-trip with value equality confirmed field-by-field"
+        },
+        {
+          "action": "Run go test -run TestCrossUnmarshalMarshalArrayOfMaps",
+          "expected": "PASS - Array of map structs (users list) round-trips",
+          "observed": "PASS - 2 users with user/password fields survive Parse->Unmarshal->Marshal->re-Parse"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/cross-area/VAL-CROSS-001-test-output.txt",
+        "testsRun": ["TestCrossUnmarshalMarshalClusterConfig", "TestCrossUnmarshalMarshalSimpleConf", "TestCrossUnmarshalMarshalMixedTypes", "TestCrossUnmarshalMarshalArrayOfMaps"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-002",
+      "title": "v1 config parsed by v2 then marshaled is v1-parseable",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test -run TestCrossV1V2V1Compatibility",
+          "expected": "PASS - All v1 sample configs survive v1 parse -> v2 parse -> v2 marshal -> v1 re-parse pipeline with equivalent values",
+          "observed": "PASS - All 10 subtests pass: simple_top_level, booleans, nested_map_with_arrays, cluster_config, single-quoted_strings, array_of_maps, datetime_and_bool, bcrypt_password, convenient_numbers, JSON-style_nested_blocks"
+        },
+        {
+          "action": "Verify test exercises v1/v2 equivalence check",
+          "expected": "Test uses conf.Parse (v1) and v2.Parse, verifies reflect.DeepEqual, then marshals and re-parses with v1",
+          "observed": "Test confirms v1 and v2 produce identical maps via reflect.DeepEqual, marshals via helper, re-parses with v1 conf.Parse, and compares values key-by-key"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/cross-area/VAL-CROSS-002-test-output.txt",
+        "testsRun": ["TestCrossV1V2V1Compatibility"],
+        "subtests": ["simple_top_level", "booleans", "nested_map_with_arrays", "cluster_config", "single-quoted_strings", "array_of_maps", "datetime_and_bool", "bcrypt_password", "convenient_numbers", "JSON-style_nested_blocks"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-003",
+      "title": "Full pipeline — file to struct to modified struct to file",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test -run TestCrossFullModifyPipeline",
+          "expected": "PASS - ParseFile->Unmarshal->modify Port=4223->Marshal->write->ParseFile->Unmarshal->verify Port=4223 and all other fields unchanged",
+          "observed": "PASS - Realistic config with host, port, debug, max_payload, ping_interval, cluster (name/port/routes), authorization (user/password/timeout) all verified field-by-field after Port modification"
+        },
+        {
+          "action": "Run go test -run TestCrossFullModifyPipelineMultipleFields",
+          "expected": "PASS - Multiple field modifications (Port, Debug, MaxConn) preserved while Host unchanged",
+          "observed": "PASS - Port=4223, Debug=true, MaxConn=2000 all modified and verified; Host=0.0.0.0 unchanged"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/cross-area/VAL-CROSS-003-test-output.txt",
+        "testsRun": ["TestCrossFullModifyPipeline", "TestCrossFullModifyPipelineMultipleFields"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-004",
+      "title": "Marshal nil and empty values",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test -run TestMarshalNilInput",
+          "expected": "PASS - Marshal(nil) returns error without panic",
+          "observed": "PASS - Marshal(nil) returns non-nil error"
+        },
+        {
+          "action": "Run go test -run TestMarshalNilPointer",
+          "expected": "PASS - Marshal((*Config)(nil)) returns error without panic",
+          "observed": "PASS - Marshal of nil pointer returns non-nil error"
+        },
+        {
+          "action": "Run go test -run TestMarshalEmptyStruct",
+          "expected": "PASS - Marshal(struct{}{}) returns valid (possibly empty) config",
+          "observed": "PASS - Empty struct produces valid output (empty or parseable)"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/cross-area/VAL-CROSS-004-test-output.txt",
+        "testsRun": ["TestMarshalNilInput", "TestMarshalNilPointer", "TestMarshalEmptyStruct"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-005",
+      "title": "Marshal output key separator consistency",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test -run TestMarshalKeySeparatorConsistency",
+          "expected": "PASS - All key-value lines in Marshal output use ': ' separator consistently",
+          "observed": "PASS - Test marshals struct with name/port/debug fields, scans all output lines, confirms every key-value line contains ': ' separator"
+        },
+        {
+          "action": "Verify test covers the assertion requirement (deterministic, documented separator)",
+          "expected": "Test checks every non-structural line for ': ' separator",
+          "observed": "Test iterates all lines, skips empty/brace lines, asserts strings.Contains(line, \": \") on each"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/cross-area/VAL-CROSS-005-test-output.txt",
+        "testsRun": ["TestMarshalKeySeparatorConsistency"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-006",
+      "title": "AST round-trip vs struct round-trip fidelity",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test -run TestCrossASTRoundTripPreservesComments",
+          "expected": "PASS - AST round-trip (ParseASTRaw->Emit) preserves all 8 comments from input",
+          "observed": "PASS - All 8 comments (# and //) found in AST output; output is valid parseable config"
+        },
+        {
+          "action": "Run go test -run TestCrossStructRoundTripDropsComments",
+          "expected": "PASS - Struct round-trip (Unmarshal->Marshal) does not include any comments",
+          "observed": "PASS - No comments found in struct output; output is valid parseable config"
+        },
+        {
+          "action": "Run go test -run TestCrossASTVsStructFidelityComparison",
+          "expected": "PASS - AST preserves comments, struct does not; both produce valid parseable output with equivalent resolved values",
+          "observed": "PASS - All 6 comments present in AST output, absent in struct output; both parse to equivalent maps; original map DeepEqual to AST map"
+        },
+        {
+          "action": "Run go test -run TestCrossASTPreservesVariablesStructResolves",
+          "expected": "PASS - AST preserves $base_port reference; struct resolves to integer 4222",
+          "observed": "PASS - AST output contains '$base_port' and comment; struct output contains neither; both valid config"
+        },
+        {
+          "action": "Run go test -run TestCrossASTPreservesIncludesStructExpands",
+          "expected": "PASS - AST preserves include directive; struct does not contain include",
+          "observed": "PASS - AST output contains 'include' and 'users.conf'; struct output has neither; struct output valid config"
+        },
+        {
+          "action": "Run go test -run TestCrossASTPreservesFormattingStructNormalizes",
+          "expected": "PASS - AST preserves original separator styles (=, :, whitespace); struct normalizes all to ': '",
+          "observed": "PASS - AST output preserves '=' for port; struct output uses ': ' for all lines; both valid config"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/cross-area/VAL-CROSS-006-test-output.txt",
+        "testsRun": [
+          "TestCrossASTRoundTripPreservesComments",
+          "TestCrossStructRoundTripDropsComments",
+          "TestCrossASTVsStructFidelityComparison",
+          "TestCrossASTPreservesVariablesStructResolves",
+          "TestCrossASTPreservesIncludesStructExpands",
+          "TestCrossASTPreservesFormattingStructNormalizes"
+        ],
+        "allPassed": true
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 6 assertions (VAL-CROSS-001 through VAL-CROSS-006): all 6 passed. Total of 16 individual test functions executed across cross_test.go and marshal_test.go, all PASS. The cross-area integration tests comprehensively cover: unmarshal-marshal round-trips with various types, v1-v2-v1 compatibility across 10 config samples, full file-based modify pipelines, nil/empty error handling, key separator consistency, and the fundamental AST vs struct round-trip fidelity distinction."
+}

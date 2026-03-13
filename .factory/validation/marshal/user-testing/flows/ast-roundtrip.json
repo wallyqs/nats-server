@@ -1,0 +1,182 @@
+{
+  "groupId": "ast-roundtrip",
+  "testedAt": "2026-03-13T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "surface": "go test output analysis (read-only)",
+    "testFile": "conf/v2/emit_test.go"
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-MARSHAL-015",
+      "title": "Comment preservation through AST round-trip",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestEmitPreservesComments",
+          "expected": "# and // comments retained in Emit output",
+          "observed": "PASS - leading comment '# Server configuration', trailing '# default port', and '// debug mode' all present in emitted output"
+        },
+        {
+          "action": "Run TestEmitPreservesCommentStyles",
+          "expected": "Both # and // comment styles preserved",
+          "observed": "PASS - both '#' and '//' styles found in emitted output"
+        },
+        {
+          "action": "Run TestEmitRoundTripWithComments",
+          "expected": "Full round-trip with comments preserves all comments and structural equivalence",
+          "observed": "PASS - '# Top comment', '# inline comment', '# Between items' all present; reflect.DeepEqual confirms structural equivalence"
+        },
+        {
+          "action": "Run TestEmitArrayWithComments",
+          "expected": "Comments inside arrays preserved",
+          "observed": "PASS - '# primary' and '# secondary' trailing comments on array elements preserved"
+        },
+        {
+          "action": "Run TestEmitMultipleCommentBlocks",
+          "expected": "Multiple consecutive comment blocks preserved",
+          "observed": "PASS - '# Block 1', '# Block 1 continued', '# Block 2' all present in output"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/ast-roundtrip/VAL-MARSHAL-015-test-output.txt",
+        "testsRun": 5,
+        "testsPassed": 5,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-016",
+      "title": "Formatting preservation through AST round-trip",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestEmitPreservesFormatting",
+          "expected": "Indentation preserved for nested map blocks",
+          "observed": "PASS - nested 'port' and 'name' inside cluster block are indented with spaces"
+        },
+        {
+          "action": "Run TestEmitPreservesBlankLines",
+          "expected": "Blank lines between items preserved",
+          "observed": "PASS - blank line between port=4222 and host preserved (verified via '4222\\n\\n' pattern)"
+        },
+        {
+          "action": "Run TestEmitPreservesIndentation",
+          "expected": "Multi-level nesting indentation preserved",
+          "observed": "PASS - server at column 0, inner port:4222 indented; nested cluster block indented correctly"
+        },
+        {
+          "action": "Run TestEmitPreservesKeySeparatorStyles",
+          "expected": "All three separator styles (=, :, space) preserved",
+          "observed": "PASS - 'port' uses '=', 'host' uses ':', 'debug' uses space separator"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/ast-roundtrip/VAL-MARSHAL-016-test-output.txt",
+        "testsRun": 4,
+        "testsPassed": 4,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-017",
+      "title": "Variable definitions preserved in round-trip",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestParseASTRawPreservesVariableNode",
+          "expected": "AST contains VariableNode for $index, not resolved value",
+          "observed": "PASS - foo's value is VariableNode with Name='index'"
+        },
+        {
+          "action": "Run TestEmitPreservesVariableDefinitions",
+          "expected": "Variable definition and $reference present in emitted output",
+          "observed": "PASS - 'index' definition and '$index' reference both present, not expanded to 22"
+        },
+        {
+          "action": "Run TestEmitRoundTripWithVariables",
+          "expected": "Multiple $references preserved and structural equivalence maintained",
+          "observed": "PASS - 2+ '$index' references found; reflect.DeepEqual confirms Parse(emitted) == Parse(original)"
+        },
+        {
+          "action": "Run TestEmitVariableNestedScope",
+          "expected": "Nested scope variables preserved ($inner_index and $index)",
+          "observed": "PASS - '$inner_index' in nested scope and '$index' at top level both preserved; structural equivalence confirmed"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/ast-roundtrip/VAL-MARSHAL-017-test-output.txt",
+        "testsRun": 4,
+        "testsPassed": 4,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-018",
+      "title": "Include directives preserved in round-trip",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestEmitPreservesIncludeDirective",
+          "expected": "Include directive and path preserved in emitted output",
+          "observed": "PASS - 'include' keyword and 'users.conf' path present in emitted output"
+        },
+        {
+          "action": "Run TestEmitRoundTripWithIncludes",
+          "expected": "Full round-trip preserves include directive verbatim",
+          "observed": "PASS - include directive with 'users.conf' path preserved in round-trip output"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/ast-roundtrip/VAL-MARSHAL-018-test-output.txt",
+        "testsRun": 2,
+        "testsPassed": 2,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-019",
+      "title": "Round-trip structural equivalence",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestEmitRoundTripStructuralEquivalence (10 sub-tests)",
+          "expected": "Parse(Emit(ParseASTRaw(input))) == Parse(input) for all input types",
+          "observed": "PASS - all 10 sub-tests pass: simple kv, nested map, array, array of maps, booleans, int with suffix, float, mixed types, JSON-style, deeply nested"
+        },
+        {
+          "action": "Run TestEmitRoundTripSimpleConf",
+          "expected": "Round-trip on real conf/simple.conf fixture preserves structure",
+          "observed": "PASS - include directive and 'Pull in from file' comment preserved"
+        },
+        {
+          "action": "Run TestEmitRoundTripV1TestCorpus (5 sub-tests)",
+          "expected": "V1 test corpus configs all pass structural equivalence",
+          "observed": "PASS - all 5 sub-tests pass: simple config, cluster config, nested maps, mixed separators, multiline array; all verified via reflect.DeepEqual"
+        },
+        {
+          "action": "Run TestEmitDocumentMethod",
+          "expected": "Document.Emit() convenience method works correctly",
+          "observed": "PASS - Document.Emit() produces output containing 'port'"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/ast-roundtrip/VAL-MARSHAL-019-test-output.txt",
+        "testsRun": 4,
+        "testsPassed": 4,
+        "testsFailed": 0,
+        "subTestsRun": 19,
+        "subTestsPassed": 19
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 5 assertions (VAL-MARSHAL-015 through VAL-MARSHAL-019): all 5 passed. Total of 20 test functions executed (with 15 additional sub-tests), all passing. AST round-trip correctly preserves comments, formatting, variable definitions/references, include directives, and structural equivalence across a diverse corpus of NATS config inputs."
+}

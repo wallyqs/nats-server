@@ -1,0 +1,143 @@
+{
+  "groupId": "special-edge",
+  "testedAt": "2026-03-13T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "surface": "go test output analysis (read-only)",
+    "testFiles": "conf/v2/marshal_test.go"
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-MARSHAL-020",
+      "title": "time.Duration marshaling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalTimeDuration",
+          "expected": "5*time.Second marshals as '5s', 2m30s marshals as '2m30s', round-trip preserves values",
+          "observed": "PASS - output contains '5s' and '2m30s', Unmarshal recovers exact duration values"
+        },
+        {
+          "action": "Run TestMarshalDurationEdgeCases",
+          "expected": "100ms and 24h edge cases marshal correctly and round-trip",
+          "observed": "PASS - short (100ms) and long (24h) durations round-trip with value preservation"
+        },
+        {
+          "action": "Verify test exercises assertion behavior",
+          "expected": "Tests check Go duration string format and round-trip fidelity",
+          "observed": "Tests verify output contains duration strings (not raw nanoseconds), and Unmarshal recovers exact time.Duration values via reflect.DeepEqual-equivalent checks"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/special-edge/VAL-MARSHAL-020-duration-tests.txt",
+        "consoleErrors": "none",
+        "testsRun": ["TestMarshalTimeDuration", "TestMarshalDurationEdgeCases"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-021",
+      "title": "time.Time marshaling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalTimeTime",
+          "expected": "time.Date(2023,11,1,0,0,0,0,UTC) marshals as '2023-11-01T00:00:00Z' ISO8601 Zulu, round-trip preserves value",
+          "observed": "PASS - output contains '2023-11-01T00:00:00Z', Unmarshal recovers time.Time with Equal() confirmation"
+        },
+        {
+          "action": "Verify test exercises assertion behavior",
+          "expected": "Test checks ISO8601 Zulu format and round-trip fidelity",
+          "observed": "Test creates specific UTC time, verifies ISO8601 string in output, and round-trips via Unmarshal with time.Equal comparison"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/special-edge/VAL-MARSHAL-021-time-tests.txt",
+        "consoleErrors": "none",
+        "testsRun": ["TestMarshalTimeTime"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-022",
+      "title": "Ambiguous string values must be quoted",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalAmbiguousStrings",
+          "expected": "All 13 ambiguous string values (bool literals, numeric strings, variable refs, bcrypt) marshal quoted and round-trip as strings",
+          "observed": "PASS - all 13 subtests pass: true/false/yes/no/on/off/TRUE/False, 123, -456, 3.14, $FOO, $2a$11$hash all round-trip as string type"
+        },
+        {
+          "action": "Verify test exercises assertion behavior",
+          "expected": "Table-driven test covers all categories: bool literals (all 6 + case variants), integers, floats, variable refs, bcrypt",
+          "observed": "Test marshals each value in a string field, parses output, type-asserts result is string (not bool/int/float), and verifies exact value match"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/special-edge/VAL-MARSHAL-022-ambiguous-strings-tests.txt",
+        "consoleErrors": "none",
+        "testsRun": ["TestMarshalAmbiguousStrings"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-023",
+      "title": "Unsupported types return error",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalUnsupportedTypeChan",
+          "expected": "Marshal of struct with chan field returns error containing 'unsupported', no panic",
+          "observed": "PASS - error returned with 'unsupported' in message, no panic"
+        },
+        {
+          "action": "Run TestMarshalUnsupportedTypeFunc",
+          "expected": "Marshal of struct with func field returns error containing 'unsupported', no panic",
+          "observed": "PASS - error returned with 'unsupported' in message, no panic"
+        },
+        {
+          "action": "Run TestMarshalUnsupportedTypeComplex",
+          "expected": "Marshal of struct with complex128 field returns error containing 'unsupported', no panic",
+          "observed": "PASS - error returned with 'unsupported' in message, no panic"
+        },
+        {
+          "action": "Run TestMarshalNilInput",
+          "expected": "Marshal(nil) returns error, no panic",
+          "observed": "PASS - error returned for nil input"
+        },
+        {
+          "action": "Run TestMarshalNilPointer",
+          "expected": "Marshal((*Config)(nil)) returns error, no panic",
+          "observed": "PASS - error returned for nil pointer"
+        },
+        {
+          "action": "Run TestMarshalEmptyStruct",
+          "expected": "Marshal(struct{}{}) returns valid output, no error",
+          "observed": "PASS - empty struct marshals without error, output is valid"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/special-edge/VAL-MARSHAL-023-unsupported-types-tests.txt",
+        "consoleErrors": "none",
+        "testsRun": [
+          "TestMarshalUnsupportedTypeChan",
+          "TestMarshalUnsupportedTypeFunc",
+          "TestMarshalUnsupportedTypeComplex",
+          "TestMarshalNilInput",
+          "TestMarshalNilPointer",
+          "TestMarshalEmptyStruct"
+        ],
+        "allPassed": true
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 4 assertions (10 test functions total): all 4 passed. VAL-MARSHAL-020: time.Duration fields marshal as Go duration strings and round-trip correctly. VAL-MARSHAL-021: time.Time marshals as ISO8601 Zulu format with round-trip fidelity. VAL-MARSHAL-022: All 13 ambiguous string value categories are properly quoted to preserve string type. VAL-MARSHAL-023: Channels, functions, and complex numbers return descriptive errors (not panics); nil/empty-struct edge cases handled correctly."
+}

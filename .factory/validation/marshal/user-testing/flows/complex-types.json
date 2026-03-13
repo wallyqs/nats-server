@@ -1,0 +1,224 @@
+{
+  "groupId": "complex-types",
+  "testedAt": "2026-03-13T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "surface": "go test output analysis (read-only)",
+    "testFile": "conf/v2/marshal_test.go"
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-MARSHAL-007",
+      "title": "Slice/array marshaling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalSlice",
+          "expected": "Slice fields produce NATS array syntax [...] with correct elements and ordering",
+          "observed": "PASS - []string and []int slices marshal to arrays, round-trip via Parse yields correct []any with 2 routes and 3 ports"
+        },
+        {
+          "action": "Run TestMarshalEmptySliceNotOmitted",
+          "expected": "Non-nil empty slice without omitempty still appears in output",
+          "observed": "PASS - Empty []string{} produces output containing 'items' key"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/complex-types/all-tests-output.txt",
+        "testNames": ["TestMarshalSlice", "TestMarshalEmptySliceNotOmitted"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-008",
+      "title": "Map/block marshaling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalMap",
+          "expected": "Map fields produce NATS map block syntax { key: value }",
+          "observed": "PASS - map[string]string marshals to block, round-trip yields equivalent map with region=us-east"
+        },
+        {
+          "action": "Run TestMarshalEmptyMap",
+          "expected": "Empty map produces valid block syntax",
+          "observed": "PASS - Empty map[string]string{} marshals and round-trips to empty map"
+        },
+        {
+          "action": "Run TestMarshalMapStringAny",
+          "expected": "map[string]any with mixed types marshals correctly",
+          "observed": "PASS - map with string, int64, bool values round-trips correctly"
+        },
+        {
+          "action": "Run TestMarshalMapAnyValues",
+          "expected": "map[string]any with nested maps marshals correctly",
+          "observed": "PASS - map with str, num, flag, and nested map values all round-trip correctly"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/complex-types/all-tests-output.txt",
+        "testNames": ["TestMarshalMap", "TestMarshalEmptyMap", "TestMarshalMapStringAny", "TestMarshalMapAnyValues"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-009",
+      "title": "Nested struct marshaling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalNestedStruct",
+          "expected": "Nested structs produce correctly nested map blocks",
+          "observed": "PASS - Config with ClusterOpts{Name, Port} marshals to nested block, round-trip yields cluster.name=my-cluster, cluster.port=6222"
+        },
+        {
+          "action": "Run TestMarshalDeeplyNestedStruct",
+          "expected": "3+ level nesting works correctly",
+          "observed": "PASS - Outer>Middle>Inner struct marshals to 3-level nested blocks, round-trip yields middle.inner.val=deep"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/complex-types/all-tests-output.txt",
+        "testNames": ["TestMarshalNestedStruct", "TestMarshalDeeplyNestedStruct"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-010",
+      "title": "Array of maps marshaling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalArrayOfMaps",
+          "expected": "[]map[string]string marshals as array of inline maps",
+          "observed": "PASS - Array of 2 maps with name/role keys marshals and round-trips as []any with 2 items"
+        },
+        {
+          "action": "Run TestMarshalArrayOfStructs",
+          "expected": "[]Struct marshals as array of map blocks",
+          "observed": "PASS - []User with name/age fields marshals to array of maps, round-trip yields users[0].name=alice"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/complex-types/all-tests-output.txt",
+        "testNames": ["TestMarshalArrayOfMaps", "TestMarshalArrayOfStructs"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-011",
+      "title": "Struct tag field naming in Marshal",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalStructTagCustomName",
+          "expected": "Fields tagged conf:\"custom_name\" marshal using the tag name as key",
+          "observed": "PASS - Host tagged conf:\"listen_addr\" outputs listen_addr key; round-trip finds listen_addr=0.0.0.0"
+        },
+        {
+          "action": "Run TestMarshalStructTagSkip",
+          "expected": "Fields tagged conf:\"-\" are omitted from output",
+          "observed": "PASS - Secret field tagged conf:\"-\" not found in output; password123 value absent"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/complex-types/all-tests-output.txt",
+        "testNames": ["TestMarshalStructTagCustomName", "TestMarshalStructTagSkip"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-012",
+      "title": "omitempty skips zero-value fields",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalOmitempty",
+          "expected": "Zero-value fields with omitempty are omitted; non-zero fields present",
+          "observed": "PASS - name/port/debug/rate/routes (all zero) omitted; present=yes-here included in output"
+        },
+        {
+          "action": "Run TestMarshalOmitemptyNilPointerAndMap",
+          "expected": "Nil pointer and nil map with omitempty are omitted",
+          "observed": "PASS - nil *string (ptr) and nil map[string]string (meta) both omitted from output"
+        },
+        {
+          "action": "Run TestMarshalEmptyStringNotOmitted",
+          "expected": "Empty string WITHOUT omitempty is NOT omitted",
+          "observed": "PASS - Empty Name string without omitempty tag produces 'name' key in output"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/complex-types/all-tests-output.txt",
+        "testNames": ["TestMarshalOmitempty", "TestMarshalOmitemptyNilPointerAndMap", "TestMarshalEmptyStringNotOmitted"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-013",
+      "title": "Custom Marshaler interface",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalCustomMarshaler",
+          "expected": "Types implementing MarshalConfig() use custom output",
+          "observed": "PASS - customMarshalType with Data='custom-output' produces 'custom-output' in marshaled config"
+        },
+        {
+          "action": "Run TestMarshalCustomMarshalerPointer",
+          "expected": "Pointer receiver MarshalConfig() also works",
+          "observed": "PASS - *customMarshalPtrType with Data='hello' produces 'ptr-custom:hello' in output"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/complex-types/all-tests-output.txt",
+        "testNames": ["TestMarshalCustomMarshaler", "TestMarshalCustomMarshalerPointer"],
+        "allPassed": true
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-014",
+      "title": "MarshalIndent controlled indentation",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalIndent",
+          "expected": "MarshalIndent(v, \"\", \"  \") indents nested blocks by 2 spaces",
+          "observed": "PASS - Nested val indented with 2 spaces; output re-parses correctly with inner.val=test"
+        },
+        {
+          "action": "Run TestMarshalIndentTabs",
+          "expected": "MarshalIndent(v, \"\", \"\\t\") uses tab indentation",
+          "observed": "PASS - Nested val indented with tab character; output re-parses successfully"
+        },
+        {
+          "action": "Run TestMarshalIndentDeep",
+          "expected": "3-level nesting has correct cumulative indentation",
+          "observed": "PASS - Deep val has 4 spaces (2 levels × 2 spaces); round-trip yields middle.deep.val=nested"
+        },
+        {
+          "action": "Run TestMarshalIndentPrefix",
+          "expected": "MarshalIndent with prefix prepends prefix to each line",
+          "observed": "PASS - Every non-empty line starts with '// ' prefix"
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/complex-types/all-tests-output.txt",
+        "testNames": ["TestMarshalIndent", "TestMarshalIndentTabs", "TestMarshalIndentDeep", "TestMarshalIndentPrefix"],
+        "allPassed": true
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 8 assertions (VAL-MARSHAL-007 through VAL-MARSHAL-014): all 8 passed. Ran 21 individual test functions covering slice/array marshaling, map/block marshaling, nested structs, array of maps, struct tag naming, omitempty behavior, custom Marshaler interface, and MarshalIndent indentation control. All tests produce PASS with correct round-trip behavior verified through Parse/Unmarshal."
+}

@@ -1,0 +1,173 @@
+{
+  "groupId": "basic-types",
+  "testedAt": "2026-03-13T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "surface": "go test output analysis (read-only)",
+    "testFiles": "conf/v2/marshal_test.go"
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-MARSHAL-001",
+      "title": "String marshaling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test -run TestMarshalBasicString",
+          "expected": "Test passes: Marshal produces valid NATS config for string field, round-trip parse recovers original value",
+          "observed": "PASS - Marshal({Name:\"nats-server\"}) produces config that re-parses to m[\"name\"]==\"nats-server\""
+        },
+        {
+          "action": "Run go test -run TestMarshalRoundTrip",
+          "expected": "Test passes: Full Marshal->Unmarshal round-trip preserves all fields including strings",
+          "observed": "PASS - Complex struct with string fields round-trips via reflect.DeepEqual"
+        },
+        {
+          "action": "Verify test exercises assertion behavior: string field produces valid config text and round-trips",
+          "expected": "Tests cover: basic string marshaling, quoted output validity, re-parse equality",
+          "observed": "TestMarshalBasicString tests single string field marshal+parse round-trip. TestMarshalRoundTrip tests multi-field struct including strings with Marshal->Unmarshal->DeepEqual."
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/basic-types/VAL-MARSHAL-001-test-output.txt",
+        "consoleErrors": "none",
+        "network": "N/A"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-002",
+      "title": "String with spaces must be quoted",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test -run TestMarshalStringWithSpaces",
+          "expected": "Test passes: String with spaces is emitted quoted, re-parse yields original",
+          "observed": "PASS - Marshal({Desc:\"hello world\"}) produces output containing '\"hello world\"' (quoted); re-parse yields m[\"desc\"]==\"hello world\""
+        },
+        {
+          "action": "Verify test exercises assertion behavior: spaces trigger quoting",
+          "expected": "Test checks output contains quoted string and round-trips",
+          "observed": "Test explicitly checks strings.Contains(out, `\"hello world\"`) for quoting, then re-parses and verifies value equality."
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/basic-types/VAL-MARSHAL-002-test-output.txt",
+        "consoleErrors": "none",
+        "network": "N/A"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-003",
+      "title": "String with special characters",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test -run TestMarshalStringSpecialChars",
+          "expected": "Test passes: All special chars (#, //, {, }, [, ], =, :, \\t, \\n) round-trip correctly",
+          "observed": "PASS - Table-driven test with 10 special-char strings all marshal and re-parse to original values"
+        },
+        {
+          "action": "Run go test -run TestMarshalStringDoubleQuoteEscape",
+          "expected": "Test passes: String containing double quotes round-trips",
+          "observed": "PASS - Marshal({Val:`has \"quotes\" inside`}) produces output that re-parses to the original string with embedded quotes"
+        },
+        {
+          "action": "Verify test exercises assertion behavior: all required special characters covered",
+          "expected": "Tests cover: #, //, {, }, [, ], =, :, \\t, \\n, \" (double quote). Single quote (') not explicitly in special chars test but double quote escape is tested separately.",
+          "observed": "TestMarshalStringSpecialChars covers has#hash, has//slash, has{brace, has}close, has[bracket, has]close, has=equals, has:colon, has\\ttab, has\\nnewline. TestMarshalStringDoubleQuoteEscape covers embedded double quotes. All pass."
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/basic-types/VAL-MARSHAL-003-test-output.txt",
+        "consoleErrors": "none",
+        "network": "N/A"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-004",
+      "title": "Integer marshaling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test -run TestMarshalInteger",
+          "expected": "Test passes: int, int64, int32, uint16 fields marshal and re-parse as int64 with correct values",
+          "observed": "PASS - Config{Port:4222, Max:1048576, Min:-100, Size:8080} marshals to config that re-parses with all values as int64 matching originals"
+        },
+        {
+          "action": "Run go test -run TestMarshalInt64Types",
+          "expected": "Test passes: All integer widths (int8-64, uint8-64) round-trip through Marshal->Unmarshal",
+          "observed": "PASS - Config with int8 through uint64 fields all round-trip via reflect.DeepEqual"
+        },
+        {
+          "action": "Verify test exercises assertion behavior: integers emitted in NATS config format, re-parse yields int64",
+          "expected": "Tests verify re-parsed values are int64 type with correct numeric values",
+          "observed": "TestMarshalInteger explicitly type-asserts m[\"port\"] to int64(4222). TestMarshalInt64Types verifies all widths via DeepEqual after Unmarshal."
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/basic-types/VAL-MARSHAL-004-test-output.txt",
+        "consoleErrors": "none",
+        "network": "N/A"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-005",
+      "title": "Float marshaling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test -run TestMarshalFloat",
+          "expected": "Test passes: float64 and float32 fields marshal and re-parse as float64",
+          "observed": "PASS - Config{Rate:3.14, Ratio:2.5, Precise:0.001} marshals and re-parses with m[\"rate\"]==float64(3.14)"
+        },
+        {
+          "action": "Run go test -run TestMarshalNegativeFloat",
+          "expected": "Test passes: Negative float (-22.5) round-trips correctly",
+          "observed": "PASS - Config{Val:-22.5} marshals and re-parses to m[\"val\"]==float64(-22.5)"
+        },
+        {
+          "action": "Verify test exercises assertion behavior: float values in NATS config format, re-parse yields float64",
+          "expected": "Tests verify float type and value preservation including negative values",
+          "observed": "TestMarshalFloat checks m[\"rate\"]==float64(3.14). TestMarshalNegativeFloat checks m[\"val\"]==float64(-22.5). Both confirm float type preserved through marshal/parse cycle."
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/basic-types/VAL-MARSHAL-005-test-output.txt",
+        "consoleErrors": "none",
+        "network": "N/A"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-MARSHAL-006",
+      "title": "Boolean marshaling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test -run TestMarshalBool",
+          "expected": "Test passes: bool fields marshal using true/false literals, re-parse yields correct bool",
+          "observed": "PASS - Config{Debug:true, Trace:false} marshals with output containing 'true' literal; re-parses to m[\"debug\"]==true, m[\"trace\"]==false"
+        },
+        {
+          "action": "Verify test exercises assertion behavior: bool emitted as parser-recognized literals, not quoted strings or integers",
+          "expected": "Test checks output contains 'true' literal and re-parsed values are bool type",
+          "observed": "Test explicitly checks strings.Contains(out, \"true\") for literal output. Re-parse assertions use m[\"debug\"] != true and m[\"trace\"] != false which verify both type (bool) and value."
+        }
+      ],
+      "evidence": {
+        "testOutput": "marshal/basic-types/VAL-MARSHAL-006-test-output.txt",
+        "consoleErrors": "none",
+        "network": "N/A"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 6 assertions: 6 passed, 0 failed. All basic type marshaling (string, string-with-spaces, string-with-special-chars, integer, float, boolean) produces valid NATS config text that round-trips correctly through parse/unmarshal."
+}
