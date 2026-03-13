@@ -90,6 +90,14 @@ type lexer struct {
 
 	// ilstart is the start position of the line from the current item.
 	ilstart int
+
+	// lastKeySep records the key separator style for the most recently
+	// consumed key-value separator.
+	lastKeySep KeySeparator
+
+	// lastCommentStyle records the comment style for the most recently
+	// emitted comment token.
+	lastCommentStyle CommentStyle
 }
 
 // lex creates a new lexer for the given input string.
@@ -588,13 +596,18 @@ func lexKeyEnd(lx *lexer) stateFn {
 	switch {
 	case unicode.IsSpace(r):
 		return lexSkip(lx, lexKeyEnd)
-	case isKeySeparator(r):
+	case r == keySepEqual:
+		lx.lastKeySep = SepEquals
+		return lexSkip(lx, lexValue)
+	case r == keySepColon:
+		lx.lastKeySep = SepColon
 		return lexSkip(lx, lexValue)
 	case r == eof:
 		lx.emit(ItemEOF)
 		return nil
 	}
-	// We start the value here
+	// We start the value here (space separator)
+	lx.lastKeySep = SepSpace
 	lx.backup()
 	return lexValue
 }
@@ -787,10 +800,15 @@ func lexMapKeyEnd(lx *lexer) stateFn {
 	switch {
 	case unicode.IsSpace(r):
 		return lexSkip(lx, lexMapKeyEnd)
-	case isKeySeparator(r):
+	case r == keySepEqual:
+		lx.lastKeySep = SepEquals
+		return lexSkip(lx, lexMapValue)
+	case r == keySepColon:
+		lx.lastKeySep = SepColon
 		return lexSkip(lx, lexMapValue)
 	}
-	// We start the value here
+	// We start the value here (space separator)
+	lx.lastKeySep = SepSpace
 	lx.backup()
 	return lexMapValue
 }
@@ -1172,6 +1190,15 @@ func lexIPAddr(lx *lexer) stateFn {
 
 // lexCommentStart begins the lexing of a comment.
 func lexCommentStart(lx *lexer) stateFn {
+	// Detect comment style by looking at what was consumed.
+	// For // comments, the consumed text includes "//".
+	// For # comments, the consumed text includes "#".
+	consumed := lx.input[lx.start:lx.pos]
+	if strings.Contains(consumed, "//") {
+		lx.lastCommentStyle = CommentSlash
+	} else {
+		lx.lastCommentStyle = CommentHash
+	}
 	lx.ignore()
 	lx.emit(ItemCommentStart)
 	return lexComment

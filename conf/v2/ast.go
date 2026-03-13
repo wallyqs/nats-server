@@ -209,6 +209,8 @@ type KeyNode struct {
 	Name string
 	// Separator is the style of separator used between this key and its value.
 	Separator KeySeparator
+	// sepKnown indicates whether Separator has been explicitly set.
+	sepKnown bool
 }
 
 // Type returns "Key".
