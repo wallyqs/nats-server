@@ -1,0 +1,17 @@
+{
+  "milestone": "misc-2",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "notes": "The misc-2 milestone has one implementation feature (misc-marshal-polish) with an empty fulfills array. All 83 validation contract assertions were already passed in prior milestones (core-parser, unmarshal, marshal). No new assertions to test. Full test suite (go test ./conf/v2/...) passes including the two new tests added by misc-marshal-polish: TestMarshalDurationSlice ([]time.Duration slice marshaling fix) and TestMarshalMapKeysSorted (non-deterministic map iteration fix).",
+  "previousRound": null
+}
