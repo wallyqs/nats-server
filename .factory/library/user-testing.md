@@ -19,3 +19,33 @@ This is a pure Go library with no interactive UI, CLI, or API surface.
 - Usable headroom: ~10 GB * 0.7 = 7 GB
 - Each validator uses ~300 MB
 - **Max concurrent validators: 5**
+
+## Flow Validator Guidance: go-test
+
+### Surface
+The user surface is `go test` — validators run specific test cases by name and inspect output.
+
+### Isolation
+Each validator runs `go test` with a `-run` filter targeting specific test names. Since tests are read-only (no shared mutable state, no file writes, no network), all validators can run concurrently without interference.
+
+### How to validate an assertion
+1. Identify which test(s) cover the assertion (test names listed in assignment)
+2. Run: `cd /Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security && go test ./conf/v2/... -count=1 -v -run "<TestNamePattern>" 2>&1`
+3. Inspect output for `--- PASS` or `--- FAIL`
+4. For each assertion, verify the test exercises the specific behavior described in the assertion
+5. Optionally read test source to confirm test coverage matches assertion requirements
+
+### Test file locations
+- Lexer tests: `conf/v2/lex_test.go`
+- AST tests: `conf/v2/ast_test.go`
+- Parser tests: `conf/v2/parse_test.go`
+- Backwards compatibility tests: `conf/v2/compat_test.go`
+
+### Repo root
+`/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security`
+
+### Constraints
+- Do NOT modify any source files
+- Do NOT modify test files
+- Only run `go test` commands for inspection
+- Each validator operates independently — no shared temp files or ports

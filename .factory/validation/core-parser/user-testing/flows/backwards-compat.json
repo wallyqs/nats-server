@@ -1,0 +1,159 @@
+{
+  "groupId": "backwards-compat",
+  "testedAt": "2026-03-12T20:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "testCommand": "go test ./conf/v2/... -count=1 -v -run <pattern>",
+    "testFile": "conf/v2/compat_test.go",
+    "sharedState": "none — read-only go test execution"
+  },
+  "toolsUsed": ["go test", "go test -fuzz"],
+  "assertions": [
+    {
+      "id": "VAL-PARSER-023",
+      "title": "Parse/ParseFile Produce Identical map[string]any Output",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run 28 cross-validation tests via go test -run pattern",
+          "expected": "All tests pass — v2 output matches v1 via reflect.DeepEqual",
+          "observed": "All 28 tests passed (0.144s total). Tests cover: simple top-level, bools (8 variants), simple/nested variables, env variables (4 variants), bcrypt, convenient numbers (18 suffixes), complex samples (5), cluster config, empty/comment-only, JSON compat (4 formats), negative float, concrete types (string/bool/int64/float64/time.Time/[]any/map[string]any), duplicate key last-wins, ParseFile with simple.conf, ParseFile with multi-level includes, JSON nested blocks (3), blocks (3)."
+        },
+        {
+          "action": "Verify crossValidate() uses reflect.DeepEqual for v1/v2 comparison",
+          "expected": "Test helper compares both Parse and ParseWithChecks output",
+          "observed": "crossValidate() compares v1/v2 Parse output via reflect.DeepEqual AND cross-validates pedantic JSON output via bytes.Equal on json.Marshal results. crossValidateFile() compares v1/v2 ParseFile output via reflect.DeepEqual."
+        },
+        {
+          "action": "Verify concrete types match: string, bool, int64, float64, time.Time, []any, map[string]any",
+          "expected": "Type assertions confirm all 7 concrete types",
+          "observed": "TestCompatConcreteTypes verifies string/bool/int64/float64, TestCompatConcreteTypeDatetime verifies time.Time, TestCompatConcreteTypeArray verifies []any, TestCompatConcreteTypeMap verifies map[string]any with int64 inner value."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/backwards-compat/VAL-PARSER-023-test-output.txt",
+        "sourceVerified": true,
+        "testsRun": 28,
+        "testsPassed": 28,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-024",
+      "title": "Pedantic Mode with Token Wrappers",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run 5 pedantic mode tests via go test -run pattern",
+          "expected": "All tests pass — token wrappers have correct methods and pedantic/non-pedantic JSON match",
+          "observed": "All 5 tests passed (0.121s total)."
+        },
+        {
+          "action": "Verify token methods: Value(), Line(), Position(), IsUsedVariable(), SourceFile(), MarshalJSON()",
+          "expected": "TestCompatPedanticTokenMethods exercises all 6 methods",
+          "observed": "Test verifies: Value()=int64(42), Line()=1, Position()=0, IsUsedVariable()=false, SourceFile()='', MarshalJSON()='42'. All methods present and returning correct values."
+        },
+        {
+          "action": "Verify pedantic and non-pedantic produce identical JSON output",
+          "expected": "TestCompatPedanticJSONMatchesNonPedantic compares via bytes.Equal",
+          "observed": "Test parses config with strings, ints, bools, arrays, and maps in both modes, marshals to JSON, and confirms byte-equal output."
+        },
+        {
+          "action": "Verify pedantic position tracking and usedVariable marking",
+          "expected": "Key position and variable usage correctly tracked",
+          "observed": "TestCompatPedanticKeyPosition confirms Position()=4 for '    foo = 42'. TestCompatPedanticUsedVariable confirms index marked as usedVariable when referenced by $index, foo not marked."
+        },
+        {
+          "action": "Verify pedantic mode with includes cross-validates against v1",
+          "expected": "ParseFileWithChecks JSON output matches v1",
+          "observed": "TestCompatPedanticIncludeVariablesWithChecks creates temp dir with include files, parses with both v1 and v2 ParseFileWithChecks, confirms JSON output matches via bytes.Equal."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/backwards-compat/VAL-PARSER-024-test-output.txt",
+        "sourceVerified": true,
+        "testsRun": 5,
+        "testsPassed": 5,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-025",
+      "title": "Digest Computation Matches v1",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestCompatDigest (10 sub-tests) and TestCompatDigestCrossValidation",
+          "expected": "All digest tests pass — SHA-256 digests match v1 and expected values",
+          "observed": "All 11 tests passed (0.115s total). 10 digest sub-tests + 1 cross-validation test."
+        },
+        {
+          "action": "Verify SHA-256 digest format and v1 matching",
+          "expected": "Digests use sha256:<hex> format and match v1 output",
+          "observed": "Each test compares v2 digest against expected sha256: string AND against v1 conf.ParseFileWithChecksDigest output. All match."
+        },
+        {
+          "action": "Verify determinism — syntax variations produce same digest",
+          "expected": "Different syntax/whitespace for same values produce identical digest",
+          "observed": "Digests 0-3 all produce sha256:226e49e...8de despite different comment/whitespace/syntax. Digests 4-5 match despite different variable usage. Digests 6-7 match. Digests 8-9 match despite include vs inline."
+        },
+        {
+          "action": "Verify usedVariable entries removed from digest computation",
+          "expected": "Variable definitions used as references are excluded before hashing",
+          "observed": "Digests 4-5 demonstrate this: config with variables (BAR_USERS=$...) and without variables produce identical digest, confirming usedVariable entries are removed before SHA-256 computation."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/backwards-compat/VAL-PARSER-025-test-output.txt",
+        "sourceVerified": true,
+        "testsRun": 11,
+        "testsPassed": 11,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-026",
+      "title": "Fuzz Resilience — No Panics on Malformed Input",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run FuzzParse seed tests (22 seeds) and TestCompatErrorOnMalformedInput",
+          "expected": "All seed tests pass without panics, malformed inputs return errors",
+          "observed": "All 22 seed tests passed. TestCompatErrorOnMalformedInput confirmed 2 malformed inputs (invalid UTF-8, truncated include) return errors."
+        },
+        {
+          "action": "Run fuzz with random inputs for 15 seconds: go test -fuzz=FuzzParse -fuzztime=15s",
+          "expected": "No panics across random inputs",
+          "observed": "1,176,082 random inputs executed at ~89K/sec with 8 workers over 15 seconds. 0 panics. 109 new interesting coverage paths discovered (644 total). PASS."
+        },
+        {
+          "action": "Verify fuzz target exercises both Parse and ParseWithChecks",
+          "expected": "Both functions called on every input",
+          "observed": "FuzzParse calls Parse(data) and ParseWithChecks(data) on every input, ensuring both code paths are fuzz-tested."
+        },
+        {
+          "action": "Verify seed corpus covers edge cases: malformed input, invalid UTF-8, truncated constructs, integer overflow",
+          "expected": "Seeds include pathological inputs",
+          "observed": "Seeds include: empty string, whitespace-only, invalid UTF-8 (A@@Føøøø?˛ø), truncated include, integer overflow (99999999999999999999), block strings, variable references, bcrypt, datetime, IP:port."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/backwards-compat/VAL-PARSER-026-test-output.txt",
+        "sourceVerified": true,
+        "seedTestsRun": 22,
+        "seedTestsPassed": 22,
+        "fuzzDuration": "15s",
+        "fuzzExecutions": 1176082,
+        "fuzzPanics": 0,
+        "fuzzNewCoverage": 109
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 4 assertions: all 4 passed. VAL-PARSER-023: 28 cross-validation tests confirm Parse/ParseFile produce identical map[string]any output to v1 via reflect.DeepEqual across all value types. VAL-PARSER-024: 5 tests confirm pedantic token wrappers implement all required methods and pedantic/non-pedantic JSON output matches. VAL-PARSER-025: 11 tests confirm SHA-256 digest computation matches v1, is deterministic across syntax variations, and correctly removes usedVariable entries. VAL-PARSER-026: 22 seed tests + 1,176,082 random fuzz inputs confirm no panics on any input."
+}

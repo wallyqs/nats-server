@@ -1,0 +1,170 @@
+{
+  "groupId": "lexer-basic",
+  "testedAt": "2026-03-12T22:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "testCommand": "go test ./conf/v2/... -count=1 -v -run <pattern>",
+    "sharedState": "none — read-only go test execution",
+    "testFiles": ["conf/v2/lex_test.go"]
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-PARSER-001",
+      "title": "All Scalar Token Types Lexed Correctly",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run 17 tests: TestLexPlainValue, TestLexSimpleKeyStringValues, TestLexComplexStringValues, TestLexSimpleKeyIntegerValues, TestLexSimpleKeyNegativeIntegerValues, TestLexSimpleKeyFloatValues, TestLexSimpleKeyBoolValues, TestLexAllBoolLiterals, TestLexDateValues, TestLexVariableValues, TestLexInclude, TestLexAllSizeSuffixes, TestLexConvenientIntegerValues, TestLexEmptyStringDQ, TestLexEmptyStringSQ, TestLexItemString, TestLexRawString",
+          "expected": "All 17 tests pass",
+          "observed": "All 17 tests passed (PASS, 0.156s)"
+        },
+        {
+          "action": "Verify test source covers all scalar categories: strings (DQ, SQ, raw, empty), integers (+/-), size suffixes (k/K/m/M/g/G/t/T/p/P/e/E/KB/MB/GB/TB/PB/EB/Ki/Mi/Gi/Ti/Pi/Ei/KiB/MiB/GiB/TiB/PiB/EiB/Kb/Mb/Gb/Tb/Pb/Eb), floats, booleans (true/false/yes/no/on/off case-insensitive), datetime (ISO8601 Zulu), variables ($name), includes",
+          "expected": "Every scalar category is exercised with exact token type and value assertions matching v1",
+          "observed": "All categories confirmed present. TestLexAllBoolLiterals tests all 12 case variants of 6 bool literals. TestLexAllSizeSuffixes tests 36 suffix variants. TestLexEmptyStringDQ/SQ test empty strings. TestLexRawString tests unquoted strings. TestLexSimpleKeyStringValues tests DQ/SQ. TestLexComplexStringValues tests SQ with escape chars preserved literally."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/lexer-basic/VAL-PARSER-001-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-002",
+      "title": "Key Separators and Key Lexing",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run 6 tests: TestLexColonKeySep, TestLexWhitespaceKeySep, TestLexQuotedKeys, TestLexQuotedKeysWithSpace, TestLexMapQuotedKeys, TestLexSpecialCharsMapQuotedKeys",
+          "expected": "All 6 tests pass",
+          "observed": "All 6 tests passed (PASS, 0.122s)"
+        },
+        {
+          "action": "Verify test source covers: equals (foo = 123), colon (foo : 123, foo:123, foo: 123), whitespace (foo 123, foo\\t123), single/double quoted keys with spaces and special characters",
+          "expected": "All separator styles and quoted key variants exercised",
+          "observed": "TestLexColonKeySep covers colon with various spacing including 'foo:123', 'foo: 123', 'foo : 123', 'foo:  123\\r\\n'. TestLexWhitespaceKeySep covers space and tab separators. TestLexQuotedKeys covers both 'foo' and \"foo\" quoted keys. TestLexQuotedKeysWithSpace covers keys with embedded spaces. TestLexMapQuotedKeys covers quoted keys inside map blocks. TestLexSpecialCharsMapQuotedKeys covers keys like 'bar-1.2.3' with special characters in nested maps."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/lexer-basic/VAL-PARSER-002-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-003",
+      "title": "Escape Sequences in Strings",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run 13 tests: TestLexEscapedString, TestLexBinaryString, TestLexBinaryStringLatin1, TestLexSingleQuotedNoEscape, TestLexCompoundStringEE, TestLexCompoundStringEES, TestLexCompoundStringES, TestLexCompoundStringESE, TestLexCompoundStringSE, TestLexCompoundStringSEE, TestLexCompoundStringSES, TestLexNonBool, TestLexNonVariable",
+          "expected": "All 13 tests pass",
+          "observed": "All 13 tests passed (PASS, 0.126s)"
+        },
+        {
+          "action": "Verify test source covers: \\t, \\n, \\r, \\\", \\\\, \\xHH in both quoted and unquoted contexts; single-quoted raw passthrough; escaped backslash prefix suppresses bool/variable detection",
+          "expected": "All escape sequence types verified with correct final values",
+          "observed": "TestLexEscapedString verifies \\t->tab, \\r->CR, \\n->NL, \\\"->quote, \\\\->backslash in unquoted context. TestLexBinaryString/Latin1 verifies \\x65->\"e\" and \\xe9->0xe9 byte. TestLexCompoundString* (7 tests) verify mixed literal+escaped strings in all orderings (ES, SE, EE, SEE, SES, EES, ESE). TestLexSingleQuotedNoEscape confirms 'bar\\r\\n  \\t' preserves backslashes literally. TestLexNonBool confirms \\\\true -> \"\\true\" (string, not bool). TestLexNonVariable confirms \\\\$var -> \"\\$var\" (string, not variable)."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/lexer-basic/VAL-PARSER-003-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-004",
+      "title": "Escape Sequence Error Reporting",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run 5 tests: TestLexBadStringEscape, TestLexBadBinaryStringEndingAfterOneHexChar, TestLexBadBinaryStringEndingAfterZeroHexChars, TestLexBadBinaryStringWithOneHexChar, TestLexBadBinaryStringWithZeroHexChars",
+          "expected": "All 5 tests pass",
+          "observed": "All 5 tests passed (PASS, 0.111s)"
+        },
+        {
+          "action": "Verify error tokens for: invalid escape char (\\y), incomplete \\x at EOL (0 and 1 hex chars), invalid hex chars after \\x in quoted strings",
+          "expected": "Error tokens match v1 output for all invalid escape cases",
+          "observed": "TestLexBadStringEscape: \\y produces ItemError 'Invalid escape character 'y'. Only the following escape characters are allowed: \\xXX, \\t, \\n, \\r, \\\", \\\\.' at line 1 pos 8. TestLexBadBinaryStringEndingAfterZeroHexChars: \\x at EOL produces 'Expected two hexadecimal digits after '\\x', but hit end of line'. TestLexBadBinaryStringEndingAfterOneHexChar: \\xF at EOL produces same message. TestLexBadBinaryStringWithZeroHexChars: \\x]\" in quoted string produces 'Expected two hexadecimal digits after '\\x', but got ']\"''. TestLexBadBinaryStringWithOneHexChar: \\xe] in quoted string produces 'Expected two hexadecimal digits after '\\x', but got 'e]''."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/lexer-basic/VAL-PARSER-004-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-027",
+      "title": "CRLF Line Ending Support",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run 3 tests: TestLexCRLFSupport, TestLexCRLFMultiline, TestLexCRLFAllValueTypes (18 subtests)",
+          "expected": "All tests pass, CRLF treated identically to LF",
+          "observed": "All 3 tests passed including 18 subtests (PASS, 0.109s). TestLexCRLFAllValueTypes covers: string_dq, string_sq, integer, integer_suffix, float, bool, datetime, variable, comment_hash, comment_slash, array, map, include, semicolons, ip_addr, raw_string, empty_string_dq, empty_string_sq"
+        },
+        {
+          "action": "Verify test methodology: CRLF inputs compared token-by-token against LF inputs for type and value equality",
+          "expected": "Token types and values match between LF and CRLF versions for all value types",
+          "observed": "TestLexCRLFSupport compares individual tokens from LF vs CRLF of same input. TestLexCRLFMultiline verifies multiline CRLF input produces correct key/value sequence. TestLexCRLFAllValueTypes uses strings.ReplaceAll to create CRLF versions and compares all token types and values."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/lexer-basic/VAL-PARSER-027-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-028",
+      "title": "Numeric Overflow Error Reporting",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run 5 tests: TestLexIntegerOverflow, TestLexNegativeIntegerOverflow, TestLexIntegerOverflowWithSuffix, TestLexFloatOverflow, TestLexValidLargeInteger",
+          "expected": "All 5 tests pass",
+          "observed": "All 5 tests passed (PASS, 0.126s)"
+        },
+        {
+          "action": "Verify: int64 overflow returns error, negative int64 overflow returns error, suffix overflow returns error, float overflow handled at lex level, valid max int64 passes",
+          "expected": "Overflow cases produce ItemError with 'integer range' message; valid large integers accepted",
+          "observed": "TestLexIntegerOverflow: 99999999999999999999 produces ItemError containing 'integer range'. TestLexNegativeIntegerOverflow: -99999999999999999999 produces ItemError containing 'integer range'. TestLexIntegerOverflowWithSuffix: 99999999999999999999k produces ItemError containing 'integer range'. TestLexFloatOverflow: large decimal float lexes as ItemFloat (overflow checked at parse time, not lex time). TestLexValidLargeInteger: 9223372036854775807 (max int64) lexes as ItemInteger with correct value."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/lexer-basic/VAL-PARSER-028-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-030",
+      "title": "Negative Float Values",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestLexNegativeFloatValues",
+          "expected": "Test passes, negative floats lexed as float tokens with negative sign",
+          "observed": "Test passed (PASS, 0.131s)"
+        },
+        {
+          "action": "Verify: -22.2 and -0.5 lexed as ItemFloat with negative sign included in value",
+          "expected": "ItemFloat tokens with values '-22.2' and '-0.5'",
+          "observed": "TestLexNegativeFloatValues verifies 'foo = -22.2' produces {ItemFloat, \"-22.2\", 1, 6} and 'foo = -0.5' produces {ItemFloat, \"-0.5\", 1, 6}. Both include the negative sign in the token value."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/lexer-basic/VAL-PARSER-030-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 7 assertions: all 7 passed. 49 total test functions executed across all assertions covering all scalar types, key separators, escape sequences, error reporting, CRLF support, numeric overflow, and negative floats. Test source code verified to exercise all behaviors described in each assertion."
+}

@@ -1,0 +1,53 @@
+{
+  "milestone": "core-parser",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 30,
+    "passed": 30,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-PARSER-001",
+    "VAL-PARSER-002",
+    "VAL-PARSER-003",
+    "VAL-PARSER-004",
+    "VAL-PARSER-005",
+    "VAL-PARSER-006",
+    "VAL-PARSER-007",
+    "VAL-PARSER-008",
+    "VAL-PARSER-009",
+    "VAL-PARSER-010",
+    "VAL-PARSER-011",
+    "VAL-PARSER-012",
+    "VAL-PARSER-013",
+    "VAL-PARSER-014",
+    "VAL-PARSER-015",
+    "VAL-PARSER-016",
+    "VAL-PARSER-017",
+    "VAL-PARSER-018",
+    "VAL-PARSER-019",
+    "VAL-PARSER-020",
+    "VAL-PARSER-021",
+    "VAL-PARSER-022",
+    "VAL-PARSER-023",
+    "VAL-PARSER-024",
+    "VAL-PARSER-025",
+    "VAL-PARSER-026",
+    "VAL-PARSER-027",
+    "VAL-PARSER-028",
+    "VAL-PARSER-029",
+    "VAL-PARSER-030"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added Flow Validator Guidance: go-test section with isolation rules, test file locations, and constraints for subagent validators",
+      "source": "setup"
+    }
+  ],
+  "previousRound": null
+}

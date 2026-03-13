@@ -1,0 +1,201 @@
+{
+  "groupId": "ast-parser",
+  "testedAt": "2026-03-12T23:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "testCommand": "go test ./conf/v2/... -count=1 -v -run <pattern>",
+    "sharedState": "none — read-only go test execution",
+    "testFiles": ["conf/v2/ast_test.go", "conf/v2/parse_test.go", "conf/v2/compat_test.go"]
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-PARSER-014",
+      "title": "AST Node Types Cover All Constructs",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run 17 AST node type tests: TestItemTypeConstants, TestItemTypeValues, TestDocumentNode, TestKeyValueNode, TestMapNode, TestArrayNode, TestStringNode, TestIntegerNode, TestFloatNode, TestBoolNode, TestDatetimeNode, TestCommentNode, TestVariableNode, TestIncludeNode, TestBlockStringNode, TestKeyNode, TestNodeTypeStrings",
+          "expected": "All tests pass, every v1 token type has a corresponding AST node type",
+          "observed": "All 17 tests PASS. TestItemTypeConstants verifies all v1 item types (Error, NIL, EOF, Key, Text, String, Bool, Integer, Float, Datetime, ArrayStart, ArrayEnd, MapStart, MapEnd, CommentStart, Variable, Include) plus v2 Comment exist. TestNodeTypeStrings verifies 14 distinct AST node types (Document, KeyValue, Map, Array, String, Integer, Float, Bool, Datetime, Comment, Variable, Include, BlockString, Key) covering all syntactic constructs."
+        },
+        {
+          "action": "Read ast_test.go to verify completeness of node type coverage",
+          "expected": "Every v1 construct (scalars, structures, references, decorators, root, keys) has an AST node type",
+          "observed": "Confirmed: scalars (StringNode, IntegerNode, FloatNode, BoolNode, DatetimeNode), structural (ArrayNode, MapNode with ordered KeyValueNode items), references (VariableNode, IncludeNode), decorators (CommentNode with hash/slash styles, BlockStringNode), root (Document), keys (KeyNode with separator style). All construct categories covered."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/ast-parser/all-assertions-test-output.txt",
+        "sourceFiles": ["conf/v2/ast_test.go"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-015",
+      "title": "Position Information Preserved in AST Nodes",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestPositionStruct, TestNodeBasePosition, TestParsePositionInfo",
+          "expected": "All pass, every AST node carries line/column/file and positions match expected values",
+          "observed": "All 3 tests PASS. TestPositionStruct verifies Position{Line, Column, File} fields. TestNodeBasePosition verifies NodeBase.Position() returns correct values. TestParsePositionInfo parses multi-line input and verifies key 'foo' on line 1 and key 'bar' on line 2."
+        },
+        {
+          "action": "Read test source to verify position info is tested in real parse scenarios",
+          "expected": "Positions checked against expected line/column for parsed input",
+          "observed": "TestParsePositionInfo parses 'foo = 1\\nbar = 2' and asserts kv1.Key.Pos.Line == 1 and kv2.Key.Pos.Line == 2. TestNodeBasePosition tests {Line:3, Column:7, File:'server.conf'} round-trip. Position struct carries File field for multi-file include tracking."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/ast-parser/all-assertions-test-output.txt",
+        "sourceFiles": ["conf/v2/ast_test.go", "conf/v2/parse_test.go"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-016",
+      "title": "Comments Attached to AST Nodes",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestKeyValueWithComments, TestParseTrailingComment, TestParseLeadingComment, TestParseSlashComment, TestParseCommentsInsideArray",
+          "expected": "All pass, comments correctly attached to nearest relevant nodes",
+          "observed": "All 5 tests PASS. TestParseTrailingComment: 'port = 4222 # default port' → kv.Comment contains 'default port'. TestParseLeadingComment: leading comment appears as separate CommentNode before KeyValueNode in doc.Items. TestParseSlashComment: '// slash comment' → kv.Comment.Style == CommentSlash. TestParseCommentsInsideArray: comments mixed with value elements in array. TestKeyValueWithComments: KV node carries Comment field with text ' enable debug'."
+        },
+        {
+          "action": "Verify test source covers trailing→preceding, leading→following, and array-internal attachment",
+          "expected": "All three attachment patterns tested",
+          "observed": "Confirmed: trailing comments attach to preceding KV (TestParseTrailingComment), leading comments appear as items before following KV (TestParseLeadingComment), comments inside arrays are mixed with elements (TestParseCommentsInsideArray). Both # and // styles tested."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/ast-parser/all-assertions-test-output.txt",
+        "sourceFiles": ["conf/v2/ast_test.go", "conf/v2/parse_test.go"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-017",
+      "title": "Variable Resolution with Block Scoping",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestParseVariableSimple, TestParseVariableNestedScope, TestParseVariableEnvFallback, TestParseVariableMissing",
+          "expected": "All pass: same-scope, nested shadowing, env fallback, missing variable error",
+          "observed": "All 4 tests PASS. TestParseVariableSimple: index=22, foo=$index → foo resolves to 22. TestParseVariableNestedScope: outer index=22, nest{index=11, foo=$index} → nest.foo=11, bar=$index → bar=22 (inner shadows outer). TestParseVariableEnvFallback: env __V2_TEST_ENVVAR__=42 → foo=$__V2_TEST_ENVVAR__ resolves to 42. TestParseVariableMissing: $missing_var → error containing 'variable reference'."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/ast-parser/all-assertions-test-output.txt",
+        "sourceFiles": ["conf/v2/parse_test.go"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-018",
+      "title": "Variable Reference Cycle Detection",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestParseVariableCycleDetection",
+          "expected": "Cyclic env var references produce 'variable reference cycle' error",
+          "observed": "Test PASS. Sets env __V2_TEST_CYCLE__='$__V2_TEST_CYCLE__' (self-referencing), then parses 'foo = $__V2_TEST_CYCLE__'. Parser correctly detects cycle and returns error containing 'variable reference cycle'."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/ast-parser/all-assertions-test-output.txt",
+        "sourceFiles": ["conf/v2/parse_test.go"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-019",
+      "title": "Environment Variable Value Parsing",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestParseVariableEnvBool, TestParseVariableEnvString, TestParseEnvVarSubParsingQuotedString, TestCompatEnvVariable, TestCompatEnvVariableString, TestCompatEnvVariableStringStartingWithNumberAndSizeUnit, TestCompatEnvVariableStringStartingWithNumberUsingQuotes",
+          "expected": "All pass: numeric→int, bool strings→bool, quoted strings→string, cross-validated with v1",
+          "observed": "All 7 tests PASS. TestParseVariableEnvBool: env 'true' → BoolNode(true). TestParseVariableEnvString: env 'hello' → StringNode('hello'). TestParseEnvVarSubParsingQuotedString: env \"'3xyz'\" → StringNode('3xyz'). TestCompatEnvVariable: env '22' → crossValidate matches v1 int64(22). TestCompatEnvVariableString: env 'xyz' → string matches v1. TestCompatEnvVariableStringStartingWithNumberAndSizeUnit: env '3Gyz' → string matches v1. TestCompatEnvVariableStringStartingWithNumberUsingQuotes: env \"'3xyz'\" → string matches v1."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/ast-parser/all-assertions-test-output.txt",
+        "sourceFiles": ["conf/v2/parse_test.go", "conf/v2/compat_test.go"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-020",
+      "title": "Include File Handling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestParseIncludeFile, TestParseIncludeInsideMap, TestParseIncludeRecursive, TestCompatParseFileSimpleConf, TestCompatParseFileWithIncludes",
+          "expected": "All pass: relative path resolution, quoted paths, recursive includes, merge into scope, cross-validated with v1",
+          "observed": "All 5 tests PASS. TestParseIncludeFile: absolute path include merges port=4222. TestParseIncludeInsideMap: include inside auth{} block merges user/password keys alongside timeout. TestParseIncludeRecursive: outer.conf includes inner.conf via relative path → both inner_key and outer_key present. TestCompatParseFileSimpleConf: cross-validates real simple.conf with v1. TestCompatParseFileWithIncludes: multi-level includes (main→users.conf→passwords.conf) cross-validated with v1 via reflect.DeepEqual."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/ast-parser/all-assertions-test-output.txt",
+        "sourceFiles": ["conf/v2/parse_test.go", "conf/v2/compat_test.go"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-021",
+      "title": "Include Error Propagation",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestParseIncludeErrorPropagation, TestParseIncludeEmptyFile, TestParseIncludeCommentOnly",
+          "expected": "Errors contain include filename; empty/comment-only includes valid",
+          "observed": "All 3 tests PASS. TestParseIncludeErrorPropagation: bad.conf with 'invalid_no_value_key' → error string contains 'bad.conf'. TestParseIncludeEmptyFile: empty include file between foo=1 and bar=2 → both keys present, no error. TestParseIncludeCommentOnly: include of file with only comments → valid, foo=1 still present."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/ast-parser/all-assertions-test-output.txt",
+        "sourceFiles": ["conf/v2/parse_test.go"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-022",
+      "title": "Invalid Config Detection",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestParseInvalidKeyNoValue, TestParseInvalidKeyNoValueAfterComments, TestParseEmptyConfig, TestParseCommentOnlyConfig, TestParseTopLevelJSON",
+          "expected": "Invalid configs produce errors; empty/comment-only/{} configs are valid",
+          "observed": "All 5 tests PASS. TestParseInvalidKeyNoValue: 'aaaaa...' → error containing 'config is invalid'. TestParseInvalidKeyNoValueAfterComments: comments + key-no-value → error 'config is invalid'. TestParseEmptyConfig: '' → valid Document with 0 items. TestParseCommentOnlyConfig: '# just a comment' → valid Document. TestParseTopLevelJSON: '{\"http_port\": 8227, \"port\": 4227}' → valid with both keys present."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/ast-parser/all-assertions-test-output.txt",
+        "sourceFiles": ["conf/v2/parse_test.go"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PARSER-029",
+      "title": "Duplicate Key Last-Wins Semantics",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestParseDuplicateKeyLastWins, TestCompatDuplicateKeyLastWins",
+          "expected": "foo=1; foo=2 results in map['foo']=2; cross-validated with v1",
+          "observed": "Both tests PASS. TestParseDuplicateKeyLastWins: parses 'foo = 1\\nfoo = 2' → extractKeyValues returns foo as IntegerNode with Value=2 (last wins). TestCompatDuplicateKeyLastWins: crossValidate('foo = 1\\nfoo = 2') confirms v1 and v2 produce identical map[string]any output via reflect.DeepEqual."
+        }
+      ],
+      "evidence": {
+        "testOutput": "core-parser/ast-parser/all-assertions-test-output.txt",
+        "sourceFiles": ["conf/v2/parse_test.go", "conf/v2/compat_test.go"]
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 10 assertions (VAL-PARSER-014 through VAL-PARSER-022 and VAL-PARSER-029): all 10 passed. 52 individual test functions executed, all PASS. Test source code review confirmed each test exercises the specific behavior described in its assertion, including cross-validation with v1 parser where applicable."
+}
