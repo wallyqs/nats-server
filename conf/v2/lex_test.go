@@ -2014,3 +2014,254 @@ func TestLexItemString(t *testing.T) {
 		t.Fatalf("Expected '(Key, 'foo', 1, 0)', got %q", s)
 	}
 }
+
+// =============================================================================
+// VAL-PARSER-028: Numeric Overflow Error Reporting
+// =============================================================================
+
+func TestLexIntegerOverflow(t *testing.T) {
+	// A number exceeding int64 max (9223372036854775807) must produce an error.
+	lx := lex("foo = 99999999999999999999")
+	it := lx.nextItem() // key
+	if it.typ != ItemKey || it.val != "foo" {
+		t.Fatalf("Expected key 'foo', got %v", it)
+	}
+	it = lx.nextItem() // value should be error
+	if it.typ != ItemError {
+		t.Fatalf("Expected error for int64 overflow, got %v", it)
+	}
+	if !strings.Contains(it.val, "integer range") {
+		t.Fatalf("Expected error message containing 'integer range', got %q", it.val)
+	}
+}
+
+func TestLexNegativeIntegerOverflow(t *testing.T) {
+	// A negative number exceeding int64 min must produce an error.
+	lx := lex("foo = -99999999999999999999")
+	it := lx.nextItem() // key
+	if it.typ != ItemKey || it.val != "foo" {
+		t.Fatalf("Expected key 'foo', got %v", it)
+	}
+	it = lx.nextItem() // value should be error
+	if it.typ != ItemError {
+		t.Fatalf("Expected error for negative int64 overflow, got %v", it)
+	}
+	if !strings.Contains(it.val, "integer range") {
+		t.Fatalf("Expected error message containing 'integer range', got %q", it.val)
+	}
+}
+
+func TestLexFloatOverflow(t *testing.T) {
+	// Float overflow is checked at parse time (strconv.ParseFloat),
+	// not at lex time, since the lexer doesn't support scientific notation.
+	// This test verifies that extremely long decimal floats still lex correctly.
+	// Actual float range checking will be done by the parser.
+	lx := lex("foo = 999999999999999999999999999999.999999999999999")
+	it := lx.nextItem() // key
+	if it.typ != ItemKey || it.val != "foo" {
+		t.Fatalf("Expected key 'foo', got %v", it)
+	}
+	it = lx.nextItem() // value - should be float (Go handles this fine)
+	if it.typ != ItemFloat {
+		t.Fatalf("Expected float for large decimal, got %v", it)
+	}
+}
+
+func TestLexIntegerOverflowWithSuffix(t *testing.T) {
+	// Very large number with suffix should also overflow.
+	lx := lex("foo = 99999999999999999999k")
+	it := lx.nextItem() // key
+	if it.typ != ItemKey || it.val != "foo" {
+		t.Fatalf("Expected key 'foo', got %v", it)
+	}
+	it = lx.nextItem() // value should be error
+	if it.typ != ItemError {
+		t.Fatalf("Expected error for int64 overflow with suffix, got %v", it)
+	}
+	if !strings.Contains(it.val, "integer range") {
+		t.Fatalf("Expected error message containing 'integer range', got %q", it.val)
+	}
+}
+
+func TestLexValidLargeInteger(t *testing.T) {
+	// Max int64 value should be valid.
+	lx := lex("foo = 9223372036854775807")
+	it := lx.nextItem() // key
+	if it.typ != ItemKey || it.val != "foo" {
+		t.Fatalf("Expected key 'foo', got %v", it)
+	}
+	it = lx.nextItem() // value
+	if it.typ != ItemInteger {
+		t.Fatalf("Expected integer for max int64, got %v", it)
+	}
+	if it.val != "9223372036854775807" {
+		t.Fatalf("Expected value '9223372036854775807', got %q", it.val)
+	}
+}
+
+// =============================================================================
+// VAL-PARSER-027: Comprehensive CRLF Line Ending Support
+// =============================================================================
+
+func TestLexCRLFAllValueTypes(t *testing.T) {
+	// Test that each value type produces identical token types and values
+	// with LF vs CRLF line endings.
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"string_dq", "foo = \"hello\"\nbar = 'world'\n"},
+		{"string_sq", "foo = 'hello'\n"},
+		{"integer", "foo = 123\nbar = -456\n"},
+		{"integer_suffix", "foo = 1k\nbar = 2MB\n"},
+		{"float", "foo = 3.14\nbar = -0.5\n"},
+		{"bool", "foo = true\nbar = false\n"},
+		{"datetime", "foo = 2016-05-04T18:53:41Z\n"},
+		{"variable", "foo = $bar\n"},
+		{"comment_hash", "# hello\nfoo = 1\n"},
+		{"comment_slash", "// hello\nfoo = 1\n"},
+		{"array", "foo = [1, 2, 3, 'bar']\n"},
+		{"map", "foo {\n  bar = 1\n}\n"},
+		{"include", "include users.conf\n"},
+		{"semicolons", "foo = 'a'; bar = 2\n"},
+		{"ip_addr", "listen = 127.0.0.1:4222\n"},
+		{"raw_string", "foo = bar\n"},
+		{"empty_string_dq", "foo = \"\"\n"},
+		{"empty_string_sq", "foo = ''\n"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lfInput := test.input
+			crlfInput := strings.ReplaceAll(lfInput, "\n", "\r\n")
+
+			// Collect all tokens from LF version.
+			lxLF := lex(lfInput)
+			var lfTokens []item
+			for {
+				it := lxLF.nextItem()
+				lfTokens = append(lfTokens, it)
+				if it.typ == ItemEOF || it.typ == ItemError {
+					break
+				}
+			}
+
+			// Collect all tokens from CRLF version.
+			lxCRLF := lex(crlfInput)
+			var crlfTokens []item
+			for {
+				it := lxCRLF.nextItem()
+				crlfTokens = append(crlfTokens, it)
+				if it.typ == ItemEOF || it.typ == ItemError {
+					break
+				}
+			}
+
+			// Compare token counts.
+			if len(lfTokens) != len(crlfTokens) {
+				t.Fatalf("Token count mismatch: LF=%d, CRLF=%d", len(lfTokens), len(crlfTokens))
+			}
+
+			// Compare types and values (not positions, as CRLF adds extra characters).
+			for i := range lfTokens {
+				if lfTokens[i].typ != crlfTokens[i].typ {
+					t.Fatalf("Token %d type mismatch:\n  LF:   %v\n  CRLF: %v", i, lfTokens[i], crlfTokens[i])
+				}
+				if lfTokens[i].val != crlfTokens[i].val {
+					t.Fatalf("Token %d value mismatch:\n  LF:   %v\n  CRLF: %v", i, lfTokens[i], crlfTokens[i])
+				}
+			}
+		})
+	}
+}
+
+// =============================================================================
+// Comprehensive cross-validation: complex multi-line configs
+// =============================================================================
+
+func TestLexCrossValidateComplexConfig(t *testing.T) {
+	// Full server-like config exercising many token types.
+	input := `
+# Server configuration
+port = 4222
+listen: 127.0.0.1:4222
+
+debug = true
+trace = off
+
+max_payload = 1MB
+max_control_line: 512
+
+cluster {
+  port: 6222
+  name = "my-cluster"
+  routes = [
+    "nats://127.0.0.1:4222"
+    "nats://127.0.0.1:4223"
+  ]
+  timeout: 0.5
+}
+
+created = 2016-05-04T18:53:41Z
+`
+	lx := lex(input)
+	var items []item
+	for {
+		it := lx.nextItem()
+		items = append(items, it)
+		if it.typ == ItemEOF || it.typ == ItemError {
+			break
+		}
+	}
+
+	// Verify we got the expected tokens (spot-check key ones).
+	found := make(map[string]bool)
+	for _, it := range items {
+		switch {
+		case it.typ == ItemCommentStart:
+			found["comment"] = true
+		case it.typ == ItemKey && it.val == "port":
+			found["key_port"] = true
+		case it.typ == ItemInteger && it.val == "4222":
+			found["int_4222"] = true
+		case it.typ == ItemString && it.val == "127.0.0.1:4222":
+			found["ip_addr"] = true
+		case it.typ == ItemBool && it.val == "true":
+			found["bool_true"] = true
+		case it.typ == ItemBool && it.val == "off":
+			found["bool_off"] = true
+		case it.typ == ItemInteger && it.val == "1MB":
+			found["int_suffix"] = true
+		case it.typ == ItemMapStart:
+			found["map_start"] = true
+		case it.typ == ItemMapEnd:
+			found["map_end"] = true
+		case it.typ == ItemArrayStart:
+			found["array_start"] = true
+		case it.typ == ItemArrayEnd:
+			found["array_end"] = true
+		case it.typ == ItemFloat && it.val == "0.5":
+			found["float"] = true
+		case it.typ == ItemDatetime:
+			found["datetime"] = true
+		}
+	}
+
+	expected := []string{
+		"comment", "key_port", "int_4222", "ip_addr",
+		"bool_true", "bool_off", "int_suffix",
+		"map_start", "map_end", "array_start", "array_end",
+		"float", "datetime",
+	}
+	for _, key := range expected {
+		if !found[key] {
+			t.Errorf("Missing expected token type: %s", key)
+		}
+	}
+
+	// Last item should be EOF, not error.
+	last := items[len(items)-1]
+	if last.typ != ItemEOF {
+		t.Fatalf("Expected EOF, got %v", last)
+	}
+}

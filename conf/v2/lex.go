@@ -20,6 +20,7 @@ package v2
 import (
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -152,6 +153,33 @@ func (lx *lexer) emitString() {
 	lx.items <- item{ItemString, finalString, lx.line, pos}
 	lx.start = lx.pos
 	lx.ilstart = lx.lstart
+}
+
+// checkIntegerOverflow validates the integer value for int64 range.
+// Returns true if the value is within range, false (and emits error) if overflow.
+func (lx *lexer) checkIntegerOverflow() bool {
+	val := lx.input[lx.start:lx.pos]
+
+	// Extract the numeric part by stripping any size suffix.
+	numStr := val
+	for len(numStr) > 0 {
+		last := numStr[len(numStr)-1]
+		if (last >= '0' && last <= '9') || last == '-' {
+			break
+		}
+		numStr = numStr[:len(numStr)-1]
+	}
+
+	if numStr != "" {
+		_, err := strconv.ParseInt(numStr, 10, 64)
+		if err != nil {
+			if e, ok := err.(*strconv.NumError); ok && e.Err == strconv.ErrRange {
+				lx.errorf("Value '%s' is outside of the integer range", val)
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (lx *lexer) addCurrentStringPart(offset int) {
@@ -1022,6 +1050,9 @@ func lexNumberOrDateOrStringOrIP(lx *lexer) stateFn {
 		return lexString
 	}
 	lx.backup()
+	if !lx.checkIntegerOverflow() {
+		return nil
+	}
 	lx.emit(ItemInteger)
 	return lx.pop()
 }
@@ -1035,6 +1066,9 @@ func lexConvenientNumber(lx *lexer) stateFn {
 	}
 	lx.backup()
 	if isNL(r) || r == eof || r == mapEnd || r == optValTerm || r == mapValTerm || isWhitespace(r) || unicode.IsDigit(r) {
+		if !lx.checkIntegerOverflow() {
+			return nil
+		}
 		lx.emit(ItemInteger)
 		return lx.pop()
 	}
@@ -1091,6 +1125,9 @@ func lexNegNumber(lx *lexer) stateFn {
 		return lexConvenientNumber
 	}
 	lx.backup()
+	if !lx.checkIntegerOverflow() {
+		return nil
+	}
 	lx.emit(ItemInteger)
 	return lx.pop()
 }
