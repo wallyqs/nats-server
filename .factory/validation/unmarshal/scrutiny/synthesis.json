@@ -1,0 +1,40 @@
+{
+  "milestone": "unmarshal",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "go test ./conf/v2/... -count=1 -v", "exitCode": 0 },
+    "typecheck": { "passed": true, "command": "go build ./conf/v2/...", "exitCode": 0 },
+    "lint": { "passed": true, "command": "go vet ./conf/v2/...", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Added .factory/library/nats-config-syntax.md documenting NATS config array element separator behavior (newline-separated vs comma-separated). Workers writing test configs with inline arrays encountered parsing issues that required multiple edits.",
+      "sourceFeature": "unmarshal-complex-types"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add guidance on ambiguous promoted field behavior: when multiple embedded structs provide the same field name, the v2 Unmarshal uses last-write-wins semantics rather than encoding/json's inaccessibility approach. Document this as intentional for config parsing simplicity, or align with encoding/json if strict compatibility is desired.",
+      "evidence": "unmarshal-core review: conf/v2/unmarshal.go buildFieldIndexRecursive() at line 150 uses last-write-wins for ambiguous promoted fields. Three related non-blocking issues were found around encoding/json behavioral differences (ambiguous promoted fields, 32-bit overflow, unexported anonymous struct promotion).",
+      "isSystemic": false
+    },
+    {
+      "target": "skills",
+      "suggestion": "Reinforce TDD procedure enforcement in go-library-worker skill. The unmarshal-complex-types worker created implementation before tests despite the skill mandating tests-first. Consider adding explicit checkpoint reminders or requiring test file creation as the first step before any implementation file.",
+      "evidence": "unmarshal-complex-types review: transcript shows unmarshal.go (implementation) was created BEFORE unmarshal_complex_test.go (tests), contradicting the skill's step 3 'Write Tests First (TDD - MANDATORY)'. Worker self-reported followedProcedure: true in handoff, which was inaccurate.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}

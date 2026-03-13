@@ -1,0 +1,40 @@
+{
+  "featureId": "unmarshal-core",
+  "reviewedAt": "2026-03-13T05:10:00Z",
+  "commitId": "33abda405a275cd18a853d0c33567481aacf8df2",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The core Unmarshal engine is well-structured, correct, and comprehensive. The implementation cleanly covers all 10 requirements: basic type assignment (string/int/float/bool), integer overflow checking for all narrow types (int8/16/32, uint8/16/32, negative-to-uint), int64-to-float64/float32 coercion, struct tag parsing (conf:\"name,omitempty\", conf:\"-\"), case-insensitive key matching, pointer field allocation, unexported field skipping, embedded struct field promotion (value and pointer), missing key preservation, and descriptive type mismatch errors. The architecture follows a clean separation of concerns: Unmarshal validates and parses, unmarshalMap iterates keys, buildFieldIndex creates a case-insensitive lookup, and type-specific assign functions handle each kind. All 26 test functions cover the specified behaviors with both positive and negative cases. Code follows Go conventions with proper doc comments on all functions.",
+    "issues": [
+      {
+        "file": "conf/v2/unmarshal.go",
+        "line": 150,
+        "severity": "non_blocking",
+        "description": "Ambiguous promoted fields from multiple embedded structs: buildFieldIndexRecursive uses last-write-wins when two embedded structs provide the same field name. encoding/json makes such ambiguous promoted fields inaccessible. The current behavior is arguably more practical for a config parser (deterministic, no silent drops), but deviates from the stated goal of 'matching encoding/json behavior'. Low risk since this edge case is unlikely in real NATS configs."
+      },
+      {
+        "file": "conf/v2/unmarshal.go",
+        "line": 259,
+        "severity": "non_blocking",
+        "description": "No overflow check for reflect.Int and reflect.Uint on 32-bit platforms. assignInt checks int8/16/32 but not plain int, and assignUint checks uint8/16/32 but not plain uint. On 64-bit platforms (NATS primary target) this is correct since int/uint are 64-bit. On 32-bit platforms, values exceeding int32/uint32 range would silently truncate via reflect.SetInt/SetUint. Very low practical risk."
+      },
+      {
+        "file": "conf/v2/unmarshal.go",
+        "line": 144,
+        "severity": "non_blocking",
+        "description": "Unexported anonymous struct fields (e.g., type Config struct { base }) would have their fields promoted, whereas encoding/json would not promote them. The check `!sf.IsExported() && !sf.Anonymous` skips unexported non-anonymous fields but allows unexported anonymous fields through to the promotion logic. Edge case unlikely in practice."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The implementation's handling of ambiguous promoted fields from multiple embedded structs uses last-write-wins semantics rather than encoding/json's inaccessible-field behavior. AGENTS.md does not specify which behavior to follow for this edge case. If future features depend on encoding/json-exact behavior, this should be documented.",
+      "evidence": "conf/v2/unmarshal.go buildFieldIndexRecursive() at line 150: fields[strings.ToLower(name)] = &fieldInfo{index: index} overwrites any existing entry without checking for ambiguity."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "The unmarshal-core feature passes review. The implementation is clean, well-tested (26 test functions covering all 10 specified requirements), and follows Go conventions. Three non-blocking issues were identified: (1) ambiguous promoted field handling deviates slightly from encoding/json by using last-write-wins, (2) missing overflow checks for int/uint on 32-bit platforms, and (3) unexported anonymous struct promotion differs from encoding/json. All three are edge cases with very low practical risk for NATS config parsing. The worker followed TDD procedure, ran all verification commands, and the code has proper doc comments throughout."
+}

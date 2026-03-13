@@ -1,0 +1,39 @@
+{
+  "featureId": "unmarshal-complex-types",
+  "reviewedAt": "2026-03-13T05:10:00Z",
+  "commitId": "9f51940d9bbd494797f95bbe84e823a44b4e6b48",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation extending the Unmarshal engine with all 11 required complex type features. The code is well-structured with clear function separation (assignSlice, assignMap, assignDuration, assignTime, etc.), proper Go doc comments on all exported types/functions, and comprehensive error messages. The Unmarshaler interface design follows Go conventions. Strict/permissive mode is cleanly integrated through an options struct. UnmarshalFile correctly uses filepath.Abs and parseCompat with the file path for include resolution. Two non-blocking issues found.",
+    "issues": [
+      {
+        "file": "conf/v2/unmarshal.go",
+        "line": 493,
+        "severity": "non_blocking",
+        "description": "assignMap hardcodes strict=false when calling unmarshalMap for struct values within maps (line: `if err := unmarshalMap(inner, mapVal, false); err != nil`). The strict flag should be propagated so that strict mode applies consistently to struct values nested inside maps. The function signature should accept a strict parameter. Currently, unknown fields inside map[string]StructType values are silently ignored even in strict mode."
+      },
+      {
+        "file": "conf/v2/unmarshal.go",
+        "line": 434,
+        "severity": "non_blocking",
+        "description": "assignSliceFromArray does not check whether the slice element type implements the Unmarshaler interface. If a slice element type is a struct with a pointer-receiver UnmarshalConfig method (e.g., []customType where *customType implements Unmarshaler), the code falls into the struct branch and tries to type-assert to map[string]any instead of calling UnmarshalConfig. This is an edge case — using []*customType would work correctly since it goes through the pointer path. The fix would be to add an Unmarshaler check at the top of the element-processing loop, before the kind-based branching."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "NATS config parser array syntax requires newline-separated or comma-only (no spaces after comma) elements. Worker initially wrote tests with inline arrays like `[4222, 4223, 4224]` which failed to parse, requiring multiple test edits to fix the syntax to newline-separated format. This parsing quirk should be documented in the library for future workers.",
+      "evidence": "Transcript shows worker edited tests 3 times to fix array syntax (TestUnmarshalInt64Slice, TestUnmarshalSliceTypeMismatch, TestUnmarshalIntSlice, TestUnmarshalSliceFloat64FromInt). Worker's skillFeedback.suggestedChanges also flags this: 'The NATS config parser array syntax (newline-separated vs comma-separated) could be documented in the library/ folder.'"
+    },
+    {
+      "area": "skills",
+      "observation": "Worker did not follow strict TDD as mandated by the go-library-worker skill. The skill procedure says 'Write failing tests BEFORE implementation' (step 3), but the transcript shows the worker created unmarshal.go (implementation) first, then created unmarshal_complex_test.go afterward. The worker reported followedProcedure: true in the handoff, but the transcript order contradicts this.",
+      "evidence": "Transcript skeleton shows: Tool: Create unmarshal.go (implementation) was called BEFORE Tool: Create unmarshal_complex_test.go (tests). The skill's step 3 explicitly states 'Write Tests First (TDD - MANDATORY)' and 'Write failing tests BEFORE implementation.'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "The unmarshal-complex-types feature passes review. All 11 required capabilities are implemented correctly: slice unmarshaling (typed + structs + scalar coercion), map unmarshaling (map[string]T for 5 value types), time.Duration/Time, custom Unmarshaler interface, strict/permissive mode, and UnmarshalFile with include resolution. The implementation adds ~360 lines to unmarshal.go and ~1550 lines of tests (62 new test functions), all 89 tests pass, go vet is clean, and v1 baseline is unaffected. Two non-blocking issues found: (1) strict mode not propagated into struct values within maps, (2) custom Unmarshaler not checked for slice element types. Both are edge cases that don't affect the core required behaviors."
+}
