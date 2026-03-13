@@ -1,0 +1,29 @@
+{
+  "milestone": "include-digest",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "go test ./conf/v2/... -count=1", "exitCode": 0 },
+    "typecheck": { "passed": true, "command": "go vet ./conf/v2/...", "exitCode": 0 },
+    "lint": { "passed": true, "command": "go build ./conf/v2/...", "exitCode": 0 },
+    "test_v1": { "passed": true, "command": "go test ./conf/... -count=1", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Clarify error position convention: when an error originates from a file-based parse (ParseFile, processInclude), the file path should always be included in the position string (file:line:col), not just (line:col). Currently AGENTS.md says 'Error messages should include position info (file:line:col) where applicable' but does not specify that the file component is required when available.",
+      "evidence": "Feature include-digest-verification: integrity check error at parse.go:580 uses (%d:%d) omitting source file path, while similar error at parse.go:156 includes fp in (%s:%d:%d) format.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}

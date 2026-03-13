@@ -1,0 +1,34 @@
+{
+  "featureId": "include-digest-verification",
+  "reviewedAt": "2026-03-13T23:50:00Z",
+  "commitId": "9a93d533c7a96da5109d8d7c150a416f2b11db4e",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation of SHA256 digest verification for include directives across 7 files (token.go, lex.go, parse.go, ast.go, emit.go, ast_test.go, include_digest_test.go). The lexer correctly routes all three include path styles (single-quoted, double-quoted, unquoted) through a new lexIncludeEnd state that optionally lexes a digest. The parser uses a clean one-token lookahead (pendingItem) to peek for ItemIncludeDigest after ItemInclude. SHA256 verification in processInclude is straightforward and correct. The emitter handles digest in both standalone and inline IncludeNode paths. All 9 expectedBehaviors from the feature spec are covered by 19 test functions. Backwards compatibility is maintained — include without digest continues to work unchanged.",
+    "issues": [
+      {
+        "file": "conf/v2/parse.go",
+        "line": 580,
+        "severity": "non_blocking",
+        "description": "Integrity check error format uses (%d:%d) for position but omits the source file path (fp). Other parser errors at line 156 include fp in the position string. If a user has nested includes across files, this error tells them which included file failed but not which source file contains the include directive. Consider: fmt.Errorf(\"include %%q: integrity check failed: expected %%s, got %%s (%s:%d:%d)\", includePath, digest, actual, fp, it.line, it.pos) for consistency."
+      },
+      {
+        "file": "conf/v2/parse.go",
+        "line": 576,
+        "severity": "non_blocking",
+        "description": "The digest string is not validated for format (e.g., must start with 'sha256:'). Any quoted string after the include path is treated as a digest. If someone writes include \"foo.conf\" \"some comment\", they get an integrity check failure rather than an 'invalid digest format' error. This is acceptable for simplicity — the error message shows both expected and actual values, making the issue clear — but a format validation could improve UX."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The integrity check error at parse.go:580 uses a position format that omits the source file path (fp), while the similar error at parse.go:156 includes it. AGENTS.md documents 'Error messages should include position info (file:line:col) where applicable' but doesn't specify exactly which errors should include the file component. This could be clarified.",
+      "evidence": "parse.go:580 — fmt.Errorf(\"include %%q: ... (%d:%d)\", ..., it.line, it.pos) vs parse.go:156 — fmt.Errorf(\"config is invalid (%s:%d:%d)\", fp, it.line, it.pos)"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The include digest verification feature is correctly implemented with comprehensive test coverage (19 tests). The lexer, parser, AST, and emitter changes are consistent with existing codebase patterns. Backwards compatibility is preserved. Two non-blocking issues noted: (1) the integrity check error could include the source file path for better debugging in nested-include scenarios, and (2) the digest string format is not validated before comparison. Neither issue affects correctness — the feature works as specified for all expected behaviors."
+}
