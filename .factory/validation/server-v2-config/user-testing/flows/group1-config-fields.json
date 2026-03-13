@@ -1,0 +1,114 @@
+{
+  "groupId": "group1-config-fields",
+  "testedAt": "2026-03-13T00:00:00Z",
+  "isolation": {
+    "surface": "go test (server package)",
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "testFile": "server/opts_v2_test.go",
+    "command": "go test ./server/... -count=1 -v -timeout 300s -run <TestNamePattern>"
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-SERVER-001",
+      "title": "ProcessConfigV2 populates simple top-level Options fields",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestProcessConfigV2SimpleFields", "expected": "PASS - 25 simple fields match expected values", "observed": "--- PASS: TestProcessConfigV2SimpleFields (0.00s)" },
+        { "action": "Run TestProcessConfigV2Listen", "expected": "PASS - host:port and port-only listen directives parsed", "observed": "--- PASS: TestProcessConfigV2Listen (host:port PASS, port_only PASS)" },
+        { "action": "Run TestProcessConfigV2HTTP", "expected": "PASS - http port, http host:port, https port parsed", "observed": "--- PASS: TestProcessConfigV2HTTP (http_port PASS, http_host:port PASS, https_port PASS)" },
+        { "action": "Run TestProcessConfigV2EquivalenceSimple", "expected": "PASS - 20 fields match between v1 and v2", "observed": "--- PASS: TestProcessConfigV2EquivalenceSimple (0.00s)" },
+        { "action": "Run TestProcessConfigV2EquivalenceListenAndHTTP", "expected": "PASS - Host, Port, HTTPHost, HTTPPort, HTTPBasePath match v1", "observed": "--- PASS: TestProcessConfigV2EquivalenceListenAndHTTP (0.00s)" },
+        { "action": "Run TestProcessConfigV2SizeSuffixes", "expected": "PASS - 1MB and 64MB size suffixes expanded correctly", "observed": "--- PASS: TestProcessConfigV2SizeSuffixes (0.00s)" },
+        { "action": "Run TestProcessConfigV2StoreDirTopLevel", "expected": "PASS - top-level store_dir populated", "observed": "--- PASS: TestProcessConfigV2StoreDirTopLevel (0.00s)" },
+        { "action": "Run TestProcessConfigV2EmptyConfig", "expected": "PASS - empty config returns valid Options", "observed": "--- PASS: TestProcessConfigV2EmptyConfig (0.00s)" },
+        { "action": "Run TestProcessConfigV2MissingFile", "expected": "PASS - missing file returns error", "observed": "--- PASS: TestProcessConfigV2MissingFile (0.00s)" }
+      ],
+      "evidence": {
+        "testOutput": "server-v2-config/group1/VAL-SERVER-001-test-output.txt",
+        "consoleErrors": "none",
+        "testResult": "9/9 tests PASS, 0 failures"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-SERVER-002",
+      "title": "ProcessConfigV2 populates nested struct fields (cluster, leafnode, websocket, mqtt, gateway)",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestProcessConfigV2Cluster", "expected": "PASS - Cluster fields (Name, Host, Port, Advertise, NoAdvertise, ConnectRetries, PoolSize) populated", "observed": "--- PASS: TestProcessConfigV2Cluster (0.00s)" },
+        { "action": "Run TestProcessConfigV2LeafNode", "expected": "PASS - LeafNode fields (Host, Port, Advertise, NoAdvertise, ReconnectInterval) populated", "observed": "--- PASS: TestProcessConfigV2LeafNode (0.00s)" },
+        { "action": "Run TestProcessConfigV2Gateway", "expected": "PASS - Gateway fields (Name, Host, Port, Advertise, ConnectRetries) populated", "observed": "--- PASS: TestProcessConfigV2Gateway (0.00s)" },
+        { "action": "Run TestProcessConfigV2Websocket", "expected": "PASS - Websocket fields (Host, Port, NoTLS, Compression) populated", "observed": "--- PASS: TestProcessConfigV2Websocket (0.00s)" },
+        { "action": "Run TestProcessConfigV2MQTT", "expected": "PASS - MQTT fields (Host, Port, AckWait, MaxAckPending) populated", "observed": "--- PASS: TestProcessConfigV2MQTT (0.00s)" },
+        { "action": "Run TestProcessConfigV2EquivalenceCluster", "expected": "PASS - Cluster fields match v1 output", "observed": "--- PASS: TestProcessConfigV2EquivalenceCluster (0.00s)" },
+        { "action": "Run TestProcessConfigV2LeafNodeEquivalence", "expected": "PASS - LeafNode fields match v1 output", "observed": "--- PASS: TestProcessConfigV2LeafNodeEquivalence (0.00s)" },
+        { "action": "Run TestProcessConfigV2GatewayEquivalence", "expected": "PASS - Gateway fields match v1 output", "observed": "--- PASS: TestProcessConfigV2GatewayEquivalence (0.00s)" },
+        { "action": "Run TestProcessConfigV2WebsocketEquivalence", "expected": "PASS - Websocket fields match v1 output", "observed": "--- PASS: TestProcessConfigV2WebsocketEquivalence (0.00s)" },
+        { "action": "Run TestProcessConfigV2MQTTEquivalence", "expected": "PASS - MQTT fields match v1 output", "observed": "--- PASS: TestProcessConfigV2MQTTEquivalence (0.00s)" }
+      ],
+      "evidence": {
+        "testOutput": "server-v2-config/group1/VAL-SERVER-002-test-output.txt",
+        "consoleErrors": "none",
+        "testResult": "10/10 tests PASS, 0 failures"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-SERVER-003",
+      "title": "ProcessConfigV2 handles polymorphic jetstream config",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestProcessConfigV2JetStreamBool", "expected": "PASS - jetstream: true enables JetStream", "observed": "--- PASS: TestProcessConfigV2JetStreamBool (0.00s)" },
+        { "action": "Run TestProcessConfigV2JetStreamString", "expected": "PASS - 'enabled' and 'disabled' string forms work", "observed": "--- PASS: TestProcessConfigV2JetStreamString (enabled PASS, disabled PASS)" },
+        { "action": "Run TestProcessConfigV2JetStreamMap", "expected": "PASS - map form with store_dir, max_mem, max_file, domain populated", "observed": "--- PASS: TestProcessConfigV2JetStreamMap (0.00s)" },
+        { "action": "Run TestProcessConfigV2EquivalenceJetStream", "expected": "PASS - all 3 forms match v1 output", "observed": "--- PASS: TestProcessConfigV2EquivalenceJetStream (bool_enabled PASS, string_enabled PASS, map_config PASS)" },
+        { "action": "Run TestProcessConfigV2JetStreamDisabled", "expected": "PASS - jetstream: false disables JetStream", "observed": "--- PASS: TestProcessConfigV2JetStreamDisabled (0.00s)" }
+      ],
+      "evidence": {
+        "testOutput": "server-v2-config/group1/VAL-SERVER-003-test-output.txt",
+        "consoleErrors": "none",
+        "testResult": "5/5 tests PASS (including subtests: 8/8), 0 failures"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-SERVER-004",
+      "title": "ProcessConfigV2 handles TLS configuration",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestProcessConfigV2TLS", "expected": "PASS - TLS block with cert_file, key_file, timeout, verify processed", "observed": "--- PASS: TestProcessConfigV2TLS (0.00s)" },
+        { "action": "Run TestProcessConfigV2EquivalenceTLS", "expected": "PASS - TLSTimeout and TLSConfig match v1 output", "observed": "--- PASS: TestProcessConfigV2EquivalenceTLS (0.00s)" }
+      ],
+      "evidence": {
+        "testOutput": "server-v2-config/group1/VAL-SERVER-004-test-output.txt",
+        "consoleErrors": "none",
+        "testResult": "2/2 tests PASS, 0 failures"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-SERVER-005",
+      "title": "ProcessConfigV2 handles authorization and accounts",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestProcessConfigV2Authorization (simple user/pass)", "expected": "PASS - Username, Password, AuthTimeout populated", "observed": "--- PASS: TestProcessConfigV2Authorization/simple_user/pass (0.00s)" },
+        { "action": "Run TestProcessConfigV2Authorization (users array)", "expected": "PASS - 2 users parsed with correct usernames", "observed": "--- PASS: TestProcessConfigV2Authorization/users_array (0.00s)" },
+        { "action": "Run TestProcessConfigV2Authorization (users with permissions)", "expected": "PASS - publish/subscribe allow/deny permissions parsed", "observed": "--- PASS: TestProcessConfigV2Authorization/users_with_permissions (0.00s)" },
+        { "action": "Run TestProcessConfigV2Authorization (nkey users)", "expected": "PASS - nkey user parsed correctly", "observed": "--- PASS: TestProcessConfigV2Authorization/nkey_users (0.00s)" },
+        { "action": "Run TestProcessConfigV2Accounts", "expected": "PASS - 2 accounts with 3 total users parsed", "observed": "--- PASS: TestProcessConfigV2Accounts (0.00s)" },
+        { "action": "Run TestProcessConfigV2EquivalenceAuth", "expected": "PASS - Username, Password, AuthTimeout match v1 output", "observed": "--- PASS: TestProcessConfigV2EquivalenceAuth (0.00s)" },
+        { "action": "Run TestProcessConfigV2AuthorizationWithToken", "expected": "PASS - Authorization token field populated", "observed": "--- PASS: TestProcessConfigV2AuthorizationWithToken (0.00s)" }
+      ],
+      "evidence": {
+        "testOutput": "server-v2-config/group1/VAL-SERVER-005-test-output.txt",
+        "consoleErrors": "none",
+        "testResult": "4/4 tests PASS (including subtests: 7/7), 0 failures"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 5 assertions (VAL-SERVER-001 through VAL-SERVER-005): all 5 passed. Total 30 test functions executed (plus subtests), all PASS. ProcessConfigV2 correctly populates simple top-level fields, nested struct fields (cluster, leafnode, gateway, websocket, mqtt), polymorphic jetstream config (bool/string/map), TLS configuration, and authorization/accounts. Equivalence tests confirm v2 output matches v1 ProcessConfigFile output."
+}

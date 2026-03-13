@@ -1,0 +1,31 @@
+{
+  "milestone": "server-v2-config",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-SERVER-001",
+    "VAL-SERVER-002",
+    "VAL-SERVER-003",
+    "VAL-SERVER-004",
+    "VAL-SERVER-005",
+    "VAL-SERVER-006",
+    "VAL-SERVER-007",
+    "VAL-SERVER-008"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added 'Flow Validator Guidance: go-test-server' section for server package test surface with test file locations, timeout guidance, and constraints",
+      "source": "setup"
+    }
+  ],
+  "previousRound": null
+}
