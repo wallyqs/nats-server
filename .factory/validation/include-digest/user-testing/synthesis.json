@@ -1,0 +1,17 @@
+{
+  "milestone": "include-digest",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null,
+  "notes": "The include-digest milestone has no validation contract assertions (no fulfills on implementation features). All 13 include-digest tests pass (TestIncludeWithMatchingDigest, TestIncludeWithMismatchingDigest, TestIncludeWithoutDigestBackwardsCompat, TestIncludeDigestAllPathStyles, TestIncludeDigestInsideMapBlock, TestIncludeDigestErrorIncludesPosition, TestIncludeDigestASTRoundTrip, TestIncludeDigestASTRoundTripNoDigest, TestIncludeDigestParseFile, TestIncludeDigestDoubleQuotedPathDoubleQuotedDigest, TestIncludeDigestASTRoundTripMapContext, TestIncludeNode, TestIncludeSepKnownPreservation). Full v2 test suite passes. v1 baseline passes. go vet clean."
+}
