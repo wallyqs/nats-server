@@ -35,7 +35,7 @@ func TestItemTypeConstants(t *testing.T) {
 		{ItemBool, "Bool"},
 		{ItemInteger, "Integer"},
 		{ItemFloat, "Float"},
-		{ItemDatetime, "DateTime"},
+		{ItemDatetime, "Datetime"},
 		{ItemArrayStart, "ArrayStart"},
 		{ItemArrayEnd, "ArrayEnd"},
 		{ItemMapStart, "MapStart"},

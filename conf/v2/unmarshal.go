@@ -288,7 +288,7 @@ func assignValue(fv reflect.Value, val any, key string, strict bool) error {
 
 	// Handle map fields.
 	if fv.Kind() == reflect.Map {
-		return assignMap(fv, val, key)
+		return assignMap(fv, val, key, strict)
 	}
 
 	// Handle nested struct fields from map values.
@@ -376,7 +376,7 @@ func assignPointerValue(fv reflect.Value, val any, key string, strict bool) erro
 	// Handle pointer to map.
 	if elemType.Kind() == reflect.Map {
 		ptr := reflect.New(elemType)
-		if err := assignMap(ptr.Elem(), val, key); err != nil {
+		if err := assignMap(ptr.Elem(), val, key, strict); err != nil {
 			return err
 		}
 		fv.Set(ptr)
@@ -457,8 +457,21 @@ func assignSliceFromArray(fv reflect.Value, arr []any, elemType reflect.Type, ke
 		elemVal := reflect.New(elemType).Elem()
 		elemKey := fmt.Sprintf("%s[%d]", key, i)
 
-		// Handle slice of structs: each element should be a map.
-		if elemType.Kind() == reflect.Struct {
+		// Check if the element type (or its pointer) implements Unmarshaler
+		// before kind-based branching, so []customType works when
+		// *customType implements Unmarshaler.
+		if reflect.PointerTo(elemType).Implements(unmarshalerType) {
+			ptrVal := reflect.New(elemType)
+			if err := ptrVal.Interface().(Unmarshaler).UnmarshalConfig(elem); err != nil {
+				return err
+			}
+			elemVal.Set(ptrVal.Elem())
+		} else if elemType.Implements(unmarshalerType) {
+			if err := elemVal.Interface().(Unmarshaler).UnmarshalConfig(elem); err != nil {
+				return err
+			}
+		} else if elemType.Kind() == reflect.Struct {
+			// Handle slice of structs: each element should be a map.
 			// Check for special types first.
 			if elemType == reflect.TypeOf(time.Time{}) {
 				if err := assignTime(elemVal, elem, elemKey); err != nil {
@@ -482,7 +495,7 @@ func assignSliceFromArray(fv reflect.Value, arr []any, elemType reflect.Type, ke
 			// For []any / []interface{}, assign directly.
 			elemVal.Set(reflect.ValueOf(elem))
 		} else if elemType.Kind() == reflect.Map {
-			if err := assignMap(elemVal, elem, elemKey); err != nil {
+			if err := assignMap(elemVal, elem, elemKey, strict); err != nil {
 				return err
 			}
 		} else if elemType.Kind() == reflect.Slice {
@@ -504,7 +517,7 @@ func assignSliceFromArray(fv reflect.Value, arr []any, elemType reflect.Type, ke
 
 // assignMap assigns a value to a map field. The config map (map[string]any)
 // is converted to the target map type. Empty maps result in non-nil empty maps.
-func assignMap(fv reflect.Value, val any, key string) error {
+func assignMap(fv reflect.Value, val any, key string, strict bool) error {
 	m, ok := val.(map[string]any)
 	if !ok {
 		return fmt.Errorf("cannot unmarshal %T into field %q of type %s", val, key, fv.Type())
@@ -535,11 +548,11 @@ func assignMap(fv reflect.Value, val any, key string) error {
 			if !ok {
 				return fmt.Errorf("cannot unmarshal %T into map value for key %q (type %s)", mv, elemKey, valType)
 			}
-			if err := unmarshalMap(inner, mapVal, false); err != nil {
+			if err := unmarshalMap(inner, mapVal, strict); err != nil {
 				return err
 			}
 		} else if valType.Kind() == reflect.Map {
-			if err := assignMap(mapVal, mv, elemKey); err != nil {
+			if err := assignMap(mapVal, mv, elemKey, strict); err != nil {
 				return err
 			}
 		} else {

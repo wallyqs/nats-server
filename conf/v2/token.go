@@ -85,7 +85,7 @@ func (t ItemType) String() string {
 	case ItemFloat:
 		return "Float"
 	case ItemDatetime:
-		return "DateTime"
+		return "Datetime"
 	case ItemArrayStart:
 		return "ArrayStart"
 	case ItemArrayEnd:
@@ -103,7 +103,7 @@ func (t ItemType) String() string {
 	case ItemComment:
 		return "Comment"
 	}
-	panic(fmt.Sprintf("BUG: Unknown ItemType %d", t))
+	return fmt.Sprintf("ItemType(%d)", t)
 }
 
 // KeySeparator represents the style of separator between a key and its value.
@@ -128,7 +128,7 @@ func (s KeySeparator) String() string {
 	case SepSpace:
 		return "space"
 	}
-	panic(fmt.Sprintf("BUG: Unknown KeySeparator %d", s))
+	return fmt.Sprintf("KeySeparator(%d)", s)
 }
 
 // CommentStyle represents the style of a comment.
@@ -149,5 +149,5 @@ func (s CommentStyle) String() string {
 	case CommentSlash:
 		return "slash"
 	}
-	panic(fmt.Sprintf("BUG: Unknown CommentStyle %d", s))
+	return fmt.Sprintf("CommentStyle(%d)", s)
 }

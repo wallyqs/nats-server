@@ -495,6 +495,7 @@ func (p *parser) processInclude(it item, fp string) error {
 		if kv, ok := item.(*KeyValueNode); ok {
 			// For included key-values, we need to push the key and set the value
 			// to maintain the same variable resolution context.
+			kv.Key.sepKnown = true
 			p.pushKey(kv.Key)
 			p.pushKeyItem(itemFromKeyNode(kv.Key))
 			p.setValue(kv.Value)
