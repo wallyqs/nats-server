@@ -2532,3 +2532,215 @@ func TestJetStreamLeafNodeSourceStreamPurgeResetThenSource(t *testing.T) {
 		t.Fatalf("Expected sourced stream sequences to match source stream after purge trick")
 	}
 }
+
+// TestJetStreamLeafNodeSourcedStreamConsumerResume tests a scenario where:
+// - Cluster A has stream "foo", cluster B is a leafnode with a sourced "foo".
+// - Messages are published on A, a consumer on A reads some messages.
+// - The purge trick is used on B so the sourced stream starts at the right sequence.
+// - More messages are published on A.
+// - A consumer on B resumes reading from where A's consumer left off, using
+//   the same stream sequence numbers.
+func TestJetStreamLeafNodeSourcedStreamConsumerResume(t *testing.T) {
+	tmplA := `
+		listen: 127.0.0.1:-1
+		server_name: cluster-a
+		jetstream {
+			store_dir: '%s',
+			domain: A
+		}
+		accounts {
+			JS { users = [ { user: "y", pass: "p" } ]; jetstream: true }
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+		leaf { port: -1 }
+	`
+	confA := createConfFile(t, []byte(fmt.Sprintf(tmplA, t.TempDir())))
+	sA, oA := RunServerWithConfig(confA)
+	defer sA.Shutdown()
+
+	tmplB := `
+		listen: 127.0.0.1:-1
+		server_name: cluster-b
+		jetstream {
+			store_dir: '%s',
+			domain: B
+		}
+		accounts {
+			JS { users = [ { user: "y", pass: "p" } ]; jetstream: true }
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+		leaf { remotes [ { url: "nats://y:p@127.0.0.1:%d", account: "JS" } ] }
+	`
+	confB := createConfFile(t, []byte(fmt.Sprintf(tmplB, t.TempDir(), oA.LeafNode.Port)))
+	sB, _ := RunServerWithConfig(confB)
+	defer sB.Shutdown()
+
+	checkLeafNodeConnectedCount(t, sA, 1)
+	checkLeafNodeConnectedCount(t, sB, 1)
+
+	ncA, jsA := jsClientConnect(t, sA, nats.UserInfo("y", "p"))
+	defer ncA.Close()
+
+	ncB, jsB := jsClientConnect(t, sB, nats.UserInfo("y", "p"))
+	defer ncB.Close()
+
+	// Create stream "foo" on cluster A.
+	_, err := jsA.AddStream(&nats.StreamConfig{
+		Name:     "foo",
+		Subjects: []string{"foo.>"},
+	})
+	require_NoError(t, err)
+
+	// Publish first batch of 50 messages on cluster A.
+	for i := 1; i <= 50; i++ {
+		_, err := jsA.Publish("foo.data", []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Create a consumer on cluster A and read all 50 messages.
+	subA, err := jsA.SubscribeSync("foo.>", nats.Durable("consumer-A"))
+	require_NoError(t, err)
+
+	var lastStreamSeq uint64
+	for i := 0; i < 50; i++ {
+		msg, err := subA.NextMsg(5 * time.Second)
+		require_NoError(t, err)
+		meta, err := msg.Metadata()
+		require_NoError(t, err)
+		lastStreamSeq = meta.Sequence.Stream
+		require_NoError(t, msg.Ack())
+	}
+	require_Equal(t, lastStreamSeq, uint64(50))
+
+	// Wait for consumer A's ack floor to reach 50.
+	var ci *nats.ConsumerInfo
+	checkFor(t, 5*time.Second, 250*time.Millisecond, func() error {
+		ci, err = jsA.ConsumerInfo("foo", "consumer-A")
+		if err != nil {
+			return err
+		}
+		if ci.AckFloor.Stream != 50 {
+			return fmt.Errorf("expected ack floor stream seq 50, got %d", ci.AckFloor.Stream)
+		}
+		return nil
+	})
+	t.Logf("Consumer A ack floor: stream seq %d", ci.AckFloor.Stream)
+
+	// Now set up cluster B's sourced stream using the purge trick.
+	// The consumer on A left off at seq 50, so we want B's stream to
+	// start sourcing from seq 1 so sequences match. Since the source
+	// stream starts at 1, we create the empty stream and the sequences
+	// will naturally align. But we use the purge trick to demonstrate
+	// it works for the general case.
+	si, err := jsA.StreamInfo("foo")
+	require_NoError(t, err)
+
+	// Step 1: Create empty stream on B (no sources yet).
+	_, err = jsB.AddStream(&nats.StreamConfig{
+		Name: "foo",
+	})
+	require_NoError(t, err)
+
+	// Step 2: Purge with the source stream's first sequence to set the
+	// internal counter so sequences will match.
+	err = jsB.PurgeStream("foo", &nats.StreamPurgeRequest{Sequence: si.State.FirstSeq})
+	require_NoError(t, err)
+
+	// Step 3: Update stream to add the source from cluster A.
+	_, err = jsB.UpdateStream(&nats.StreamConfig{
+		Name: "foo",
+		Sources: []*nats.StreamSource{{
+			Name:     "foo",
+			External: &nats.ExternalStream{APIPrefix: "$JS.A.API"},
+		}},
+	})
+	require_NoError(t, err)
+
+	// Wait for the first 50 messages to be sourced.
+	checkFor(t, 15*time.Second, 250*time.Millisecond, func() error {
+		ssi, err := jsB.StreamInfo("foo")
+		if err != nil {
+			return err
+		}
+		if ssi.State.Msgs < 50 {
+			return fmt.Errorf("expected at least 50 messages in sourced stream, got %d", ssi.State.Msgs)
+		}
+		return nil
+	})
+
+	// Publish a second batch of 50 messages on cluster A (seqs 51-100).
+	for i := 51; i <= 100; i++ {
+		_, err := jsA.Publish("foo.data", []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Wait for all 100 messages to arrive on B.
+	checkFor(t, 15*time.Second, 250*time.Millisecond, func() error {
+		ssi, err := jsB.StreamInfo("foo")
+		if err != nil {
+			return err
+		}
+		if ssi.State.Msgs != 100 {
+			return fmt.Errorf("expected 100 messages in sourced stream, got %d", ssi.State.Msgs)
+		}
+		return nil
+	})
+
+	// Verify sequences match between A and B.
+	siA, err := jsA.StreamInfo("foo")
+	require_NoError(t, err)
+	siB, err := jsB.StreamInfo("foo")
+	require_NoError(t, err)
+	require_Equal(t, siA.State.FirstSeq, siB.State.FirstSeq)
+	require_Equal(t, siA.State.LastSeq, siB.State.LastSeq)
+	t.Logf("Stream A: %d..%d, Stream B: %d..%d",
+		siA.State.FirstSeq, siA.State.LastSeq, siB.State.FirstSeq, siB.State.LastSeq)
+
+	// Now create a consumer on B that starts reading from where consumer A
+	// left off (stream seq 51). Since sequences match, we can use the same
+	// stream sequence from consumer A's ack floor. We bind directly to the
+	// stream since the sourced stream has no subjects of its own.
+	resumeSeq := ci.AckFloor.Stream + 1 // 51
+	subB, err := jsB.SubscribeSync(_EMPTY_,
+		nats.BindStream("foo"),
+		nats.Durable("consumer-B"),
+		nats.StartSequence(resumeSeq),
+	)
+	require_NoError(t, err)
+
+	// Consumer B should read messages 51-100 (the ones consumer A didn't read).
+	for i := 0; i < 50; i++ {
+		msg, err := subB.NextMsg(5 * time.Second)
+		require_NoError(t, err)
+		meta, err := msg.Metadata()
+		require_NoError(t, err)
+
+		expectedStreamSeq := uint64(51 + i)
+		require_Equal(t, meta.Sequence.Stream, expectedStreamSeq)
+
+		// Verify the message content matches what's in cluster A at the same seq.
+		srcMsg, err := jsA.GetMsg("foo", expectedStreamSeq)
+		require_NoError(t, err)
+		require_Equal(t, string(msg.Data), string(srcMsg.Data))
+
+		require_NoError(t, msg.Ack())
+	}
+
+	// Wait for consumer B's ack floor to reach 100.
+	var ciB *nats.ConsumerInfo
+	checkFor(t, 5*time.Second, 250*time.Millisecond, func() error {
+		ciB, err = jsB.ConsumerInfo("foo", "consumer-B")
+		if err != nil {
+			return err
+		}
+		if ciB.AckFloor.Stream != 100 {
+			return fmt.Errorf("expected ack floor stream seq 100, got %d", ciB.AckFloor.Stream)
+		}
+		return nil
+	})
+	t.Logf("Consumer B ack floor: stream seq %d", ciB.AckFloor.Stream)
+
+	// No more messages should be pending.
+	_, err = subB.NextMsg(500 * time.Millisecond)
+	require_Error(t, err, nats.ErrTimeout)
+}
