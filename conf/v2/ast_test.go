@@ -45,6 +45,8 @@ func TestItemTypeConstants(t *testing.T) {
 		{ItemInclude, "Include"},
 		// v2 addition: comment token
 		{ItemComment, "Comment"},
+		// v2 addition: include digest token
+		{ItemIncludeDigest, "IncludeDigest"},
 	}
 
 	for _, et := range expectedTypes {
@@ -111,6 +113,10 @@ func TestItemTypeValues(t *testing.T) {
 	// ItemComment is a v2 addition, comes after ItemInclude.
 	if ItemComment != 17 {
 		t.Errorf("ItemComment = %d, want 17", ItemComment)
+	}
+	// ItemIncludeDigest is a v2 addition for include integrity verification.
+	if ItemIncludeDigest != 18 {
+		t.Errorf("ItemIncludeDigest = %d, want 18", ItemIncludeDigest)
 	}
 }
 

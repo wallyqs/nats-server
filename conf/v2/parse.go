@@ -18,6 +18,7 @@
 package v2
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"math"
 	"os"
@@ -60,6 +61,10 @@ type parser struct {
 	// include directives as AST nodes instead of resolving/expanding them.
 	// Used for round-trip emission.
 	raw bool
+
+	// pendingItem holds a token consumed by look-ahead (e.g., after ItemInclude)
+	// that needs to be returned by the next call to next().
+	pendingItem *item
 }
 
 // ParseAST parses the given NATS configuration data and returns the AST root.
@@ -168,6 +173,11 @@ func (p *parser) parse(fp string) (*Document, error) {
 }
 
 func (p *parser) next() item {
+	if p.pendingItem != nil {
+		it := *p.pendingItem
+		p.pendingItem = nil
+		return it
+	}
 	return p.lx.nextItem()
 }
 
@@ -422,16 +432,28 @@ func (p *parser) processItem(it item, fp string) error {
 		}
 
 	case ItemInclude:
+		// Peek for an optional ItemIncludeDigest token following the include path.
+		var digest string
+		nextIt := p.next()
+		if nextIt.typ == ItemIncludeDigest {
+			digest = nextIt.val
+		} else {
+			// Not a digest token — save it as pending so the main parse
+			// loop sees it on the next call to next().
+			p.pendingItem = &nextIt
+		}
+
 		if p.raw {
 			// In raw mode, preserve include directive as IncludeNode.
 			pos := Position{Line: it.line, Column: it.pos, File: fp}
 			node := &IncludeNode{
 				NodeBase: NodeBase{Pos: pos},
 				Path:     it.val,
+				Digest:   digest,
 			}
 			p.addToContext(node)
 		} else {
-			if err := p.processInclude(it, fp); err != nil {
+			if err := p.processInclude(it, fp, digest); err != nil {
 				return err
 			}
 		}
@@ -537,7 +559,8 @@ func (p *parser) attachTrailingComment(comment *CommentNode) {
 }
 
 // processInclude handles an include directive by reading and parsing the included file.
-func (p *parser) processInclude(it item, fp string) error {
+// If digest is non-empty, the file's SHA256 digest is verified before parsing.
+func (p *parser) processInclude(it item, fp string, digest string) error {
 	// If the include path is absolute, use it directly.
 	// Otherwise, resolve relative to the including file's directory.
 	includePath := it.val
@@ -547,6 +570,16 @@ func (p *parser) processInclude(it item, fp string) error {
 	data, err := os.ReadFile(includePath)
 	if err != nil {
 		return fmt.Errorf("error parsing include file '%s', %v", it.val, err)
+	}
+
+	// If a digest was provided, verify the file's integrity.
+	if digest != "" {
+		h := sha256.Sum256(data)
+		actual := fmt.Sprintf("sha256:%x", h[:])
+		if actual != digest {
+			return fmt.Errorf("include %q: integrity check failed: expected %s, got %s (%d:%d)",
+				includePath, digest, actual, it.line, it.pos)
+		}
 	}
 
 	includeDoc, err := parseAST(string(data), includePath)

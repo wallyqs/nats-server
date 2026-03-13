@@ -61,6 +61,8 @@ const (
 	ItemInclude
 	// ItemComment represents a complete comment token (v2 addition).
 	ItemComment
+	// ItemIncludeDigest represents an optional SHA256 digest following an include path.
+	ItemIncludeDigest
 )
 
 // String returns the human-readable name of an ItemType.
@@ -102,6 +104,8 @@ func (t ItemType) String() string {
 		return "Include"
 	case ItemComment:
 		return "Comment"
+	case ItemIncludeDigest:
+		return "IncludeDigest"
 	}
 	return fmt.Sprintf("ItemType(%d)", t)
 }

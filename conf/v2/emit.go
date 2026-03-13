@@ -152,6 +152,11 @@ func (e *emitter) emitValue(node Node, depth int) {
 		e.buf.WriteString("include '")
 		e.buf.WriteString(n.Path)
 		e.buf.WriteByte('\'')
+		if n.Digest != "" {
+			e.buf.WriteString(" '")
+			e.buf.WriteString(n.Digest)
+			e.buf.WriteByte('\'')
+		}
 	}
 }
 
@@ -330,6 +335,11 @@ func (e *emitter) emitInclude(inc *IncludeNode, depth int) {
 	e.buf.WriteString("include '")
 	e.buf.WriteString(inc.Path)
 	e.buf.WriteByte('\'')
+	if inc.Digest != "" {
+		e.buf.WriteString(" '")
+		e.buf.WriteString(inc.Digest)
+		e.buf.WriteByte('\'')
+	}
 	e.buf.WriteByte('\n')
 	e.currentLine++
 }

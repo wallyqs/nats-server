@@ -206,6 +206,9 @@ type IncludeNode struct {
 	// Raw is the original include directive text (e.g., "include './file.conf'").
 	// Set during raw-mode parsing for round-trip emission.
 	Raw string
+	// Digest is an optional SHA256 integrity digest for the included file.
+	// Format: "sha256:<hex>". Empty when no digest was specified.
+	Digest string
 }
 
 // Type returns "Include".

@@ -510,7 +510,7 @@ func lexIncludeQuotedString(lx *lexer) stateFn {
 		lx.emit(ItemInclude)
 		lx.next()
 		lx.ignore()
-		return lx.pop()
+		return lexIncludeEnd
 	case r == eof:
 		return lx.errorf("Unexpected EOF in quoted include")
 	}
@@ -526,7 +526,7 @@ func lexIncludeDubQuotedString(lx *lexer) stateFn {
 		lx.emit(ItemInclude)
 		lx.next()
 		lx.ignore()
-		return lx.pop()
+		return lexIncludeEnd
 	case r == eof:
 		return lx.errorf("Unexpected EOF in double quoted include")
 	}
@@ -537,18 +537,82 @@ func lexIncludeDubQuotedString(lx *lexer) stateFn {
 func lexIncludeString(lx *lexer) stateFn {
 	r := lx.next()
 	switch {
-	case isNL(r) || r == eof || r == optValTerm || r == mapEnd || isWhitespace(r):
+	case isNL(r) || r == eof || r == optValTerm || r == mapEnd:
 		lx.backup()
 		lx.emit(ItemInclude)
 		return lx.pop()
+	case isWhitespace(r):
+		lx.backup()
+		lx.emit(ItemInclude)
+		return lexIncludeEnd
 	case r == sqStringEnd:
 		lx.backup()
 		lx.emit(ItemInclude)
 		lx.next()
 		lx.ignore()
-		return lx.pop()
+		return lexIncludeEnd
 	}
 	return lexIncludeString
+}
+
+// lexIncludeEnd is entered after the include path has been lexed. It looks
+// for an optional quoted digest string. If a quote character is found, it
+// lexes the digest and emits ItemIncludeDigest. Otherwise (newline, EOF,
+// semicolon, closing brace), it backs up and pops — no digest, backwards
+// compatible.
+func lexIncludeEnd(lx *lexer) stateFn {
+	r := lx.next()
+	switch {
+	case isWhitespace(r):
+		lx.ignore()
+		return lexIncludeEnd
+	case r == sqStringStart:
+		lx.ignore()
+		return lexIncludeDigestQuotedString
+	case r == dqStringStart:
+		lx.ignore()
+		return lexIncludeDigestDubQuotedString
+	case isNL(r) || r == eof || r == optValTerm || r == mapEnd:
+		lx.backup()
+		return lx.pop()
+	}
+	// Any other character: not a digest, treat as end of include.
+	lx.backup()
+	return lx.pop()
+}
+
+// lexIncludeDigestQuotedString consumes a single-quoted digest string
+// and emits ItemIncludeDigest.
+func lexIncludeDigestQuotedString(lx *lexer) stateFn {
+	r := lx.next()
+	switch {
+	case r == sqStringEnd:
+		lx.backup()
+		lx.emit(ItemIncludeDigest)
+		lx.next()
+		lx.ignore()
+		return lx.pop()
+	case r == eof:
+		return lx.errorf("Unexpected EOF in include digest")
+	}
+	return lexIncludeDigestQuotedString
+}
+
+// lexIncludeDigestDubQuotedString consumes a double-quoted digest string
+// and emits ItemIncludeDigest.
+func lexIncludeDigestDubQuotedString(lx *lexer) stateFn {
+	r := lx.next()
+	switch {
+	case r == dqStringEnd:
+		lx.backup()
+		lx.emit(ItemIncludeDigest)
+		lx.next()
+		lx.ignore()
+		return lx.pop()
+	case r == eof:
+		return lx.errorf("Unexpected EOF in include digest")
+	}
+	return lexIncludeDigestDubQuotedString
 }
 
 // lexInclude will consume the include value.
