@@ -1,0 +1,62 @@
+{
+  "milestone": "unmarshal-enhanced",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "go test ./conf/v2/... -count=1 -v", "exitCode": 0 },
+    "typecheck": { "passed": true, "command": "go vet ./conf/v2/...", "exitCode": 0 },
+    "lint": { "passed": true, "command": "go build ./conf/v2/...", "exitCode": 0 },
+    "test_v1": { "passed": true, "command": "go test ./conf/... -count=1", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "unmarshal-error-reporting",
+      "severity": "non_blocking",
+      "description": "assignDuration/assignTime changed error wrapping from '%w' to '%v' for time.ParseDuration/time.Parse errors, preventing errors.Is/errors.Unwrap for underlying parsing errors. ConfigError is the canonical error type so this is acceptable."
+    },
+    {
+      "featureId": "unmarshal-error-reporting",
+      "severity": "non_blocking",
+      "description": "unwrapTokenValue returns (val, 0, 0, \"\") for non-token values (e.g., array elements). This means some error paths could produce '0:0: reason' format. The parent key's position is used as fallback where available."
+    },
+    {
+      "featureId": "unmarshal-error-reporting",
+      "severity": "non_blocking",
+      "description": "Custom Unmarshaler interface errors are not wrapped in ConfigError. This is intentional since custom unmarshalers control their own error types, but means those errors won't include position info unless the implementation adds it."
+    },
+    {
+      "featureId": "unmarshal-alias-support",
+      "severity": "non_blocking",
+      "description": "configFieldAliases does not guard against empty alias segments from malformed tags like conf:\"host||net\". strings.Split would produce empty strings registered as keys. Very minor edge case unlikely in practice, consistent with encoding/json behavior."
+    },
+    {
+      "featureId": "unmarshal-alias-support",
+      "severity": "non_blocking",
+      "description": "No detection or warning when two different struct fields register overlapping aliases. Last-processed field wins silently. Matches encoding/json behavior for duplicate json tags."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [
+    {
+      "observation": "AGENTS.md already documents the error reporting pattern (ConfigError, Source() method, unwrapValue pattern)",
+      "reason": "already-documented"
+    },
+    {
+      "observation": "Error message changed from 'unknown config key' to 'unknown field' to match server pattern",
+      "reason": "already-documented — the change is reflected in updated tests and follows the server convention documented in AGENTS.md"
+    },
+    {
+      "observation": "AGENTS.md already documents the pipe-separated alias syntax under 'Struct Tag Syntax' section",
+      "reason": "already-documented"
+    }
+  ],
+  "previousRound": null
+}

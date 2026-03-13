@@ -1,0 +1,45 @@
+{
+  "featureId": "unmarshal-error-reporting",
+  "reviewedAt": "2026-03-13T19:25:00.000Z",
+  "commitId": "bb139396f",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Well-implemented feature that adds structured ConfigError type with source position information to all Unmarshal error paths. The implementation follows the server's configErr/unknownConfigFieldErr patterns from server/errors.go and the unwrapValue pattern from server/opts.go. Key changes: (1) ConfigError struct with Line, Column, File, Reason fields and Source()/Error() methods, (2) Unmarshal switched to ParseWithChecks (pedantic mode) to retain token position info, (3) unwrapTokenValue helper extracts position from pedantic token wrappers, (4) all ~25 error paths converted from fmt.Errorf to newConfigError/newUnknownFieldError, (5) map values in assignMap also unwrapped for nested position info. The existing test assertion in unmarshal_complex_test.go was properly updated from 'unknown config key' to 'unknown field'. 13 new test functions provide comprehensive coverage across all validation contract assertions.",
+    "issues": [
+      {
+        "file": "conf/v2/unmarshal.go",
+        "line": 484,
+        "severity": "non_blocking",
+        "description": "assignDuration changed error wrapping from '%w' to '%v' for time.ParseDuration errors (and similarly assignTime at line 500 for time.Parse errors). This means callers can no longer use errors.Is/errors.Unwrap to detect the underlying parsing error. The Reason string still contains the original error text, and ConfigError is the intended canonical error type, so this is acceptable but worth noting for future API documentation."
+      },
+      {
+        "file": "conf/v2/unmarshal.go",
+        "line": 90,
+        "severity": "non_blocking",
+        "description": "unwrapTokenValue returns (val, 0, 0, \"\") for non-token values. This means array element errors and any non-pedantic-wrapped values will report line=0, col=0, which produces '0:0: reason' in the error message. This is a limitation of the token wrapping approach where only top-level key-value pair values (and map values) are wrapped. For slice elements, the parent key's position is passed through, which is the best available info. Not a bug per se, but the '0:0' fallback could be confusing if it ever surfaces."
+      },
+      {
+        "file": "conf/v2/unmarshal.go",
+        "line": 338,
+        "severity": "non_blocking",
+        "description": "Custom Unmarshaler interface errors (lines 338, 343, 401, 405, 550, 555) are not wrapped in ConfigError. This is intentional — custom unmarshalers control their own error types — but it means errors from Unmarshaler implementations won't include position info unless the implementation adds it."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md already documents the error reporting pattern (ConfigError, Source() method, unwrapValue pattern) under 'Error Reporting Pattern' section. The worker's implementation matches the documented conventions precisely. No gap found.",
+      "evidence": "AGENTS.md 'Error Reporting Pattern' section matches the implemented ConfigError type, Source() format, and server reference patterns."
+    },
+    {
+      "area": "conventions",
+      "observation": "The error message for unknown fields changed from 'unknown config key' to 'unknown field' to match the server's unknownConfigFieldErr pattern. The existing test in unmarshal_complex_test.go was properly updated. AGENTS.md doesn't specify the exact wording, but the server reference is clear.",
+      "evidence": "conf/v2/unmarshal_complex_test.go lines 947-951 and 1110-1113 updated from 'unknown config key' to 'unknown field'."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Feature passes review. ConfigError type is well-designed with proper Source()/Error() methods matching server patterns. All error paths (type mismatch, overflow, unknown field, duration/time parsing, struct/map/slice assignment) correctly produce ConfigError with position info from pedantic tokens. UnmarshalFile properly includes filenames. String-based parsing correctly omits file prefix. Unknown field errors match server's unknownConfigFieldErr format. Tests are comprehensive (13 new test functions) covering all three validation contract assertions (VAL-UNMARSHAL-024, VAL-UNMARSHAL-025, VAL-UNMARSHAL-029). Three non-blocking observations noted: loss of %w error wrapping for duration/time parse errors, zero-position fallback for non-token values, and custom Unmarshaler errors not wrapped in ConfigError."
+}

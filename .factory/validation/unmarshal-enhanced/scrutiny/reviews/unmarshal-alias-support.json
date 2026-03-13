@@ -1,0 +1,34 @@
+{
+  "featureId": "unmarshal-alias-support",
+  "reviewedAt": "2026-03-13T19:25:00Z",
+  "commitId": "e61f2515a1c28bd88ed053e8cb490656c9430fd5",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, minimal implementation of pipe-separated alias support in conf struct tags. The worker renamed configFieldName to configFieldAliases (returning []string), updated buildFieldIndexRecursive to register all aliases pointing to a shared fieldInfo, and updated parseTag in marshal.go to extract only the primary (first) alias for output. Changes are well-scoped across 3 files: unmarshal.go (+33/-13 lines), marshal.go (+10/-2 lines), and unmarshal_alias_test.go (526 new lines with 14 test functions). All alias matching is properly case-insensitive via strings.ToLower. The implementation correctly handles the skip tag '-' with the adjusted check `len(aliases) == 1 && aliases[0] == \"-\"`. All 14 tests pass, covering primary/secondary/tertiary alias matching, case-insensitivity, omitempty interaction, strict mode, nested structs, marshal output, round-trip, and real NATS alias patterns.",
+    "issues": [
+      {
+        "file": "conf/v2/unmarshal.go",
+        "line": 308,
+        "severity": "non_blocking",
+        "description": "configFieldAliases does not guard against empty alias segments from malformed tags like conf:\"host||net\" or conf:\"host|\". strings.Split would produce empty strings that get registered as keys in the field index. This is a very minor edge case unlikely in practice (no user would write such tags), and is consistent with how encoding/json handles malformed struct tags (no validation). Consider adding a filter for empty aliases in a future hardening pass."
+      },
+      {
+        "file": "conf/v2/unmarshal.go",
+        "line": 284,
+        "severity": "non_blocking",
+        "description": "No detection or warning when two different struct fields register overlapping aliases (e.g., field A with conf:\"host|net\" and field B with conf:\"net|addr\" — both register 'net'). Last-processed field wins silently. This matches encoding/json behavior for duplicate json tags but could be surprising. Not a bug per se, but worth noting for future consideration."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md already documents the pipe-separated alias syntax under 'Struct Tag Syntax' section, including examples like conf:\"host|net\" and conf:\"host|net,omitempty\". This was either added proactively or updated alongside this feature. The documentation is accurate and matches the implementation.",
+      "evidence": "AGENTS.md 'Struct Tag Syntax' section lists: 'Pipe-separated aliases: conf:\"host|net\" — matches \"host\" or \"net\" (case-insensitive). First name is primary (used by Marshal).'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The implementation correctly adds pipe-separated alias support to conf struct tags. Three files were modified: configFieldName was refactored to configFieldAliases in unmarshal.go (returning []string of aliases), buildFieldIndexRecursive registers all aliases to a shared fieldInfo, and parseTag in marshal.go extracts only the primary alias for output. 14 comprehensive test functions cover all required behaviors including real NATS patterns (host/net, user/username, pass/password, store_dir/storedir, max_connections/max_conn, pub/publish/import, leaf/leafnodes), case-insensitivity, omitempty, strict mode, nested structs, and round-trip marshal/unmarshal. Two non-blocking observations noted: no guard against empty alias segments from malformed tags, and no collision detection for overlapping aliases across fields. Both are consistent with stdlib patterns and do not affect correctness for valid usage."
+}
