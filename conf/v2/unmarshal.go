@@ -89,6 +89,24 @@ func unwrapTokenValue(v any) (val any, line, col int, file string) {
 	return v, 0, 0, ""
 }
 
+// wrapUnmarshalerErr wraps an error from a custom Unmarshaler with source
+// position info if the error does not already include it. Errors that are
+// already *ConfigError are returned as-is.
+func wrapUnmarshalerErr(err error, line, col int, file string) error {
+	if err == nil {
+		return nil
+	}
+	// If already a ConfigError, return as-is.
+	if _, ok := err.(*ConfigError); ok {
+		return err
+	}
+	// Only wrap if we have meaningful position info.
+	if line > 0 {
+		return newConfigError(line, col, file, err.Error())
+	}
+	return err
+}
+
 // Unmarshaler is the interface implemented by types that can unmarshal
 // a NATS configuration value. UnmarshalConfig receives the raw parsed
 // value (string, int64, float64, bool, map[string]any, []any, or time.Time)
@@ -335,12 +353,12 @@ func assignValue(fv reflect.Value, val any, key string, strict bool, line, col i
 		if fv.CanAddr() {
 			ptrVal := fv.Addr()
 			if ptrVal.Type().Implements(unmarshalerType) {
-				return ptrVal.Interface().(Unmarshaler).UnmarshalConfig(val)
+				return wrapUnmarshalerErr(ptrVal.Interface().(Unmarshaler).UnmarshalConfig(val), line, col, file)
 			}
 		}
 		if fv.Type().Implements(unmarshalerType) {
 			if fv.CanInterface() {
-				return fv.Interface().(Unmarshaler).UnmarshalConfig(val)
+				return wrapUnmarshalerErr(fv.Interface().(Unmarshaler).UnmarshalConfig(val), line, col, file)
 			}
 		}
 	}
@@ -398,12 +416,12 @@ func assignPointerValue(fv reflect.Value, val any, key string, strict bool, line
 		if fv.IsNil() {
 			fv.Set(reflect.New(elemType))
 		}
-		return fv.Interface().(Unmarshaler).UnmarshalConfig(val)
+		return wrapUnmarshalerErr(fv.Interface().(Unmarshaler).UnmarshalConfig(val), line, col, file)
 	}
 	if reflect.PointerTo(elemType).Implements(unmarshalerType) {
 		ptr := reflect.New(elemType)
 		if err := ptr.Interface().(Unmarshaler).UnmarshalConfig(val); err != nil {
-			return err
+			return wrapUnmarshalerErr(err, line, col, file)
 		}
 		fv.Set(ptr)
 		return nil
@@ -548,12 +566,12 @@ func assignSliceFromArray(fv reflect.Value, arr []any, elemType reflect.Type, ke
 		if reflect.PointerTo(elemType).Implements(unmarshalerType) {
 			ptrVal := reflect.New(elemType)
 			if err := ptrVal.Interface().(Unmarshaler).UnmarshalConfig(elem); err != nil {
-				return err
+				return wrapUnmarshalerErr(err, line, col, file)
 			}
 			elemVal.Set(ptrVal.Elem())
 		} else if elemType.Implements(unmarshalerType) {
 			if err := elemVal.Interface().(Unmarshaler).UnmarshalConfig(elem); err != nil {
-				return err
+				return wrapUnmarshalerErr(err, line, col, file)
 			}
 		} else if elemType.Kind() == reflect.Struct {
 			// Handle slice of structs: each element should be a map.

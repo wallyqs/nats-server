@@ -144,30 +144,32 @@ func processConfigV2(configFile string, opts *Options) error {
 
 // validateConfigV2 performs value validation on the processed config
 // when CheckConfig is true. It collects all errors and warnings.
+// It re-parses the config in pedantic mode to obtain token positions
+// for accurate file:line:col error reporting.
 func validateConfigV2(configFile string, o *Options) error {
 	errors := make([]error, 0)
 	warnings := make([]error, 0)
 
-	// Check for empty config by re-parsing to get the raw map.
-	m, _, _ := v2.ParseFileWithChecksDigest(configFile)
+	// Re-parse in pedantic mode to get the token map for position lookup.
+	m, _ := v2.ParseFileWithChecks(configFile)
 	if len(m) == 0 {
 		warnings = append(warnings, fmt.Errorf("%s: config has no values or is empty", configFile))
 	}
 
 	// Validate conflicting auth options.
-	validateAuthV2(configFile, o, &errors, &warnings)
+	validateAuthV2(configFile, o, m, &errors, &warnings)
 
 	// Validate cluster config.
-	validateClusterV2(configFile, o, &errors, &warnings)
+	validateClusterV2(configFile, o, m, &errors, &warnings)
 
 	// Validate leafnode config.
-	validateLeafNodeV2(configFile, o, &errors, &warnings)
+	validateLeafNodeV2(configFile, o, m, &errors, &warnings)
 
 	// Validate accounts.
-	validateAccountsV2(configFile, o, &errors, &warnings)
+	validateAccountsV2(configFile, o, m, &errors, &warnings)
 
 	// Validate lame duck duration.
-	validateLameDuckV2(configFile, o, &errors, &warnings)
+	validateLameDuckV2(configFile, o, m, &errors, &warnings)
 
 	if len(errors) > 0 || len(warnings) > 0 {
 		return &processConfigV2Err{
@@ -179,21 +181,93 @@ func validateConfigV2(configFile string, o *Options) error {
 	return nil
 }
 
+// v2TokenPos looks up a token position from a pedantic map for the given
+// key path. Returns line, position (col), and whether the token was found.
+// The pedantic map wraps values in v2 token structs that satisfy the
+// server token interface. The key path elements are case-insensitive.
+func v2TokenPos(m map[string]any, keys ...string) (line, pos int, ok bool) {
+	if len(keys) == 0 || m == nil {
+		return 0, 0, false
+	}
+
+	// Case-insensitive key lookup.
+	lookupKey := func(m map[string]any, key string) (any, bool) {
+		lk := strings.ToLower(key)
+		for k, v := range m {
+			if strings.ToLower(k) == lk {
+				return v, true
+			}
+		}
+		return nil, false
+	}
+
+	for i, key := range keys {
+		raw, found := lookupKey(m, key)
+		if !found {
+			return 0, 0, false
+		}
+
+		if i == len(keys)-1 {
+			// Last key: extract position from the token wrapper.
+			if tk, ok := raw.(token); ok {
+				return tk.Line(), tk.Position(), true
+			}
+			return 0, 0, false
+		}
+
+		// Intermediate key: unwrap and descend into nested map.
+		val := raw
+		if tk, ok := val.(token); ok {
+			val = tk.Value()
+		}
+		sub, ok := val.(map[string]any)
+		if !ok {
+			return 0, 0, false
+		}
+		m = sub
+	}
+	return 0, 0, false
+}
+
+// v2ConfigErr formats a config error with optional position info.
+// When line > 0, the error includes file:line:pos prefix.
+// Otherwise, just file: prefix.
+func v2ConfigErr(configFile string, line, pos int, reason string) error {
+	if line > 0 {
+		return fmt.Errorf("%s:%d:%d: %s", configFile, line, pos, reason)
+	}
+	return fmt.Errorf("%s: %s", configFile, reason)
+}
+
 // validateAuthV2 checks authorization-related configuration for errors.
-func validateAuthV2(configFile string, o *Options, errors *[]error, warnings *[]error) {
+// The pedantic map m is used to look up token positions for error reporting.
+func validateAuthV2(configFile string, o *Options, m map[string]any, errors *[]error, warnings *[]error) {
+	// Look up authorization block position for error reporting.
+	authLine, authPos, hasAuth := v2TokenPos(m, "authorization")
+
+	// Determine position for user/nkey errors. If the authorization
+	// block is defined, use its position. Otherwise fall back to the
+	// accounts block position (users/nkeys may come from accounts).
+	errLine, errPos := authLine, authPos
+	if !hasAuth {
+		if al, ap, ok := v2TokenPos(m, "accounts"); ok {
+			errLine, errPos = al, ap
+		}
+	}
+
 	// Check for user/pass + token conflict.
 	if (o.Username != _EMPTY_ || o.Password != _EMPTY_) && o.Authorization != _EMPTY_ {
-		*errors = append(*errors, fmt.Errorf("%s: Cannot have a user/pass and token", configFile))
+		*errors = append(*errors, v2ConfigErr(configFile, authLine, authPos, "Cannot have a user/pass and token"))
 	}
 
 	// Check for user + users array conflict.
 	if o.Username != _EMPTY_ && len(o.Users) > 0 {
-		*errors = append(*errors, fmt.Errorf("%s: Can not have a single user/pass and a users array", configFile))
+		*errors = append(*errors, v2ConfigErr(configFile, authLine, authPos, "Can not have a single user/pass and a users array"))
 	}
 
 	// Check for token + users array conflict.
 	if o.Authorization != _EMPTY_ && len(o.Users) > 0 {
-		*errors = append(*errors, fmt.Errorf("%s: Can not have a token and a users array", configFile))
+		*errors = append(*errors, v2ConfigErr(configFile, authLine, authPos, "Can not have a token and a users array"))
 	}
 
 	// Check for duplicate users.
@@ -201,7 +275,7 @@ func validateAuthV2(configFile string, o *Options, errors *[]error, warnings *[]
 	for _, u := range o.Users {
 		if u.Username != _EMPTY_ {
 			if _, ok := unames[u.Username]; ok {
-				*errors = append(*errors, fmt.Errorf("%s: Duplicate user %q detected", configFile, u.Username))
+				*errors = append(*errors, v2ConfigErr(configFile, errLine, errPos, fmt.Sprintf("Duplicate user %q detected", u.Username)))
 			}
 			unames[u.Username] = struct{}{}
 		}
@@ -212,7 +286,7 @@ func validateAuthV2(configFile string, o *Options, errors *[]error, warnings *[]
 	for _, nk := range o.Nkeys {
 		if nk.Nkey != _EMPTY_ {
 			if _, ok := nkeyNames[nk.Nkey]; ok {
-				*errors = append(*errors, fmt.Errorf("%s: Duplicate nkey %q detected", configFile, nk.Nkey))
+				*errors = append(*errors, v2ConfigErr(configFile, errLine, errPos, fmt.Sprintf("Duplicate nkey %q detected", nk.Nkey)))
 			}
 			nkeyNames[nk.Nkey] = struct{}{}
 		}
@@ -221,59 +295,71 @@ func validateAuthV2(configFile string, o *Options, errors *[]error, warnings *[]
 	// Validate nkey public keys for users.
 	for _, nk := range o.Nkeys {
 		if nk.Nkey != _EMPTY_ && !nkeys.IsValidPublicUserKey(nk.Nkey) {
-			*errors = append(*errors, fmt.Errorf("%s: Not a valid public nkey for a user", configFile))
+			*errors = append(*errors, v2ConfigErr(configFile, errLine, errPos, "Not a valid public nkey for a user"))
 		}
 	}
 }
 
 // validateClusterV2 checks cluster-related configuration for errors.
-func validateClusterV2(configFile string, o *Options, errors *[]error, warnings *[]error) {
+func validateClusterV2(configFile string, o *Options, m map[string]any, errors *[]error, warnings *[]error) {
 	if o.Cluster.Port == 0 && o.Cluster.ListenStr == _EMPTY_ && o.Cluster.Name == _EMPTY_ {
 		return
 	}
 
+	// Look up cluster block position for error reporting.
+	clusterLine, clusterPos, _ := v2TokenPos(m, "cluster")
+
 	// Validate cluster ping_interval max.
 	if o.Cluster.PingInterval > routeMaxPingInterval {
-		*warnings = append(*warnings, fmt.Errorf("%s: Cluster 'ping_interval' will reset to %v which is the max for routes",
-			configFile, routeMaxPingInterval))
+		*warnings = append(*warnings, v2ConfigErr(configFile, clusterLine, clusterPos,
+			fmt.Sprintf("Cluster 'ping_interval' will reset to %v which is the max for routes", routeMaxPingInterval)))
 	}
 }
 
 // validateLeafNodeV2 checks leafnode-related configuration for errors.
-func validateLeafNodeV2(configFile string, o *Options, errors *[]error, warnings *[]error) {
+func validateLeafNodeV2(configFile string, o *Options, m map[string]any, errors *[]error, warnings *[]error) {
 	if o.LeafNode.Port == 0 && len(o.LeafNode.Remotes) == 0 {
 		return
 	}
 
+	// Look up leafnodes block position for error reporting.
+	leafLine, leafPos, _ := v2TokenPos(m, "leafnodes")
+
 	// Validate min_version.
 	if o.LeafNode.MinVersion != _EMPTY_ {
 		if err := checkLeafMinVersionConfig(o.LeafNode.MinVersion); err != nil {
-			*errors = append(*errors, fmt.Errorf("%s: %s", configFile, err.Error()))
+			*errors = append(*errors, v2ConfigErr(configFile, leafLine, leafPos, err.Error()))
 		}
 	}
 }
 
 // validateAccountsV2 checks accounts-related configuration for errors.
-func validateAccountsV2(configFile string, o *Options, errors *[]error, warnings *[]error) {
+func validateAccountsV2(configFile string, o *Options, m map[string]any, errors *[]error, warnings *[]error) {
+	// Look up accounts block position for error reporting.
+	acctLine, acctPos, _ := v2TokenPos(m, "accounts")
+
 	// Validate account nkeys.
 	for _, acc := range o.Accounts {
 		if acc.Nkey != _EMPTY_ && !nkeys.IsValidPublicAccountKey(acc.Nkey) {
-			*errors = append(*errors, fmt.Errorf("%s: Not a valid public nkey for an account: %q", configFile, acc.Nkey))
+			*errors = append(*errors, v2ConfigErr(configFile, acctLine, acctPos,
+				fmt.Sprintf("Not a valid public nkey for an account: %q", acc.Nkey)))
 		}
 	}
 }
 
 // validateLameDuckV2 checks lame duck configuration for value errors.
-func validateLameDuckV2(configFile string, o *Options, errors *[]error, warnings *[]error) {
+func validateLameDuckV2(configFile string, o *Options, m map[string]any, errors *[]error, warnings *[]error) {
 	// Validate lame_duck_duration bounds.
 	if o.LameDuckDuration > 0 && o.LameDuckDuration < 30*time.Second {
-		*errors = append(*errors, fmt.Errorf("%s: invalid lame_duck_duration of %v, minimum is 30 seconds",
-			configFile, o.LameDuckDuration))
+		durLine, durPos, _ := v2TokenPos(m, "lame_duck_duration")
+		*errors = append(*errors, v2ConfigErr(configFile, durLine, durPos,
+			fmt.Sprintf("invalid lame_duck_duration of %v, minimum is 30 seconds", o.LameDuckDuration)))
 	}
 	// Validate lame_duck_grace_period is positive.
 	if o.LameDuckGracePeriod < 0 {
-		*errors = append(*errors, fmt.Errorf("%s: invalid lame_duck_grace_period, needs to be positive",
-			configFile))
+		graceLine, gracePos, _ := v2TokenPos(m, "lame_duck_grace_period")
+		*errors = append(*errors, v2ConfigErr(configFile, graceLine, gracePos,
+			"invalid lame_duck_grace_period, needs to be positive"))
 	}
 }
 

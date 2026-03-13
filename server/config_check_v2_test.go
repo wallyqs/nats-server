@@ -26,6 +26,12 @@ func TestConfigCheckV2(t *testing.T) {
 		err         error
 		warningErr  error
 		errContains string
+
+		// errorLine is the 1-based line number of the error in the config.
+		errorLine int
+
+		// errorPos is the 0-based character position within the line.
+		errorPos int
 	}{
 		// =================================================================
 		// Unknown field detection (strict mode)
@@ -36,6 +42,8 @@ func TestConfigCheckV2(t *testing.T) {
 				monitor = "127.0.0.1:4442"
 			`,
 			errContains: `unknown field "monitor"`,
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "unknown field default_permissions at top level",
@@ -46,6 +54,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `unknown field "default_permissions"`,
+			errorLine:   2,
+			errorPos:    6,
 		},
 		{
 			name: "multiple unknown top level fields",
@@ -54,6 +64,8 @@ func TestConfigCheckV2(t *testing.T) {
 				foo_bar = "hello"
 			`,
 			errContains: `unknown field "foo_bar"`,
+			errorLine:   3,
+			errorPos:    5,
 		},
 		{
 			name: "valid top level fields accepted",
@@ -93,6 +105,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `unknown field "hello"`,
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "tls cipher suites with unknown field",
@@ -106,6 +120,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `unknown field "preferences"`,
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "tls curve preferences with unknown field",
@@ -120,6 +136,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `unknown field "suites"`,
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "tls invalid curve preference",
@@ -131,6 +149,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `unrecognized curve preference`,
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "missing key_file in TLS",
@@ -140,6 +160,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: "missing 'key_file' in TLS configuration",
+			// No errorLine/errorPos: TLS validation error from GenTLSConfig
+			// in post-processing, not from parser token positions.
 		},
 
 		// =================================================================
@@ -154,6 +176,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `unknown field "foo"`,
+			errorLine:   4,
+			errorPos:    7,
 		},
 		{
 			name: "cluster with port and name valid",
@@ -179,6 +203,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: "Cannot have a user/pass and token",
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "token and users array conflict",
@@ -194,6 +220,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: "Can not have a token and a users array",
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "user/pass and users array conflict",
@@ -210,6 +238,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: "Can not have a single user/pass and a users array",
+			errorLine:   2,
+			errorPos:    5,
 		},
 
 		// =================================================================
@@ -227,6 +257,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `Duplicate user "user1" detected`,
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "duplicate nkeys in authorization",
@@ -240,6 +272,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `Duplicate nkey "UC6NLCN7AS34YOJVCYD4PJ3QB7QGLYG5B5IMBT25VW5K4TNUJODM7BOX" detected`,
+			errorLine:   2,
+			errorPos:    5,
 		},
 
 		// =================================================================
@@ -255,6 +289,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: "Not a valid public nkey for a user",
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "valid nkey for user",
@@ -317,6 +353,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: "Not a valid public nkey for a user",
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "invalid nkey in accounts block for account",
@@ -328,6 +366,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `Not a valid public nkey for an account: "invalid"`,
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "accounts block includes duplicate user",
@@ -345,6 +385,8 @@ func TestConfigCheckV2(t *testing.T) {
 				http_port = 8222
 			`,
 			errContains: `Duplicate user "foo" detected`,
+			errorLine:   3,
+			errorPos:    5,
 		},
 		{
 			name: "accounts block with referenced config variable within same block",
@@ -424,6 +466,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: "invalid leafnode's minimum version",
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "leafnode min_version is too low",
@@ -434,6 +478,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: "the minimum version should be at least 2.8.0",
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "valid leafnodes with port",
@@ -454,6 +500,8 @@ func TestConfigCheckV2(t *testing.T) {
 				lame_duck_duration: abc
 			`,
 			errContains: "invalid duration",
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "lame_duck_duration too small",
@@ -461,6 +509,8 @@ func TestConfigCheckV2(t *testing.T) {
 				lame_duck_duration: "5s"
 			`,
 			errContains: "invalid lame_duck_duration",
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "valid lame_duck_duration",
@@ -475,6 +525,8 @@ func TestConfigCheckV2(t *testing.T) {
 				lame_duck_grace_period: abc
 			`,
 			errContains: "invalid duration",
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "lame_duck_grace_period should be positive",
@@ -482,6 +534,8 @@ func TestConfigCheckV2(t *testing.T) {
 				lame_duck_grace_period: "-5s"
 			`,
 			errContains: "invalid lame_duck_grace_period",
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "valid lame_duck_grace_period",
@@ -512,6 +566,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			warningErr: fmt.Errorf("Cluster 'ping_interval' will reset to"),
+			errorLine:  2,
+			errorPos:   5,
 		},
 
 		// =================================================================
@@ -628,6 +684,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: "cannot unmarshal",
+			errorLine:   3,
+			errorPos:    7,
 		},
 		{
 			name: "port wrong type - string instead of int",
@@ -635,6 +693,8 @@ func TestConfigCheckV2(t *testing.T) {
 				port = "abc"
 			`,
 			errContains: "cannot unmarshal",
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "debug wrong type - string instead of bool",
@@ -642,6 +702,8 @@ func TestConfigCheckV2(t *testing.T) {
 				debug = "abc"
 			`,
 			errContains: "cannot unmarshal",
+			errorLine:   2,
+			errorPos:    5,
 		},
 		{
 			name: "max_payload wrong type - bool instead of int",
@@ -649,6 +711,8 @@ func TestConfigCheckV2(t *testing.T) {
 				max_payload = true
 			`,
 			errContains: "cannot unmarshal",
+			errorLine:   2,
+			errorPos:    5,
 		},
 
 		// =================================================================
@@ -708,6 +772,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `unknown field "foo"`,
+			errorLine:   5,
+			errorPos:    7,
 		},
 
 		// =================================================================
@@ -723,6 +789,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `unknown field "foo_bar"`,
+			errorLine:   5,
+			errorPos:    7,
 		},
 
 		// =================================================================
@@ -737,6 +805,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `unknown field "baz"`,
+			errorLine:   4,
+			errorPos:    7,
 		},
 
 		// =================================================================
@@ -751,6 +821,8 @@ func TestConfigCheckV2(t *testing.T) {
 				}
 			`,
 			errContains: `unknown field "foo_field"`,
+			errorLine:   4,
+			errorPos:    7,
 		},
 
 		// =================================================================
@@ -804,6 +876,166 @@ func TestConfigCheckV2(t *testing.T) {
 			// Unmarshaler, so bool cannot be assigned to it directly.
 			// This differs from v1 which handles it in custom parsing.
 			errContains: "cannot unmarshal",
+			errorLine:   4,
+			errorPos:    7,
+		},
+
+		// =================================================================
+		// Position accuracy: errors deep in nested blocks
+		// =================================================================
+		{
+			name: "unknown field deep in cluster after many valid lines",
+			config: `
+				port = 4222
+				host = "0.0.0.0"
+				server_name = "test-server"
+				debug = false
+				trace = false
+				max_payload = 1MB
+				max_connections = 100
+				cluster {
+				  port = 6222
+				  name = "my-cluster"
+				  bogus_field = true
+				}
+			`,
+			errContains: `unknown field "bogus_field"`,
+			errorLine:   12,
+			errorPos:    7,
+		},
+		{
+			name: "unknown field deep in gateway after many valid lines",
+			config: `
+				port = 4222
+				host = "127.0.0.1"
+				debug = true
+				trace = false
+				gateway {
+				  port = 7222
+				  name = "A"
+				  unknown_gw = true
+				}
+			`,
+			errContains: `unknown field "unknown_gw"`,
+			errorLine:   9,
+			errorPos:    7,
+		},
+		{
+			name: "type mismatch in nested mqtt block after leading config",
+			config: `
+				port = 4222
+				host = "0.0.0.0"
+				server_name = "test"
+				mqtt {
+				  port: "not_a_number"
+				}
+			`,
+			errContains: "cannot unmarshal",
+			errorLine:   6,
+			errorPos:    7,
+		},
+		{
+			name: "auth conflict after many config lines",
+			config: `
+				port = 4222
+				host = "0.0.0.0"
+				server_name = "test-server"
+				debug = false
+				trace = false
+				max_payload = 1MB
+				authorization = {
+				  user = "admin"
+				  pass = "secret"
+				  token = "my_token"
+				}
+			`,
+			errContains: "Cannot have a user/pass and token",
+			errorLine:   8,
+			errorPos:    5,
+		},
+		{
+			name: "invalid nkey in accounts after many valid fields",
+			config: `
+				port = 4222
+				host = "0.0.0.0"
+				server_name = "test-server"
+				debug = false
+				accounts {
+				  synadia = {
+				    nkey = "invalid_key"
+				  }
+				}
+			`,
+			errContains: `Not a valid public nkey for an account: "invalid_key"`,
+			errorLine:   6,
+			errorPos:    5,
+		},
+		{
+			name: "lame_duck_duration after many config lines",
+			config: `
+				port = 4222
+				host = "0.0.0.0"
+				server_name = "test-server"
+				debug = false
+				trace = false
+				max_payload = 1MB
+				max_connections = 100
+				lame_duck_duration: "5s"
+			`,
+			errContains: "invalid lame_duck_duration",
+			errorLine:   9,
+			errorPos:    5,
+		},
+		{
+			name: "leafnode min_version error after leading config",
+			config: `
+				port = 4222
+				host = "0.0.0.0"
+				leafnodes {
+				  port: 7422
+				  min_version = 2.7.9
+				}
+			`,
+			errContains: "the minimum version should be at least 2.8.0",
+			errorLine:   4,
+			errorPos:    5,
+		},
+		{
+			name: "duplicate user in accounts deep in config",
+			config: `
+				port = 4222
+				host = "0.0.0.0"
+				server_name = "test"
+				accounts = {
+				  nats {
+				    users = [
+				      { user: "alice", pass: "secret1" }
+				      { user: "bob",   pass: "secret2" }
+				      { user: "alice", pass: "secret3" }
+				    ]
+				  }
+				}
+			`,
+			errContains: `Duplicate user "alice" detected`,
+			errorLine:   5,
+			errorPos:    5,
+		},
+		{
+			name: "websocket unknown field deep in nested block",
+			config: `
+				port = 4222
+				host = "0.0.0.0"
+				server_name = "my-server"
+				debug = false
+				websocket {
+				  port = 8080
+				  no_tls = true
+				  invalid_ws_field = "test"
+				}
+			`,
+			errContains: `unknown field "invalid_ws_field"`,
+			errorLine:   9,
+			errorPos:    7,
 		},
 	}
 
@@ -831,6 +1063,15 @@ func TestConfigCheckV2(t *testing.T) {
 			if expectedErr != nil {
 				if err == nil {
 					t.Fatalf("Expected error containing %q but got none", expectedErr)
+				}
+
+				// When errorLine > 0, verify the error contains the expected
+				// file:line:pos prefix, matching v1's TestConfigCheck pattern.
+				if test.errorLine > 0 {
+					prefix := fmt.Sprintf("%s:%d:%d:", conf, test.errorLine, test.errorPos)
+					if !strings.Contains(err.Error(), prefix) {
+						t.Errorf("Expected error to contain position prefix:\n  %q\ngot:\n  %q", prefix, err.Error())
+					}
 				}
 
 				matchStr := ""
