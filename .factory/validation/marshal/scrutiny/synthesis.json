@@ -1,0 +1,51 @@
+{
+  "milestone": "marshal",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "go test ./conf/v2/... -count=1", "exitCode": 0 },
+    "typecheck": { "passed": true, "command": "go build ./conf/v2/...", "exitCode": 0 },
+    "lint": { "passed": true, "command": "go vet ./conf/v2/...", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 3,
+    "passed": 3,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Added documentation about duration strings needing to be quoted in NATS config output (lexer interprets numeric+letter suffix as size-suffixed integers)",
+      "sourceFeature": "marshal-core"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add to Coding Conventions: mention the Marshaler (MarshalConfig() ([]byte, error)) and Unmarshaler (UnmarshalConfig(v any) error) interfaces as public API in conf/v2. Future workers implementing types that need custom marshal/unmarshal should know about these interfaces.",
+      "evidence": "conf/v2/marshal.go:33-35 defines Marshaler interface, conf/v2/unmarshal.go defines Unmarshaler interface. These are public APIs not mentioned in AGENTS.md coding conventions. Flagged by marshal-core reviewer.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Inconsistent Raw field population pattern across AST node types (IntegerNode always vs Float/Bool/Datetime conditionally vs StringNode never)",
+      "reason": "Too implementation-specific; this is an internal AST detail that doesn't affect other workers. Already noted as non-blocking code quality issue in the review."
+    },
+    {
+      "observation": "Dead AST fields (rawSep on KeyNode, Raw on IncludeNode) added but never wired up",
+      "reason": "Already captured as non-blocking issues in the ast-emission-roundtrip review. Not systemic — these are specific code quality items, not guidance gaps."
+    },
+    {
+      "observation": "Task description referenced cross_area_test.go but actual file is cross_test.go",
+      "reason": "Minor reference inconsistency in the task description, not a code or guidance issue. No action needed."
+    },
+    {
+      "observation": "Worker deviated from strict TDD for integration tests (wrote tests after reading implementation)",
+      "reason": "Reviewer explicitly noted this is a reasonable deviation for integration tests that compose already-implemented functions. No skill change warranted."
+    }
+  ],
+  "previousRound": null
+}

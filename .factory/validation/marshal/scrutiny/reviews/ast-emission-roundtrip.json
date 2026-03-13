@@ -1,0 +1,63 @@
+{
+  "featureId": "ast-emission-roundtrip",
+  "reviewedAt": "2026-03-13T06:15:00Z",
+  "commitId": "52066b850",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation of AST-to-config-text emitter with well-structured code, comprehensive tests (39 test functions), and clean separation between raw-mode parsing and emission. All 5 validation contract assertions (VAL-MARSHAL-015 through 019) are covered. The emitter correctly preserves comments (both # and // styles), formatting (indentation, blank lines), variable definitions/references, include directives, and key separator styles. Round-trip structural equivalence is verified via reflect.DeepEqual on 10+ config variants plus the v1 test corpus. A few non-blocking code quality issues noted below.",
+    "issues": [
+      {
+        "file": "conf/v2/ast.go",
+        "line": 236,
+        "severity": "non_blocking",
+        "description": "Dead code: rawSep field added to KeyNode but never set in parse.go and never read in emit.go. The emitter uses the Separator enum with canonical whitespace instead. This field should either be removed or wired up for true byte-for-byte separator preservation."
+      },
+      {
+        "file": "conf/v2/ast.go",
+        "line": 205,
+        "severity": "non_blocking",
+        "description": "Dead code: IncludeNode.Raw field added but never set by the parser and never read by the emitter. The emitter reconstructs the include directive from Path directly. Should be removed or wired up."
+      },
+      {
+        "file": "conf/v2/parse.go",
+        "line": 312,
+        "severity": "non_blocking",
+        "description": "StringNode.Raw is never set during parsing (raw mode or otherwise), despite being added to the AST type. The emitter falls back to quoteString() which may re-quote differently than the original. This means string values don't get byte-for-byte preservation, only structural equivalence. Not a bug since all round-trip tests pass, but inconsistent with Float/Bool/Datetime which do set Raw in raw mode."
+      },
+      {
+        "file": "conf/v2/parse.go",
+        "line": 329,
+        "severity": "non_blocking",
+        "description": "IntegerNode.Raw is unconditionally set (Raw: it.val in struct literal) regardless of raw mode, while FloatNode, BoolNode, and DatetimeNode only set Raw when p.raw is true. This inconsistency is harmless but could confuse future maintainers."
+      },
+      {
+        "file": "conf/v2/emit.go",
+        "line": 220,
+        "severity": "non_blocking",
+        "description": "MapNode closing brace indentation uses heuristic (m.Pos.Column - 2) which assumes 2-space indentation. For configs with different indent widths (e.g., 4-space, tabs), the closing brace may be misaligned. All current tests use 2-space indent so this isn't caught."
+      },
+      {
+        "file": "conf/v2/parse.go",
+        "line": 667,
+        "severity": "non_blocking",
+        "description": "cloneNodeWithPosition doesn't preserve Raw fields for FloatNode, BoolNode, DatetimeNode. This only affects non-raw mode (in raw mode variables become VariableNode), so no current bug, but creates an asymmetry with IntegerNode which does preserve Raw in cloning."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The feature introduced a pattern of conditional Raw field population (only in raw mode for Float/Bool/Datetime, always for Integer, never for String). This inconsistency isn't documented in AGENTS.md and could lead to confusion for future workers implementing similar AST preservation features.",
+      "evidence": "parse.go:329 sets IntegerNode.Raw unconditionally; parse.go:350,370,385 set Float/Bool/Datetime Raw only when p.raw; parse.go:312-318 never sets StringNode.Raw despite the field existing in ast.go:112-114."
+    },
+    {
+      "area": "conventions",
+      "observation": "Dead fields (rawSep on KeyNode, Raw on IncludeNode) were added to AST types but never wired up. AGENTS.md doesn't have guidance about avoiding unused struct fields or marking them as 'reserved for future use'.",
+      "evidence": "ast.go:236-238 defines rawSep, ast.go:205-207 defines IncludeNode.Raw — neither is set in parse.go or read in emit.go."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "The ast-emission-roundtrip feature passes review. Implementation is well-structured with clean separation between raw parsing and emission. All 5 validation contract assertions are met: comment preservation (VAL-MARSHAL-015), formatting preservation (VAL-MARSHAL-016), variable preservation (VAL-MARSHAL-017), include preservation (VAL-MARSHAL-018), and round-trip structural equivalence (VAL-MARSHAL-019). Tests are comprehensive with 39 test functions covering all expected behaviors plus edge cases. Six non-blocking code quality issues were identified: two dead fields (rawSep, IncludeNode.Raw), one missing Raw field population (StringNode), one inconsistent Raw population pattern (IntegerNode always vs others conditionally), one heuristic closing-brace indentation assumption, and one incomplete clone function. None of these affect correctness or test outcomes."
+}

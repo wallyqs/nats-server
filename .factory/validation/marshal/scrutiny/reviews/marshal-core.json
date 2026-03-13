@@ -1,0 +1,57 @@
+{
+  "featureId": "marshal-core",
+  "reviewedAt": "2026-03-13T05:45:00Z",
+  "commitId": "15f14c35791ce7a6ea20aa9b96fee32fe54adc04",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation covering all 13 feature requirements. The marshal engine is well-structured with clean separation between encoding, field marshaling, slice/map handling, and string quoting. TDD was followed with 49 comprehensive tests including round-trip verification. All exports have doc comments, code uses stdlib only, and stays within conf/v2/ boundaries. A few non-blocking issues noted: dead code for time.Duration in slice context (time.Duration has Kind Int64, not Struct, so the check inside `case reflect.Struct` in marshalSlice is unreachable), an unused `parentIndex` parameter in marshalStructFields, and a redundant type-implements check in tryMarshalCustom's pointer branch.",
+    "issues": [
+      {
+        "file": "conf/v2/marshal.go",
+        "line": 375,
+        "severity": "non_blocking",
+        "description": "Dead code: time.Duration check inside `case reflect.Struct:` in marshalSlice is unreachable. time.Duration is `type Duration int64`, so its Kind() is reflect.Int64, not reflect.Struct. A []time.Duration slice would hit the Int64 case and marshal durations as raw nanosecond integers instead of human-readable strings like '5s'. This doesn't affect current tests (no []time.Duration slice test exists) but could surprise users marshaling duration slices."
+      },
+      {
+        "file": "conf/v2/marshal.go",
+        "line": 126,
+        "severity": "non_blocking",
+        "description": "Unused parameter: `parentIndex []int` in marshalStructFields is only passed recursively but never read for any logic. It appears vestigial — likely a placeholder for future embedded struct conflict resolution that was never implemented. Could be removed to reduce noise."
+      },
+      {
+        "file": "conf/v2/marshal.go",
+        "line": 266,
+        "severity": "non_blocking",
+        "description": "Redundant check in tryMarshalCustom: The pointer branch (`v.Kind() == reflect.Pointer && !v.IsNil()`) re-checks `v.Type().Implements(marshalerType)` which was already checked at the top of the function. This is dead code in the pointer branch since the first check would have already matched."
+      },
+      {
+        "file": "conf/v2/marshal.go",
+        "line": 495,
+        "severity": "non_blocking",
+        "description": "marshalSliceElement (for interface{} elements) missing reflect.Struct case. If a []interface{} slice contained a struct value, time.Time, or nested slice, it would return an unsupported-type error rather than handling it. Edge case unlikely in typical NATS configs but could affect map[string]any round-trips with complex nested data."
+      },
+      {
+        "file": "conf/v2/marshal.go",
+        "line": 538,
+        "severity": "non_blocking",
+        "description": "marshalMapEntries assumes string map keys (key.String()). For non-string key types (e.g., map[int]string), reflect.Value.String() returns '<int Value>' instead of the actual value. No validation or error is returned — the output would silently contain garbled keys. NATS configs always use string keys so this is unlikely in practice, but a defensive type-check with error would be more robust."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The Marshaler interface (MarshalConfig() ([]byte, error)) is now a public API in conf/v2 but is not documented in AGENTS.md's coding conventions. Future workers implementing types that need custom marshaling should know about this interface.",
+      "evidence": "conf/v2/marshal.go:33-35 defines the Marshaler interface. AGENTS.md does not mention it."
+    },
+    {
+      "area": "knowledge",
+      "observation": "Worker discovered that time.Duration strings like '5s' and '2m30s' must be quoted in NATS config output because the NATS lexer interprets numeric-prefix+letter-suffix as size-suffixed integers (e.g., '2m' = 2 million). This NATS config syntax quirk is not documented in nats-config-syntax.md.",
+      "evidence": "conf/v2/marshal.go:287-290 comment explains: 'Duration strings like \"5s\", \"2m30s\" must always be quoted because the NATS lexer would otherwise interpret the numeric prefix with letter suffix as a size-suffixed integer.' Worker spent one debug cycle fixing this (initially used quoteString which didn't quote durations, then switched to escapeString)."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The marshal-core feature comprehensively implements all 13 requirements: basic types, ambiguous string quoting, complex types (slices/maps/nested structs/arrays), struct tags with omitempty, time.Duration/Time, custom Marshaler interface, MarshalIndent, key separator consistency, unsupported type errors, nil/empty handling, and pointer fields. 49 well-written tests with round-trip verification. Code follows NATS conventions with full doc comments, stdlib-only deps, and clean go vet. Five non-blocking issues noted: dead code for duration-in-slice, unused parentIndex parameter, redundant Marshaler check, missing Struct case in marshalSliceElement, and no validation for non-string map keys. None of these affect the current feature contract or tests."
+}
