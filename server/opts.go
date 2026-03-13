@@ -62,40 +62,40 @@ type PinnedCertSet map[string]struct{}
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
 type ClusterOpts struct {
-	Name              string             `json:"-"`
-	Host              string             `json:"addr,omitempty"`
-	Port              int                `json:"cluster_port,omitempty"`
-	Username          string             `json:"-"`
-	Password          string             `json:"-"`
-	AuthTimeout       float64            `json:"auth_timeout,omitempty"`
-	Permissions       *RoutePermissions  `json:"-"`
-	TLSTimeout        float64            `json:"-"`
-	TLSConfig         *tls.Config        `json:"-"`
-	TLSMap            bool               `json:"-"`
-	TLSCheckKnownURLs bool               `json:"-"`
-	TLSPinnedCerts    PinnedCertSet      `json:"-"`
-	ListenStr         string             `json:"-"`
-	Advertise         string             `json:"-"`
-	NoAdvertise       bool               `json:"-"`
-	ConnectRetries    int                `json:"-"`
-	ConnectBackoff    bool               `json:"-"`
-	PoolSize          int                `json:"-"`
-	PinnedAccounts    []string           `json:"-"`
-	Compression       CompressionOpts    `json:"-"`
-	PingInterval      time.Duration      `json:"-"`
-	MaxPingsOut       int                `json:"-"`
-	WriteDeadline     time.Duration      `json:"-"`
-	WriteTimeout      WriteTimeoutPolicy `json:"-"`
+	Name              string             `json:"-" conf:"name"`
+	Host              string             `json:"addr,omitempty" conf:"host|net"`
+	Port              int                `json:"cluster_port,omitempty" conf:"port"`
+	Username          string             `json:"-" conf:"-"`
+	Password          string             `json:"-" conf:"-"`
+	AuthTimeout       float64            `json:"auth_timeout,omitempty" conf:"-"`
+	Permissions       *RoutePermissions  `json:"-" conf:"-"`
+	TLSTimeout        float64            `json:"-" conf:"-"`
+	TLSConfig         *tls.Config        `json:"-" conf:"-"`
+	TLSMap            bool               `json:"-" conf:"-"`
+	TLSCheckKnownURLs bool               `json:"-" conf:"-"`
+	TLSPinnedCerts    PinnedCertSet      `json:"-" conf:"-"`
+	ListenStr         string             `json:"-" conf:"-"`
+	Advertise         string             `json:"-" conf:"cluster_advertise|advertise"`
+	NoAdvertise       bool               `json:"-" conf:"no_advertise"`
+	ConnectRetries    int                `json:"-" conf:"connect_retries"`
+	ConnectBackoff    bool               `json:"-" conf:"connect_backoff"`
+	PoolSize          int                `json:"-" conf:"pool_size"`
+	PinnedAccounts    []string           `json:"-" conf:"accounts"`
+	Compression       CompressionOpts    `json:"-" conf:"compression"`
+	PingInterval      time.Duration      `json:"-" conf:"ping_interval"`
+	MaxPingsOut       int                `json:"-" conf:"ping_max"`
+	WriteDeadline     time.Duration      `json:"-" conf:"write_deadline"`
+	WriteTimeout      WriteTimeoutPolicy `json:"-" conf:"write_timeout"`
 
 	// Not exported (used in tests)
-	resolver netResolver
+	resolver netResolver `conf:"-"`
 	// Snapshot of configured TLS options.
-	tlsConfigOpts *TLSConfigOpts
+	tlsConfigOpts *TLSConfigOpts `conf:"-"`
 }
 
 // CompressionOpts defines the compression mode and optional configuration.
 type CompressionOpts struct {
-	Mode string
+	Mode string `conf:"mode"`
 	// If `Mode` is set to CompressionS2Auto, RTTThresholds provides the
 	// thresholds at which the compression level will go from
 	// CompressionS2Uncompressed to CompressionS2Fast, CompressionS2Better
@@ -105,108 +105,108 @@ type CompressionOpts struct {
 	// CompressionS2Fast, then from ]10ms..20ms], the level will be selected
 	// as CompressionS2Better. Anything above 20ms will result in picking
 	// the CompressionS2Best compression level.
-	RTTThresholds []time.Duration
+	RTTThresholds []time.Duration `conf:"rtt_thresholds|thresholds|rtts|rtt"`
 }
 
 // GatewayOpts are options for gateways.
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
 type GatewayOpts struct {
-	Name              string               `json:"name"`
-	Host              string               `json:"addr,omitempty"`
-	Port              int                  `json:"port,omitempty"`
-	Username          string               `json:"-"`
-	Password          string               `json:"-"`
-	AuthTimeout       float64              `json:"auth_timeout,omitempty"`
-	TLSConfig         *tls.Config          `json:"-"`
-	TLSTimeout        float64              `json:"tls_timeout,omitempty"`
-	TLSMap            bool                 `json:"-"`
-	TLSCheckKnownURLs bool                 `json:"-"`
-	TLSPinnedCerts    PinnedCertSet        `json:"-"`
-	Advertise         string               `json:"advertise,omitempty"`
-	ConnectRetries    int                  `json:"connect_retries,omitempty"`
-	ConnectBackoff    bool                 `json:"connect_backoff,omitempty"`
-	Gateways          []*RemoteGatewayOpts `json:"gateways,omitempty"`
-	RejectUnknown     bool                 `json:"reject_unknown,omitempty"` // config got renamed to reject_unknown_cluster
-	WriteDeadline     time.Duration        `json:"-"`
-	WriteTimeout      WriteTimeoutPolicy   `json:"-"`
+	Name              string               `json:"name" conf:"name"`
+	Host              string               `json:"addr,omitempty" conf:"host|net"`
+	Port              int                  `json:"port,omitempty" conf:"port"`
+	Username          string               `json:"-" conf:"-"`
+	Password          string               `json:"-" conf:"-"`
+	AuthTimeout       float64              `json:"auth_timeout,omitempty" conf:"-"`
+	TLSConfig         *tls.Config          `json:"-" conf:"-"`
+	TLSTimeout        float64              `json:"tls_timeout,omitempty" conf:"-"`
+	TLSMap            bool                 `json:"-" conf:"-"`
+	TLSCheckKnownURLs bool                 `json:"-" conf:"-"`
+	TLSPinnedCerts    PinnedCertSet        `json:"-" conf:"-"`
+	Advertise         string               `json:"advertise,omitempty" conf:"advertise"`
+	ConnectRetries    int                  `json:"connect_retries,omitempty" conf:"connect_retries"`
+	ConnectBackoff    bool                 `json:"connect_backoff,omitempty" conf:"connect_backoff"`
+	Gateways          []*RemoteGatewayOpts `json:"gateways,omitempty" conf:"gateways"`
+	RejectUnknown     bool                 `json:"reject_unknown,omitempty" conf:"reject_unknown|reject_unknown_cluster"` // config got renamed to reject_unknown_cluster
+	WriteDeadline     time.Duration        `json:"-" conf:"write_deadline"`
+	WriteTimeout      WriteTimeoutPolicy   `json:"-" conf:"write_timeout"`
 
 	// Not exported, for tests.
-	resolver         netResolver
-	sendQSubsBufSize int
+	resolver         netResolver `conf:"-"`
+	sendQSubsBufSize int         `conf:"-"`
 
 	// Snapshot of configured TLS options.
-	tlsConfigOpts *TLSConfigOpts
+	tlsConfigOpts *TLSConfigOpts `conf:"-"`
 }
 
 // RemoteGatewayOpts are options for connecting to a remote gateway
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
 type RemoteGatewayOpts struct {
-	Name          string      `json:"name"`
-	TLSConfig     *tls.Config `json:"-"`
-	TLSTimeout    float64     `json:"tls_timeout,omitempty"`
-	URLs          []*url.URL  `json:"urls,omitempty"`
-	tlsConfigOpts *TLSConfigOpts
+	Name          string         `json:"name" conf:"name"`
+	TLSConfig     *tls.Config    `json:"-" conf:"-"`
+	TLSTimeout    float64        `json:"tls_timeout,omitempty" conf:"-"`
+	URLs          []*url.URL     `json:"urls,omitempty" conf:"-"`
+	tlsConfigOpts *TLSConfigOpts `conf:"-"`
 }
 
 // LeafNodeOpts are options for a given server to accept leaf node connections and/or connect to a remote cluster.
 type LeafNodeOpts struct {
-	Host           string        `json:"addr,omitempty"`
-	Port           int           `json:"port,omitempty"`
-	Username       string        `json:"-"`
-	Password       string        `json:"-"`
-	ProxyRequired  bool          `json:"-"`
-	Nkey           string        `json:"-"`
-	Account        string        `json:"-"`
-	Users          []*User       `json:"-"`
-	AuthTimeout    float64       `json:"auth_timeout,omitempty"`
-	TLSConfig      *tls.Config   `json:"-"`
-	TLSTimeout     float64       `json:"tls_timeout,omitempty"`
-	TLSMap         bool          `json:"-"`
-	TLSPinnedCerts PinnedCertSet `json:"-"`
+	Host           string        `json:"addr,omitempty" conf:"host|net"`
+	Port           int           `json:"port,omitempty" conf:"port"`
+	Username       string        `json:"-" conf:"-"`
+	Password       string        `json:"-" conf:"-"`
+	ProxyRequired  bool          `json:"-" conf:"-"`
+	Nkey           string        `json:"-" conf:"-"`
+	Account        string        `json:"-" conf:"-"`
+	Users          []*User       `json:"-" conf:"-"`
+	AuthTimeout    float64       `json:"auth_timeout,omitempty" conf:"-"`
+	TLSConfig      *tls.Config   `json:"-" conf:"-"`
+	TLSTimeout     float64       `json:"tls_timeout,omitempty" conf:"-"`
+	TLSMap         bool          `json:"-" conf:"-"`
+	TLSPinnedCerts PinnedCertSet `json:"-" conf:"-"`
 	// When set to true, the server will perform the TLS handshake before
 	// sending the INFO protocol. For remote leafnodes that are not configured
 	// with a similar option, their connection will fail with some sort
 	// of timeout or EOF error since they are expecting to receive an
 	// INFO protocol first.
-	TLSHandshakeFirst bool `json:"-"`
+	TLSHandshakeFirst bool `json:"-" conf:"-"`
 	// If TLSHandshakeFirst is true and this value is strictly positive,
 	// the server will wait for that amount of time for the TLS handshake
 	// to start before falling back to previous behavior of sending the
 	// INFO protocol first. It allows for a mix of newer remote leafnodes
 	// that can require a TLS handshake first, and older that can't.
-	TLSHandshakeFirstFallback time.Duration      `json:"-"`
-	Advertise                 string             `json:"-"`
-	NoAdvertise               bool               `json:"-"`
-	ReconnectInterval         time.Duration      `json:"-"`
-	WriteDeadline             time.Duration      `json:"-"`
-	WriteTimeout              WriteTimeoutPolicy `json:"-"`
+	TLSHandshakeFirstFallback time.Duration      `json:"-" conf:"-"`
+	Advertise                 string             `json:"-" conf:"leafnode_advertise|advertise"`
+	NoAdvertise               bool               `json:"-" conf:"no_advertise"`
+	ReconnectInterval         time.Duration      `json:"-" conf:"reconnect|reconnect_delay|reconnect_interval"`
+	WriteDeadline             time.Duration      `json:"-" conf:"write_deadline"`
+	WriteTimeout              WriteTimeoutPolicy `json:"-" conf:"write_timeout"`
 
 	// Compression options
-	Compression CompressionOpts `json:"-"`
+	Compression CompressionOpts `json:"-" conf:"compression"`
 
 	// For solicited connections to other clusters/superclusters.
-	Remotes []*RemoteLeafOpts `json:"remotes,omitempty"`
+	Remotes []*RemoteLeafOpts `json:"remotes,omitempty" conf:"remotes"`
 
 	// This is the minimum version that is accepted for remote connections.
 	// Note that since the server version in the CONNECT protocol was added
 	// only starting at v2.8.0, any version below that will be rejected
 	// (since empty version string in CONNECT would fail the "version at
 	// least" test).
-	MinVersion string
+	MinVersion string `conf:"min_version|minimum_version"`
 
 	// Isolate subject interest from other leafnode connections, preventing
 	// east-west propagation.
-	IsolateLeafnodeInterest bool `json:"-"`
+	IsolateLeafnodeInterest bool `json:"-" conf:"isolate_leafnode_interest|isolate"`
 
 	// Not exported, for tests.
-	resolver    netResolver
-	dialTimeout time.Duration
-	connDelay   time.Duration
+	resolver    netResolver   `conf:"-"`
+	dialTimeout time.Duration `conf:"-"`
+	connDelay   time.Duration `conf:"-"`
 
 	// Snapshot of configured TLS options.
-	tlsConfigOpts *TLSConfigOpts
+	tlsConfigOpts *TLSConfigOpts `conf:"-"`
 }
 
 // SignatureHandler is used to sign a nonce from the server while
@@ -216,332 +216,332 @@ type SignatureHandler func([]byte) (string, []byte, error)
 
 // RemoteLeafOpts are options for connecting to a remote server as a leaf node.
 type RemoteLeafOpts struct {
-	LocalAccount      string           `json:"local_account,omitempty"`
-	NoRandomize       bool             `json:"-"`
-	URLs              []*url.URL       `json:"urls,omitempty"`
-	Credentials       string           `json:"-"`
-	Nkey              string           `json:"-"`
-	SignatureCB       SignatureHandler `json:"-"`
-	TLS               bool             `json:"-"`
-	TLSConfig         *tls.Config      `json:"-"`
-	TLSTimeout        float64          `json:"tls_timeout,omitempty"`
-	TLSHandshakeFirst bool             `json:"-"`
-	Hub               bool             `json:"hub,omitempty"`
-	DenyImports       []string         `json:"-"`
-	DenyExports       []string         `json:"-"`
+	LocalAccount      string           `json:"local_account,omitempty" conf:"account|local"`
+	NoRandomize       bool             `json:"-" conf:"no_randomize|dont_randomize"`
+	URLs              []*url.URL       `json:"urls,omitempty" conf:"-"`
+	Credentials       string           `json:"-" conf:"creds|credentials"`
+	Nkey              string           `json:"-" conf:"nkey|seed"`
+	SignatureCB       SignatureHandler `json:"-" conf:"-"`
+	TLS               bool             `json:"-" conf:"-"`
+	TLSConfig         *tls.Config      `json:"-" conf:"-"`
+	TLSTimeout        float64          `json:"tls_timeout,omitempty" conf:"-"`
+	TLSHandshakeFirst bool             `json:"-" conf:"-"`
+	Hub               bool             `json:"hub,omitempty" conf:"hub"`
+	DenyImports       []string         `json:"-" conf:"deny_imports|deny_import"`
+	DenyExports       []string         `json:"-" conf:"deny_exports|deny_export"`
 
 	// FirstInfoTimeout is the amount of time the server will wait for the
 	// initial INFO protocol from the remote server before closing the
 	// connection.
-	FirstInfoTimeout time.Duration `json:"-"`
+	FirstInfoTimeout time.Duration `json:"-" conf:"first_info_timeout"`
 
 	// Compression options for this remote. Each remote could have a different
 	// setting and also be different from the LeafNode options.
-	Compression CompressionOpts `json:"-"`
+	Compression CompressionOpts `json:"-" conf:"compression"`
 
 	// When an URL has the "ws" (or "wss") scheme, then the server will initiate the
 	// connection as a websocket connection. By default, the websocket frames will be
 	// masked (as if this server was a websocket client to the remote server). The
 	// NoMasking option will change this behavior and will send umasked frames.
 	Websocket struct {
-		Compression bool `json:"-"`
-		NoMasking   bool `json:"-"`
-	}
+		Compression bool `json:"-" conf:"ws_compress|ws_compression|websocket_compress|websocket_compression"`
+		NoMasking   bool `json:"-" conf:"ws_no_masking|websocket_no_masking"`
+	} `conf:"-"`
 
 	// HTTP Proxy configuration for WebSocket connections
 	Proxy struct {
 		// URL of the HTTP proxy server (e.g., "http://proxy.example.com:8080")
-		URL string `json:"-"`
+		URL string `json:"-" conf:"url"`
 		// Username for proxy authentication
-		Username string `json:"-"`
+		Username string `json:"-" conf:"username"`
 		// Password for proxy authentication
-		Password string `json:"-"`
+		Password string `json:"-" conf:"password"`
 		// Timeout for proxy connection
-		Timeout time.Duration `json:"-"`
-	}
+		Timeout time.Duration `json:"-" conf:"timeout"`
+	} `conf:"proxy"`
 
-	tlsConfigOpts *TLSConfigOpts
+	tlsConfigOpts *TLSConfigOpts `conf:"-"`
 
 	// If we are clustered and our local account has JetStream, if apps are accessing
 	// a stream or consumer leader through this LN and it gets dropped, the apps will
 	// not be able to work. This tells the system to migrate the leaders away from this server.
 	// This only changes leader for R>1 assets.
-	JetStreamClusterMigrate bool `json:"jetstream_cluster_migrate,omitempty"`
+	JetStreamClusterMigrate bool `json:"jetstream_cluster_migrate,omitempty" conf:"jetstream_cluster_migrate|js_cluster_migrate"`
 
 	// If JetStreamClusterMigrate is set to true, this is the time after which the leader
 	// will be migrated away from this server if still disconnected.
-	JetStreamClusterMigrateDelay time.Duration `json:"jetstream_cluster_migrate_delay,omitempty"`
+	JetStreamClusterMigrateDelay time.Duration `json:"jetstream_cluster_migrate_delay,omitempty" conf:"-"`
 
 	// LocalIsolation isolates this remote from east-west subject interest originating locally.
-	LocalIsolation bool `json:"local_isolation,omitempty"`
+	LocalIsolation bool `json:"local_isolation,omitempty" conf:"isolate_leafnode_interest|isolate"`
 
 	// RequestIsolation asks the remote side to isolate us from their east-west subject interest.
-	RequestIsolation bool `json:"request_isolation,omitempty"`
+	RequestIsolation bool `json:"request_isolation,omitempty" conf:"request_isolation"`
 
 	// If this is set to true, the connection to this remote will not be solicited.
 	// During a configuration reload, if this is changed from `false` to `true`, the
 	// existing connection will be closed and not solicited again (until it is changed
 	// to `false` again.
-	Disabled bool `json:"-"`
+	Disabled bool `json:"-" conf:"disabled"`
 }
 
 // JSLimitOpts are active limits for the meta cluster
 type JSLimitOpts struct {
-	MaxRequestBatch           int           `json:"max_request_batch,omitempty"`             // MaxRequestBatch is the maximum amount of updates that can be sent in a batch
-	MaxAckPending             int           `json:"max_ack_pending,omitempty"`               // MaxAckPending is the server limit for maximum amount of outstanding Acks
-	MaxHAAssets               int           `json:"max_ha_assets,omitempty"`                 // MaxHAAssets is the maximum of Streams and Consumers that may have more than 1 replica
-	Duplicates                time.Duration `json:"max_duplicate_window,omitempty"`          // Duplicates is the maximum value for duplicate tracking on Streams
-	MaxBatchInflightPerStream int           `json:"max_batch_inflight_per_stream,omitempty"` // MaxBatchInflightPerStream is the maximum amount of open batches per stream
-	MaxBatchInflightTotal     int           `json:"max_batch_inflight_total,omitempty"`      // MaxBatchInflightTotal is the maximum amount of total open batches per server
-	MaxBatchSize              int           `json:"max_batch_size,omitempty"`                // MaxBatchSize is the maximum amount of messages allowed in a batch publish to a Stream
-	MaxBatchTimeout           time.Duration `json:"max_batch_timeout,omitempty"`             // MaxBatchTimeout is the maximum time to receive the commit message after receiving the first message of a batch
+	MaxRequestBatch           int           `json:"max_request_batch,omitempty" conf:"max_request_batch"`             // MaxRequestBatch is the maximum amount of updates that can be sent in a batch
+	MaxAckPending             int           `json:"max_ack_pending,omitempty" conf:"max_ack_pending"`                 // MaxAckPending is the server limit for maximum amount of outstanding Acks
+	MaxHAAssets               int           `json:"max_ha_assets,omitempty" conf:"max_ha_assets"`                     // MaxHAAssets is the maximum of Streams and Consumers that may have more than 1 replica
+	Duplicates                time.Duration `json:"max_duplicate_window,omitempty" conf:"duplicate_window"`           // Duplicates is the maximum value for duplicate tracking on Streams
+	MaxBatchInflightPerStream int           `json:"max_batch_inflight_per_stream,omitempty" conf:"-"`                 // MaxBatchInflightPerStream is the maximum amount of open batches per stream
+	MaxBatchInflightTotal     int           `json:"max_batch_inflight_total,omitempty" conf:"-"`                      // MaxBatchInflightTotal is the maximum amount of total open batches per server
+	MaxBatchSize              int           `json:"max_batch_size,omitempty" conf:"-"`                                // MaxBatchSize is the maximum amount of messages allowed in a batch publish to a Stream
+	MaxBatchTimeout           time.Duration `json:"max_batch_timeout,omitempty" conf:"-"`                             // MaxBatchTimeout is the maximum time to receive the commit message after receiving the first message of a batch
 }
 
 type JSTpmOpts struct {
-	KeysFile    string
-	KeyPassword string
-	SrkPassword string
-	Pcr         int
+	KeysFile    string `conf:"keys_file"`
+	KeyPassword string `conf:"encryption_password"`
+	SrkPassword string `conf:"srk_password"`
+	Pcr         int    `conf:"pcr"`
 }
 
 // AuthCallout option used to map external AuthN to NATS based AuthZ.
 type AuthCallout struct {
 	// Must be a public account Nkey.
-	Issuer string
+	Issuer string `conf:"issuer"`
 	// Account to be used for sending requests.
-	Account string
+	Account string `conf:"account|acc"`
 	// Users that will bypass auth_callout and be used for the auth service itself.
-	AuthUsers []string
+	AuthUsers []string `conf:"auth_users|users"`
 	// XKey is a public xkey for the authorization service.
 	// This will enable encryption for server requests and the authorization service responses.
-	XKey string
+	XKey string `conf:"xkey|key"`
 	// AllowedAccounts that will be delegated to the auth service.
 	// If empty then all accounts will be delegated.
-	AllowedAccounts []string
+	AllowedAccounts []string `conf:"allowed_accounts"`
 }
 
 // Options block for nats-server.
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
 type Options struct {
-	ConfigFile      string `json:"-"`
-	ServerName      string `json:"server_name"`
-	Host            string `json:"addr"`
-	Port            int    `json:"port"`
-	DontListen      bool   `json:"dont_listen"`
-	ClientAdvertise string `json:"-"`
-	Trace           bool   `json:"-"`
-	Debug           bool   `json:"-"`
-	TraceVerbose    bool   `json:"-"`
+	ConfigFile      string `json:"-" conf:"-"`
+	ServerName      string `json:"server_name" conf:"server_name"`
+	Host            string `json:"addr" conf:"host|net"`
+	Port            int    `json:"port" conf:"port"`
+	DontListen      bool   `json:"dont_listen" conf:"-"`
+	ClientAdvertise string `json:"-" conf:"client_advertise"`
+	Trace           bool   `json:"-" conf:"trace"`
+	Debug           bool   `json:"-" conf:"debug"`
+	TraceVerbose    bool   `json:"-" conf:"trace_verbose"`
 
 	// TraceHeaders if true will only trace message headers, not the payload.
-	TraceHeaders               bool          `json:"-"`
-	NoLog                      bool          `json:"-"`
-	NoSigs                     bool          `json:"-"`
-	NoSublistCache             bool          `json:"-"`
-	NoHeaderSupport            bool          `json:"-"`
-	DisableShortFirstPing      bool          `json:"-"`
-	Logtime                    bool          `json:"-"`
-	LogtimeUTC                 bool          `json:"-"`
-	MaxConn                    int           `json:"max_connections"`
-	MaxSubs                    int           `json:"max_subscriptions,omitempty"`
-	MaxSubTokens               uint8         `json:"-"`
-	Nkeys                      []*NkeyUser   `json:"-"`
-	Users                      []*User       `json:"-"`
-	Accounts                   []*Account    `json:"-"`
-	NoAuthUser                 string        `json:"-"`
-	DefaultSentinel            string        `json:"-"`
-	SystemAccount              string        `json:"-"`
-	NoSystemAccount            bool          `json:"-"`
-	Username                   string        `json:"-"`
-	Password                   string        `json:"-"`
-	ProxyRequired              bool          `json:"-"`
-	ProxyProtocol              bool          `json:"-"`
-	Authorization              string        `json:"-"`
-	AuthCallout                *AuthCallout  `json:"-"`
-	PingInterval               time.Duration `json:"ping_interval"`
-	MaxPingsOut                int           `json:"ping_max"`
-	HTTPHost                   string        `json:"http_host"`
-	HTTPPort                   int           `json:"http_port"`
-	HTTPBasePath               string        `json:"http_base_path"`
-	HTTPSPort                  int           `json:"https_port"`
-	AuthTimeout                float64       `json:"auth_timeout"`
-	MaxControlLine             int32         `json:"max_control_line"`
-	MaxPayload                 int32         `json:"max_payload"`
-	MaxPending                 int64         `json:"max_pending"`
-	NoFastProducerStall        bool          `json:"-"`
-	Cluster                    ClusterOpts   `json:"cluster,omitempty"`
-	Gateway                    GatewayOpts   `json:"gateway,omitempty"`
-	LeafNode                   LeafNodeOpts  `json:"leaf,omitempty"`
-	JetStream                  bool          `json:"jetstream"`
-	NoJetStreamStrict          bool          `json:"-"` // Strict by default.
-	JetStreamMaxMemory         int64         `json:"-"`
-	JetStreamMaxStore          int64         `json:"-"`
-	JetStreamDomain            string        `json:"-"`
-	JetStreamExtHint           string        `json:"-"`
-	JetStreamKey               string        `json:"-"`
-	JetStreamOldKey            string        `json:"-"`
-	JetStreamCipher            StoreCipher   `json:"-"`
-	JetStreamUniqueTag         string
-	JetStreamLimits            JSLimitOpts
-	JetStreamTpm               JSTpmOpts
-	JetStreamMaxCatchup        int64
-	JetStreamRequestQueueLimit int64
-	JetStreamInfoQueueLimit    int64
-	JetStreamMetaCompact       uint64
-	JetStreamMetaCompactSize   uint64
-	JetStreamMetaCompactSync   bool
-	StreamMaxBufferedMsgs      int               `json:"-"`
-	StreamMaxBufferedSize      int64             `json:"-"`
-	StoreDir                   string            `json:"-"`
-	SyncInterval               time.Duration     `json:"-"`
-	SyncAlways                 bool              `json:"-"`
-	JsAccDefaultDomain         map[string]string `json:"-"` // account to domain name mapping
-	Websocket                  WebsocketOpts     `json:"-"`
-	MQTT                       MQTTOpts          `json:"-"`
-	ProfPort                   int               `json:"-"`
-	ProfBlockRate              int               `json:"-"`
-	PidFile                    string            `json:"-"`
-	PortsFileDir               string            `json:"-"`
-	LogFile                    string            `json:"-"`
-	LogSizeLimit               int64             `json:"-"`
-	LogMaxFiles                int64             `json:"-"`
-	Syslog                     bool              `json:"-"`
-	RemoteSyslog               string            `json:"-"`
-	Routes                     []*url.URL        `json:"-"`
-	RoutesStr                  string            `json:"-"`
-	TLSTimeout                 float64           `json:"tls_timeout"`
-	TLS                        bool              `json:"-"`
-	TLSVerify                  bool              `json:"-"`
-	TLSMap                     bool              `json:"-"`
-	TLSCert                    string            `json:"-"`
-	TLSKey                     string            `json:"-"`
-	TLSCaCert                  string            `json:"-"`
-	TLSConfig                  *tls.Config       `json:"-"`
-	TLSPinnedCerts             PinnedCertSet     `json:"-"`
-	TLSRateLimit               int64             `json:"-"`
+	TraceHeaders               bool          `json:"-" conf:"trace_headers"`
+	NoLog                      bool          `json:"-" conf:"-"`
+	NoSigs                     bool          `json:"-" conf:"-"`
+	NoSublistCache             bool          `json:"-" conf:"disable_sublist_cache|no_sublist_cache"`
+	NoHeaderSupport            bool          `json:"-" conf:"no_header_support"`
+	DisableShortFirstPing      bool          `json:"-" conf:"-"`
+	Logtime                    bool          `json:"-" conf:"logtime"`
+	LogtimeUTC                 bool          `json:"-" conf:"logtime_utc"`
+	MaxConn                    int           `json:"max_connections" conf:"max_connections|max_conn"`
+	MaxSubs                    int           `json:"max_subscriptions,omitempty" conf:"max_subscriptions|max_subs"`
+	MaxSubTokens               uint8         `json:"-" conf:"max_sub_tokens|max_subscription_tokens"`
+	Nkeys                      []*NkeyUser   `json:"-" conf:"-"`
+	Users                      []*User       `json:"-" conf:"-"`
+	Accounts                   []*Account    `json:"-" conf:"-"`
+	NoAuthUser                 string        `json:"-" conf:"no_auth_user"`
+	DefaultSentinel            string        `json:"-" conf:"default_sentinel"`
+	SystemAccount              string        `json:"-" conf:"system_account|system"`
+	NoSystemAccount            bool          `json:"-" conf:"no_system_account|no_system|no_sys_acc"`
+	Username                   string        `json:"-" conf:"-"`
+	Password                   string        `json:"-" conf:"-"`
+	ProxyRequired              bool          `json:"-" conf:"-"`
+	ProxyProtocol              bool          `json:"-" conf:"proxy_protocol"`
+	Authorization              string        `json:"-" conf:"-"`
+	AuthCallout                *AuthCallout  `json:"-" conf:"-"`
+	PingInterval               time.Duration `json:"ping_interval" conf:"ping_interval"`
+	MaxPingsOut                int           `json:"ping_max" conf:"ping_max"`
+	HTTPHost                   string        `json:"http_host" conf:"-"`
+	HTTPPort                   int           `json:"http_port" conf:"http_port|monitor_port"`
+	HTTPBasePath               string        `json:"http_base_path" conf:"http_base_path"`
+	HTTPSPort                  int           `json:"https_port" conf:"https_port"`
+	AuthTimeout                float64       `json:"auth_timeout" conf:"-"`
+	MaxControlLine             int32         `json:"max_control_line" conf:"max_control_line"`
+	MaxPayload                 int32         `json:"max_payload" conf:"max_payload"`
+	MaxPending                 int64         `json:"max_pending" conf:"max_pending"`
+	NoFastProducerStall        bool          `json:"-" conf:"no_fast_producer_stall"`
+	Cluster                    ClusterOpts   `json:"cluster,omitempty" conf:"cluster"`
+	Gateway                    GatewayOpts   `json:"gateway,omitempty" conf:"gateway"`
+	LeafNode                   LeafNodeOpts  `json:"leaf,omitempty" conf:"leaf|leafnodes"`
+	JetStream                  bool          `json:"jetstream" conf:"-"`
+	NoJetStreamStrict          bool          `json:"-" conf:"-"` // Strict by default.
+	JetStreamMaxMemory         int64         `json:"-" conf:"-"`
+	JetStreamMaxStore          int64         `json:"-" conf:"-"`
+	JetStreamDomain            string        `json:"-" conf:"-"`
+	JetStreamExtHint           string        `json:"-" conf:"-"`
+	JetStreamKey               string        `json:"-" conf:"-"`
+	JetStreamOldKey            string        `json:"-" conf:"-"`
+	JetStreamCipher            StoreCipher   `json:"-" conf:"-"`
+	JetStreamUniqueTag         string        `conf:"-"`
+	JetStreamLimits            JSLimitOpts   `conf:"-"`
+	JetStreamTpm               JSTpmOpts     `conf:"-"`
+	JetStreamMaxCatchup        int64         `conf:"-"`
+	JetStreamRequestQueueLimit int64         `conf:"-"`
+	JetStreamInfoQueueLimit    int64         `conf:"-"`
+	JetStreamMetaCompact       uint64        `conf:"-"`
+	JetStreamMetaCompactSize   uint64        `conf:"-"`
+	JetStreamMetaCompactSync   bool          `conf:"-"`
+	StreamMaxBufferedMsgs      int               `json:"-" conf:"-"`
+	StreamMaxBufferedSize      int64             `json:"-" conf:"-"`
+	StoreDir                   string            `json:"-" conf:"store_dir|storedir"`
+	SyncInterval               time.Duration     `json:"-" conf:"-"`
+	SyncAlways                 bool              `json:"-" conf:"-"`
+	JsAccDefaultDomain         map[string]string `json:"-" conf:"default_js_domain"` // account to domain name mapping
+	Websocket                  WebsocketOpts     `json:"-" conf:"websocket|ws"`
+	MQTT                       MQTTOpts          `json:"-" conf:"mqtt"`
+	ProfPort                   int               `json:"-" conf:"prof_port"`
+	ProfBlockRate              int               `json:"-" conf:"prof_block_rate"`
+	PidFile                    string            `json:"-" conf:"pidfile|pid_file"`
+	PortsFileDir               string            `json:"-" conf:"ports_file_dir"`
+	LogFile                    string            `json:"-" conf:"logfile|log_file"`
+	LogSizeLimit               int64             `json:"-" conf:"logfile_size_limit|log_size_limit"`
+	LogMaxFiles                int64             `json:"-" conf:"logfile_max_num|log_max_num"`
+	Syslog                     bool              `json:"-" conf:"syslog"`
+	RemoteSyslog               string            `json:"-" conf:"remote_syslog"`
+	Routes                     []*url.URL        `json:"-" conf:"-"`
+	RoutesStr                  string            `json:"-" conf:"-"`
+	TLSTimeout                 float64           `json:"tls_timeout" conf:"-"`
+	TLS                        bool              `json:"-" conf:"-"`
+	TLSVerify                  bool              `json:"-" conf:"-"`
+	TLSMap                     bool              `json:"-" conf:"-"`
+	TLSCert                    string            `json:"-" conf:"-"`
+	TLSKey                     string            `json:"-" conf:"-"`
+	TLSCaCert                  string            `json:"-" conf:"-"`
+	TLSConfig                  *tls.Config       `json:"-" conf:"-"`
+	TLSPinnedCerts             PinnedCertSet     `json:"-" conf:"-"`
+	TLSRateLimit               int64             `json:"-" conf:"-"`
 	// When set to true, the server will perform the TLS handshake before
 	// sending the INFO protocol. For clients that are not configured
 	// with a similar option, their connection will fail with some sort
 	// of timeout or EOF error since they are expecting to receive an
 	// INFO protocol first.
-	TLSHandshakeFirst bool `json:"-"`
+	TLSHandshakeFirst bool `json:"-" conf:"-"`
 	// If TLSHandshakeFirst is true and this value is strictly positive,
 	// the server will wait for that amount of time for the TLS handshake
 	// to start before falling back to previous behavior of sending the
 	// INFO protocol first. It allows for a mix of newer clients that can
 	// require a TLS handshake first, and older clients that can't.
-	TLSHandshakeFirstFallback time.Duration      `json:"-"`
-	AllowNonTLS               bool               `json:"-"`
-	WriteDeadline             time.Duration      `json:"-"`
-	WriteTimeout              WriteTimeoutPolicy `json:"-"`
-	MaxClosedClients          int                `json:"-"`
-	LameDuckDuration          time.Duration      `json:"-"`
-	LameDuckGracePeriod       time.Duration      `json:"-"`
+	TLSHandshakeFirstFallback time.Duration      `json:"-" conf:"-"`
+	AllowNonTLS               bool               `json:"-" conf:"allow_non_tls"`
+	WriteDeadline             time.Duration      `json:"-" conf:"write_deadline"`
+	WriteTimeout              WriteTimeoutPolicy `json:"-" conf:"write_timeout"`
+	MaxClosedClients          int                `json:"-" conf:"max_closed_clients"`
+	LameDuckDuration          time.Duration      `json:"-" conf:"lame_duck_duration"`
+	LameDuckGracePeriod       time.Duration      `json:"-" conf:"lame_duck_grace_period"`
 
 	// MaxTracedMsgLen is the maximum printable length for traced messages.
-	MaxTracedMsgLen int `json:"-"`
+	MaxTracedMsgLen int `json:"-" conf:"max_traced_msg_len"`
 
 	// Operating a trusted NATS server
-	TrustedKeys              []string              `json:"-"`
-	TrustedOperators         []*jwt.OperatorClaims `json:"-"`
-	AccountResolver          AccountResolver       `json:"-"`
-	AccountResolverTLSConfig *tls.Config           `json:"-"`
+	TrustedKeys              []string              `json:"-" conf:"trusted|trusted_keys"`
+	TrustedOperators         []*jwt.OperatorClaims `json:"-" conf:"-"`
+	AccountResolver          AccountResolver       `json:"-" conf:"-"`
+	AccountResolverTLSConfig *tls.Config           `json:"-" conf:"-"`
 
 	// AlwaysEnableNonce will always present a nonce to new connections
 	// typically used by custom Authentication implementations who embeds
 	// the server and so not presented as a configuration option
-	AlwaysEnableNonce bool
+	AlwaysEnableNonce bool `conf:"-"`
 
-	CustomClientAuthentication Authentication `json:"-"`
-	CustomRouterAuthentication Authentication `json:"-"`
+	CustomClientAuthentication Authentication `json:"-" conf:"-"`
+	CustomRouterAuthentication Authentication `json:"-" conf:"-"`
 
 	// CheckConfig configuration file syntax test was successful and exit.
-	CheckConfig bool `json:"-"`
+	CheckConfig bool `json:"-" conf:"-"`
 
 	// DisableJetStreamBanner will not print the ascii art on startup for JetStream enabled servers
-	DisableJetStreamBanner bool `json:"-"`
+	DisableJetStreamBanner bool `json:"-" conf:"-"`
 
 	// ConnectErrorReports specifies the number of failed attempts
 	// at which point server should report the failure of an initial
 	// connection to a route, gateway or leaf node.
 	// See DEFAULT_CONNECT_ERROR_REPORTS for default value.
-	ConnectErrorReports int
+	ConnectErrorReports int `conf:"connect_error_reports"`
 
 	// ReconnectErrorReports is similar to ConnectErrorReports except
 	// that this applies to reconnect events.
-	ReconnectErrorReports int
+	ReconnectErrorReports int `conf:"reconnect_error_reports"`
 
 	// Tags describing the server. They will be included in varz
 	// and used as a filter criteria for some system requests.
-	Tags jwt.TagList `json:"-"`
+	Tags jwt.TagList `json:"-" conf:"server_tags"`
 
 	// Metadata describing the server. They will be included in 'Z' responses.
-	Metadata map[string]string `json:"-"`
+	Metadata map[string]string `json:"-" conf:"server_metadata"`
 
 	// OCSPConfig enables OCSP Stapling in the server.
-	OCSPConfig    *OCSPConfig
-	tlsConfigOpts *TLSConfigOpts
+	OCSPConfig    *OCSPConfig    `conf:"ocsp"`
+	tlsConfigOpts *TLSConfigOpts `conf:"-"`
 
 	// Proxies configuration.
-	Proxies *ProxiesConfig
+	Proxies *ProxiesConfig `conf:"proxies"`
 
 	// private fields, used to know if bool options are explicitly
 	// defined in config and/or command line params.
-	inConfig  map[string]bool
-	inCmdLine map[string]bool
+	inConfig  map[string]bool `conf:"-"`
+	inCmdLine map[string]bool `conf:"-"`
 
 	// private fields for operator mode
-	operatorJWT            []string
-	resolverPreloads       map[string]string
-	resolverPinnedAccounts map[string]struct{}
+	operatorJWT            []string              `conf:"-"`
+	resolverPreloads       map[string]string     `conf:"-"`
+	resolverPinnedAccounts map[string]struct{}   `conf:"-"`
 
 	// private fields, used for testing
-	gatewaysSolicitDelay time.Duration
-	overrideProto        int
+	gatewaysSolicitDelay time.Duration `conf:"-"`
+	overrideProto        int           `conf:"-"`
 
 	// JetStream
-	maxMemSet   bool
-	maxStoreSet bool
-	syncSet     bool
+	maxMemSet   bool `conf:"-"`
+	maxStoreSet bool `conf:"-"`
+	syncSet     bool `conf:"-"`
 
 	// OCSP Cache config enables next-gen cache for OCSP features
-	OCSPCacheConfig *OCSPResponseCacheConfig
+	OCSPCacheConfig *OCSPResponseCacheConfig `conf:"ocsp_cache"`
 
 	// Used to mark that we had a top level authorization block.
-	authBlockDefined bool
+	authBlockDefined bool `conf:"-"`
 
 	// configDigest represents the state of configuration.
-	configDigest string
+	configDigest string `conf:"-"`
 }
 
 // WebsocketOpts are options for websocket
 type WebsocketOpts struct {
 	// The server will accept websocket client connections on this hostname/IP.
-	Host string
+	Host string `conf:"host|net"`
 	// The server will accept websocket client connections on this port.
-	Port int
+	Port int `conf:"port"`
 	// The host:port to advertise to websocket clients in the cluster.
-	Advertise string
+	Advertise string `conf:"advertise"`
 
 	// If no user name is provided when a client connects, will default to the
 	// matching user from the global list of users in `Options.Users`.
-	NoAuthUser string
+	NoAuthUser string `conf:"no_auth_user"`
 
 	// Name of the cookie, which if present in WebSocket upgrade headers,
 	// will be treated as JWT during CONNECT phase as long as
 	// "jwt" specified in the CONNECT options is missing or empty.
-	JWTCookie string
+	JWTCookie string `conf:"jwt_cookie"`
 
 	// Name of the cookie, which if present in WebSocket upgrade headers,
 	// will be treated as Username during CONNECT phase as long as
 	// "user" specified in the CONNECT options is missing or empty.
-	UsernameCookie string
+	UsernameCookie string `conf:"user_cookie"`
 
 	// Name of the cookie, which if present in WebSocket upgrade headers,
 	// will be treated as Password during CONNECT phase as long as
 	// "pass" specified in the CONNECT options is missing or empty.
-	PasswordCookie string
+	PasswordCookie string `conf:"pass_cookie"`
 
 	// Name of the cookie, which if present in WebSocket upgrade headers,
 	// will be treated as Token during CONNECT phase as long as
@@ -551,16 +551,16 @@ type WebsocketOpts struct {
 	// when using delegated authentication, but the auth callout validates some
 	// other JWT or string. Note that this does map to an actual server-wide
 	// "auth_token", note that using it for that purpose is greatly discouraged.
-	TokenCookie string
+	TokenCookie string `conf:"token_cookie"`
 
 	// Authentication section. If anything is configured in this section,
 	// it will override the authorization configuration of regular clients.
-	Username string
-	Password string
-	Token    string
+	Username string `conf:"-"`
+	Password string `conf:"-"`
+	Token    string `conf:"-"`
 
 	// Timeout for the authentication process.
-	AuthTimeout float64
+	AuthTimeout float64 `conf:"-"`
 
 	// By default the server will enforce the use of TLS. If no TLS configuration
 	// is provided, you need to explicitly set NoTLS to true to allow the server
@@ -569,73 +569,73 @@ type WebsocketOpts struct {
 	// server with that TLS configuration.
 	// Running without TLS is less secure since Websocket clients that use bearer
 	// tokens will send them in clear. So this should not be used in production.
-	NoTLS bool
+	NoTLS bool `conf:"no_tls"`
 
 	// TLS configuration is required.
-	TLSConfig *tls.Config
+	TLSConfig *tls.Config `conf:"-"`
 	// If true, map certificate values for authentication purposes.
-	TLSMap bool
+	TLSMap bool `conf:"-"`
 
 	// When present, accepted client certificates (verify/verify_and_map) must be in this list
-	TLSPinnedCerts PinnedCertSet
+	TLSPinnedCerts PinnedCertSet `conf:"-"`
 
 	// If true, the Origin header must match the request's host.
-	SameOrigin bool
+	SameOrigin bool `conf:"same_origin"`
 
 	// Only origins in this list will be accepted. If empty and
 	// SameOrigin is false, any origin is accepted.
-	AllowedOrigins []string
+	AllowedOrigins []string `conf:"allowed_origins|allowed_origin|allow_origins|allow_origin|origins|origin"`
 
 	// If set to true, the server will negotiate with clients
 	// if compression can be used. If this is false, no compression
 	// will be used (both in server and clients) since it has to
 	// be negotiated between both endpoints
-	Compression bool
+	Compression bool `conf:"compress|compression"`
 
 	// Total time allowed for the server to read the client request
 	// and write the response back to the client. This include the
 	// time needed for the TLS Handshake.
-	HandshakeTimeout time.Duration
+	HandshakeTimeout time.Duration `conf:"handshake_timeout"`
 
 	// How often to send pings to WebSocket clients. When set to a non-zero
 	// duration, this overrides the default PingInterval for WebSocket connections.
 	// If not set or zero, the server's default PingInterval will be used.
-	PingInterval time.Duration
+	PingInterval time.Duration `conf:"ping_interval"`
 
 	// Headers to be added to the upgrade response.
 	// Useful for adding custom headers like Strict-Transport-Security.
-	Headers map[string]string
+	Headers map[string]string `conf:"headers"`
 
 	// Snapshot of configured TLS options.
-	tlsConfigOpts *TLSConfigOpts
+	tlsConfigOpts *TLSConfigOpts `conf:"-"`
 }
 
 // MQTTOpts are options for MQTT
 type MQTTOpts struct {
 	// The server will accept MQTT client connections on this hostname/IP.
-	Host string
+	Host string `conf:"host|net"`
 	// The server will accept MQTT client connections on this port.
-	Port int
+	Port int `conf:"port"`
 
 	// If no user name is provided when a client connects, will default to the
 	// matching user from the global list of users in `Options.Users`.
-	NoAuthUser string
+	NoAuthUser string `conf:"no_auth_user"`
 
 	// Authentication section. If anything is configured in this section,
 	// it will override the authorization configuration of regular clients.
-	Username string
-	Password string
-	Token    string
+	Username string `conf:"-"`
+	Password string `conf:"-"`
+	Token    string `conf:"-"`
 
 	// JetStream domain mqtt is supposed to pick up
-	JsDomain string
+	JsDomain string `conf:"js_domain"`
 
 	// Number of replicas for MQTT streams.
 	// Negative or 0 value means that the server(s) will pick a replica
 	// number based on the known size of the cluster (but capped at 3).
 	// Note that if an account was already connected, the stream's replica
 	// count is not modified. Use the NATS CLI to update the count if desired.
-	StreamReplicas int
+	StreamReplicas int `conf:"stream_replicas"`
 
 	// Number of replicas for MQTT consumers.
 	// Negative or 0 value means that there is no override and the consumer
@@ -647,27 +647,27 @@ type MQTTOpts struct {
 	//
 	// UPDATE: This is no longer used while messages stream has interest policy retention
 	// which requires consumer replica count to match the parent stream.
-	ConsumerReplicas int
+	ConsumerReplicas int `conf:"consumer_replicas"`
 
 	// Indicate if the consumers should be created with memory storage.
 	// Note that existing consumers are not modified.
-	ConsumerMemoryStorage bool
+	ConsumerMemoryStorage bool `conf:"consumer_memory_storage"`
 
 	// If specified will have the system auto-cleanup the consumers after being
 	// inactive for the specified amount of time.
-	ConsumerInactiveThreshold time.Duration
+	ConsumerInactiveThreshold time.Duration `conf:"consumer_inactive_threshold|consumer_auto_cleanup"`
 
 	// Timeout for the authentication process.
-	AuthTimeout float64
+	AuthTimeout float64 `conf:"-"`
 
 	// TLS configuration is required.
-	TLSConfig *tls.Config
+	TLSConfig *tls.Config `conf:"-"`
 	// If true, map certificate values for authentication purposes.
-	TLSMap bool
+	TLSMap bool `conf:"-"`
 	// Timeout for the TLS handshake
-	TLSTimeout float64
+	TLSTimeout float64 `conf:"-"`
 	// Set of allowable certificates
-	TLSPinnedCerts PinnedCertSet
+	TLSPinnedCerts PinnedCertSet `conf:"-"`
 
 	// AckWait is the amount of time after which a QoS 1 or 2 message sent to a
 	// client is redelivered as a DUPLICATE if the server has not received the
@@ -676,10 +676,10 @@ type MQTTOpts struct {
 	// server to use the default value (30 seconds). Note that changes to this
 	// option is applied only to new MQTT subscriptions (or sessions for
 	// PubRels).
-	AckWait time.Duration
+	AckWait time.Duration `conf:"ack_wait|ackwait"`
 
 	// JSAPITimeout defines timeout for JetStream api calls (default is 5 seconds)
-	JSAPITimeout time.Duration
+	JSAPITimeout time.Duration `conf:"js_api_timeout|api_timeout"`
 
 	// MaxAckPending is the amount of QoS 1 and 2 messages (combined) the server
 	// can send to a subscription without receiving any PUBACK for those
@@ -693,18 +693,18 @@ type MQTTOpts struct {
 	// Due to how the NATS Server handles the MQTT "#" wildcard, each
 	// subscription ending with "#" will use 2 times the MaxAckPending value.
 	// Note that changes to this option is applied only to new subscriptions.
-	MaxAckPending uint16
+	MaxAckPending uint16 `conf:"max_ack_pending|max_pending|max_inflight"`
 
 	// Snapshot of configured TLS options.
-	tlsConfigOpts *TLSConfigOpts
+	tlsConfigOpts *TLSConfigOpts `conf:"-"`
 
 	// rejectQoS2Pub tells the MQTT client to not accept QoS2 PUBLISH, instead
 	// error and terminate the connection.
-	rejectQoS2Pub bool
+	rejectQoS2Pub bool `conf:"reject_qos2_publish"`
 
 	// downgradeQOS2Sub tells the MQTT client to downgrade QoS2 SUBSCRIBE
 	// requests to QoS1.
-	downgradeQoS2Sub bool
+	downgradeQoS2Sub bool `conf:"downgrade_qos2_subscribe"`
 }
 
 type netResolver interface {
@@ -789,55 +789,55 @@ type authorization struct {
 // TLSConfigOpts holds the parsed tls config information,
 // used with flag parsing
 type TLSConfigOpts struct {
-	CertFile             string
-	KeyFile              string
-	CaFile               string
-	Verify               bool
-	Insecure             bool
-	Map                  bool
-	TLSCheckKnownURLs    bool
-	HandshakeFirst       bool          // Indicate that the TLS handshake should occur first, before sending the INFO protocol.
-	FallbackDelay        time.Duration // Where supported, indicates how long to wait for the handshake before falling back to sending the INFO protocol first.
-	Timeout              float64
-	RateLimit            int64
-	AllowInsecureCiphers bool
-	Ciphers              []uint16
-	CurvePreferences     []tls.CurveID
-	PinnedCerts          PinnedCertSet
-	CertStore            certstore.StoreType
-	CertMatchBy          certstore.MatchByType
-	CertMatch            string
-	CertMatchSkipInvalid bool
-	CaCertsMatch         []string
-	OCSPPeerConfig       *certidp.OCSPPeerConfig
-	Certificates         []*TLSCertPairOpt
-	MinVersion           uint16
+	CertFile             string                  `conf:"cert_file"`
+	KeyFile              string                  `conf:"key_file"`
+	CaFile               string                  `conf:"ca_file"`
+	Verify               bool                    `conf:"verify"`
+	Insecure             bool                    `conf:"insecure"`
+	Map                  bool                    `conf:"-"`
+	TLSCheckKnownURLs    bool                    `conf:"-"`
+	HandshakeFirst       bool                    `conf:"handshake_first|first|immediate"` // Indicate that the TLS handshake should occur first, before sending the INFO protocol.
+	FallbackDelay        time.Duration           `conf:"-"`                               // Where supported, indicates how long to wait for the handshake before falling back to sending the INFO protocol first.
+	Timeout              float64                 `conf:"timeout"`
+	RateLimit            int64                   `conf:"connection_rate_limit"`
+	AllowInsecureCiphers bool                    `conf:"allow_insecure_cipher_suites"`
+	Ciphers              []uint16                `conf:"-"`
+	CurvePreferences     []tls.CurveID           `conf:"-"`
+	PinnedCerts          PinnedCertSet           `conf:"-"`
+	CertStore            certstore.StoreType     `conf:"cert_store"`
+	CertMatchBy          certstore.MatchByType   `conf:"cert_match_by"`
+	CertMatch            string                  `conf:"cert_match"`
+	CertMatchSkipInvalid bool                    `conf:"cert_match_skip_invalid"`
+	CaCertsMatch         []string                `conf:"ca_certs_match"`
+	OCSPPeerConfig       *certidp.OCSPPeerConfig `conf:"-"`
+	Certificates         []*TLSCertPairOpt       `conf:"certs|certificates"`
+	MinVersion           uint16                  `conf:"-"`
 }
 
 // TLSCertPairOpt are the paths to a certificate and private key.
 type TLSCertPairOpt struct {
-	CertFile string
-	KeyFile  string
+	CertFile string `conf:"cert_file"`
+	KeyFile  string `conf:"key_file"`
 }
 
 // OCSPConfig represents the options of OCSP stapling options.
 type OCSPConfig struct {
 	// Mode defines the policy for OCSP stapling.
-	Mode OCSPMode
+	Mode OCSPMode `conf:"mode"`
 
 	// OverrideURLs is the http URL endpoint used to get OCSP staples.
-	OverrideURLs []string
+	OverrideURLs []string `conf:"urls"`
 }
 
 // ProxiesConfig represents the options of Proxies.
 type ProxiesConfig struct {
-	Trusted []*ProxyConfig
+	Trusted []*ProxyConfig `conf:"trusted"`
 }
 
 // ProxyConfig represents the options of Proxy.
 type ProxyConfig struct {
 	// Public key.
-	Key string
+	Key string `conf:"key|public_key"`
 }
 
 var tlsUsage = `

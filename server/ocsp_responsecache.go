@@ -54,10 +54,10 @@ var OCSPResponseCacheTypeMap = map[string]OCSPResponseCacheType{
 }
 
 type OCSPResponseCacheConfig struct {
-	Type            OCSPResponseCacheType
-	LocalStore      string
-	PreserveRevoked bool
-	SaveInterval    float64
+	Type            OCSPResponseCacheType `conf:"type"`
+	LocalStore      string                `conf:"local_store"`
+	PreserveRevoked bool                  `conf:"preserve_revoked"`
+	SaveInterval    float64               `conf:"save_interval"`
 }
 
 func NewOCSPResponseCacheConfig() *OCSPResponseCacheConfig {
