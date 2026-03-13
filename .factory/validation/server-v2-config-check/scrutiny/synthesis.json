@@ -1,0 +1,54 @@
+{
+  "milestone": "server-v2-config-check",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test_v2": { "passed": true, "command": "go test ./conf/v2/... -count=1 -timeout 120s", "exitCode": 0 },
+    "test_v1": { "passed": true, "command": "go test ./conf/... -count=1 -timeout 120s", "exitCode": 0 },
+    "test_server_config": { "passed": true, "command": "go test ./server/... -count=1 -timeout 600s -p 1 -run 'TestConfigCheckV2|TestProcessConfigV2'", "exitCode": 0 },
+    "test_server_options": { "passed": true, "command": "go test ./server/... -count=1 -timeout 600s -p 1 -run 'TestConfig|TestOption'", "exitCode": 0 },
+    "vet_v2": { "passed": true, "command": "go vet ./conf/v2/...", "exitCode": 0 },
+    "vet_server": { "passed": false, "command": "go vet ./server/...", "exitCode": 1, "note": "3 pre-existing warnings in server/stream.go about MarshalJSON() signature - not introduced by this milestone. Already documented in .factory/library/architecture.md." },
+    "build_v2": { "passed": true, "command": "go build ./conf/v2/...", "exitCode": 0 },
+    "build_server": { "passed": true, "command": "go build ./server/...", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Document the v2-prefix naming convention for server helpers: v2-specific helper functions in server/ (e.g., v2TokenPos, v2ConfigErr) use 'v2' prefix to distinguish from v1 equivalents.",
+      "evidence": "Feature server-config-check-v2 introduced v2TokenPos and v2ConfigErr in server/opts_v2.go following this convention.",
+      "isSystemic": false
+    },
+    {
+      "target": ".factory/skills/go-library-worker/SKILL.md",
+      "suggestion": "Clarify TDD guidance for enhancement features: when a feature requires enhancing existing test infrastructure before adding new tests, a test-enhancement → implementation → new-tests flow is an acceptable TDD variant. The 'Write Tests First' mandate should note this exception for enhancement/refactor features.",
+      "evidence": "Feature server-config-check-v2-positions required modifying existing test struct and loop before new test cases could be written. Worker deviated from strict test-first approach.",
+      "isSystemic": false
+    },
+    {
+      "target": ".factory/skills/go-library-worker/SKILL.md",
+      "suggestion": "Note that custom Unmarshalers handle their own field validation separately from strict mode. Strict mode catches unknown fields, but value validation (auth conflicts, duplicates, bounds) requires separate post-unmarshal checks. Workers building config validation should be aware of this separation.",
+      "evidence": "Feature server-config-check-v2 discovered this pattern: strict mode Unmarshal + separate validateConfigV2 function needed for complete config checking.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Re-parse-for-positions pattern: re-parsing via v2.ParseFileWithChecks in pedantic mode provides token positions for post-validation error reporting.",
+      "reason": "already-documented: Pattern is implicitly documented in architecture.md under pedantic mode section, and the code itself serves as documentation."
+    },
+    {
+      "observation": "Pre-existing go vet warnings in server/stream.go about MarshalJSON signature.",
+      "reason": "already-documented: Already recorded in .factory/library/architecture.md."
+    }
+  ],
+  "previousRound": null
+}

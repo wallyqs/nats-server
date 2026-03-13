@@ -1,0 +1,62 @@
+{
+  "featureId": "server-config-check-v2",
+  "reviewedAt": "2026-03-13T23:00:00Z",
+  "commitId": "a16e2f797",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation of CheckConfig support for ProcessConfigV2. Two commits: 3f1a4f14e adds the core processConfigV2Err type, strict mode Unmarshal, value validation, and 64+ test cases; a16e2f797 enhances with file:line:col position info via pedantic re-parse and wrapUnmarshalerErr in conf/v2/unmarshal.go. The processConfigV2Err type faithfully mirrors v1's processConfigErr pattern. Value validation covers auth conflicts, duplicate users/nkeys, invalid nkeys, account nkeys, lame_duck bounds, cluster ping_interval max warning, leafnode min_version, and empty config warning. Test coverage is comprehensive with 64 table-driven cases plus 8 standalone test functions, including position accuracy verification for errors deep in nested blocks.",
+    "issues": [
+      {
+        "file": "server/opts_v2.go",
+        "line": 155,
+        "severity": "non_blocking",
+        "description": "In validateConfigV2, the error from v2.ParseFileWithChecks(configFile) is silently discarded: `m, _ := v2.ParseFileWithChecks(configFile)`. If this re-parse fails (unlikely since Step 1 and Step 2 already parsed successfully), m would be nil/empty, triggering a false 'empty config' warning. Consider logging or propagating this error, or at least guarding the empty-config check against re-parse failure."
+      },
+      {
+        "file": "server/opts_v2.go",
+        "line": 28,
+        "severity": "non_blocking",
+        "description": "processConfigV2Err is a near-exact duplicate of v1's processConfigErr (server/errors.go:306). Both have identical structure (errors/warnings slices) and identical Error() method. While keeping them separate is reasonable for v2 independence, this could be unified or one could embed the other to reduce duplication. Not urgent since v2 may evolve differently."
+      },
+      {
+        "file": "server/opts_v2.go",
+        "line": 87,
+        "severity": "non_blocking",
+        "description": "ProcessConfigV2 (public function) swallows warning-only processConfigV2Err and returns (opts, nil). This is correct behavior for server startup (warnings shouldn't prevent starting), but callers who want to surface warnings (e.g., nats-server --config-check) must use ProcessConfigFileV2 receiver method instead. This divergence from v1's pattern (where ProcessConfigFile also returns warnings) could confuse future callers. Consider documenting this distinction in the function's doc comment."
+      },
+      {
+        "file": "server/config_check_v2_test.go",
+        "line": 430,
+        "severity": "non_blocking",
+        "description": "The 'cluster compression bool to struct type error' test documents a known behavioral difference from v1: in v2, CompressionOpts without a custom Unmarshaler fails with 'cannot unmarshal' when given a bool value, whereas v1 handles this in custom parsing. This is tracked in the handoff's discoveredIssues but the test comment could be more prominent (e.g., a TODO linking to a future feature for CompressionOpts Unmarshaler)."
+      },
+      {
+        "file": "conf/v2/unmarshal.go",
+        "line": 100,
+        "severity": "non_blocking",
+        "description": "wrapUnmarshalerErr guards position wrapping with `line > 0`, meaning errors at hypothetical line 0 would skip wrapping. This is correct since NATS config lines are 1-based, but a brief comment explaining the guard would improve clarity."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "Worker introduced v2-prefixed helper functions (v2TokenPos, v2ConfigErr) in opts_v2.go for position-aware error formatting. This naming convention (v2 prefix for v2-specific server helpers) is not documented in AGENTS.md but is consistent and clear.",
+      "evidence": "server/opts_v2.go:185 (v2TokenPos), server/opts_v2.go:220 (v2ConfigErr) — both follow pattern of prefixing with 'v2' to distinguish from v1 helpers."
+    },
+    {
+      "area": "knowledge",
+      "observation": "Worker discovered that re-parsing via v2.ParseFileWithChecks in pedantic mode provides token positions needed for post-unmarshal validation error reporting. This pattern (unmarshal first for values, re-parse for positions) could be documented as a known technique for v2 position-aware validation.",
+      "evidence": "server/opts_v2.go:155 — re-parses after unmarshal to get pedantic token map for position lookup in validateConfigV2. This is a workaround because Unmarshal doesn't expose token positions to post-processing validators."
+    },
+    {
+      "area": "skills",
+      "observation": "Worker's skill feedback suggests documenting that custom Unmarshalers handle their own field validation separately from strict mode, meaning not all v1 config checking patterns can be replicated purely through strict mode Unmarshal. This is valid — the skill should note that strict mode catches unknown fields but value validation requires separate post-unmarshal checks.",
+      "evidence": "Handoff skillFeedback.suggestedChanges[0]: 'The skill could mention that when working on server/ files, custom Unmarshalers may handle their own field validation separately from strict mode...'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Feature passes review. The implementation delivers all expected behaviors: processConfigV2Err type with Errors()/Warnings() methods, strict mode Unmarshal for unknown field detection, comprehensive value validation (auth conflicts, nkeys, duplicates, durations, cluster, leafnode), file:line:col position info in error messages, and warning support. Test suite has 64 table-driven cases plus 8 standalone test functions covering all key categories including position accuracy verification. The conf/v2/unmarshal.go enhancement (wrapUnmarshalerErr) properly propagates position info from custom Unmarshaler errors. All identified issues are non-blocking style/documentation concerns. All verification commands passed per handoff (tests, vet, build)."
+}

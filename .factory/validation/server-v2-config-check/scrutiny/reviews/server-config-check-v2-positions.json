@@ -1,0 +1,39 @@
+{
+  "featureId": "server-config-check-v2-positions",
+  "reviewedAt": "2026-03-13T23:10:00Z",
+  "commitId": "a16e2f797",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation of error position verification matching v1's TestConfigCheck pattern. Three files modified: conf/v2/unmarshal.go adds wrapUnmarshalerErr to wrap custom Unmarshaler errors with position info; server/opts_v2.go adds v2TokenPos and v2ConfigErr helpers plus updates all 5 validators to accept and use a pedantic map for token position lookup; server/config_check_v2_test.go adds errorLine/errorPos fields to test struct, position prefix verification in the test loop, updates all 33 existing error test cases with correct positions, and adds 9 new deep-nesting position accuracy test cases. The approach of re-parsing in pedantic mode (via v2.ParseFileWithChecks) to get token positions for post-validation errors is well-reasoned and consistent with how v1 handles position reporting. The change from ParseFileWithChecksDigest to ParseFileWithChecks correctly eliminates the unnecessary digest computation. Known limitations (TLS GenTLSConfig and ambiguous store_dir lacking positions) are consistent with v1 behavior and properly documented.",
+    "issues": [
+      {
+        "file": "server/opts_v2.go",
+        "line": 220,
+        "severity": "non_blocking",
+        "description": "Variable shadowing: v2TokenPos uses 'ok' as both a named return value and an inner variable in type assertions (e.g., 'if tk, ok := raw.(token); ok'). While valid Go and the compiler handles it correctly, it reduces readability. Consider using a different variable name for the type assertion to avoid confusion."
+      },
+      {
+        "file": "server/opts_v2.go",
+        "line": 253,
+        "severity": "non_blocking",
+        "description": "For post-validation errors (auth conflicts, duplicate users, invalid nkeys), the position reported is the parent block position (e.g., 'authorization' or 'accounts' block start line) rather than the specific offending field's position. This is a pragmatic design choice that matches v1's approach, but it means all errors within the same block point to the block header. A future enhancement could look up specific nested key paths for more precise positioning."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker noted that the Go Library Worker skill mandates 'Write Tests First (TDD)' but this feature required enhancing existing tests before new implementation could be tested. The worker followed a test-enhancement → implementation → new-tests flow, which is a reasonable deviation for enhancement features vs greenfield features. The skill could clarify that test-enhancement-first is an acceptable TDD variant for features that modify existing test infrastructure.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'The Go Library Worker skill says Write Tests First (TDD - MANDATORY) but for this feature, the existing tests needed enhancement first...'"
+    },
+    {
+      "area": "conventions",
+      "observation": "The pre-existing go vet warnings in server/stream.go (3 warnings about MarshalJSON signature) are flagged in the handoff but not tracked in AGENTS.md or any known-issues document. These could confuse future workers who see vet failures and think they introduced them.",
+      "evidence": "Handoff verification: go vet ./server/... exitCode 1 with '3 pre-existing warnings in server/stream.go about MarshalJSON signature - not introduced by this change'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Feature passes review. The implementation correctly adds error position verification to TestConfigCheckV2, matching v1's errorLine/errorPos pattern. The wrapUnmarshalerErr function in conf/v2/unmarshal.go properly wraps custom Unmarshaler errors with position info. The v2TokenPos helper in server/opts_v2.go provides case-insensitive pedantic map traversal for token position lookup. All 5 post-unmarshal validators are updated to include file:line:col in error messages. 42 test cases now verify exact position prefixes, and 9 new test cases confirm position accuracy for errors deep in nested blocks at various line depths (4-12). Two non-blocking observations noted: variable shadowing in v2TokenPos and block-level (vs field-level) position granularity for validation errors. Both are consistent with v1 patterns."
+}
