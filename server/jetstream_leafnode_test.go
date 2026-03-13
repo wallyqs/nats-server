@@ -2328,3 +2328,207 @@ func TestJetStreamLeafNodeMirrorAndSourceConsumerStateNotPreserved(t *testing.T)
 		require_Equal(t, meta.Sequence.Consumer, uint64(1))
 	})
 }
+
+// TestJetStreamLeafNodeSourceStreamPurgeResetThenSource tests whether we can
+// make a sourced stream have the same sequence numbers as the origin stream
+// by creating it empty, purging with a future sequence to advance the internal
+// counter, and then adding the source configuration.
+func TestJetStreamLeafNodeSourceStreamPurgeResetThenSource(t *testing.T) {
+	tmplA := `
+		listen: 127.0.0.1:-1
+		server_name: cluster-a
+		jetstream {
+			store_dir: '%s',
+			domain: A
+		}
+		accounts {
+			JS { users = [ { user: "y", pass: "p" } ]; jetstream: true }
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+		leaf { port: -1 }
+	`
+	confA := createConfFile(t, []byte(fmt.Sprintf(tmplA, t.TempDir())))
+	sA, oA := RunServerWithConfig(confA)
+	defer sA.Shutdown()
+
+	tmplB := `
+		listen: 127.0.0.1:-1
+		server_name: cluster-b
+		jetstream {
+			store_dir: '%s',
+			domain: B
+		}
+		accounts {
+			JS { users = [ { user: "y", pass: "p" } ]; jetstream: true }
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+		leaf { remotes [ { url: "nats://y:p@127.0.0.1:%d", account: "JS" } ] }
+	`
+	confB := createConfFile(t, []byte(fmt.Sprintf(tmplB, t.TempDir(), oA.LeafNode.Port)))
+	sB, _ := RunServerWithConfig(confB)
+	defer sB.Shutdown()
+
+	checkLeafNodeConnectedCount(t, sA, 1)
+	checkLeafNodeConnectedCount(t, sB, 1)
+
+	ncA, jsA := jsClientConnect(t, sA, nats.UserInfo("y", "p"))
+	defer ncA.Close()
+
+	ncB, jsB := jsClientConnect(t, sB, nats.UserInfo("y", "p"))
+	defer ncB.Close()
+
+	// Create the source stream FOO on server A with 100 messages.
+	_, err := jsA.AddStream(&nats.StreamConfig{
+		Name:     "FOO",
+		Subjects: []string{"foo.>"},
+	})
+	require_NoError(t, err)
+
+	for i := 1; i <= 100; i++ {
+		_, err := jsA.Publish("foo.test", []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	si, err := jsA.StreamInfo("FOO")
+	require_NoError(t, err)
+	require_Equal(t, si.State.FirstSeq, uint64(1))
+	require_Equal(t, si.State.LastSeq, uint64(100))
+
+	// Step 1: Create an empty stream on server B (no sources yet).
+	_, err = jsB.AddStream(&nats.StreamConfig{
+		Name: "SOURCED-FOO",
+	})
+	require_NoError(t, err)
+
+	// Step 2: Purge with the source stream's first sequence to advance the
+	// internal sequence counter. This sets LastSeq = firstSeq - 1, so the
+	// next stored message will get sequence = firstSeq.
+	err = jsB.PurgeStream("SOURCED-FOO", &nats.StreamPurgeRequest{Sequence: si.State.FirstSeq})
+	require_NoError(t, err)
+
+	// Verify the stream state after purge.
+	ssi, err := jsB.StreamInfo("SOURCED-FOO")
+	require_NoError(t, err)
+	// After purging an empty stream with seq=1, FirstSeq should be 1 and
+	// LastSeq should be 0 (no messages yet). The next message stored will
+	// get sequence 1.
+	t.Logf("After purge: FirstSeq=%d, LastSeq=%d, Msgs=%d",
+		ssi.State.FirstSeq, ssi.State.LastSeq, ssi.State.Msgs)
+
+	// Step 3: Update the stream to add the source configuration.
+	_, err = jsB.UpdateStream(&nats.StreamConfig{
+		Name: "SOURCED-FOO",
+		Sources: []*nats.StreamSource{{
+			Name:     "FOO",
+			External: &nats.ExternalStream{APIPrefix: "$JS.A.API"},
+		}},
+	})
+	require_NoError(t, err)
+
+	// Wait for the sourced stream to pull all messages.
+	checkFor(t, 15*time.Second, 250*time.Millisecond, func() error {
+		ssi, err := jsB.StreamInfo("SOURCED-FOO")
+		if err != nil {
+			return err
+		}
+		if ssi.State.Msgs != 100 {
+			return fmt.Errorf("expected 100 messages in sourced stream, got %d", ssi.State.Msgs)
+		}
+		return nil
+	})
+
+	ssi, err = jsB.StreamInfo("SOURCED-FOO")
+	require_NoError(t, err)
+
+	t.Logf("After sourcing: FirstSeq=%d, LastSeq=%d, Msgs=%d",
+		ssi.State.FirstSeq, ssi.State.LastSeq, ssi.State.Msgs)
+
+	// Check if the sequences match the source stream.
+	// Since we purged with seq=1 on an empty stream, LastSeq stayed at 0,
+	// so the first sourced message should get seq 1 — same as normal.
+	// The sequences should naturally match since the source starts at 1.
+	require_Equal(t, ssi.State.FirstSeq, si.State.FirstSeq)
+	require_Equal(t, ssi.State.LastSeq, si.State.LastSeq)
+
+	// Verify message content at matching sequences.
+	for seq := si.State.FirstSeq; seq <= si.State.LastSeq; seq++ {
+		srcMsg, err := jsA.GetMsg("FOO", seq)
+		require_NoError(t, err)
+		srdMsg, err := jsB.GetMsg("SOURCED-FOO", seq)
+		require_NoError(t, err)
+		require_Equal(t, string(srcMsg.Data), string(srdMsg.Data))
+	}
+
+	// Now test the harder case: source stream doesn't start at 1.
+	// Purge first 50 messages from the source.
+	err = jsA.PurgeStream("FOO", &nats.StreamPurgeRequest{Sequence: 51})
+	require_NoError(t, err)
+
+	si, err = jsA.StreamInfo("FOO")
+	require_NoError(t, err)
+	require_Equal(t, si.State.FirstSeq, uint64(51))
+	require_Equal(t, si.State.LastSeq, uint64(100))
+
+	// Create a new empty stream, purge to advance to seq 51, then add source.
+	_, err = jsB.AddStream(&nats.StreamConfig{
+		Name: "SOURCED-FOO-2",
+	})
+	require_NoError(t, err)
+
+	// Purge with sequence = 51 to advance the internal counter.
+	// This should set FirstSeq=51, LastSeq=50.
+	err = jsB.PurgeStream("SOURCED-FOO-2", &nats.StreamPurgeRequest{Sequence: 51})
+	require_NoError(t, err)
+
+	ssi2, err := jsB.StreamInfo("SOURCED-FOO-2")
+	require_NoError(t, err)
+	t.Logf("After purge to 51: FirstSeq=%d, LastSeq=%d, Msgs=%d",
+		ssi2.State.FirstSeq, ssi2.State.LastSeq, ssi2.State.Msgs)
+
+	// Now add the source.
+	_, err = jsB.UpdateStream(&nats.StreamConfig{
+		Name: "SOURCED-FOO-2",
+		Sources: []*nats.StreamSource{{
+			Name:     "FOO",
+			External: &nats.ExternalStream{APIPrefix: "$JS.A.API"},
+		}},
+	})
+	require_NoError(t, err)
+
+	// Wait for all 50 remaining messages to be sourced.
+	checkFor(t, 15*time.Second, 250*time.Millisecond, func() error {
+		ssi2, err := jsB.StreamInfo("SOURCED-FOO-2")
+		if err != nil {
+			return err
+		}
+		if ssi2.State.Msgs != 50 {
+			return fmt.Errorf("expected 50 messages in sourced stream, got %d", ssi2.State.Msgs)
+		}
+		return nil
+	})
+
+	ssi2, err = jsB.StreamInfo("SOURCED-FOO-2")
+	require_NoError(t, err)
+	t.Logf("After sourcing: FirstSeq=%d, LastSeq=%d, Msgs=%d",
+		ssi2.State.FirstSeq, ssi2.State.LastSeq, ssi2.State.Msgs)
+
+	// The key question: do the sequences now match?
+	// With the purge trick, FirstSeq should be 51 and messages should
+	// be at 51..100, matching the source stream exactly.
+	if ssi2.State.FirstSeq == si.State.FirstSeq && ssi2.State.LastSeq == si.State.LastSeq {
+		t.Logf("SUCCESS: Purge trick works! Sourced stream sequences match source: %d..%d",
+			ssi2.State.FirstSeq, ssi2.State.LastSeq)
+		// Verify message content matches at the same sequences.
+		for seq := si.State.FirstSeq; seq <= si.State.LastSeq; seq++ {
+			srcMsg, err := jsA.GetMsg("FOO", seq)
+			require_NoError(t, err)
+			srdMsg, err := jsB.GetMsg("SOURCED-FOO-2", seq)
+			require_NoError(t, err)
+			require_Equal(t, string(srcMsg.Data), string(srdMsg.Data))
+		}
+	} else {
+		t.Logf("Purge trick did NOT align sequences. Source: %d..%d, Sourced: %d..%d",
+			si.State.FirstSeq, si.State.LastSeq, ssi2.State.FirstSeq, ssi2.State.LastSeq)
+		t.Fatalf("Expected sourced stream sequences to match source stream after purge trick")
+	}
+}
