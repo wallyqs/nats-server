@@ -1,0 +1,21 @@
+{
+  "milestone": "misc-2",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "go test ./conf/v2/... -count=1", "exitCode": 0 },
+    "typecheck": { "passed": true, "command": "go vet ./conf/v2/...", "exitCode": 0 },
+    "lint": { "passed": true, "command": "go build ./conf/v2/...", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [],
+  "previousRound": null
+}

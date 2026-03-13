@@ -1,0 +1,15 @@
+{
+  "featureId": "misc-marshal-polish",
+  "reviewedAt": "2026-03-13T14:25:00Z",
+  "commitId": "1d21a032d2bde1d344c4c90a7dbc1f65b05bafbc",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Both fixes are correctly implemented and well-tested. Fix 1: The dead time.Duration check was properly moved from the reflect.Struct case (where Duration can never match since its Kind is int64) to the reflect.Int64 case in marshalSlice, with a correct `continue` to skip the normal integer formatting path. The escapeString usage is consistent with the non-slice duration marshaling in marshalField (line 320). The round-trip unmarshal support via assignDuration in assignSliceFromArray is correctly placed and reuses the existing assignDuration function. Fix 2: The writeMap test helper in cross_test.go now sorts keys before iteration, matching the pattern already used in production code (marshalMapEntries at line 578 already sorts keys). Tests cover 3 duration values (seconds, milliseconds, compound), verify no raw nanoseconds appear, verify round-trip fidelity, and verify deterministic map ordering across 20 iterations for both flat and nested maps.",
+    "issues": []
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": null,
+  "summary": "Clean pass. Both fixes (duration slice marshaling and deterministic map key ordering) are correctly implemented, consistent with existing patterns, and thoroughly tested with 4 new test functions covering the described expected behaviors. No issues found."
+}
