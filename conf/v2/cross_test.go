@@ -42,6 +42,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -493,10 +494,16 @@ func marshalMapToConfig(m map[string]any) string {
 }
 
 // writeMap recursively writes a map[string]any as NATS config text.
+// Keys are sorted for deterministic output.
 func writeMap(buf *strings.Builder, m map[string]any, depth int) {
 	indent := strings.Repeat("  ", depth)
-	for key, val := range m {
-		writeKeyValue(buf, key, val, indent, depth)
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		writeKeyValue(buf, key, m[key], indent, depth)
 	}
 }
 
@@ -1285,5 +1292,61 @@ debug true
 	_, err = Parse(structText)
 	if err != nil {
 		t.Fatalf("Struct output is not valid config: %v", err)
+	}
+}
+
+// TestMarshalMapToConfigDeterministic tests that marshalMapToConfig
+// produces deterministic output by sorting map keys before iteration.
+func TestMarshalMapToConfigDeterministic(t *testing.T) {
+	m := map[string]any{
+		"zebra":  "z-val",
+		"apple":  "a-val",
+		"mango":  "m-val",
+		"banana": "b-val",
+	}
+	var first string
+	for i := 0; i < 20; i++ {
+		out := marshalMapToConfig(m)
+		if i == 0 {
+			first = out
+		} else if out != first {
+			t.Fatalf("non-deterministic output on iteration %d:\nfirst:\n%s\ngot:\n%s", i, first, out)
+		}
+	}
+
+	// Verify the keys appear in sorted order.
+	lines := strings.Split(strings.TrimSpace(first), "\n")
+	var keys []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, ":") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			keys = append(keys, strings.TrimSpace(parts[0]))
+		}
+	}
+	expected := []string{"apple", "banana", "mango", "zebra"}
+	if !reflect.DeepEqual(keys, expected) {
+		t.Fatalf("keys not in sorted order: got %v, want %v", keys, expected)
+	}
+}
+
+// TestMarshalMapToConfigNestedDeterministic tests that nested maps in
+// marshalMapToConfig also produce deterministic output.
+func TestMarshalMapToConfigNestedDeterministic(t *testing.T) {
+	m := map[string]any{
+		"outer_z": map[string]any{
+			"inner_b": "val_b",
+			"inner_a": "val_a",
+		},
+		"outer_a": "simple",
+	}
+	var first string
+	for i := 0; i < 20; i++ {
+		out := marshalMapToConfig(m)
+		if i == 0 {
+			first = out
+		} else if out != first {
+			t.Fatalf("non-deterministic nested output on iteration %d:\nfirst:\n%s\ngot:\n%s", i, first, out)
+		}
 	}
 }

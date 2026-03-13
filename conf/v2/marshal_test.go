@@ -1254,3 +1254,118 @@ func TestMarshalEmptyMap(t *testing.T) {
 		t.Fatalf("expected empty map, got %v", dm)
 	}
 }
+
+// TestMarshalDurationSlice tests that []time.Duration fields marshal
+// duration elements as quoted Go duration strings (e.g. "5s") instead
+// of raw nanosecond integers.
+func TestMarshalDurationSlice(t *testing.T) {
+	type Config struct {
+		Timeouts []time.Duration `conf:"timeouts"`
+	}
+	cfg := Config{
+		Timeouts: []time.Duration{
+			5 * time.Second,
+			100 * time.Millisecond,
+			2*time.Minute + 30*time.Second,
+		},
+	}
+	data, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+	out := string(data)
+
+	// Verify human-readable duration strings appear, not nanosecond integers.
+	if !strings.Contains(out, "5s") {
+		t.Fatalf("expected '5s' in output, got: %s", out)
+	}
+	if !strings.Contains(out, "100ms") {
+		t.Fatalf("expected '100ms' in output, got: %s", out)
+	}
+	if !strings.Contains(out, "2m30s") {
+		t.Fatalf("expected '2m30s' in output, got: %s", out)
+	}
+
+	// Verify nanosecond values do NOT appear.
+	if strings.Contains(out, "5000000000") {
+		t.Fatalf("found raw nanoseconds in output, expected duration string: %s", out)
+	}
+	if strings.Contains(out, "100000000") {
+		t.Fatalf("found raw nanoseconds in output, expected duration string: %s", out)
+	}
+
+	// Round-trip via Unmarshal.
+	var got Config
+	if err := Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal error: %v\nOutput: %s", err, string(data))
+	}
+	if len(got.Timeouts) != 3 {
+		t.Fatalf("expected 3 timeouts, got %d", len(got.Timeouts))
+	}
+	if got.Timeouts[0] != 5*time.Second {
+		t.Fatalf("expected Timeouts[0]=5s, got %v", got.Timeouts[0])
+	}
+	if got.Timeouts[1] != 100*time.Millisecond {
+		t.Fatalf("expected Timeouts[1]=100ms, got %v", got.Timeouts[1])
+	}
+	if got.Timeouts[2] != 2*time.Minute+30*time.Second {
+		t.Fatalf("expected Timeouts[2]=2m30s, got %v", got.Timeouts[2])
+	}
+}
+
+// TestMarshalMapKeysSorted tests that marshalMapToConfig in cross_test
+// produces deterministic output by sorting map keys.
+func TestMarshalMapKeysSorted(t *testing.T) {
+	type Config struct {
+		Data map[string]string `conf:"data"`
+	}
+	cfg := Config{
+		Data: map[string]string{
+			"zebra":    "z",
+			"apple":    "a",
+			"mango":    "m",
+			"banana":   "b",
+			"cherry":   "c",
+			"date":     "d",
+			"eggplant": "e",
+		},
+	}
+	// Marshal multiple times and verify deterministic output.
+	var first string
+	for i := 0; i < 10; i++ {
+		data, err := Marshal(cfg)
+		if err != nil {
+			t.Fatalf("Marshal error: %v", err)
+		}
+		out := string(data)
+		if i == 0 {
+			first = out
+		} else if out != first {
+			t.Fatalf("non-deterministic output on iteration %d:\nfirst:\n%s\ngot:\n%s", i, first, out)
+		}
+	}
+
+	// Verify the keys appear in sorted order within the data block.
+	lines := strings.Split(first, "\n")
+	var dataKeys []string
+	inBlock := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "data:") {
+			inBlock = true
+			continue
+		}
+		if inBlock && trimmed == "}" {
+			break
+		}
+		if inBlock && strings.Contains(trimmed, ":") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			dataKeys = append(dataKeys, strings.TrimSpace(parts[0]))
+		}
+	}
+	for i := 1; i < len(dataKeys); i++ {
+		if dataKeys[i-1] >= dataKeys[i] {
+			t.Fatalf("keys not in sorted order: %v", dataKeys)
+		}
+	}
+}

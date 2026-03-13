@@ -502,6 +502,11 @@ func assignSliceFromArray(fv reflect.Value, arr []any, elemType reflect.Type, ke
 			if err := assignSlice(elemVal, elem, elemKey, strict); err != nil {
 				return err
 			}
+		} else if elemType == reflect.TypeOf(time.Duration(0)) {
+			// Handle []time.Duration: elements may be duration strings.
+			if err := assignDuration(elemVal, elem, elemKey); err != nil {
+				return err
+			}
 		} else {
 			if err := assignScalar(elemVal, elem, elemKey); err != nil {
 				return err

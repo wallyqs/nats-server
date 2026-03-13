@@ -437,16 +437,11 @@ func (e *encoder) marshalSlice(name string, v reflect.Value) error {
 
 		switch elem.Kind() {
 		case reflect.Struct:
-			// Handle time types.
+			// Handle time.Time.
 			if elem.Type() == reflect.TypeOf(time.Time{}) {
 				e.writePrefix()
 				t := elem.Interface().(time.Time)
 				e.buf.WriteString(t.UTC().Format("2006-01-02T15:04:05Z"))
-				e.buf.WriteByte('\n')
-			} else if elem.Type() == reflect.TypeOf(time.Duration(0)) {
-				e.writePrefix()
-				d := time.Duration(elem.Int())
-				e.buf.WriteString(escapeString(d.String()))
 				e.buf.WriteByte('\n')
 			} else {
 				// Struct element: emit as inline map block.
@@ -483,6 +478,14 @@ func (e *encoder) marshalSlice(name string, v reflect.Value) error {
 			}
 			e.buf.WriteByte('\n')
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			// Check for time.Duration (underlying kind is int64).
+			if elem.Type() == reflect.TypeOf(time.Duration(0)) {
+				e.writePrefix()
+				d := time.Duration(elem.Int())
+				e.buf.WriteString(escapeString(d.String()))
+				e.buf.WriteByte('\n')
+				continue
+			}
 			e.writePrefix()
 			e.buf.WriteString(strconv.FormatInt(elem.Int(), 10))
 			e.buf.WriteByte('\n')
