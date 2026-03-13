@@ -20,9 +20,31 @@ package v2
 import (
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 )
+
+// Unmarshaler is the interface implemented by types that can unmarshal
+// a NATS configuration value. UnmarshalConfig receives the raw parsed
+// value (string, int64, float64, bool, map[string]any, []any, or time.Time)
+// and should populate the receiver accordingly. Errors are propagated
+// to the caller.
+type Unmarshaler interface {
+	UnmarshalConfig(v any) error
+}
+
+// unmarshalerType is cached for interface checks.
+var unmarshalerType = reflect.TypeOf((*Unmarshaler)(nil)).Elem()
+
+// UnmarshalOptions controls optional behavior for the Unmarshal engine.
+type UnmarshalOptions struct {
+	// Strict enables strict mode where unknown config keys that do not
+	// match any struct field produce an error. Default is false (permissive).
+	Strict bool
+}
 
 // Unmarshal parses the NATS configuration data and populates the target
 // struct v using reflection. The target must be a non-nil pointer to a
@@ -31,11 +53,22 @@ import (
 // field name for untagged fields. Key matching is case-insensitive.
 //
 // Supported types: string, bool, all integer types (with overflow checking),
-// float64, float32, nested structs, and pointer variants of these types.
+// float64, float32, time.Duration, time.Time, slices, maps, nested structs,
+// and pointer variants of these types. Types implementing the Unmarshaler
+// interface receive the raw parsed value for custom handling.
 // Fields tagged conf:"-" are skipped. Unexported fields are silently ignored.
 // Embedded (anonymous) structs have their fields promoted to the outer struct,
 // matching encoding/json behavior.
+//
+// Unknown config keys are silently ignored in the default permissive mode.
+// Use UnmarshalWith to enable strict mode.
 func Unmarshal(data []byte, v any) error {
+	return UnmarshalWith(data, v, nil)
+}
+
+// UnmarshalWith is like Unmarshal but accepts options to control behavior
+// such as strict mode for unknown fields. If opts is nil, defaults are used.
+func UnmarshalWith(data []byte, v any, opts *UnmarshalOptions) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return fmt.Errorf("unmarshal requires a non-nil pointer to a struct")
@@ -50,16 +83,60 @@ func Unmarshal(data []byte, v any) error {
 		return fmt.Errorf("parse error: %w", err)
 	}
 
-	return unmarshalMap(m, rv)
+	strict := opts != nil && opts.Strict
+	return unmarshalMap(m, rv, strict)
+}
+
+// UnmarshalFile reads a NATS configuration file, parses it, and
+// unmarshals its contents into the target struct v. The target must
+// be a non-nil pointer to a struct. Include paths in the config file
+// are resolved relative to the file's directory.
+// Missing files return an *os.PathError-compatible error.
+func UnmarshalFile(path string, v any) error {
+	return UnmarshalFileWith(path, v, nil)
+}
+
+// UnmarshalFileWith is like UnmarshalFile but accepts options to control
+// behavior such as strict mode for unknown fields.
+func UnmarshalFileWith(path string, v any, opts *UnmarshalOptions) error {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return fmt.Errorf("unmarshal requires a non-nil pointer to a struct")
+	}
+	rv = rv.Elem()
+	if rv.Kind() != reflect.Struct {
+		return fmt.Errorf("unmarshal requires a non-nil pointer to a struct, got pointer to %s", rv.Kind())
+	}
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return err
+	}
+
+	m, err := parseCompat(string(data), absPath, false)
+	if err != nil {
+		return err
+	}
+
+	strict := opts != nil && opts.Strict
+	return unmarshalMap(m, rv, strict)
 }
 
 // unmarshalMap populates the struct value rv from the parsed config map.
-func unmarshalMap(m map[string]any, rv reflect.Value) error {
+func unmarshalMap(m map[string]any, rv reflect.Value, strict bool) error {
 	fields := buildFieldIndex(rv.Type())
 
 	for key, val := range m {
 		fi, ok := fields[strings.ToLower(key)]
 		if !ok {
+			if strict {
+				return fmt.Errorf("unknown config key %q", key)
+			}
 			// Permissive mode: unknown keys are silently ignored.
 			continue
 		}
@@ -69,7 +146,7 @@ func unmarshalMap(m map[string]any, rv reflect.Value) error {
 			continue
 		}
 
-		if err := assignValue(fv, val, key); err != nil {
+		if err := assignValue(fv, val, key, strict); err != nil {
 			return err
 		}
 	}
@@ -169,11 +246,49 @@ func fieldByIndex(rv reflect.Value, index []int) reflect.Value {
 }
 
 // assignValue assigns a parsed config value to a struct field, handling
-// type conversions, pointer allocation, and overflow checking.
-func assignValue(fv reflect.Value, val any, key string) error {
+// type conversions, pointer allocation, overflow checking, custom
+// unmarshalers, and complex types (slices, maps, duration, time).
+func assignValue(fv reflect.Value, val any, key string, strict bool) error {
+	// Check for custom Unmarshaler interface on the field's type.
+	// For pointer types, defer Unmarshaler check to assignPointerValue
+	// which handles allocation.
+	if fv.Kind() != reflect.Pointer {
+		if fv.CanAddr() {
+			ptrVal := fv.Addr()
+			if ptrVal.Type().Implements(unmarshalerType) {
+				return ptrVal.Interface().(Unmarshaler).UnmarshalConfig(val)
+			}
+		}
+		if fv.Type().Implements(unmarshalerType) {
+			if fv.CanInterface() {
+				return fv.Interface().(Unmarshaler).UnmarshalConfig(val)
+			}
+		}
+	}
+
 	// Handle pointer fields: allocate and assign through the pointer.
 	if fv.Kind() == reflect.Pointer {
-		return assignPointerValue(fv, val, key)
+		return assignPointerValue(fv, val, key, strict)
+	}
+
+	// Handle time.Duration fields.
+	if fv.Type() == reflect.TypeOf(time.Duration(0)) {
+		return assignDuration(fv, val, key)
+	}
+
+	// Handle time.Time fields.
+	if fv.Type() == reflect.TypeOf(time.Time{}) {
+		return assignTime(fv, val, key)
+	}
+
+	// Handle slice fields.
+	if fv.Kind() == reflect.Slice {
+		return assignSlice(fv, val, key, strict)
+	}
+
+	// Handle map fields.
+	if fv.Kind() == reflect.Map {
+		return assignMap(fv, val, key)
 	}
 
 	// Handle nested struct fields from map values.
@@ -182,15 +297,57 @@ func assignValue(fv reflect.Value, val any, key string) error {
 		if !ok {
 			return fmt.Errorf("cannot unmarshal %T into struct field %q (type %s)", val, key, fv.Type())
 		}
-		return unmarshalMap(m, fv)
+		return unmarshalMap(m, fv, strict)
+	}
+
+	// Handle interface{} / any fields.
+	if fv.Kind() == reflect.Interface {
+		fv.Set(reflect.ValueOf(val))
+		return nil
 	}
 
 	return assignScalar(fv, val, key)
 }
 
 // assignPointerValue allocates and assigns through a pointer field.
-func assignPointerValue(fv reflect.Value, val any, key string) error {
+func assignPointerValue(fv reflect.Value, val any, key string, strict bool) error {
 	elemType := fv.Type().Elem()
+
+	// Check if the pointer type implements Unmarshaler.
+	if fv.Type().Implements(unmarshalerType) {
+		if fv.IsNil() {
+			fv.Set(reflect.New(elemType))
+		}
+		return fv.Interface().(Unmarshaler).UnmarshalConfig(val)
+	}
+	if reflect.PointerTo(elemType).Implements(unmarshalerType) {
+		ptr := reflect.New(elemType)
+		if err := ptr.Interface().(Unmarshaler).UnmarshalConfig(val); err != nil {
+			return err
+		}
+		fv.Set(ptr)
+		return nil
+	}
+
+	// Handle time.Duration pointer.
+	if elemType == reflect.TypeOf(time.Duration(0)) {
+		ptr := reflect.New(elemType)
+		if err := assignDuration(ptr.Elem(), val, key); err != nil {
+			return err
+		}
+		fv.Set(ptr)
+		return nil
+	}
+
+	// Handle time.Time pointer.
+	if elemType == reflect.TypeOf(time.Time{}) {
+		ptr := reflect.New(elemType)
+		if err := assignTime(ptr.Elem(), val, key); err != nil {
+			return err
+		}
+		fv.Set(ptr)
+		return nil
+	}
 
 	// If the value is a map and the pointer target is a struct, handle nested struct.
 	if elemType.Kind() == reflect.Struct {
@@ -199,7 +356,27 @@ func assignPointerValue(fv reflect.Value, val any, key string) error {
 			return fmt.Errorf("cannot unmarshal %T into field %q (type %s)", val, key, fv.Type())
 		}
 		ptr := reflect.New(elemType)
-		if err := unmarshalMap(m, ptr.Elem()); err != nil {
+		if err := unmarshalMap(m, ptr.Elem(), strict); err != nil {
+			return err
+		}
+		fv.Set(ptr)
+		return nil
+	}
+
+	// Handle pointer to slice.
+	if elemType.Kind() == reflect.Slice {
+		ptr := reflect.New(elemType)
+		if err := assignSlice(ptr.Elem(), val, key, strict); err != nil {
+			return err
+		}
+		fv.Set(ptr)
+		return nil
+	}
+
+	// Handle pointer to map.
+	if elemType.Kind() == reflect.Map {
+		ptr := reflect.New(elemType)
+		if err := assignMap(ptr.Elem(), val, key); err != nil {
 			return err
 		}
 		fv.Set(ptr)
@@ -212,6 +389,169 @@ func assignPointerValue(fv reflect.Value, val any, key string) error {
 		return err
 	}
 	fv.Set(ptr)
+	return nil
+}
+
+// assignDuration assigns a value to a time.Duration field.
+// String values are parsed via time.ParseDuration. Integer values
+// are treated as seconds for backwards compatibility.
+func assignDuration(fv reflect.Value, val any, key string) error {
+	switch v := val.(type) {
+	case string:
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid duration for field %q: %w", key, err)
+		}
+		fv.SetInt(int64(d))
+		return nil
+	case int64:
+		// Treat integer values as seconds.
+		fv.SetInt(int64(time.Duration(v) * time.Second))
+		return nil
+	default:
+		return fmt.Errorf("cannot unmarshal %T into field %q of type time.Duration", val, key)
+	}
+}
+
+// assignTime assigns a value to a time.Time field.
+// Values must be ISO8601 Zulu datetime strings or time.Time values
+// already parsed by the config parser.
+func assignTime(fv reflect.Value, val any, key string) error {
+	switch v := val.(type) {
+	case time.Time:
+		fv.Set(reflect.ValueOf(v))
+		return nil
+	case string:
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return fmt.Errorf("invalid datetime for field %q: %w", key, err)
+		}
+		fv.Set(reflect.ValueOf(t))
+		return nil
+	default:
+		return fmt.Errorf("cannot unmarshal %T into field %q of type time.Time", val, key)
+	}
+}
+
+// assignSlice assigns a value to a slice field. Config arrays ([]any)
+// are converted to typed slices. Scalar values are coerced to single-element
+// slices to support shorthand config patterns (e.g., routes = "host:4222"
+// as shorthand for routes = ["host:4222"]).
+func assignSlice(fv reflect.Value, val any, key string, strict bool) error {
+	elemType := fv.Type().Elem()
+
+	switch arr := val.(type) {
+	case []any:
+		return assignSliceFromArray(fv, arr, elemType, key, strict)
+	default:
+		// Scalar-to-single-element-slice coercion.
+		return assignSliceFromArray(fv, []any{val}, elemType, key, strict)
+	}
+}
+
+// assignSliceFromArray creates and populates a typed slice from a []any array.
+func assignSliceFromArray(fv reflect.Value, arr []any, elemType reflect.Type, key string, strict bool) error {
+	slice := reflect.MakeSlice(fv.Type(), 0, len(arr))
+
+	for i, elem := range arr {
+		elemVal := reflect.New(elemType).Elem()
+		elemKey := fmt.Sprintf("%s[%d]", key, i)
+
+		// Handle slice of structs: each element should be a map.
+		if elemType.Kind() == reflect.Struct {
+			// Check for special types first.
+			if elemType == reflect.TypeOf(time.Time{}) {
+				if err := assignTime(elemVal, elem, elemKey); err != nil {
+					return err
+				}
+			} else {
+				m, ok := elem.(map[string]any)
+				if !ok {
+					return fmt.Errorf("cannot unmarshal %T into element of %s for key %q", elem, fv.Type(), key)
+				}
+				if err := unmarshalMap(m, elemVal, strict); err != nil {
+					return err
+				}
+			}
+		} else if elemType.Kind() == reflect.Pointer {
+			// Handle slice of pointers.
+			if err := assignPointerValue(elemVal, elem, elemKey, strict); err != nil {
+				return err
+			}
+		} else if elemType.Kind() == reflect.Interface {
+			// For []any / []interface{}, assign directly.
+			elemVal.Set(reflect.ValueOf(elem))
+		} else if elemType.Kind() == reflect.Map {
+			if err := assignMap(elemVal, elem, elemKey); err != nil {
+				return err
+			}
+		} else if elemType.Kind() == reflect.Slice {
+			if err := assignSlice(elemVal, elem, elemKey, strict); err != nil {
+				return err
+			}
+		} else {
+			if err := assignScalar(elemVal, elem, elemKey); err != nil {
+				return err
+			}
+		}
+
+		slice = reflect.Append(slice, elemVal)
+	}
+
+	fv.Set(slice)
+	return nil
+}
+
+// assignMap assigns a value to a map field. The config map (map[string]any)
+// is converted to the target map type. Empty maps result in non-nil empty maps.
+func assignMap(fv reflect.Value, val any, key string) error {
+	m, ok := val.(map[string]any)
+	if !ok {
+		return fmt.Errorf("cannot unmarshal %T into field %q of type %s", val, key, fv.Type())
+	}
+
+	mapType := fv.Type()
+	keyType := mapType.Key()
+	valType := mapType.Elem()
+
+	// Only string keys are supported.
+	if keyType.Kind() != reflect.String {
+		return fmt.Errorf("unsupported map key type %s for field %q; only string keys are supported", keyType, key)
+	}
+
+	newMap := reflect.MakeMapWithSize(mapType, len(m))
+
+	for mk, mv := range m {
+		mapKey := reflect.ValueOf(mk)
+		mapVal := reflect.New(valType).Elem()
+
+		elemKey := fmt.Sprintf("%s.%s", key, mk)
+
+		if valType.Kind() == reflect.Interface {
+			// map[string]any: assign directly.
+			mapVal.Set(reflect.ValueOf(mv))
+		} else if valType.Kind() == reflect.Struct {
+			inner, ok := mv.(map[string]any)
+			if !ok {
+				return fmt.Errorf("cannot unmarshal %T into map value for key %q (type %s)", mv, elemKey, valType)
+			}
+			if err := unmarshalMap(inner, mapVal, false); err != nil {
+				return err
+			}
+		} else if valType.Kind() == reflect.Map {
+			if err := assignMap(mapVal, mv, elemKey); err != nil {
+				return err
+			}
+		} else {
+			if err := assignScalar(mapVal, mv, elemKey); err != nil {
+				return err
+			}
+		}
+
+		newMap.SetMapIndex(mapKey, mapVal)
+	}
+
+	fv.Set(newMap)
 	return nil
 }
 
