@@ -19,7 +19,39 @@ import (
 	"time"
 
 	v2 "github.com/nats-io/nats-server/v2/conf/v2"
+	"github.com/nats-io/nkeys"
 )
+
+// processConfigV2Err is the result of processing a configuration file
+// via ProcessConfigV2 when CheckConfig is true. It collects multiple
+// errors and warnings, similar to the v1 processConfigErr type.
+type processConfigV2Err struct {
+	errors   []error
+	warnings []error
+}
+
+// Error returns the collection of errors separated by new lines,
+// warnings appear first then hard errors.
+func (e *processConfigV2Err) Error() string {
+	var msg string
+	for _, err := range e.Warnings() {
+		msg += err.Error() + "\n"
+	}
+	for _, err := range e.Errors() {
+		msg += err.Error() + "\n"
+	}
+	return msg
+}
+
+// Warnings returns the list of warnings.
+func (e *processConfigV2Err) Warnings() []error {
+	return e.warnings
+}
+
+// Errors returns the list of errors.
+func (e *processConfigV2Err) Errors() []error {
+	return e.errors
+}
 
 // configV2Wrapper is an intermediate struct used by ProcessConfigV2 to
 // unmarshal a NATS config file into Options. It embeds *Options so that
@@ -56,9 +88,20 @@ type configV2Wrapper struct {
 func ProcessConfigV2(configFile string) (*Options, error) {
 	opts := &Options{}
 	if err := processConfigV2(configFile, opts); err != nil {
+		// If only warnings then continue and return the options.
+		if cerr, ok := err.(*processConfigV2Err); ok && len(cerr.Errors()) == 0 {
+			return opts, nil
+		}
 		return nil, err
 	}
 	return opts, nil
+}
+
+// ProcessConfigFileV2 processes a configuration file using the v2 engine.
+// This is the receiver version that respects pre-set Options fields like
+// CheckConfig, similar to (o *Options).ProcessConfigFile for the v1 engine.
+func (o *Options) ProcessConfigFileV2(configFile string) error {
+	return processConfigV2(configFile, o)
 }
 
 // processConfigV2 performs the actual config processing.
@@ -75,8 +118,12 @@ func processConfigV2(configFile string, opts *Options) error {
 	// Step 2: Unmarshal the config file into the wrapper struct.
 	// The wrapper embeds *Options so simple tagged fields are populated
 	// directly. Overlay fields handle polymorphic/complex blocks.
+	// When CheckConfig is true, use strict mode to detect unknown fields.
 	wrapper := &configV2Wrapper{Options: opts}
-	if err := v2.UnmarshalFile(configFile, wrapper); err != nil {
+	unmarshalOpts := &v2.UnmarshalOptions{
+		Strict: opts.CheckConfig,
+	}
+	if err := v2.UnmarshalFileWith(configFile, wrapper, unmarshalOpts); err != nil {
 		return fmt.Errorf("error processing config file: %w", err)
 	}
 
@@ -85,7 +132,149 @@ func processConfigV2(configFile string, opts *Options) error {
 		return err
 	}
 
+	// Step 4: When CheckConfig is true, perform value validation to
+	// detect issues like invalid nkeys, duplicate users, conflicting
+	// auth options, etc.
+	if opts.CheckConfig {
+		return validateConfigV2(configFile, opts)
+	}
+
 	return nil
+}
+
+// validateConfigV2 performs value validation on the processed config
+// when CheckConfig is true. It collects all errors and warnings.
+func validateConfigV2(configFile string, o *Options) error {
+	errors := make([]error, 0)
+	warnings := make([]error, 0)
+
+	// Check for empty config by re-parsing to get the raw map.
+	m, _, _ := v2.ParseFileWithChecksDigest(configFile)
+	if len(m) == 0 {
+		warnings = append(warnings, fmt.Errorf("%s: config has no values or is empty", configFile))
+	}
+
+	// Validate conflicting auth options.
+	validateAuthV2(configFile, o, &errors, &warnings)
+
+	// Validate cluster config.
+	validateClusterV2(configFile, o, &errors, &warnings)
+
+	// Validate leafnode config.
+	validateLeafNodeV2(configFile, o, &errors, &warnings)
+
+	// Validate accounts.
+	validateAccountsV2(configFile, o, &errors, &warnings)
+
+	// Validate lame duck duration.
+	validateLameDuckV2(configFile, o, &errors, &warnings)
+
+	if len(errors) > 0 || len(warnings) > 0 {
+		return &processConfigV2Err{
+			errors:   errors,
+			warnings: warnings,
+		}
+	}
+
+	return nil
+}
+
+// validateAuthV2 checks authorization-related configuration for errors.
+func validateAuthV2(configFile string, o *Options, errors *[]error, warnings *[]error) {
+	// Check for user/pass + token conflict.
+	if (o.Username != _EMPTY_ || o.Password != _EMPTY_) && o.Authorization != _EMPTY_ {
+		*errors = append(*errors, fmt.Errorf("%s: Cannot have a user/pass and token", configFile))
+	}
+
+	// Check for user + users array conflict.
+	if o.Username != _EMPTY_ && len(o.Users) > 0 {
+		*errors = append(*errors, fmt.Errorf("%s: Can not have a single user/pass and a users array", configFile))
+	}
+
+	// Check for token + users array conflict.
+	if o.Authorization != _EMPTY_ && len(o.Users) > 0 {
+		*errors = append(*errors, fmt.Errorf("%s: Can not have a token and a users array", configFile))
+	}
+
+	// Check for duplicate users.
+	unames := make(map[string]struct{})
+	for _, u := range o.Users {
+		if u.Username != _EMPTY_ {
+			if _, ok := unames[u.Username]; ok {
+				*errors = append(*errors, fmt.Errorf("%s: Duplicate user %q detected", configFile, u.Username))
+			}
+			unames[u.Username] = struct{}{}
+		}
+	}
+
+	// Check for duplicate nkeys.
+	nkeyNames := make(map[string]struct{})
+	for _, nk := range o.Nkeys {
+		if nk.Nkey != _EMPTY_ {
+			if _, ok := nkeyNames[nk.Nkey]; ok {
+				*errors = append(*errors, fmt.Errorf("%s: Duplicate nkey %q detected", configFile, nk.Nkey))
+			}
+			nkeyNames[nk.Nkey] = struct{}{}
+		}
+	}
+
+	// Validate nkey public keys for users.
+	for _, nk := range o.Nkeys {
+		if nk.Nkey != _EMPTY_ && !nkeys.IsValidPublicUserKey(nk.Nkey) {
+			*errors = append(*errors, fmt.Errorf("%s: Not a valid public nkey for a user", configFile))
+		}
+	}
+}
+
+// validateClusterV2 checks cluster-related configuration for errors.
+func validateClusterV2(configFile string, o *Options, errors *[]error, warnings *[]error) {
+	if o.Cluster.Port == 0 && o.Cluster.ListenStr == _EMPTY_ && o.Cluster.Name == _EMPTY_ {
+		return
+	}
+
+	// Validate cluster ping_interval max.
+	if o.Cluster.PingInterval > routeMaxPingInterval {
+		*warnings = append(*warnings, fmt.Errorf("%s: Cluster 'ping_interval' will reset to %v which is the max for routes",
+			configFile, routeMaxPingInterval))
+	}
+}
+
+// validateLeafNodeV2 checks leafnode-related configuration for errors.
+func validateLeafNodeV2(configFile string, o *Options, errors *[]error, warnings *[]error) {
+	if o.LeafNode.Port == 0 && len(o.LeafNode.Remotes) == 0 {
+		return
+	}
+
+	// Validate min_version.
+	if o.LeafNode.MinVersion != _EMPTY_ {
+		if err := checkLeafMinVersionConfig(o.LeafNode.MinVersion); err != nil {
+			*errors = append(*errors, fmt.Errorf("%s: %s", configFile, err.Error()))
+		}
+	}
+}
+
+// validateAccountsV2 checks accounts-related configuration for errors.
+func validateAccountsV2(configFile string, o *Options, errors *[]error, warnings *[]error) {
+	// Validate account nkeys.
+	for _, acc := range o.Accounts {
+		if acc.Nkey != _EMPTY_ && !nkeys.IsValidPublicAccountKey(acc.Nkey) {
+			*errors = append(*errors, fmt.Errorf("%s: Not a valid public nkey for an account: %q", configFile, acc.Nkey))
+		}
+	}
+}
+
+// validateLameDuckV2 checks lame duck configuration for value errors.
+func validateLameDuckV2(configFile string, o *Options, errors *[]error, warnings *[]error) {
+	// Validate lame_duck_duration bounds.
+	if o.LameDuckDuration > 0 && o.LameDuckDuration < 30*time.Second {
+		*errors = append(*errors, fmt.Errorf("%s: invalid lame_duck_duration of %v, minimum is 30 seconds",
+			configFile, o.LameDuckDuration))
+	}
+	// Validate lame_duck_grace_period is positive.
+	if o.LameDuckGracePeriod < 0 {
+		*errors = append(*errors, fmt.Errorf("%s: invalid lame_duck_grace_period, needs to be positive",
+			configFile))
+	}
 }
 
 // postProcessV2 applies computed/dependent field processing after
