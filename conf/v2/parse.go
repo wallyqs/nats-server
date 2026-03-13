@@ -51,6 +51,10 @@ type parser struct {
 
 	// comments collects pending comment nodes to attach to the next key-value.
 	pendingComments []*CommentNode
+
+	// usedVarKeys tracks KeyValueNodes whose values were referenced as
+	// variables during parsing. Used by the backwards-compatible pedantic API.
+	usedVarKeys map[*KeyValueNode]bool
 }
 
 // ParseAST parses the given NATS configuration data and returns the AST root.
@@ -91,6 +95,7 @@ func newASTParser(data, fp string) *parser {
 		keyItems:         make([]item, 0, 4),
 		envVarReferences: make(map[string]bool),
 		pendingComments:  make([]*CommentNode, 0),
+		usedVarKeys:      make(map[*KeyValueNode]bool),
 	}
 }
 
@@ -119,6 +124,9 @@ func (p *parser) parse(fp string) (*Document, error) {
 
 	// Flush any remaining pending comments to the document.
 	p.flushPendingComments()
+
+	// Transfer used variable keys tracking to the document.
+	doc.usedVarKeys = p.usedVarKeys
 
 	return doc, nil
 }
@@ -565,15 +573,21 @@ func (p *parser) lookupInContext(ctx Node, name string) (bool, Node) {
 
 	// Search through key-value pairs (last-wins for duplicates).
 	var found Node
+	var foundKV *KeyValueNode
 	for _, item := range items {
 		if kv, ok := item.(*KeyValueNode); ok {
 			if kv.Key.Name == name {
 				found = kv.Value
+				foundKV = kv
 			}
 		}
 	}
 
 	if found != nil {
+		// Track that this KV was used as a variable source.
+		if foundKV != nil {
+			p.usedVarKeys[foundKV] = true
+		}
 		return true, found
 	}
 	return false, nil

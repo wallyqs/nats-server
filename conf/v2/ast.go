@@ -53,6 +53,10 @@ type Document struct {
 	NodeBase
 	// Items holds the ordered top-level nodes in the document.
 	Items []Node
+	// usedVarKeys tracks keys that were used as variable sources during
+	// parsing. Each entry maps a KeyValueNode pointer to true.
+	// This is used by the backwards-compatible API for pedantic mode.
+	usedVarKeys map[*KeyValueNode]bool
 }
 
 // Type returns "Document".
