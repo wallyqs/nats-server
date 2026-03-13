@@ -1,0 +1,201 @@
+{
+  "groupId": "struct-tags",
+  "testedAt": "2026-03-12T23:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "testingTool": "go test",
+    "testPackage": "./conf/v2/...",
+    "noServicesNeeded": true,
+    "readOnly": true
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-UNMARSHAL-011",
+      "title": "Struct tag field naming",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestUnmarshalStructTagFieldNaming",
+          "expected": "Fields with conf:\"custom_name\" match config keys to custom_name",
+          "observed": "PASS - Host with tag conf:\"addr\" matches key addr, Port with tag conf:\"listen_port\" matches listen_port"
+        },
+        {
+          "action": "Run TestUnmarshalStructTagSkip",
+          "expected": "Fields tagged conf:\"-\" are skipped during unmarshal",
+          "observed": "PASS - Secret field with conf:\"-\" remains empty despite config key present"
+        },
+        {
+          "action": "Run TestUnmarshalCaseInsensitiveKeyMatching",
+          "expected": "Key matching is case-insensitive",
+          "observed": "PASS - All 3 sub-tests pass: lowercase, mixed_case, uppercase all match MaxPayload field"
+        },
+        {
+          "action": "Run TestUnmarshalUntaggedFieldLowercaseMatch",
+          "expected": "Untagged fields match by lowercased Go field name",
+          "observed": "PASS - MaxPayload matches 'maxpayload', ServerName matches 'servername'"
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/struct-tags/VAL-UNMARSHAL-011-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-012",
+      "title": "Omitempty tag behavior",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestUnmarshalStructTagOmitempty",
+          "expected": "Fields with omitempty tag are still populated when present in config",
+          "observed": "PASS - Port (conf:\"port,omitempty\") = 4222, Name (conf:\"name,omitempty\") = \"test\" both populated"
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/struct-tags/VAL-UNMARSHAL-012-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-013",
+      "title": "Pointer field and nil handling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestUnmarshalPointerFields",
+          "expected": "*string, *int64, *bool allocated when present, nil when absent",
+          "observed": "PASS - Name=*\"nats\", Port=*4222, Debug=*true, Missing=nil"
+        },
+        {
+          "action": "Run TestUnmarshalPointerToNestedStruct",
+          "expected": "*NestedStruct allocated and populated when present, nil when absent",
+          "observed": "PASS - Cluster=*Inner{Name:\"my-cluster\", Port:6222}, Missing=nil"
+        },
+        {
+          "action": "Run TestUnmarshalPointerToBasicTypes",
+          "expected": "Pointer fields for all basic types (*string, *int, *float64, *bool) work correctly",
+          "observed": "PASS - All pointer fields allocated with correct values, Missing=nil"
+        },
+        {
+          "action": "Run TestUnmarshalDurationPointer",
+          "expected": "*time.Duration allocated when present, nil when absent",
+          "observed": "PASS - Ping=*3s, Missing=nil"
+        },
+        {
+          "action": "Run TestUnmarshalTimePointer",
+          "expected": "*time.Time allocated when present, nil when absent",
+          "observed": "PASS - Created=*2023-11-01T00:00:00Z, Missing=nil"
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/struct-tags/VAL-UNMARSHAL-013-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-015",
+      "title": "Type mismatch error",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestUnmarshalTypeMismatchError/string_to_int",
+          "expected": "Descriptive error for string value into int field",
+          "observed": "PASS - Error returned mentioning field name \"port\""
+        },
+        {
+          "action": "Run TestUnmarshalTypeMismatchError/bool_to_string",
+          "expected": "Descriptive error for bool value into string field",
+          "observed": "PASS - Error returned mentioning field name \"name\""
+        },
+        {
+          "action": "Run TestUnmarshalTypeMismatchError/int_to_bool",
+          "expected": "Descriptive error for int value into bool field",
+          "observed": "PASS - Error returned mentioning field name \"debug\""
+        },
+        {
+          "action": "Run TestUnmarshalTypeMismatchError/map_to_string",
+          "expected": "Descriptive error for map value into string field",
+          "observed": "PASS - Error returned mentioning field name \"name\""
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/struct-tags/VAL-UNMARSHAL-015-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-017",
+      "title": "Missing config fields retain zero values",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestUnmarshalMissingKeys",
+          "expected": "Pre-set values preserved when config lacks corresponding keys",
+          "observed": "PASS - Config{Port:9999, Debug:true} preserved after unmarshal of 'name = test' only"
+        },
+        {
+          "action": "Run TestUnmarshalEmptyInput",
+          "expected": "Empty config input doesn't error and fields retain Go zero values",
+          "observed": "PASS - Empty input produces no error, Name=\"\", Port=0"
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/struct-tags/VAL-UNMARSHAL-017-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-019",
+      "title": "Unexported fields skipped",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestUnmarshalUnexportedFields",
+          "expected": "Unexported fields silently skipped, no panic, no modification",
+          "observed": "PASS - Struct with unexported 'internal' field unmarshals without error; exported Name and Port fields populated correctly"
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/struct-tags/VAL-UNMARSHAL-019-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-022",
+      "title": "Embedded struct unmarshaling",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestUnmarshalEmbeddedStruct",
+          "expected": "Promoted fields from anonymous struct populated from top-level config keys",
+          "observed": "PASS - Base{Host, Port} promoted: Host=\"127.0.0.1\", Port=4222, Name=\"test\""
+        },
+        {
+          "action": "Run TestUnmarshalEmbeddedPointerStruct",
+          "expected": "Embedded pointer struct (*Base) auto-allocated and promoted fields populated",
+          "observed": "PASS - *Base allocated, Host=\"127.0.0.1\", Port=4222, Name=\"test\""
+        },
+        {
+          "action": "Run TestUnmarshalMultipleEmbeddedStructs",
+          "expected": "Multiple embedded structs have all promoted fields populated",
+          "observed": "PASS - Network{Host, Port} and Auth{Username, Password} both promoted correctly alongside Name field"
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/struct-tags/VAL-UNMARSHAL-022-test-output.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 7 assertions: all 7 passed. VAL-UNMARSHAL-011 (struct tag field naming with 4 tests), VAL-UNMARSHAL-012 (omitempty behavior), VAL-UNMARSHAL-013 (pointer fields with 5 tests), VAL-UNMARSHAL-015 (type mismatch errors with 4 sub-tests), VAL-UNMARSHAL-017 (missing keys retain values with 2 tests), VAL-UNMARSHAL-019 (unexported fields skipped), VAL-UNMARSHAL-022 (embedded structs with 3 tests). All tests exercise the specified assertion behaviors and produce --- PASS results."
+}

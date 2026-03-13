@@ -1,0 +1,85 @@
+{
+  "groupId": "advanced",
+  "testedAt": "2026-03-12T23:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "testTool": "go test",
+    "testPackage": "./conf/v2/...",
+    "readOnly": true
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-UNMARSHAL-014",
+      "title": "Custom Unmarshaler interface",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test with -run filter for TestUnmarshalCustomUnmarshaler, TestUnmarshalCustomUnmarshalerWithInt, TestUnmarshalCustomUnmarshalerError, TestUnmarshalCustomUnmarshalerPointer, TestUnmarshalCustomUnmarshalerWithMap",
+          "expected": "All 5 tests pass (--- PASS)",
+          "observed": "All 5 tests pass: TestUnmarshalCustomUnmarshaler, TestUnmarshalCustomUnmarshalerWithInt, TestUnmarshalCustomUnmarshalerError, TestUnmarshalCustomUnmarshalerPointer, TestUnmarshalCustomUnmarshalerWithMap"
+        },
+        {
+          "action": "Read test source to verify coverage of assertion: UnmarshalConfig(v any) error called with raw parsed value, errors propagated",
+          "expected": "Tests cover: (1) string value passed to UnmarshalConfig, (2) int64 value passed, (3) error propagation, (4) pointer receiver, (5) map value passed",
+          "observed": "TestUnmarshalCustomUnmarshaler: customType receives raw string 'hello', transforms to 'HELLO'. TestUnmarshalCustomUnmarshalerWithInt: receives int64 42, sets data='INT'. TestUnmarshalCustomUnmarshalerError: errorUnmarshaler returns error, verified it propagates. TestUnmarshalCustomUnmarshalerPointer: *customType pointer allocated and UnmarshalConfig called. TestUnmarshalCustomUnmarshalerWithMap: customType receives map[string]any from block syntax."
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/advanced/VAL-UNMARSHAL-014-test-output.txt",
+        "sourceFile": "conf/v2/unmarshal_complex_test.go lines 817-913",
+        "testCount": "5 tests, 5 passed"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-016",
+      "title": "Unknown/extra config fields - strict and permissive modes",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test with -run filter for TestUnmarshalPermissiveMode, TestUnmarshalStrictModeRejectsUnknown, TestUnmarshalStrictModeAllowsKnown, TestUnmarshalStrictModeNilOptions",
+          "expected": "All 4 tests pass (--- PASS)",
+          "observed": "All 4 tests pass: TestUnmarshalPermissiveMode, TestUnmarshalStrictModeRejectsUnknown, TestUnmarshalStrictModeAllowsKnown, TestUnmarshalStrictModeNilOptions"
+        },
+        {
+          "action": "Read test source to verify coverage of assertion: strict mode returns error, permissive mode ignores, both modes available",
+          "expected": "Tests cover: (1) permissive mode ignores unknown keys, (2) strict mode rejects unknown keys with descriptive error, (3) strict mode allows known keys, (4) nil options defaults to permissive",
+          "observed": "TestUnmarshalPermissiveMode: default Unmarshal() ignores 'unknown_key' and 'extra_field', assigns known 'name'. TestUnmarshalStrictModeRejectsUnknown: UnmarshalWith with Strict:true returns error containing 'unknown config key' and the key name 'unknown_key'. TestUnmarshalStrictModeAllowsKnown: strict mode with only known keys succeeds. TestUnmarshalStrictModeNilOptions: UnmarshalWith with nil options behaves as permissive. Both modes available via UnmarshalWith/UnmarshalOptions API."
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/advanced/VAL-UNMARSHAL-016-test-output.txt",
+        "sourceFile": "conf/v2/unmarshal_complex_test.go lines 916-1000",
+        "testCount": "4 tests, 4 passed"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-018",
+      "title": "UnmarshalFile reads and parses file",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run go test with -run filter for TestUnmarshalFileValid, TestUnmarshalFileMissing, TestUnmarshalFileInvalidSyntax, TestUnmarshalFileWithIncludes, TestUnmarshalFileStrict, TestUnmarshalFileNonPointer, TestUnmarshalFileWithRelativeInclude",
+          "expected": "All 7 tests pass (--- PASS)",
+          "observed": "All 7 tests pass: TestUnmarshalFileValid, TestUnmarshalFileMissing, TestUnmarshalFileInvalidSyntax, TestUnmarshalFileWithIncludes, TestUnmarshalFileStrict, TestUnmarshalFileNonPointer, TestUnmarshalFileWithRelativeInclude"
+        },
+        {
+          "action": "Read test source to verify coverage of assertion: missing file returns path error, invalid syntax returns parse error, includes resolved relative to file path",
+          "expected": "Tests cover: (1) valid file unmarshals, (2) missing file returns *os.PathError, (3) invalid syntax returns error, (4) includes resolved with absolute path, (5) strict mode with file, (6) non-pointer target error, (7) relative include resolution",
+          "observed": "TestUnmarshalFileValid: writes temp file with 'name=test port=4222', verifies correct unmarshal. TestUnmarshalFileMissing: calls UnmarshalFile with nonexistent path, asserts errors.As(*os.PathError). TestUnmarshalFileInvalidSyntax: writes invalid config 'name {\\n', verifies error returned. TestUnmarshalFileWithIncludes: creates included.conf with port=6222, main.conf with include directive, verifies port from include. TestUnmarshalFileStrict: writes file with extra key, verifies strict mode rejects. TestUnmarshalFileNonPointer: passes Config{} (non-pointer), verifies error. TestUnmarshalFileWithRelativeInclude: creates subdir 'includes/ports.conf', main.conf with relative include './includes/ports.conf', verifies port=9222 from relative include."
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/advanced/VAL-UNMARSHAL-018-test-output.txt",
+        "sourceFile": "conf/v2/unmarshal_complex_test.go lines 1002-1524",
+        "testCount": "7 tests, 7 passed"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 3 assertions (16 tests total): all 3 passed. VAL-UNMARSHAL-014 (5 tests) verifies custom Unmarshaler interface with string/int/map values, error propagation, and pointer receivers. VAL-UNMARSHAL-016 (4 tests) verifies strict mode rejects unknown keys and permissive mode ignores them, with both modes available via UnmarshalWith API. VAL-UNMARSHAL-018 (7 tests) verifies UnmarshalFile with valid files, missing file PathError, invalid syntax errors, absolute and relative include resolution, strict mode, and non-pointer target errors."
+}

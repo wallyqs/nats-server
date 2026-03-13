@@ -1,0 +1,175 @@
+{
+  "groupId": "complex-types",
+  "testedAt": "2026-03-12T20:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "testingTool": "go test with -run filter",
+    "noServicesNeeded": true,
+    "readOnlyExecution": true
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-UNMARSHAL-005",
+      "title": "time.Duration field unmarshaling",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestUnmarshalDurationFromString", "expected": "PASS - parses '2s', '100ms', '2h30m' correctly", "observed": "PASS - all three duration strings parsed correctly" },
+        { "action": "Run TestUnmarshalDurationFromInt64", "expected": "PASS - int64 5 treated as 5 seconds", "observed": "PASS - ping_interval=5 -> 5*time.Second" },
+        { "action": "Run TestUnmarshalDurationInvalid", "expected": "PASS - 'xyz' returns invalid duration error", "observed": "PASS - error contains 'invalid duration'" },
+        { "action": "Run TestUnmarshalDurationUnsupportedType", "expected": "PASS - bool into duration returns error", "observed": "PASS - error returned for bool value" },
+        { "action": "Run TestUnmarshalDurationPointer", "expected": "PASS - *time.Duration allocated when present, nil when absent", "observed": "PASS - pointer set to 3s, missing pointer is nil" },
+        { "action": "Run TestUnmarshalDurationZero", "expected": "PASS - 0 duration value accepted", "observed": "PASS - timeout=0 -> 0 duration" }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/complex-types/VAL-UNMARSHAL-005-duration-tests.log",
+        "testsRun": 6,
+        "testsPassed": 6,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-006",
+      "title": "time.Time field unmarshaling",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestUnmarshalTimeFromDatetime", "expected": "PASS - ISO8601 Zulu unquoted datetime parsed", "observed": "PASS - 2023-11-01T00:00:00Z parsed to correct time.Time" },
+        { "action": "Run TestUnmarshalTimeFromString", "expected": "PASS - quoted ISO8601 string parsed", "observed": "PASS - '2024-06-15T10:30:00Z' parsed correctly" },
+        { "action": "Run TestUnmarshalTimeInvalid", "expected": "PASS - 'not-a-date' returns invalid datetime error", "observed": "PASS - error contains 'invalid datetime'" },
+        { "action": "Run TestUnmarshalTimeUnsupportedType", "expected": "PASS - int into time.Time returns error", "observed": "PASS - error returned for int64 value" },
+        { "action": "Run TestUnmarshalTimePointer", "expected": "PASS - *time.Time allocated when present, nil when absent", "observed": "PASS - pointer set correctly, missing pointer is nil" }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/complex-types/VAL-UNMARSHAL-006-time-tests.log",
+        "testsRun": 5,
+        "testsPassed": 5,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-007",
+      "title": "Size suffix to int64 unmarshaling",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestUnmarshalSizeSuffix", "expected": "PASS - 1MB=1048576, 64KB=65536", "observed": "PASS - max_payload=1MB -> 1048576, buffer=64KB -> 65536" }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/complex-types/VAL-UNMARSHAL-007-size-suffix-tests.log",
+        "testsRun": 1,
+        "testsPassed": 1,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-008",
+      "title": "Slice field unmarshaling",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestUnmarshalStringSlice", "expected": "PASS - []string from array of strings", "observed": "PASS - 3 routes unmarshaled correctly" },
+        { "action": "Run TestUnmarshalInt64Slice", "expected": "PASS - []int64 from array of ints", "observed": "PASS - 3 ports unmarshaled correctly" },
+        { "action": "Run TestUnmarshalFloat64Slice", "expected": "PASS - []float64 from array of floats", "observed": "PASS - 3 rates unmarshaled correctly" },
+        { "action": "Run TestUnmarshalBoolSlice", "expected": "PASS - []bool from array of bools", "observed": "PASS - 3 flags unmarshaled correctly" },
+        { "action": "Run TestUnmarshalEmptySlice", "expected": "PASS - empty array -> non-nil zero-length slice", "observed": "PASS - routes and ports are non-nil, length 0" },
+        { "action": "Run TestUnmarshalSliceTypeMismatch", "expected": "PASS - string in int64 slice returns error with element index", "observed": "PASS - error mentions 'ports[0]'" },
+        { "action": "Run TestUnmarshalIntSlice", "expected": "PASS - []int from array of ints", "observed": "PASS - 3 values unmarshaled correctly" },
+        { "action": "Run TestUnmarshalSliceOfAny", "expected": "PASS - []any with mixed types", "observed": "PASS - string, int64, bool, float64 all preserved" },
+        { "action": "Run TestUnmarshalSliceFloat64FromInt", "expected": "PASS - int64 elements coerced to float64", "observed": "PASS - [1, 2, 3] -> [1.0, 2.0, 3.0]" }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/complex-types/VAL-UNMARSHAL-008-slice-tests.log",
+        "testsRun": 9,
+        "testsPassed": 9,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-009",
+      "title": "Map field unmarshaling",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestUnmarshalMapStringString", "expected": "PASS - map[string]string populated", "observed": "PASS - region and env keys populated" },
+        { "action": "Run TestUnmarshalMapStringInt64", "expected": "PASS - map[string]int64 populated", "observed": "PASS - http=8080, grpc=9090" },
+        { "action": "Run TestUnmarshalMapStringFloat64", "expected": "PASS - map[string]float64 populated", "observed": "PASS - read=1.5, write=2.5" },
+        { "action": "Run TestUnmarshalMapStringBool", "expected": "PASS - map[string]bool populated", "observed": "PASS - auth=true, tls=false" },
+        { "action": "Run TestUnmarshalMapStringAny", "expected": "PASS - map[string]any with mixed types", "observed": "PASS - string, int64, float64, bool values preserved" },
+        { "action": "Run TestUnmarshalEmptyMap", "expected": "PASS - empty map {} -> non-nil empty map", "observed": "PASS - metadata is non-nil, length 0" },
+        { "action": "Run TestUnmarshalMapTypeMismatch", "expected": "PASS - string into int64 map value returns error", "observed": "PASS - error returned" },
+        { "action": "Run TestUnmarshalMapFloat64FromInt", "expected": "PASS - int64 coerced to float64 in map values", "observed": "PASS - read=5.0, write=10.0" },
+        { "action": "Run TestUnmarshalMapStringValueTypeMismatch", "expected": "PASS - int64 into string map value returns error", "observed": "PASS - error returned" },
+        { "action": "Run TestUnmarshalMapNonMapValue", "expected": "PASS - string into map field returns error", "observed": "PASS - error returned" },
+        { "action": "Run TestUnmarshalMapNonStringKey", "expected": "PASS - map[int]string returns error about string keys", "observed": "PASS - error mentions 'only string keys'" }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/complex-types/VAL-UNMARSHAL-009-map-tests.log",
+        "testsRun": 11,
+        "testsPassed": 11,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-010",
+      "title": "Nested struct unmarshaling",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestUnmarshalNestedStruct", "expected": "PASS - basic nested struct populated", "observed": "PASS - cluster fields populated correctly" },
+        { "action": "Run TestUnmarshalDeeplyNestedStruct", "expected": "PASS - 2-level nesting works", "observed": "PASS - deeply nested values accessible" },
+        { "action": "Run TestUnmarshalDeeplyNestedStructThreeLevels", "expected": "PASS - 3-level nesting with multiple fields", "observed": "PASS - Top.Middle.Inner.Value='deep-value', Count=42" },
+        { "action": "Run TestUnmarshalFourLevelNesting", "expected": "PASS - 4-level nesting", "observed": "PASS - Top.Middle.Inner.Deep.ID='four-deep'" },
+        { "action": "Run TestUnmarshalMapInNestedStruct", "expected": "PASS - map field inside nested struct", "observed": "PASS - Inner.Tags populated correctly" },
+        { "action": "Run TestUnmarshalNestedStructWithSliceAndMap", "expected": "PASS - nested struct with slices and maps combined", "observed": "PASS - endpoints slice, labels map all populated" }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/complex-types/VAL-UNMARSHAL-010-nested-struct-tests.log",
+        "testsRun": 6,
+        "testsPassed": 6,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-020",
+      "title": "Slice of structs unmarshaling",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestUnmarshalSliceOfStructs", "expected": "PASS - array of maps -> []User", "observed": "PASS - 2 users with Name/Age populated" },
+        { "action": "Run TestUnmarshalSliceOfStructsWithNested", "expected": "PASS - nested structs within slice elements", "observed": "PASS - users[0].Address.City=NYC, users[1].Address.City=LA" },
+        { "action": "Run TestUnmarshalSliceOfStructsInvalidElement", "expected": "PASS - non-map element in struct slice returns error", "observed": "PASS - error returned for string element" },
+        { "action": "Run TestUnmarshalSliceWithStructTags", "expected": "PASS - struct tags applied to slice fields", "observed": "PASS - conf:'cluster_routes' tag maps correctly" }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/complex-types/VAL-UNMARSHAL-020-slice-of-structs-tests.log",
+        "testsRun": 4,
+        "testsPassed": 4,
+        "testsFailed": 0
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-023",
+      "title": "Scalar to single-element slice coercion",
+      "status": "pass",
+      "steps": [
+        { "action": "Run TestUnmarshalScalarToStringSlice", "expected": "PASS - string coerced to []string{string}", "observed": "PASS - routes='nats://host:4222' -> []string with 1 element" },
+        { "action": "Run TestUnmarshalScalarToIntSlice", "expected": "PASS - int64 coerced to []int64{int64}", "observed": "PASS - ports=4222 -> []int64{4222}" },
+        { "action": "Run TestUnmarshalScalarToBoolSlice", "expected": "PASS - bool coerced to []bool{bool}", "observed": "PASS - flags=true -> []bool{true}" },
+        { "action": "Run TestUnmarshalScalarToFloat64Slice", "expected": "PASS - float64 coerced to []float64{float64}", "observed": "PASS - rates=3.14 -> []float64{3.14}" },
+        { "action": "Run TestUnmarshalScalarToSliceWithCoercionInNestedStruct", "expected": "PASS - coercion works in nested struct context", "observed": "PASS - cluster.routes='nats://single-host:4222' -> []string with 1 element" }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal/complex-types/VAL-UNMARSHAL-023-scalar-to-slice-tests.log",
+        "testsRun": 5,
+        "testsPassed": 5,
+        "testsFailed": 0
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 8 assertions (47 total test cases): all 8 passed. VAL-UNMARSHAL-005 (duration: 6/6), VAL-UNMARSHAL-006 (time: 5/5), VAL-UNMARSHAL-007 (size suffix: 1/1), VAL-UNMARSHAL-008 (slices: 9/9), VAL-UNMARSHAL-009 (maps: 11/11), VAL-UNMARSHAL-010 (nested structs: 6/6), VAL-UNMARSHAL-020 (slice of structs: 4/4), VAL-UNMARSHAL-023 (scalar-to-slice coercion: 5/5)."
+}
