@@ -1,0 +1,39 @@
+{
+  "featureId": "backwards-compat-api",
+  "reviewedAt": "2026-03-13T04:30:00.000Z",
+  "commitId": "993f43202",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The backwards-compatible API implementation in conf/v2/compat.go is clean, well-structured, and faithfully reproduces v1's behavior. All 5 public functions (Parse, ParseFile, ParseWithChecks, ParseFileWithChecks, ParseFileWithChecksDigest) match v1 signatures exactly. The AST-to-map converter correctly walks the AST and produces identical output to v1, verified through comprehensive cross-validation tests using reflect.DeepEqual (non-pedantic) and JSON byte comparison (pedantic). The token struct provides all 6 required methods (Value, Line, Position, IsUsedVariable, SourceFile, MarshalJSON) with Position() correctly returning key position not value position. Digest computation matches v1 for all 10 test cases. The usedVarKeys tracking in the parser is cleanly integrated. The fuzz test covers both Parse and ParseWithChecks. Test coverage is thorough with 34+ test cases covering all expectedBehavior items and edge cases.",
+    "issues": [
+      {
+        "file": "conf/v2/compat.go",
+        "line": 137,
+        "severity": "non_blocking",
+        "description": "v2's cleanupUsedEnvVars uses a safe type assertion (v, ok := v.(*token)) while v1 uses a bare assertion (t := v.(*token)). This is actually a safety improvement — in v1, a non-token value would panic. In v2, it silently skips non-token entries. Since pedantic mode always wraps values in tokens, this difference is inconsequential for correctness, but worth noting as a deliberate behavioral divergence from v1."
+      },
+      {
+        "file": "conf/v2/compat.go",
+        "line": 28,
+        "severity": "non_blocking",
+        "description": "The token type and all its methods are unexported. This matches v1's pattern, but means external package users can only access token methods through interface type assertions (e.g., defining a local interface with Value() any). This is acceptable as it matches v1's design, but future features (like Unmarshal) may benefit from an exported interface type for the token contract."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker noted in skillFeedback.suggestedChanges that strict TDD (write failing tests before implementation) was less efficient for this feature since the API shape was fully defined by v1 signatures and cross-validation required both v1 and v2 callable simultaneously. The skill's 'Write Tests First (TDD - MANDATORY)' step may need a nuance for backwards-compat features where the API contract is already defined by a reference implementation.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'The skill mentions Write failing tests BEFORE implementation (TDD), but for this feature the implementation and tests were developed together since the API shape was clearly defined by v1 signatures and the cross-validation testing pattern required both v1 and v2 to be callable simultaneously.'"
+    },
+    {
+      "area": "conventions",
+      "observation": "The worker added a usedVarKeys field to the Document AST struct and a usedVarKeys field to the parser struct. These are unexported fields used only by the backwards-compat API's pedantic mode. This couples the AST/parser to the compat layer. AGENTS.md does not address whether the AST layer should be kept pure (independent of compat concerns) or whether such coupling is acceptable.",
+      "evidence": "conf/v2/ast.go:56 — usedVarKeys map[*KeyValueNode]bool added to Document. conf/v2/parse.go:54 — usedVarKeys map[*KeyValueNode]bool added to parser. Both are documented as 'used by the backwards-compatible API for pedantic mode.'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "The backwards-compat-api feature passes review. The implementation is clean, correct, and thoroughly tested. All 5 public functions match v1 signatures and behavior exactly. Cross-validation via reflect.DeepEqual confirms identical output for all v1 parse_test.go inputs. Pedantic mode token wrappers provide all required methods with correct key-position semantics. Digest computation matches v1 for all 10 test cases. Fuzz test confirms no panics. Two non-blocking observations noted: (1) slightly more defensive type assertion in cleanupUsedEnvVars vs v1, and (2) unexported token type matches v1 but may warrant an exported interface in the future. No blocking issues found."
+}

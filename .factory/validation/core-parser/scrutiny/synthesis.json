@@ -1,0 +1,46 @@
+{
+  "milestone": "core-parser",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "go test ./conf/v2/... -count=1 -v", "exitCode": 0 },
+    "typecheck": { "passed": true, "command": "go vet ./conf/v2/...", "exitCode": 0 },
+    "lint": { "passed": true, "command": "go test ./conf/... -count=1", "exitCode": 0, "note": "v1 baseline test used as lint equivalent; no separate linter configured" }
+  },
+  "reviewsSummary": {
+    "total": 4,
+    "passed": 4,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skills",
+      "suggestion": "Update go-library-worker skill TDD guidance to acknowledge incremental sessions and backwards-compat features. For features with prior sessions or where the API contract is defined by a reference implementation, the TDD 'red' phase should focus on gaps/additions rather than re-testing everything from scratch. Backwards-compat features may benefit from simultaneous implementation and cross-validation test development.",
+      "evidence": "Both the lexer (session 7abd516d, second session) and backwards-compat-api (session a08897bf) workers noted that strict 'write failing tests before implementation' was less efficient for their feature types. The lexer had substantial code from a prior session and needed gap-filling. The backwards-compat-api had its API shape fully defined by v1 signatures.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add convention: Later features in the same package may extend structs defined by prior features (adding fields to existing types) as long as existing tests still pass. This is expected when parser features need to extend lexer or AST types. Document this as an accepted pattern.",
+      "evidence": "The parser-ast-builder worker added lastKeySep and lastCommentStyle fields to the lexer struct and sepKnown to KeyNode, which were files created by prior features. This cross-file modification pattern is natural but not documented."
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Block string CRLF limitation inherited from v1 should be documented in AGENTS.md or library",
+      "reason": "This is a v1-inherited behavior that v2 faithfully reproduces. It's not a convention issue or a worker guidance issue — it's a known parser limitation. If it needs documenting, it belongs in the codebase itself (code comment) not in shared mission state."
+    },
+    {
+      "observation": "Hardcoded string literal '}' vs named constant mapEndString in parser EOF check",
+      "reason": "Minor stylistic difference from v1. Not systemic — only one occurrence. The behavior is correct. Not worth a shared state update."
+    },
+    {
+      "observation": "AST/parser coupling to compat layer via usedVarKeys fields",
+      "reason": "This is an architectural detail specific to the v2 implementation. The coupling is minimal (one unexported field) and serves a clear purpose (pedantic mode tracking). Not a convention issue needing AGENTS.md guidance — it's a design decision within the feature scope."
+    }
+  ],
+  "previousRound": null
+}

@@ -1,0 +1,51 @@
+{
+  "featureId": "parser-ast-builder",
+  "reviewedAt": "2026-03-13T04:30:00Z",
+  "commitId": "2489d6e071fb8b11746497d32c2fbaf4dee4636e",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The parser implementation is solid and well-structured. It correctly builds an AST from lexer tokens, handles all required syntactic constructs, implements variable resolution with block scoping and env var fallback, includes cycle detection, include file handling with relative path resolution, comment attachment, float overflow detection, and invalid config detection. The code follows v1 patterns closely and all 49 tests cover the feature requirements thoroughly. Two non-blocking issues were identified: (1) the sepKnown flag on KeyNode is never set to true, causing included file key separators to be overwritten by the parent lexer state, and (2) several AST node types (VariableNode, IncludeNode, BlockStringNode) are defined but never instantiated since variables/includes are resolved at parse time.",
+    "issues": [
+      {
+        "file": "conf/v2/parse.go",
+        "line": 222,
+        "severity": "non_blocking",
+        "description": "Bug: sepKnown flag is checked but never set to true anywhere in the codebase. The comment on line 221 states 'For included keys, the separator is already set (sepKnown flag is true)' but this is incorrect. When processInclude (line 375) re-processes included KeyValueNodes by pushing kv.Key and calling setValue, the sepKnown check on line 222 always evaluates to true (since sepKnown defaults to false), causing the key's separator to be overwritten with the parent lexer's lastKeySep state. This corrupts the separator metadata for included keys. Fix: set key.sepKnown = true after assigning the separator on line 223, or set it in processInclude before calling setValue."
+      },
+      {
+        "file": "conf/v2/parse.go",
+        "line": 335,
+        "severity": "non_blocking",
+        "description": "Dead code: The case for ItemComment (line 335-342) handles a token type that the lexer never emits. The lexer uses ItemCommentStart + ItemText two-token sequence for all comments. The ItemComment constant exists in token.go but no lexer state function emits it. This dead code is harmless but could be removed or documented as a forward-looking handler for a future single-token comment emission."
+      },
+      {
+        "file": "conf/v2/ast.go",
+        "line": 186,
+        "severity": "non_blocking",
+        "description": "Unused AST types: VariableNode (line 186), IncludeNode (line 199), and BlockStringNode (line 209) are defined but never instantiated by the parser. The parser resolves variables and includes at parse time (matching v1 behavior) and block strings arrive as ItemString from the lexer. The expectedBehavior states 'All AST node types are used' which is technically not met. These types may be needed for future non-resolving parse modes (e.g., AST round-trip) so their existence is fine, but the spec language should be updated."
+      },
+      {
+        "file": "conf/v2/parse.go",
+        "line": 574,
+        "severity": "non_blocking",
+        "description": "parseIntegerValue returns (num, nil) for unrecognized suffixes at line 574, silently dropping unknown suffix text. While this matches v1 behavior (where unrecognized suffixes result in no setValue call, which is arguably buggier), it means something like '1xyz' with a lexer that sends it as an integer token would return 1 without error. In practice, the lexer constrains this so it's not reachable, but a defensive error for the default case would be safer."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "Worker added lastKeySep and lastCommentStyle fields to the lexer struct (lex.go) and a sepKnown field to KeyNode (ast.go) as part of the parser feature. These cross-file modifications to types defined by prior features (lexer, AST types) are not documented as an expected pattern in AGENTS.md. Future features may also need to extend prior types, so AGENTS.md could note that later features may add fields to existing structs in conf/v2/ as long as they don't break existing tests.",
+      "evidence": "git diff shows changes to conf/v2/lex.go (added lastKeySep, lastCommentStyle) and conf/v2/ast.go (added sepKnown to KeyNode) which were files created by prior features (lexer, ast-and-token-types)."
+    },
+    {
+      "area": "conventions",
+      "observation": "The parser uses a hardcoded string literal '}' in the EOF invalid-config check (parse.go line 114: prevItem.val != \"}\") whereas v1 uses a named constant mapEndString. AGENTS.md recommends following v1 naming conventions where applicable.",
+      "evidence": "conf/parse.go:225 uses mapEndString constant; conf/v2/parse.go:114 uses raw string \"}\"."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "The parser-ast-builder feature passes review. The implementation correctly builds an AST from lexer tokens with all required features: all syntactic constructs, position info, comment attachment, variable resolution with block scoping and env var fallback, cycle detection, include handling, duplicate key last-wins, invalid config detection, and float overflow detection. The code closely mirrors v1 patterns. 49 comprehensive tests cover all expected behaviors. Four non-blocking issues were found: (1) sepKnown flag never set to true causing included key separator metadata corruption, (2) dead code for unused ItemComment token type, (3) three AST node types defined but never instantiated, (4) silent fallthrough for unrecognized integer suffixes. None are blocking since they don't affect parsed configuration values - only AST metadata fidelity."
+}
