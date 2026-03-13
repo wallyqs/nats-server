@@ -947,8 +947,8 @@ unknown_key = "rejected"
 	if err == nil {
 		t.Fatal("expected error in strict mode for unknown key")
 	}
-	if !strings.Contains(err.Error(), "unknown config key") {
-		t.Fatalf("expected unknown key error, got: %v", err)
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("expected unknown field error, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), "unknown_key") {
 		t.Fatalf("expected error to mention the key name, got: %v", err)
@@ -1110,8 +1110,8 @@ func TestUnmarshalFileStrict(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown key in strict mode")
 	}
-	if !strings.Contains(err.Error(), "unknown config key") {
-		t.Fatalf("expected unknown key error, got: %v", err)
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("expected unknown field error, got: %v", err)
 	}
 }
 
