@@ -1,0 +1,45 @@
+{
+  "featureId": "server-opts-conf-tags",
+  "reviewedAt": "2026-03-13T21:15:00.000Z",
+  "commitId": "fc3eb794e1f3dffa9f67002a3c84c06b8e5c5ae2",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Thorough and correct implementation. All 17+ struct types (Options, ClusterOpts, GatewayOpts, RemoteGatewayOpts, LeafNodeOpts, RemoteLeafOpts, CompressionOpts, JSLimitOpts, JSTpmOpts, AuthCallout, WebsocketOpts, MQTTOpts, OCSPConfig, ProxiesConfig, ProxyConfig, TLSConfigOpts, TLSCertPairOpt, OCSPResponseCacheConfig) have been tagged. Every conf tag alias was cross-referenced against the corresponding parse function switch cases (processConfigFileLine, parseCluster, parseGateway, parseGateways, parseLeafNodes, parseRemoteLeafNodes, parseCompression, parseWebsocket, parseMQTT, parseJetStreamLimits, parseJetStreamTPM, parseAuthCallout, parseTLS, parseProxies, parseProxiesTrusted, parseOCSPResponseCache). All pipe-separated aliases match exactly. Internal/computed fields (TLS runtime objects, operator JWT, auth block parsed via intermediate structs, function callbacks, test-only fields, URL types needing custom parsing) are correctly tagged conf:\"-\". The 338-line diff is purely additive struct tags with no behavioral changes. Build succeeds, go vet has only pre-existing warnings, and all TestConfig*/TestOption* tests pass.",
+    "issues": [
+      {
+        "file": "server/opts.go",
+        "line": 250,
+        "severity": "non_blocking",
+        "description": "RemoteLeafOpts.Websocket anonymous struct is tagged conf:\"-\" but its inner fields (Compression, NoMasking) have their own conf tags (ws_compress|ws_compression|..., ws_no_masking|...). Since the outer struct is conf:\"-\", Unmarshal will skip the entire struct and never consult the inner field tags. In the v1 parser, these are flat keys at the remote leaf level, not nested under a 'websocket' sub-block. A custom unmarshaler for RemoteLeafOpts will need to handle these flat keys directly. The inner field tags are informational but effectively unreachable. Consider either removing the inner field tags to avoid confusion, or documenting that the Websocket sub-struct fields are handled by the custom unmarshaler."
+      },
+      {
+        "file": "server/opts.go",
+        "line": 841,
+        "severity": "non_blocking",
+        "description": "OCSPConfig.OverrideURLs is tagged conf:\"urls\" but processConfigFileLine also accepts the singular key \"url\" (which wraps a single string into a slice). The \"url\" alias is missing from the tag. This will require a custom unmarshaler for OCSPConfig to handle the singular form. Minor gap since custom handling is already expected for this polymorphic field (ocsp accepts bool or map)."
+      },
+      {
+        "file": "server/opts.go",
+        "line": 830,
+        "severity": "non_blocking",
+        "description": "TLSConfigOpts.MinVersion (uint16) is tagged conf:\"-\" despite parseTLS having a \"min_version\" case. The justification is that the field requires custom string-to-uint16 conversion via parseTLSVersion(). This is a reasonable design choice but means min_version must be handled by a custom TLS unmarshaler. Documenting this in AGENTS.md would help future implementers."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker deviated from TDD requirement (step 3 of go-library-worker skill) for purely additive struct tag metadata with no behavior change. The deviation is justified — TDD does not apply to metadata-only additions where existing tests already validate behavior. The worker's skillFeedback suggests adding a carve-out for metadata-only changes.",
+      "evidence": "Handoff skillFeedback.deviations[0]: 'Skipped TDD since this feature is purely additive struct tags with no behavior change'. Feature description explicitly states 'This is purely additive - no behavior change, just tags'."
+    },
+    {
+      "area": "conventions",
+      "observation": "The pattern of tagging anonymous struct fields as conf:\"-\" while their inner fields have conf tags (e.g., RemoteLeafOpts.Websocket) creates a potentially confusing pattern. Future implementers of custom unmarshalers need to know that these inner tags are informational/unreachable and that the flat config keys must be handled directly by the custom unmarshaler. This pattern should be documented.",
+      "evidence": "server/opts.go RemoteLeafOpts.Websocket struct: outer field tagged conf:\"-\", inner fields tagged with ws_compress/ws_no_masking aliases. In parseRemoteLeafNodes these are flat keys, not nested."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The implementation correctly adds conf struct tags with pipe-separated aliases to Options and all 17 nested structs across server/opts.go and server/ocsp_responsecache.go (338 lines changed, 676 total in diff). All aliases were verified against processConfigFileLine and every parse* function. Internal/computed fields are appropriately tagged conf:\"-\". Three non-blocking issues noted: (1) unreachable inner tags on RemoteLeafOpts.Websocket anonymous struct, (2) missing \"url\" singular alias on OCSPConfig.OverrideURLs, (3) TLSConfigOpts.MinVersion tagged \"-\" despite having a parse key. All are acceptable given the custom unmarshaler design pattern. Build succeeds, existing tests pass."
+}

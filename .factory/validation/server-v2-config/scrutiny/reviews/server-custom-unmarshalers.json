@@ -1,0 +1,56 @@
+{
+  "featureId": "server-custom-unmarshalers",
+  "reviewedAt": "2026-03-13T21:30:00.000Z",
+  "commitId": "c30c4517c",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation of 8 custom UnmarshalConfig types in server/opts_unmarshal.go (1178 lines) with comprehensive tests in server/opts_unmarshal_test.go (1126 lines). All required types are covered: DurationValue, ListenValue, JetStreamValue, OCSPConfig, OCSPResponseCacheConfig, TLSConfigOpts, AuthorizationConfig, and AccountsConfig. The unmarshalers properly handle polymorphic inputs (bool/string/map), unwrap pedantic-mode tokens, use existing server helper functions (getStorageSize, parseCipher, parseCurvePreferences, parseTLSVersion, defaultCipherSuites, defaultCurvePreferences, NewOCSPResponseCacheConfig), and integrate cleanly with the ProcessConfigV2 pipeline via opts_v2.go. Tests cover positive and negative cases for all types, including error conditions. Code follows existing NATS conventions consistently (case-insensitive key matching, _EMPTY_ sentinel, comprehensive alias support). The code builds cleanly, and existing server config tests pass without regression.",
+    "issues": [
+      {
+        "file": "server/opts_unmarshal.go",
+        "line": 42,
+        "severity": "non_blocking",
+        "description": "unwrapConfigMap() is defined but never called anywhere in the codebase. It's dead code. Consider removing it or deferring until it's actually needed to keep the file clean."
+      },
+      {
+        "file": "server/opts_unmarshal.go",
+        "line": 254,
+        "severity": "non_blocking",
+        "description": "In JetStreamValue.UnmarshalConfig, the 'sync' case chain uses repeated type assertion via 'if s, ok := mv.(string)' twice in sequence. While functionally correct, this could be simplified with a single switch on mv.(type) for clarity, matching the pattern used elsewhere in the same file."
+      },
+      {
+        "file": "server/opts_unmarshal.go",
+        "line": 400,
+        "severity": "non_blocking",
+        "description": "OCSPResponseCacheConfig.UnmarshalConfig save_interval parsing uses float64 intermediate then converts to time.Duration then back to float64 via .Seconds(). The double conversion is functional but slightly convoluted. This mirrors v1 behavior though, so acceptable for backwards compatibility."
+      },
+      {
+        "file": "server/opts_unmarshal.go",
+        "line": 1039,
+        "severity": "non_blocking",
+        "description": "AccountsConfig defers parsing of exports, imports, jetstream limits, and mappings to ProcessConfigV2. This is a reasonable design choice given the complexity, but it means the AccountsConfig unmarshaler produces an incomplete Account object. The feature description acknowledges this ('For very complex blocks, you may call existing parse helper functions'). The deferred items should be tracked to ensure ProcessConfigV2 handles them."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker deviated from TDD mandate (writing tests first) because this is a server/ feature where test compilation requires types to exist. The skill's TDD rule is written for conf/v2/ library features and doesn't account for server/ features where types must be defined before tests can compile. The worker's skillFeedback correctly flags this.",
+      "evidence": "Handoff skillFeedback.deviations[0]: 'Wrote implementation first then tests, since this is a server/ feature not conf/v2/ and tests required the types to exist first for compilation'. SKILL.md Step 3 says 'Write Tests First (TDD - MANDATORY)' without exception for server/ features."
+    },
+    {
+      "area": "skills",
+      "observation": "Worker deviated from the 'Never modify files outside conf/v2/' rule. The skill's Step 4 says this, but the feature description explicitly requires creating server/opts_unmarshal.go. The worker's feedback suggests the skill should clarify that server/ milestone features may create files in server/.",
+      "evidence": "Handoff skillFeedback.deviations[1]: 'Created new file in server/ package as specified by the feature description'. SKILL.md Step 4: 'Never modify files outside conf/v2/'. AGENTS.md says: 'May add new files and modify existing structs in server/ for ProcessConfigV2 integration.'"
+    },
+    {
+      "area": "conventions",
+      "observation": "The go vet warning about MarshalJSON in server/stream.go is pre-existing (not introduced by this feature), but it means go vet ./server/... never returns clean. This is documented in the handoff but could be noted in AGENTS.md as a known pre-existing issue so future workers don't spend time investigating it.",
+      "evidence": "Handoff verification: 'go vet ./server/... exitCode 1, Pre-existing vet warnings in server/stream.go (MarshalJSON signature) - NOT introduced by this change'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "The server-custom-unmarshalers feature passes review. The implementation correctly covers all 8 required custom Unmarshaler types with proper polymorphic handling (bool/string/map), token unwrapping for pedantic mode, comprehensive field alias support, and thorough error reporting. The code integrates cleanly with the ProcessConfigV2 pipeline via opts_v2.go. Tests are comprehensive with 40+ cases covering positive paths, error conditions, and edge cases. Four non-blocking issues noted: dead code (unwrapConfigMap), a minor code style opportunity in JetStream sync parsing, convoluted float64 duration conversion in OCSP cache, and deferred account sub-block parsing that needs tracking. No blocking issues found."
+}

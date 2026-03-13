@@ -23,3 +23,13 @@ Architectural decisions and patterns for the conf/v2 parser.
 - Marshal converts structs → NATS config text via reflection
 - Unmarshal converts parsed data → structs via reflection + struct tags
 - AST emission preserves comments, formatting, variables, includes
+
+## Server Integration (ProcessConfigV2)
+
+- **configV2Wrapper pattern**: `server/opts_v2.go` defines `configV2Wrapper` that embeds `*Options` with overlay fields for complex types (Listen, HTTP, HTTPS, JetStream, TLS, Authorization, Accounts). The v2 unmarshal engine populates simple fields directly into Options via embedded struct promotion, while complex/polymorphic fields are captured by overlay fields with custom Unmarshalers, then mapped to Options in a post-processing step.
+- **Custom Unmarshalers**: `server/opts_unmarshal.go` implements `UnmarshalConfig(v any) error` on 8 types: `DurationValue`, `ListenValue`, `JetStreamValue`, `OCSPConfig`, `OCSPResponseCacheConfig`, `TLSConfigOpts`, `AuthorizationConfig`, `AccountsConfig`. These handle polymorphic inputs (bool/string/map) and reuse existing server helper functions.
+- **Struct tags**: `server/opts.go` has `conf:"name|alias"` tags on Options and all 17+ nested structs. Fields tagged `conf:"-"` are internal/computed and skipped by Unmarshal.
+
+## Known Pre-existing Issues
+
+- `go vet ./server/...` reports 3 warnings in `server/stream.go` about `MarshalJSON() []byte` methods that should have signature `MarshalJSON() ([]byte, error)`. These are pre-existing in the upstream codebase and not introduced by the v2 parser work. They are safe to ignore for v2-related validation.
