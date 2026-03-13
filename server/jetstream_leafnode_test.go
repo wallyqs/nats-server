@@ -1879,3 +1879,452 @@ func TestJetStreamLeafNodeAndMirrorResyncAfterLeafEstablished(t *testing.T) {
 	defer sGW1.Shutdown()
 	defer sGW2.Shutdown()
 }
+
+// TestJetStreamLeafNodeMirrorStreamPreservesSequences verifies that when
+// server B mirrors a stream from server A (connected via leaf nodes),
+// the mirrored stream preserves the exact same message sequence numbers
+// as the source stream.
+func TestJetStreamLeafNodeMirrorStreamPreservesSequences(t *testing.T) {
+	tmplA := `
+		listen: 127.0.0.1:-1
+		server_name: cluster-a
+		jetstream {
+			store_dir: '%s',
+			domain: A
+		}
+		accounts {
+			JS { users = [ { user: "y", pass: "p" } ]; jetstream: true }
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+		leaf { port: -1 }
+	`
+	confA := createConfFile(t, []byte(fmt.Sprintf(tmplA, t.TempDir())))
+	sA, oA := RunServerWithConfig(confA)
+	defer sA.Shutdown()
+
+	tmplB := `
+		listen: 127.0.0.1:-1
+		server_name: cluster-b
+		jetstream {
+			store_dir: '%s',
+			domain: B
+		}
+		accounts {
+			JS { users = [ { user: "y", pass: "p" } ]; jetstream: true }
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+		leaf { remotes [ { url: "nats://y:p@127.0.0.1:%d", account: "JS" } ] }
+	`
+	confB := createConfFile(t, []byte(fmt.Sprintf(tmplB, t.TempDir(), oA.LeafNode.Port)))
+	sB, _ := RunServerWithConfig(confB)
+	defer sB.Shutdown()
+
+	checkLeafNodeConnectedCount(t, sA, 1)
+	checkLeafNodeConnectedCount(t, sB, 1)
+
+	ncA, jsA := jsClientConnect(t, sA, nats.UserInfo("y", "p"))
+	defer ncA.Close()
+
+	ncB, jsB := jsClientConnect(t, sB, nats.UserInfo("y", "p"))
+	defer ncB.Close()
+
+	// Create the source stream FOO on server A.
+	_, err := jsA.AddStream(&nats.StreamConfig{
+		Name:     "FOO",
+		Subjects: []string{"foo.>"},
+	})
+	require_NoError(t, err)
+
+	// Publish 100 messages to FOO on server A.
+	for i := 1; i <= 100; i++ {
+		_, err := jsA.Publish("foo.test", []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Verify source stream state.
+	si, err := jsA.StreamInfo("FOO")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, uint64(100))
+	require_Equal(t, si.State.FirstSeq, uint64(1))
+	require_Equal(t, si.State.LastSeq, uint64(100))
+
+	// Create a mirror of FOO on server B.
+	_, err = jsB.AddStream(&nats.StreamConfig{
+		Name: "MIRROR-FOO",
+		Mirror: &nats.StreamSource{
+			Name:     "FOO",
+			External: &nats.ExternalStream{APIPrefix: "$JS.A.API"},
+		},
+	})
+	require_NoError(t, err)
+
+	// Wait for the mirror to sync all messages.
+	checkFor(t, 15*time.Second, 250*time.Millisecond, func() error {
+		msi, err := jsB.StreamInfo("MIRROR-FOO")
+		if err != nil {
+			return err
+		}
+		if msi.State.Msgs != 100 {
+			return fmt.Errorf("expected 100 messages in mirror, got %d", msi.State.Msgs)
+		}
+		return nil
+	})
+
+	// Verify that the mirror preserves the exact same sequence numbers.
+	msi, err := jsB.StreamInfo("MIRROR-FOO")
+	require_NoError(t, err)
+	require_Equal(t, msi.State.FirstSeq, uint64(1))
+	require_Equal(t, msi.State.LastSeq, uint64(100))
+
+	// Verify individual messages have the same sequence numbers.
+	for seq := uint64(1); seq <= 100; seq++ {
+		srcMsg, err := jsA.GetMsg("FOO", seq)
+		require_NoError(t, err)
+		mirMsg, err := jsB.GetMsg("MIRROR-FOO", seq)
+		require_NoError(t, err)
+		require_Equal(t, string(srcMsg.Data), string(mirMsg.Data))
+	}
+
+	// Now publish more messages to the source and confirm they continue
+	// with the same sequences in the mirror.
+	for i := 101; i <= 150; i++ {
+		_, err := jsA.Publish("foo.test", []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	checkFor(t, 15*time.Second, 250*time.Millisecond, func() error {
+		msi, err := jsB.StreamInfo("MIRROR-FOO")
+		if err != nil {
+			return err
+		}
+		if msi.State.LastSeq != 150 {
+			return fmt.Errorf("expected last seq 150 in mirror, got %d", msi.State.LastSeq)
+		}
+		return nil
+	})
+
+	msi, err = jsB.StreamInfo("MIRROR-FOO")
+	require_NoError(t, err)
+	require_Equal(t, msi.State.FirstSeq, uint64(1))
+	require_Equal(t, msi.State.LastSeq, uint64(150))
+}
+
+// TestJetStreamLeafNodeSourceStreamDoesNotPreserveSequences verifies that when
+// server B sources a stream from server A (connected via leaf nodes),
+// the sourced stream assigns its own independent sequence numbers rather than
+// preserving the source stream's sequence numbers.
+func TestJetStreamLeafNodeSourceStreamDoesNotPreserveSequences(t *testing.T) {
+	tmplA := `
+		listen: 127.0.0.1:-1
+		server_name: cluster-a
+		jetstream {
+			store_dir: '%s',
+			domain: A
+		}
+		accounts {
+			JS { users = [ { user: "y", pass: "p" } ]; jetstream: true }
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+		leaf { port: -1 }
+	`
+	confA := createConfFile(t, []byte(fmt.Sprintf(tmplA, t.TempDir())))
+	sA, oA := RunServerWithConfig(confA)
+	defer sA.Shutdown()
+
+	tmplB := `
+		listen: 127.0.0.1:-1
+		server_name: cluster-b
+		jetstream {
+			store_dir: '%s',
+			domain: B
+		}
+		accounts {
+			JS { users = [ { user: "y", pass: "p" } ]; jetstream: true }
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+		leaf { remotes [ { url: "nats://y:p@127.0.0.1:%d", account: "JS" } ] }
+	`
+	confB := createConfFile(t, []byte(fmt.Sprintf(tmplB, t.TempDir(), oA.LeafNode.Port)))
+	sB, _ := RunServerWithConfig(confB)
+	defer sB.Shutdown()
+
+	checkLeafNodeConnectedCount(t, sA, 1)
+	checkLeafNodeConnectedCount(t, sB, 1)
+
+	ncA, jsA := jsClientConnect(t, sA, nats.UserInfo("y", "p"))
+	defer ncA.Close()
+
+	ncB, jsB := jsClientConnect(t, sB, nats.UserInfo("y", "p"))
+	defer ncB.Close()
+
+	// Create the source stream FOO on server A.
+	_, err := jsA.AddStream(&nats.StreamConfig{
+		Name:     "FOO",
+		Subjects: []string{"foo.>"},
+	})
+	require_NoError(t, err)
+
+	// Publish 50 messages, then delete first 20 to create a gap.
+	// This means the source stream's first seq will be 21.
+	for i := 1; i <= 50; i++ {
+		_, err := jsA.Publish("foo.test", []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+	err = jsA.PurgeStream("FOO", &nats.StreamPurgeRequest{Sequence: 21})
+	require_NoError(t, err)
+
+	si, err := jsA.StreamInfo("FOO")
+	require_NoError(t, err)
+	require_Equal(t, si.State.FirstSeq, uint64(21))
+	require_Equal(t, si.State.LastSeq, uint64(50))
+	require_Equal(t, si.State.Msgs, uint64(30))
+
+	// Create a sourced stream on server B.
+	_, err = jsB.AddStream(&nats.StreamConfig{
+		Name: "SOURCED-FOO",
+		Sources: []*nats.StreamSource{{
+			Name:     "FOO",
+			External: &nats.ExternalStream{APIPrefix: "$JS.A.API"},
+		}},
+	})
+	require_NoError(t, err)
+
+	// Wait for the sourced stream to pull all messages.
+	checkFor(t, 15*time.Second, 250*time.Millisecond, func() error {
+		ssi, err := jsB.StreamInfo("SOURCED-FOO")
+		if err != nil {
+			return err
+		}
+		if ssi.State.Msgs != 30 {
+			return fmt.Errorf("expected 30 messages in sourced stream, got %d", ssi.State.Msgs)
+		}
+		return nil
+	})
+
+	// The sourced stream should start at sequence 1, NOT 21.
+	// This is the key difference from mirrors.
+	ssi, err := jsB.StreamInfo("SOURCED-FOO")
+	require_NoError(t, err)
+	require_Equal(t, ssi.State.FirstSeq, uint64(1))
+	require_Equal(t, ssi.State.LastSeq, uint64(30))
+
+	// Verify message content is correct even though sequences differ.
+	// Source seq 21 should be sourced stream seq 1, etc.
+	for i := uint64(0); i < 30; i++ {
+		srcMsg, err := jsA.GetMsg("FOO", 21+i)
+		require_NoError(t, err)
+		srdMsg, err := jsB.GetMsg("SOURCED-FOO", 1+i)
+		require_NoError(t, err)
+		require_Equal(t, string(srcMsg.Data), string(srdMsg.Data))
+	}
+
+	// Now publish more to the source and verify they get new sequences
+	// in the sourced stream.
+	for i := 51; i <= 60; i++ {
+		_, err := jsA.Publish("foo.test", []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	checkFor(t, 15*time.Second, 250*time.Millisecond, func() error {
+		ssi, err := jsB.StreamInfo("SOURCED-FOO")
+		if err != nil {
+			return err
+		}
+		if ssi.State.Msgs != 40 {
+			return fmt.Errorf("expected 40 messages in sourced stream, got %d", ssi.State.Msgs)
+		}
+		return nil
+	})
+
+	ssi, err = jsB.StreamInfo("SOURCED-FOO")
+	require_NoError(t, err)
+	// Sourced stream should be 1..40, NOT 21..60.
+	require_Equal(t, ssi.State.FirstSeq, uint64(1))
+	require_Equal(t, ssi.State.LastSeq, uint64(40))
+}
+
+// TestJetStreamLeafNodeMirrorAndSourceConsumerStateNotPreserved verifies that
+// when a consumer is created on server A's stream, and then a consumer with
+// the same name is created on server B's mirror/sourced stream, the consumer
+// state (ack floor, deliver sequence) is NOT preserved - it starts fresh.
+func TestJetStreamLeafNodeMirrorAndSourceConsumerStateNotPreserved(t *testing.T) {
+	tmplA := `
+		listen: 127.0.0.1:-1
+		server_name: cluster-a
+		jetstream {
+			store_dir: '%s',
+			domain: A
+		}
+		accounts {
+			JS { users = [ { user: "y", pass: "p" } ]; jetstream: true }
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+		leaf { port: -1 }
+	`
+	confA := createConfFile(t, []byte(fmt.Sprintf(tmplA, t.TempDir())))
+	sA, oA := RunServerWithConfig(confA)
+	defer sA.Shutdown()
+
+	tmplB := `
+		listen: 127.0.0.1:-1
+		server_name: cluster-b
+		jetstream {
+			store_dir: '%s',
+			domain: B
+		}
+		accounts {
+			JS { users = [ { user: "y", pass: "p" } ]; jetstream: true }
+			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
+		}
+		leaf { remotes [ { url: "nats://y:p@127.0.0.1:%d", account: "JS" } ] }
+	`
+	confB := createConfFile(t, []byte(fmt.Sprintf(tmplB, t.TempDir(), oA.LeafNode.Port)))
+	sB, _ := RunServerWithConfig(confB)
+	defer sB.Shutdown()
+
+	checkLeafNodeConnectedCount(t, sA, 1)
+	checkLeafNodeConnectedCount(t, sB, 1)
+
+	ncA, jsA := jsClientConnect(t, sA, nats.UserInfo("y", "p"))
+	defer ncA.Close()
+
+	ncB, jsB := jsClientConnect(t, sB, nats.UserInfo("y", "p"))
+	defer ncB.Close()
+
+	// Create stream FOO on server A with 100 messages.
+	_, err := jsA.AddStream(&nats.StreamConfig{
+		Name:     "FOO",
+		Subjects: []string{"foo.>"},
+	})
+	require_NoError(t, err)
+
+	for i := 1; i <= 100; i++ {
+		_, err := jsA.Publish("foo.test", []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Create mirror and sourced stream on server B.
+	_, err = jsB.AddStream(&nats.StreamConfig{
+		Name: "MIRROR-FOO",
+		Mirror: &nats.StreamSource{
+			Name:     "FOO",
+			External: &nats.ExternalStream{APIPrefix: "$JS.A.API"},
+		},
+	})
+	require_NoError(t, err)
+
+	_, err = jsB.AddStream(&nats.StreamConfig{
+		Name: "SOURCED-FOO",
+		Sources: []*nats.StreamSource{{
+			Name:     "FOO",
+			External: &nats.ExternalStream{APIPrefix: "$JS.A.API"},
+		}},
+	})
+	require_NoError(t, err)
+
+	// Wait for both to sync.
+	for _, name := range []string{"MIRROR-FOO", "SOURCED-FOO"} {
+		streamName := name
+		checkFor(t, 15*time.Second, 250*time.Millisecond, func() error {
+			si, err := jsB.StreamInfo(streamName)
+			if err != nil {
+				return err
+			}
+			if si.State.Msgs != 100 {
+				return fmt.Errorf("expected 100 messages in %s, got %d", streamName, si.State.Msgs)
+			}
+			return nil
+		})
+	}
+
+	// Create a durable push consumer on server A and consume+ack 50 messages.
+	subA, err := jsA.SubscribeSync("foo.>", nats.Durable("my-consumer"), nats.BindStream("FOO"))
+	require_NoError(t, err)
+
+	for i := 0; i < 50; i++ {
+		msg, err := subA.NextMsg(5 * time.Second)
+		require_NoError(t, err)
+		err = msg.Ack()
+		require_NoError(t, err)
+	}
+	// Drain so we release the consumer binding.
+	subA.Drain()
+	ncA.Flush()
+
+	// Verify consumer state on server A.
+	checkFor(t, 5*time.Second, 250*time.Millisecond, func() error {
+		ci, err := jsA.ConsumerInfo("FOO", "my-consumer")
+		if err != nil {
+			return err
+		}
+		if ci.AckFloor.Stream != 50 {
+			return fmt.Errorf("expected ack floor stream seq 50, got %d", ci.AckFloor.Stream)
+		}
+		if ci.AckFloor.Consumer != 50 {
+			return fmt.Errorf("expected ack floor consumer seq 50, got %d", ci.AckFloor.Consumer)
+		}
+		return nil
+	})
+
+	t.Run("MirrorConsumerStartsFresh", func(t *testing.T) {
+		// Create a consumer with the same durable name on server B's mirror.
+		// Since mirrors preserve sequences, seq numbers match, but
+		// consumer state (ack floor) does NOT carry over.
+		subB, err := jsB.SubscribeSync("foo.>", nats.Durable("my-consumer"), nats.BindStream("MIRROR-FOO"))
+		require_NoError(t, err)
+		defer subB.Drain()
+
+		ci, err := jsB.ConsumerInfo("MIRROR-FOO", "my-consumer")
+		require_NoError(t, err)
+
+		// The consumer on B should NOT have the ack floor from A.
+		// It starts fresh — deliver sequence and ack floor start at 0.
+		if ci.AckFloor.Stream != 0 {
+			t.Fatalf("expected mirror consumer ack floor stream seq 0 (fresh), got %d", ci.AckFloor.Stream)
+		}
+		if ci.AckFloor.Consumer != 0 {
+			t.Fatalf("expected mirror consumer ack floor consumer seq 0 (fresh), got %d", ci.AckFloor.Consumer)
+		}
+
+		// The first message delivered should be seq 1 (the very first message),
+		// NOT seq 51 (where the server A consumer left off).
+		msg, err := subB.NextMsg(5 * time.Second)
+		require_NoError(t, err)
+
+		meta, err := msg.Metadata()
+		require_NoError(t, err)
+
+		// Stream sequence should be 1 (mirrors preserve sequences, consumer starts from beginning).
+		require_Equal(t, meta.Sequence.Stream, uint64(1))
+		// Consumer/deliver sequence should be 1 (fresh consumer).
+		require_Equal(t, meta.Sequence.Consumer, uint64(1))
+	})
+
+	t.Run("SourcedConsumerStartsFresh", func(t *testing.T) {
+		// Same test but for the sourced stream.
+		subB, err := jsB.SubscribeSync(">", nats.Durable("my-consumer"), nats.BindStream("SOURCED-FOO"))
+		require_NoError(t, err)
+		defer subB.Drain()
+
+		ci, err := jsB.ConsumerInfo("SOURCED-FOO", "my-consumer")
+		require_NoError(t, err)
+
+		// The consumer on B should start fresh.
+		if ci.AckFloor.Stream != 0 {
+			t.Fatalf("expected sourced consumer ack floor stream seq 0 (fresh), got %d", ci.AckFloor.Stream)
+		}
+		if ci.AckFloor.Consumer != 0 {
+			t.Fatalf("expected sourced consumer ack floor consumer seq 0 (fresh), got %d", ci.AckFloor.Consumer)
+		}
+
+		// First delivered message should be at stream seq 1 and deliver seq 1.
+		msg, err := subB.NextMsg(5 * time.Second)
+		require_NoError(t, err)
+
+		meta, err := msg.Metadata()
+		require_NoError(t, err)
+
+		require_Equal(t, meta.Sequence.Stream, uint64(1))
+		require_Equal(t, meta.Sequence.Consumer, uint64(1))
+	})
+}
