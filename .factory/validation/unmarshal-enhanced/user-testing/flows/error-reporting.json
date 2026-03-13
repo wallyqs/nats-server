@@ -1,0 +1,133 @@
+{
+  "groupId": "error-reporting",
+  "testedAt": "2026-03-13T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "testFiles": ["conf/v2/unmarshal_errors_test.go", "conf/v2/unmarshal_alias_test.go"],
+    "noServicesNeeded": true,
+    "readOnly": true
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-UNMARSHAL-024",
+      "title": "Error messages include source position (file:line:column)",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestUnmarshalTypeMismatchErrorWithPosition (3 sub-tests: line 1, line 2, bool-to-string)",
+          "expected": "All sub-tests PASS, verifying errors.As extracts *ConfigError with correct Line for type mismatches",
+          "observed": "All 3 sub-tests PASS. Type mismatch errors include correct line numbers (line 1 and line 2 verified)."
+        },
+        {
+          "action": "Run TestUnmarshalOverflowErrorWithPosition",
+          "expected": "PASS: overflow error for int8 field with value 200 includes Line=1 and reason containing 'overflow'",
+          "observed": "PASS. ConfigError has Line=1 and Reason contains 'overflow'."
+        },
+        {
+          "action": "Run TestUnmarshalFileErrorIncludesFilename",
+          "expected": "PASS: UnmarshalFile error includes filename in File field, Source(), and Error()",
+          "observed": "PASS. File field is non-empty, Source() contains 'test.conf', Error() contains 'test.conf'."
+        },
+        {
+          "action": "Run TestUnmarshalStringErrorOmitsFile",
+          "expected": "PASS: string-based parse error has Source() in 'line:col' format (2 parts, no file)",
+          "observed": "PASS. Source() splits into exactly 2 parts (line:col), File is empty."
+        },
+        {
+          "action": "Run TestUnmarshalConfigErrorFormat",
+          "expected": "PASS: Error() string contains position info and mentions field name 'port'",
+          "observed": "PASS. Error string contains ':' position separator and mentions 'port'."
+        },
+        {
+          "action": "Run TestUnmarshalNestedStructErrorPosition",
+          "expected": "PASS: nested struct error for 'port = \"bad\"' on line 3 reports Line=3",
+          "observed": "PASS. ConfigError has Line=3 for nested struct error."
+        },
+        {
+          "action": "Run TestUnmarshalMultipleErrorsFirstReported",
+          "expected": "PASS: first error has non-zero line (valid position info)",
+          "observed": "PASS. ConfigError has non-zero Line for first reported error."
+        },
+        {
+          "action": "Verify ConfigError type in unmarshal.go has Line, Column, File fields and Source()/Error() methods",
+          "expected": "ConfigError struct with Line int, Column int, File string, Reason string; Source() returns 'file:line:col' or 'line:col'; Error() returns 'source: reason'",
+          "observed": "Confirmed. ConfigError has all required fields. Source() uses fmt.Sprintf with file prefix when File is non-empty, omits file otherwise. Error() delegates to Source() + Reason."
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal-enhanced/error-reporting/test-output.txt",
+        "sourceVerification": "unmarshal-enhanced/error-reporting/config-error-type.txt",
+        "consoleErrors": "none",
+        "network": "N/A - pure Go library test"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-025",
+      "title": "Structured error type with Source() method",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestUnmarshalErrorIsConfigError",
+          "expected": "PASS: errors.As(err, &cfgErr) succeeds for type mismatch error, extracting *ConfigError with non-zero Line and non-empty Reason",
+          "observed": "PASS. errors.As successfully extracts *ConfigError. Line is non-zero, Reason is non-empty."
+        },
+        {
+          "action": "Run TestUnmarshalConfigErrorSource",
+          "expected": "PASS: Source() returns 'line:col' format (2-part string) for string-based parse; File is empty",
+          "observed": "PASS. Source() returns 2-part 'line:col' format. File is confirmed empty for string parse."
+        },
+        {
+          "action": "Run TestUnmarshalFileErrorHasThreePartSource",
+          "expected": "PASS: Source() for file-based error contains the file path, producing 'file:line:col' format",
+          "observed": "PASS. Source() contains the full file path in its output."
+        },
+        {
+          "action": "Verify ConfigError type exposes Line, Column, File fields for programmatic access",
+          "expected": "ConfigError struct has exported Line, Column, File fields matching server's configErr pattern",
+          "observed": "Confirmed. ConfigError has exported Line int, Column int, File string, Reason string fields. Source() method provides formatted position string."
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal-enhanced/error-reporting/test-output.txt",
+        "sourceVerification": "unmarshal-enhanced/error-reporting/config-error-type.txt",
+        "consoleErrors": "none",
+        "network": "N/A - pure Go library test"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-029",
+      "title": "Unknown field errors include the field name and position",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestUnmarshalStrictUnknownFieldErrorWithPosition",
+          "expected": "PASS: strict mode error for 'bogus_field' on line 2 includes field name, 'unknown field' text, Line=2, and quoted field name format",
+          "observed": "PASS. Error contains 'bogus_field', 'unknown field', Line=2, and format matches 'unknown field \"bogus_field\"'."
+        },
+        {
+          "action": "Run TestUnmarshalFileStrictUnknownFieldIncludesFilename",
+          "expected": "PASS: file-based strict mode error includes filename 'server.conf' and field name 'bogus'",
+          "observed": "PASS. File field contains 'server.conf'. Error string contains both 'server.conf' and 'bogus'."
+        },
+        {
+          "action": "Run TestUnmarshalAliasStrictModeUnknownField",
+          "expected": "PASS: strict mode with alias tags correctly identifies 'unknown_field' as unknown (not confused by aliases)",
+          "observed": "PASS. Error correctly reports 'unknown_field' as unknown even when aliased fields are present."
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal-enhanced/error-reporting/test-output.txt",
+        "sourceVerification": "unmarshal-enhanced/error-reporting/config-error-type.txt",
+        "consoleErrors": "none",
+        "network": "N/A - pure Go library test"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 3 assertions: 3 passed. All 13 Go tests passed. VAL-UNMARSHAL-024: Error messages include source position (file:line:column) verified through 7 tests covering type mismatch, overflow, file-based errors, string-based errors, nested structs, and multiple errors. VAL-UNMARSHAL-025: Structured ConfigError type with Source() method confirmed via errors.As type assertion and field access, with separate verification of 2-part (string) vs 3-part (file) Source() formats. VAL-UNMARSHAL-029: Unknown field errors in strict mode include field name and position, verified through string-based, file-based, and alias-aware tests."
+}

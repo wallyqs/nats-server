@@ -1,0 +1,23 @@
+{
+  "milestone": "unmarshal-enhanced",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 6,
+    "passed": 6,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-UNMARSHAL-024",
+    "VAL-UNMARSHAL-025",
+    "VAL-UNMARSHAL-026",
+    "VAL-UNMARSHAL-027",
+    "VAL-UNMARSHAL-028",
+    "VAL-UNMARSHAL-029"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null
+}

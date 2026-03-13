@@ -1,0 +1,140 @@
+{
+  "groupId": "aliases",
+  "testedAt": "2026-03-13T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/waldemarquevedo/repos/nats-dev/src/github.com/nats-io/nats-server-security",
+    "testFile": "conf/v2/unmarshal_alias_test.go",
+    "services": "none - pure Go library",
+    "readOnly": true
+  },
+  "toolsUsed": ["go test"],
+  "assertions": [
+    {
+      "id": "VAL-UNMARSHAL-026",
+      "title": "Pipe-separated aliases in conf tag",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestUnmarshalAliasPrimaryName",
+          "expected": "conf:\"host|net\" field populated by config key \"host\"",
+          "observed": "PASS - Host field populated with \"127.0.0.1\" from key \"host\""
+        },
+        {
+          "action": "Run TestUnmarshalAliasSecondaryName",
+          "expected": "conf:\"host|net\" field populated by config key \"net\"",
+          "observed": "PASS - Host field populated with \"192.168.1.1\" from key \"net\""
+        },
+        {
+          "action": "Run TestUnmarshalAliasRealNATSPatterns",
+          "expected": "All real NATS alias patterns work: host/net, user/username, pass/password, store_dir/storedir, max_connections/max_conn",
+          "observed": "PASS - All 10 subtests pass: primary and secondary aliases for all 5 alias groups"
+        },
+        {
+          "action": "Run TestUnmarshalAliasComplexConfig",
+          "expected": "Multiple alias patterns used together in a single config",
+          "observed": "PASS - All 5 fields populated correctly using secondary aliases (net, username, password, storedir)"
+        },
+        {
+          "action": "Run TestUnmarshalAliasNestedStruct",
+          "expected": "Aliases work in nested structs",
+          "observed": "PASS - Cluster.Host populated from \"net\" key inside cluster block"
+        },
+        {
+          "action": "Run TestUnmarshalAliasMultipleAliases",
+          "expected": "More than 2 aliases work (e.g., pub|publish|import)",
+          "observed": "PASS - All 5 subtests pass: primary, secondary, and tertiary aliases"
+        },
+        {
+          "action": "Run TestUnmarshalAliasWithOmitempty",
+          "expected": "Aliases work with omitempty option",
+          "observed": "PASS - Both primary and secondary aliases work with omitempty tag"
+        },
+        {
+          "action": "Review configFieldAliases() implementation in unmarshal.go",
+          "expected": "Splits conf tag on pipe to extract all aliases",
+          "observed": "Confirmed: splits name portion on \"|\" and returns all aliases; each stored lowercased in field map"
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal-enhanced/aliases/test-output.txt",
+        "codeReview": "unmarshal-enhanced/aliases/implementation-review.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-027",
+      "title": "Marshal uses primary alias name",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestMarshalAliasPrimaryName",
+          "expected": "Marshal outputs \"host: \", \"user: \", \"pass: \" (primary names), NOT \"net: \", \"username: \", \"password: \"",
+          "observed": "PASS - Output contains primary names only; secondary names absent"
+        },
+        {
+          "action": "Run TestMarshalAliasWithOmitempty",
+          "expected": "Zero-value aliased field omitted; non-zero uses primary name",
+          "observed": "PASS - Empty host omitted; non-empty host uses \"host: 0.0.0.0\""
+        },
+        {
+          "action": "Run TestMarshalAliasMultipleAliases",
+          "expected": "With 3+ aliases, marshal uses first alias only",
+          "observed": "PASS - Output contains \"pub: \" only, not \"publish: \" or \"import: \""
+        },
+        {
+          "action": "Run TestMarshalIndentAlias",
+          "expected": "MarshalIndent uses primary alias name in nested output",
+          "observed": "PASS - Output contains \"host: \" inside cluster block, not \"net: \""
+        },
+        {
+          "action": "Run TestUnmarshalMarshalRoundTripAlias",
+          "expected": "Unmarshal via secondary alias then Marshal produces primary alias in output",
+          "observed": "PASS - Input uses \"net:\", marshaled output uses \"host:\", re-unmarshal matches"
+        },
+        {
+          "action": "Review parseTag() implementation in marshal.go",
+          "expected": "Extracts only first alias before pipe for output key",
+          "observed": "Confirmed: parseTag() finds first \"|\" index and truncates to get primary name only"
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal-enhanced/aliases/test-output.txt",
+        "codeReview": "unmarshal-enhanced/aliases/implementation-review.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-UNMARSHAL-028",
+      "title": "Aliases are case-insensitive",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run TestUnmarshalAliasCaseInsensitive",
+          "expected": "conf:\"host|net\" matches HOST, NET, Host, Net, host, net",
+          "observed": "PASS - All 6 subtests pass: uppercase HOST, uppercase NET, mixed Host, mixed Net, lower host, lower net"
+        },
+        {
+          "action": "Run TestUnmarshalAliasWithOmitempty (implicit case insensitivity)",
+          "expected": "Aliases with omitempty still match case-insensitively",
+          "observed": "PASS - Both primary and secondary aliases work (lowercase test)"
+        },
+        {
+          "action": "Review alias storage in unmarshal.go",
+          "expected": "All aliases stored lowercased for case-insensitive matching",
+          "observed": "Confirmed: line 281 uses strings.ToLower(alias) when storing in fields map, matching the existing case-insensitive key matching behavior"
+        }
+      ],
+      "evidence": {
+        "testOutput": "unmarshal-enhanced/aliases/test-output.txt",
+        "codeReview": "unmarshal-enhanced/aliases/implementation-review.txt",
+        "consoleErrors": "none"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 3 assertions: 3 passed. All 14 tests pass. VAL-UNMARSHAL-026 (pipe-separated aliases) confirmed with 7 tests covering primary, secondary, tertiary aliases, real NATS patterns, nested structs, complex configs, and omitempty. VAL-UNMARSHAL-027 (marshal primary name) confirmed with 5 tests verifying marshal always outputs first alias. VAL-UNMARSHAL-028 (case-insensitive aliases) confirmed with tests covering uppercase, mixed-case, and lowercase for both primary and secondary aliases. Implementation review confirms correct behavior in configFieldAliases() and parseTag()."
+}
