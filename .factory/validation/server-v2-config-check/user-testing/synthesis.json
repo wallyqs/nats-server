@@ -1,0 +1,17 @@
+{
+  "milestone": "server-v2-config-check",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null,
+  "notes": "No validation contract assertions are mapped to the server-v2-config-check milestone. The two implementation features (server-config-check-v2 and server-config-check-v2-positions) have empty fulfills arrays. All milestone tests pass: TestConfigCheckV2 (all subtests), TestConfigCheckV2ProcessConfigV2Err, TestConfigCheckV2StrictModeDetectsUnknownFields, TestConfigCheckV2PermissiveByDefault, TestConfigCheckV2MultipleValidationErrors, TestConfigCheckV2WarningsOnlyStructType, TestConfigCheckV2ErrorWithPositionInfo, TestConfigCheckV2ProcessConfigV2PublicAPI, TestConfigCheckV2DurationFieldsValid, TestConfigCheckV2NkeyValidation, TestConfigCheckV2ProcessConfigFileV2Method. conf/v2 tests also pass."
+}
