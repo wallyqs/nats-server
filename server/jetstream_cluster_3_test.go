@@ -7375,6 +7375,92 @@ func TestJetStreamClusterConsumerScaleDownChangesRaftGroup(t *testing.T) {
 	})
 }
 
+// TestJetStreamClusterConsumerScaleDownNilConsumerDuringRestart ensures that
+// scaling a consumer down and back up while a server has its meta paused does
+// not panic when the consumer is transiently nil during recreation.
+func TestJetStreamClusterConsumerScaleDownNilConsumerDuringRestart(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	cfg := &nats.ConsumerConfig{
+		Durable:  "CONSUMER",
+		Replicas: 3,
+	}
+	_, err = js.AddConsumer("TEST", cfg)
+	require_NoError(t, err)
+
+	// Wait for all servers to have the consumer.
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		for _, s := range c.servers {
+			mset, err := s.globalAccount().lookupStream("TEST")
+			if err != nil {
+				return err
+			}
+			if mset.lookupConsumer("CONSUMER") == nil {
+				return fmt.Errorf("consumer not found on %s", s.Name())
+			}
+		}
+		return nil
+	})
+
+	var pausedServer *Server
+	for _, s := range c.servers {
+		if !s.JetStreamIsLeader() && !s.JetStreamIsConsumerLeader(globalAccountName, "TEST", "CONSUMER") {
+			pausedServer = s
+			break
+		}
+	}
+	require_NotNil(t, pausedServer)
+
+	// Pause the meta layer to simulate slow meta changes.
+	sjs := pausedServer.getJetStream()
+	meta := sjs.getMetaGroup()
+	require_NoError(t, meta.PauseApply())
+
+	// Scale consumer down to 1 and back up to 3.
+	// This causes the consumer to be removed and recreated on the paused server.
+	cfg.Replicas = 1
+	_, err = js.UpdateConsumer("TEST", cfg)
+	require_NoError(t, err)
+	cfg.Replicas = 3
+	_, err = js.UpdateConsumer("TEST", cfg)
+	require_NoError(t, err)
+
+	// Unpause immediately — the consumer may be nil transiently while
+	// the paused server replays the scale-down (delete) before the scale-up (create).
+	meta.ResumeApply()
+
+	// This must not panic even if lookupConsumer returns nil during replay.
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		mset, err := pausedServer.globalAccount().lookupStream("TEST")
+		if err != nil {
+			return err
+		}
+		o := mset.lookupConsumer("CONSUMER")
+		if o == nil {
+			return fmt.Errorf("consumer not yet available")
+		}
+		n := o.raftNode()
+		if n == nil {
+			return fmt.Errorf("raft node not yet available")
+		}
+		if n.Group() == _EMPTY_ {
+			return fmt.Errorf("raft group not yet set")
+		}
+		return nil
+	})
+}
+
 func TestJetStreamClusterConsumerRescaleCatchup(t *testing.T) {
 	test := func(t *testing.T, doSnapshot bool) {
 		c := createJetStreamClusterExplicit(t, "R3S", 3)
