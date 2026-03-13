@@ -1307,6 +1307,288 @@ func TestProcessConfigV2WebsocketEquivalence(t *testing.T) {
 	}
 }
 
+// TestDigestEquivalenceMinimal tests that the SHA256 config digest
+// produced by ProcessConfigV2 matches the digest produced by
+// ProcessConfigFile (v1) for a minimal config (just port).
+func TestDigestEquivalenceMinimal(t *testing.T) {
+	conf := `port: 4222`
+	fp := writeTestConfig(t, conf)
+
+	v1Opts, err := ProcessConfigFile(fp)
+	if err != nil {
+		t.Fatalf("ProcessConfigFile error: %v", err)
+	}
+	v2Opts, err := ProcessConfigV2(fp)
+	if err != nil {
+		t.Fatalf("ProcessConfigV2 error: %v", err)
+	}
+
+	v1Digest := v1Opts.ConfigDigest()
+	v2Digest := v2Opts.ConfigDigest()
+
+	if v1Digest == "" {
+		t.Fatal("v1 digest is empty")
+	}
+	if v2Digest == "" {
+		t.Fatal("v2 digest is empty")
+	}
+	if !strings.HasPrefix(v1Digest, "sha256:") {
+		t.Errorf("v1 digest does not start with 'sha256:': %q", v1Digest)
+	}
+	if !strings.HasPrefix(v2Digest, "sha256:") {
+		t.Errorf("v2 digest does not start with 'sha256:': %q", v2Digest)
+	}
+	if v1Digest != v2Digest {
+		t.Errorf("Digest mismatch for minimal config:\n  v1: %s\n  v2: %s", v1Digest, v2Digest)
+	}
+}
+
+// TestDigestEquivalenceMedium tests that the SHA256 config digest
+// produced by ProcessConfigV2 matches the digest produced by
+// ProcessConfigFile (v1) for a medium-complexity config with
+// listen, cluster, and jetstream.
+func TestDigestEquivalenceMedium(t *testing.T) {
+	conf := `
+		listen: 127.0.0.1:4242
+		server_name: digest_medium
+
+		cluster {
+			name: "digest-cluster"
+			host: "127.0.0.1"
+			port: 6222
+			no_advertise: true
+			connect_retries: 5
+		}
+
+		jetstream {
+			store_dir: "/tmp/nats/jetstream"
+			max_mem: 1GB
+			max_file: 10GB
+			domain: "test-domain"
+		}
+	`
+	fp := writeTestConfig(t, conf)
+
+	v1Opts, err := ProcessConfigFile(fp)
+	if err != nil {
+		t.Fatalf("ProcessConfigFile error: %v", err)
+	}
+	v2Opts, err := ProcessConfigV2(fp)
+	if err != nil {
+		t.Fatalf("ProcessConfigV2 error: %v", err)
+	}
+
+	v1Digest := v1Opts.ConfigDigest()
+	v2Digest := v2Opts.ConfigDigest()
+
+	if v1Digest == "" {
+		t.Fatal("v1 digest is empty")
+	}
+	if v2Digest == "" {
+		t.Fatal("v2 digest is empty")
+	}
+	if !strings.HasPrefix(v1Digest, "sha256:") {
+		t.Errorf("v1 digest does not start with 'sha256:': %q", v1Digest)
+	}
+	if !strings.HasPrefix(v2Digest, "sha256:") {
+		t.Errorf("v2 digest does not start with 'sha256:': %q", v2Digest)
+	}
+	if v1Digest != v2Digest {
+		t.Errorf("Digest mismatch for medium config:\n  v1: %s\n  v2: %s", v1Digest, v2Digest)
+	}
+}
+
+// TestDigestEquivalenceComprehensive tests that the SHA256 config digest
+// produced by ProcessConfigV2 matches the digest produced by
+// ProcessConfigFile (v1) for a comprehensive config exercising all
+// major sections: listen, cluster, leafnode, gateway, websocket, mqtt,
+// jetstream map, authorization with users, and accounts.
+func TestDigestEquivalenceComprehensive(t *testing.T) {
+	conf := `
+		server_name: digest_comprehensive
+		listen: 127.0.0.1:4242
+
+		http: 8222
+		http_base_path: /nats
+
+		debug: true
+		trace: false
+		logtime: true
+		max_connections: 500
+		max_subscriptions: 5000
+		max_payload: 2MB
+		max_control_line: 4096
+		max_pending: 128MB
+		ping_interval: "30s"
+		ping_max: 5
+		write_deadline: "5s"
+		max_traced_msg_len: 2048
+		connect_error_reports: 3600
+		reconnect_error_reports: 10
+
+		cluster {
+			name: "digest-cluster"
+			host: "127.0.0.1"
+			port: 6222
+			no_advertise: true
+			connect_retries: 3
+			pool_size: 5
+		}
+
+		leafnodes {
+			host: "0.0.0.0"
+			port: 7422
+			no_advertise: true
+		}
+
+		gateway {
+			name: "digest-gw"
+			host: "0.0.0.0"
+			port: 7222
+			connect_retries: 2
+		}
+
+		websocket {
+			host: "0.0.0.0"
+			port: 8080
+			no_tls: true
+			compression: true
+		}
+
+		mqtt {
+			host: "0.0.0.0"
+			port: 1883
+			ack_wait: "60s"
+			max_ack_pending: 200
+		}
+
+		jetstream {
+			store_dir: "/tmp/nats/jetstream"
+			max_mem: 2GB
+			max_file: 20GB
+			domain: "comprehensive"
+		}
+
+		authorization {
+			users = [
+				{user: alice, password: s3cr3t}
+				{user: bob, password: p@ssw0rd}
+			]
+		}
+
+		accounts {
+			SYS {
+				users = [{user: admin, password: admin123}]
+			}
+			APP {
+				users = [{user: app_user, password: app_pass}]
+			}
+		}
+	`
+	fp := writeTestConfig(t, conf)
+
+	v1Opts, err := ProcessConfigFile(fp)
+	if err != nil {
+		t.Fatalf("ProcessConfigFile error: %v", err)
+	}
+	v2Opts, err := ProcessConfigV2(fp)
+	if err != nil {
+		t.Fatalf("ProcessConfigV2 error: %v", err)
+	}
+
+	v1Digest := v1Opts.ConfigDigest()
+	v2Digest := v2Opts.ConfigDigest()
+
+	if v1Digest == "" {
+		t.Fatal("v1 digest is empty")
+	}
+	if v2Digest == "" {
+		t.Fatal("v2 digest is empty")
+	}
+	if !strings.HasPrefix(v1Digest, "sha256:") {
+		t.Errorf("v1 digest does not start with 'sha256:': %q", v1Digest)
+	}
+	if !strings.HasPrefix(v2Digest, "sha256:") {
+		t.Errorf("v2 digest does not start with 'sha256:': %q", v2Digest)
+	}
+	if v1Digest != v2Digest {
+		t.Errorf("Digest mismatch for comprehensive config:\n  v1: %s\n  v2: %s", v1Digest, v2Digest)
+	}
+}
+
+// TestDigestEquivalenceChangedConfig tests that changing a config value
+// produces a different digest, verifying the digest is actually computed
+// from the config content and not a constant value.
+func TestDigestEquivalenceChangedConfig(t *testing.T) {
+	confA := `
+		port: 4222
+		server_name: digest_a
+	`
+	confB := `
+		port: 4333
+		server_name: digest_b
+	`
+
+	fpA := writeTestConfig(t, confA)
+	fpB := filepath.Join(t.TempDir(), "b.conf")
+	if err := os.WriteFile(fpB, []byte(confB), 0644); err != nil {
+		t.Fatalf("Failed to write config B: %v", err)
+	}
+
+	// Get v1 digests for both configs.
+	v1OptsA, err := ProcessConfigFile(fpA)
+	if err != nil {
+		t.Fatalf("ProcessConfigFile(A) error: %v", err)
+	}
+	v1OptsB, err := ProcessConfigFile(fpB)
+	if err != nil {
+		t.Fatalf("ProcessConfigFile(B) error: %v", err)
+	}
+
+	// Get v2 digests for both configs.
+	v2OptsA, err := ProcessConfigV2(fpA)
+	if err != nil {
+		t.Fatalf("ProcessConfigV2(A) error: %v", err)
+	}
+	v2OptsB, err := ProcessConfigV2(fpB)
+	if err != nil {
+		t.Fatalf("ProcessConfigV2(B) error: %v", err)
+	}
+
+	// Verify digests are non-empty and well-formed.
+	for name, digest := range map[string]string{
+		"v1A": v1OptsA.ConfigDigest(),
+		"v1B": v1OptsB.ConfigDigest(),
+		"v2A": v2OptsA.ConfigDigest(),
+		"v2B": v2OptsB.ConfigDigest(),
+	} {
+		if digest == "" {
+			t.Fatalf("%s digest is empty", name)
+		}
+		if !strings.HasPrefix(digest, "sha256:") {
+			t.Errorf("%s digest does not start with 'sha256:': %q", name, digest)
+		}
+	}
+
+	// v1A == v2A (same config, different engine).
+	if v1OptsA.ConfigDigest() != v2OptsA.ConfigDigest() {
+		t.Errorf("Config A digest mismatch:\n  v1: %s\n  v2: %s",
+			v1OptsA.ConfigDigest(), v2OptsA.ConfigDigest())
+	}
+
+	// v1B == v2B (same config, different engine).
+	if v1OptsB.ConfigDigest() != v2OptsB.ConfigDigest() {
+		t.Errorf("Config B digest mismatch:\n  v1: %s\n  v2: %s",
+			v1OptsB.ConfigDigest(), v2OptsB.ConfigDigest())
+	}
+
+	// Config A digest != Config B digest (different configs produce different digests).
+	if v1OptsA.ConfigDigest() == v1OptsB.ConfigDigest() {
+		t.Errorf("Different configs should produce different digests, but both have: %s",
+			v1OptsA.ConfigDigest())
+	}
+}
+
 // TestProcessConfigV2MQTTEquivalence tests equivalence of MQTT config.
 func TestProcessConfigV2MQTTEquivalence(t *testing.T) {
 	conf := `
