@@ -55,6 +55,11 @@ type parser struct {
 	// usedVarKeys tracks KeyValueNodes whose values were referenced as
 	// variables during parsing. Used by the backwards-compatible pedantic API.
 	usedVarKeys map[*KeyValueNode]bool
+
+	// raw enables raw-mode parsing that preserves variable references and
+	// include directives as AST nodes instead of resolving/expanding them.
+	// Used for round-trip emission.
+	raw bool
 }
 
 // ParseAST parses the given NATS configuration data and returns the AST root.
@@ -75,9 +80,40 @@ func ParseASTFile(fp string) (*Document, error) {
 	return parseAST(string(data), fp)
 }
 
+// ParseASTRaw parses the given NATS configuration data in raw mode and
+// returns the AST root. In raw mode, variable references are preserved
+// as VariableNode instead of being resolved, and include directives are
+// preserved as IncludeNode instead of being expanded. Raw text
+// representations are stored on AST nodes for round-trip emission.
+func ParseASTRaw(data string) (*Document, error) {
+	return parseASTRaw(data, "")
+}
+
+// ParseASTRawFile parses a NATS configuration file in raw mode.
+// In raw mode, include directives are preserved as IncludeNode
+// instead of being expanded, and variables are preserved as VariableNode.
+func ParseASTRawFile(fp string) (*Document, error) {
+	data, err := os.ReadFile(fp)
+	if err != nil {
+		return nil, fmt.Errorf("error opening config file: %v", err)
+	}
+	return parseASTRaw(string(data), fp)
+}
+
 func parseAST(data, fp string) (*Document, error) {
 	p := newASTParser(data, fp)
 	return p.parse(fp)
+}
+
+func parseASTRaw(data, fp string) (*Document, error) {
+	p := newASTParser(data, fp)
+	p.raw = true
+	doc, err := p.parse(fp)
+	if err != nil {
+		return nil, err
+	}
+	doc.Source = data
+	return doc, nil
 }
 
 func parseASTEnv(data string, parent *parser) (*Document, error) {
@@ -310,6 +346,9 @@ func (p *parser) processItem(it item, fp string) error {
 			NodeBase: NodeBase{Pos: pos},
 			Value:    num,
 		}
+		if p.raw {
+			node.Raw = it.val
+		}
 		p.setValue(node)
 
 	case ItemBool:
@@ -327,6 +366,9 @@ func (p *parser) processItem(it item, fp string) error {
 			NodeBase: NodeBase{Pos: pos},
 			Value:    val,
 		}
+		if p.raw {
+			node.Raw = it.val
+		}
 		p.setValue(node)
 
 	case ItemDatetime:
@@ -338,6 +380,9 @@ func (p *parser) processItem(it item, fp string) error {
 		node := &DatetimeNode{
 			NodeBase: NodeBase{Pos: pos},
 			Value:    dt,
+		}
+		if p.raw {
+			node.Raw = it.val
 		}
 		p.setValue(node)
 
@@ -354,22 +399,41 @@ func (p *parser) processItem(it item, fp string) error {
 
 	case ItemVariable:
 		pos := Position{Line: it.line, Column: it.pos, File: fp}
-		value, found, err := p.lookupVariable(it.val)
-		if err != nil {
-			return fmt.Errorf("variable reference for '%s' on line %d could not be parsed: %s",
-				it.val, it.line, err)
+		if p.raw {
+			// In raw mode, preserve variable reference as VariableNode.
+			node := &VariableNode{
+				NodeBase: NodeBase{Pos: pos},
+				Name:     it.val,
+			}
+			p.setValue(node)
+		} else {
+			value, found, err := p.lookupVariable(it.val)
+			if err != nil {
+				return fmt.Errorf("variable reference for '%s' on line %d could not be parsed: %s",
+					it.val, it.line, err)
+			}
+			if !found {
+				return fmt.Errorf("variable reference for '%s' on line %d can not be found",
+					it.val, it.line)
+			}
+			// Clone the resolved value node with the variable's position.
+			resolved := cloneNodeWithPosition(value, pos)
+			p.setValue(resolved)
 		}
-		if !found {
-			return fmt.Errorf("variable reference for '%s' on line %d can not be found",
-				it.val, it.line)
-		}
-		// Clone the resolved value node with the variable's position.
-		resolved := cloneNodeWithPosition(value, pos)
-		p.setValue(resolved)
 
 	case ItemInclude:
-		if err := p.processInclude(it, fp); err != nil {
-			return err
+		if p.raw {
+			// In raw mode, preserve include directive as IncludeNode.
+			pos := Position{Line: it.line, Column: it.pos, File: fp}
+			node := &IncludeNode{
+				NodeBase: NodeBase{Pos: pos},
+				Path:     it.val,
+			}
+			p.addToContext(node)
+		} else {
+			if err := p.processInclude(it, fp); err != nil {
+				return err
+			}
 		}
 
 	case ItemCommentStart:

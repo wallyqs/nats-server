@@ -98,6 +98,7 @@ type lexer struct {
 	// lastCommentStyle records the comment style for the most recently
 	// emitted comment token.
 	lastCommentStyle CommentStyle
+
 }
 
 // lex creates a new lexer for the given input string.

@@ -57,6 +57,9 @@ type Document struct {
 	// parsing. Each entry maps a KeyValueNode pointer to true.
 	// This is used by the backwards-compatible API for pedantic mode.
 	usedVarKeys map[*KeyValueNode]bool
+	// Source is the original source text of the document.
+	// Set during raw-mode parsing for round-trip emission.
+	Source string
 }
 
 // Type returns "Document".
@@ -106,6 +109,9 @@ type StringNode struct {
 	NodeBase
 	// Value is the string content after processing escape sequences.
 	Value string
+	// Raw is the original text representation including quotes and escape
+	// sequences. Set during raw-mode parsing for round-trip emission.
+	Raw string
 }
 
 // Type returns "String".
@@ -129,6 +135,9 @@ type FloatNode struct {
 	NodeBase
 	// Value is the parsed float64 value.
 	Value float64
+	// Raw is the original text representation.
+	// Set during raw-mode parsing for round-trip emission.
+	Raw string
 }
 
 // Type returns "Float".
@@ -140,6 +149,9 @@ type BoolNode struct {
 	NodeBase
 	// Value is the parsed boolean value.
 	Value bool
+	// Raw is the original text representation (e.g., "true", "yes", "on").
+	// Set during raw-mode parsing for round-trip emission.
+	Raw string
 }
 
 // Type returns "Bool".
@@ -150,6 +162,9 @@ type DatetimeNode struct {
 	NodeBase
 	// Value is the parsed time.Time value.
 	Value time.Time
+	// Raw is the original text representation.
+	// Set during raw-mode parsing for round-trip emission.
+	Raw string
 }
 
 // Type returns "Datetime".
@@ -188,6 +203,9 @@ type IncludeNode struct {
 	NodeBase
 	// Path is the include file path (may be relative).
 	Path string
+	// Raw is the original include directive text (e.g., "include './file.conf'").
+	// Set during raw-mode parsing for round-trip emission.
+	Raw string
 }
 
 // Type returns "Include".
@@ -215,6 +233,9 @@ type KeyNode struct {
 	Separator KeySeparator
 	// sepKnown indicates whether Separator has been explicitly set.
 	sepKnown bool
+	// rawSep is the raw separator text between key and value
+	// (e.g., " = ", ": ", " "). Set during raw-mode parsing.
+	rawSep string
 }
 
 // Type returns "Key".
