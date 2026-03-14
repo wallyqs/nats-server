@@ -459,6 +459,10 @@ type Options struct {
 	// CheckConfig configuration file syntax test was successful and exit.
 	CheckConfig bool `json:"-" conf:"-"`
 
+	// LockConfig rewrites config files to add SHA-256 digests to include
+	// directives. Requires CheckConfig (-t) and NATS_CONFIG_V2.
+	LockConfig bool `json:"-" conf:"-"`
+
 	// DisableJetStreamBanner will not print the ascii art on startup for JetStream enabled servers
 	DisableJetStreamBanner bool `json:"-" conf:"-"`
 
@@ -6077,6 +6081,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.StringVar(&configFile, "c", _EMPTY_, "Configuration file.")
 	fs.StringVar(&configFile, "config", _EMPTY_, "Configuration file.")
 	fs.BoolVar(&opts.CheckConfig, "t", false, "Check configuration and exit.")
+	fs.BoolVar(&opts.LockConfig, "lock", false, "Lock config include directives with SHA-256 digests and exit.")
 	fs.StringVar(&signal, "sl", "", "Send signal to nats-server process (ldm, stop, quit, term, reopen, reload).")
 	fs.StringVar(&signal, "signal", "", "Send signal to nats-server process (ldm, stop, quit, term, reopen, reload).")
 	fs.StringVar(&opts.PidFile, "P", "", "File to store process pid.")
@@ -6194,6 +6199,16 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	if signal != _EMPTY_ {
 		if err := processSignal(signal); err != nil {
 			return nil, err
+		}
+	}
+
+	// Validate --lock flag requirements.
+	if opts.LockConfig {
+		if !opts.CheckConfig {
+			return nil, fmt.Errorf("--lock requires -t (check configuration mode)")
+		}
+		if !useConfigV2() {
+			return nil, fmt.Errorf("--lock requires NATS_CONFIG_V2 environment variable to be set")
 		}
 	}
 

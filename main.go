@@ -108,6 +108,11 @@ func main() {
 		server.PrintTLSHelpAndDie)
 	if err != nil {
 		server.PrintAndDie(fmt.Sprintf("%s: %s", exe, err))
+	} else if opts.CheckConfig && opts.LockConfig {
+		if err := server.LockConfigIncludes(opts.ConfigFile); err != nil {
+			server.PrintAndDie(fmt.Sprintf("%s: %s", exe, err))
+		}
+		os.Exit(0)
 	} else if opts.CheckConfig {
 		fmt.Fprintf(os.Stderr, "%s: configuration file %s is valid (%s)\n", exe, opts.ConfigFile, opts.ConfigDigest())
 		os.Exit(0)
