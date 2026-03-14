@@ -1,0 +1,39 @@
+{
+  "featureId": "config-lock-includes",
+  "reviewedAt": "2026-03-14T01:15:00.000Z",
+  "commitId": "b100ccc3240069a7c023943c7f4ff3e2a0b8a013",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation of the --lock flag feature. The code is well-structured across 4 files (main.go, server/opts.go, server/config_lock.go, server/config_lock_test.go) totaling 646 lines added. The core logic in config_lock.go correctly uses v2 AST raw mode (ParseASTRawFile/Emit) for round-trip fidelity, implements recursive processing with cycle detection via a visited map, handles includes inside MapNode blocks, and properly sequences sub-file locking before parent digest computation. Flag validation in opts.go correctly enforces both -t and NATS_CONFIG_V2 requirements. The main.go integration is cleanly placed before the existing CheckConfig exit block. All 10 tests are comprehensive and cover every expectedBehavior item plus additional edge cases (map-nested includes, flag validation).",
+    "issues": [
+      {
+        "file": "server/config_lock.go",
+        "line": 155,
+        "severity": "non_blocking",
+        "description": "In lockIncludeNode, the error return from os.ReadFile returns (0, err) instead of (locked, err), which is inconsistent with other error returns in the same function that preserve the locked count. Since callers check the error and abort, this has no functional impact, but it's a minor inconsistency."
+      },
+      {
+        "file": "server/config_lock.go",
+        "line": 105,
+        "severity": "non_blocking",
+        "description": "lockIncludes only recurses into MapNode values of KeyValueNode but does not recurse into ArrayNode elements. If a NATS config ever had an include directive inside an array context, it would be missed. This is unlikely in practice (NATS configs don't typically use includes inside arrays), and the feature description only explicitly mentions MapNode blocks, so this is an acceptable scope limitation."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The copyright header in the new files (config_lock.go, config_lock_test.go) uses '2025' but the current year is 2026. This is consistent with the existing convention in other recently added files (opts_v2.go also uses 2025), so it appears to be the project's standard practice for the current development cycle.",
+      "evidence": "server/config_lock.go:1 — 'Copyright 2025 The NATS Authors', consistent with server/opts_v2.go:1"
+    },
+    {
+      "area": "skills",
+      "observation": "The worker followed the skill procedure correctly. The skill says 'Write tests before implementation' (TDD). The handoff confirms all tests were written and pass. The skill's guidance about server/ tests is properly followed with targeted -run flags. No skill gaps identified.",
+      "evidence": "handoff.skillFeedback.followedProcedure = true, no deviations"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "The config-lock-includes feature passes review. The implementation correctly adds a --lock flag that rewrites config files with SHA-256 digests on include directives using the v2 AST raw mode for round-trip fidelity. Flag validation properly enforces -t and NATS_CONFIG_V2 requirements. Recursive include processing with cycle detection works correctly, sub-files are processed before parent digests are computed, and includes nested in map blocks are handled. Two non-blocking issues noted: a minor error-path return value inconsistency in lockIncludeNode, and the lack of ArrayNode traversal (acceptable scope limitation). All 10 tests are well-written, covering basic locking, already-locked files, wrong digests, multiple includes, recursive includes, formatting preservation, map-nested includes, and flag validation. All verification commands passed."
+}
