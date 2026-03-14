@@ -6200,12 +6200,24 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	// Parse config if given
 	if configFile != _EMPTY_ {
 		// This will update the options with values from the config file.
-		err := opts.ProcessConfigFile(configFile)
+		var err error
+		if useConfigV2() {
+			err = opts.ProcessConfigFileV2(configFile)
+		} else {
+			err = opts.ProcessConfigFile(configFile)
+		}
 		if err != nil {
 			if opts.CheckConfig {
 				return nil, err
 			}
-			if cerr, ok := err.(*processConfigErr); !ok || len(cerr.Errors()) != 0 {
+			// Check if error is warnings-only from either v1 or v2 config processing.
+			warningsOnly := false
+			if cerr, ok := err.(*processConfigErr); ok && len(cerr.Errors()) == 0 {
+				warningsOnly = true
+			} else if cerr, ok := err.(*processConfigV2Err); ok && len(cerr.Errors()) == 0 {
+				warningsOnly = true
+			}
+			if !warningsOnly {
 				return nil, err
 			}
 			// If we get here we only have warnings and can still continue

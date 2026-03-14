@@ -15,12 +15,24 @@ package server
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	v2 "github.com/nats-io/nats-server/v2/conf/v2"
 	"github.com/nats-io/nkeys"
 )
+
+// envConfigV2 is the environment variable name that, when set to a
+// non-empty value, switches config file parsing from v1 to v2.
+const envConfigV2 = "NATS_CONFIG_V2"
+
+// useConfigV2 reports whether the NATS_CONFIG_V2 environment variable
+// is set to a non-empty value, indicating the v2 config parser should
+// be used.
+func useConfigV2() bool {
+	return os.Getenv(envConfigV2) != ""
+}
 
 // processConfigV2Err is the result of processing a configuration file
 // via ProcessConfigV2 when CheckConfig is true. It collects multiple

@@ -14,6 +14,7 @@
 package server
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1624,5 +1625,208 @@ func TestProcessConfigV2MQTTEquivalence(t *testing.T) {
 		if !reflect.DeepEqual(c.v1, c.v2) {
 			t.Errorf("Field %s: v1=%v, v2=%v", c.name, c.v1, c.v2)
 		}
+	}
+}
+
+// TestConfigV2EnvVar tests that setting the NATS_CONFIG_V2 environment
+// variable causes ConfigureOptions to use the v2 config parser path.
+func TestConfigV2EnvVar(t *testing.T) {
+	t.Run("v2 parser via env var", func(t *testing.T) {
+		conf := `
+			server_name: env_v2_test
+			port: 4222
+			debug: true
+			max_connections: 100
+			max_payload: 1MB
+			ping_interval: "30s"
+			ping_max: 5
+			write_deadline: "2s"
+		`
+		fp := writeTestConfig(t, conf)
+
+		// Set the NATS_CONFIG_V2 env var to enable v2 parser.
+		t.Setenv(envConfigV2, "1")
+
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		args := []string{"-c", fp}
+		opts, err := ConfigureOptions(fs, args, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("ConfigureOptions error: %v", err)
+		}
+
+		// Verify options are populated correctly via v2 parser.
+		if opts.ServerName != "env_v2_test" {
+			t.Errorf("ServerName: got %q, expected %q", opts.ServerName, "env_v2_test")
+		}
+		if opts.Port != 4222 {
+			t.Errorf("Port: got %d, expected %d", opts.Port, 4222)
+		}
+		if !opts.Debug {
+			t.Error("Debug: expected true")
+		}
+		if opts.MaxConn != 100 {
+			t.Errorf("MaxConn: got %d, expected %d", opts.MaxConn, 100)
+		}
+		if opts.MaxPayload != int32(1024*1024) {
+			t.Errorf("MaxPayload: got %d, expected %d", opts.MaxPayload, int32(1024*1024))
+		}
+		if opts.PingInterval != 30*time.Second {
+			t.Errorf("PingInterval: got %v, expected %v", opts.PingInterval, 30*time.Second)
+		}
+		if opts.MaxPingsOut != 5 {
+			t.Errorf("MaxPingsOut: got %d, expected %d", opts.MaxPingsOut, 5)
+		}
+		if opts.WriteDeadline != 2*time.Second {
+			t.Errorf("WriteDeadline: got %v, expected %v", opts.WriteDeadline, 2*time.Second)
+		}
+		// ConfigFile should be set.
+		if opts.ConfigFile != fp {
+			t.Errorf("ConfigFile: got %q, expected %q", opts.ConfigFile, fp)
+		}
+	})
+
+	t.Run("v1 parser without env var", func(t *testing.T) {
+		conf := `
+			server_name: env_v1_test
+			port: 4333
+		`
+		fp := writeTestConfig(t, conf)
+
+		// Explicitly unset the env var (t.Setenv restores after test).
+		t.Setenv(envConfigV2, "")
+
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		args := []string{"-c", fp}
+		opts, err := ConfigureOptions(fs, args, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("ConfigureOptions error: %v", err)
+		}
+
+		// Verify v1 parser was used and options populated.
+		if opts.ServerName != "env_v1_test" {
+			t.Errorf("ServerName: got %q, expected %q", opts.ServerName, "env_v1_test")
+		}
+		if opts.Port != 4333 {
+			t.Errorf("Port: got %d, expected %d", opts.Port, 4333)
+		}
+	})
+
+	t.Run("v2 parser equivalence", func(t *testing.T) {
+		// Verify that v2 via env var produces equivalent results to direct ProcessConfigV2.
+		conf := `
+			server_name: equiv_env_test
+			port: 4242
+			debug: false
+			trace: true
+			max_connections: 50
+			ping_interval: "60s"
+		`
+		fp := writeTestConfig(t, conf)
+
+		t.Setenv(envConfigV2, "true")
+
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		args := []string{"-c", fp}
+		envOpts, err := ConfigureOptions(fs, args, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("ConfigureOptions error: %v", err)
+		}
+
+		directOpts, err := ProcessConfigV2(fp)
+		if err != nil {
+			t.Fatalf("ProcessConfigV2 error: %v", err)
+		}
+
+		// Compare key fields.
+		checks := []struct {
+			name   string
+			v1, v2 any
+		}{
+			{"ServerName", envOpts.ServerName, directOpts.ServerName},
+			{"Port", envOpts.Port, directOpts.Port},
+			{"Debug", envOpts.Debug, directOpts.Debug},
+			{"Trace", envOpts.Trace, directOpts.Trace},
+			{"MaxConn", envOpts.MaxConn, directOpts.MaxConn},
+			{"PingInterval", envOpts.PingInterval, directOpts.PingInterval},
+		}
+		for _, c := range checks {
+			if !reflect.DeepEqual(c.v1, c.v2) {
+				t.Errorf("Field %s: env=%v, direct=%v", c.name, c.v1, c.v2)
+			}
+		}
+	})
+
+	t.Run("v2 parser with check config", func(t *testing.T) {
+		conf := `
+			server_name: check_v2_test
+			port: 4222
+		`
+		fp := writeTestConfig(t, conf)
+
+		t.Setenv(envConfigV2, "1")
+
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		args := []string{"-c", fp, "-t"}
+		opts, err := ConfigureOptions(fs, args, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("ConfigureOptions error: %v", err)
+		}
+		if opts.ServerName != "check_v2_test" {
+			t.Errorf("ServerName: got %q, expected %q", opts.ServerName, "check_v2_test")
+		}
+	})
+}
+
+// TestConfigV2EnvVarReload tests that config reload respects the
+// NATS_CONFIG_V2 environment variable and uses the v2 parser path.
+func TestConfigV2EnvVarReload(t *testing.T) {
+	t.Setenv(envConfigV2, "1")
+
+	conf := `
+		listen: "127.0.0.1:-1"
+		server_name: reload_v2_test
+		max_connections: 100
+	`
+	fp := writeTestConfig(t, conf)
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	args := []string{"-c", fp}
+	opts, err := ConfigureOptions(fs, args, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("ConfigureOptions error: %v", err)
+	}
+	opts.NoSigs = true
+
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	// Verify initial config.
+	sopts := s.getOpts()
+	if sopts.ServerName != "reload_v2_test" {
+		t.Fatalf("ServerName: got %q, expected %q", sopts.ServerName, "reload_v2_test")
+	}
+	if sopts.MaxConn != 100 {
+		t.Fatalf("MaxConn: got %d, expected %d", sopts.MaxConn, 100)
+	}
+
+	// Update config file with new values and reload.
+	// Note: server_name cannot be changed via reload, so keep it the same.
+	newConf := fmt.Sprintf(`
+		listen: "%s"
+		server_name: reload_v2_test
+		max_connections: 200
+	`, s.Addr().String())
+	if err := os.WriteFile(fp, []byte(newConf), 0644); err != nil {
+		t.Fatalf("Failed to write updated config: %v", err)
+	}
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload error: %v", err)
+	}
+
+	// Verify updated config was applied via v2 parser.
+	sopts = s.getOpts()
+	if sopts.MaxConn != 200 {
+		t.Errorf("MaxConn after reload: got %d, expected %d", sopts.MaxConn, 200)
 	}
 }

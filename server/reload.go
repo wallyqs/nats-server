@@ -1094,7 +1094,13 @@ func (s *Server) Reload() error {
 		return errors.New("can only reload config when a file is provided using -c or --config")
 	}
 
-	newOpts, err := ProcessConfigFile(configFile)
+	var newOpts *Options
+	var err error
+	if useConfigV2() {
+		newOpts, err = ProcessConfigV2(configFile)
+	} else {
+		newOpts, err = ProcessConfigFile(configFile)
+	}
 	if err != nil {
 		// TODO: Dump previous good config to a .bak file?
 		return err
