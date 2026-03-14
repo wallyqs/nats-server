@@ -99,6 +99,12 @@ type lexer struct {
 	// emitted comment token.
 	lastCommentStyle CommentStyle
 
+	// includeKeywordCol records the column position of the 'include'
+	// keyword before it is consumed by ignore(). This is needed because
+	// the ItemInclude token's position points at the path value, not
+	// the keyword start. The parser uses this to set the correct column
+	// on IncludeNode for round-trip emission.
+	includeKeywordCol int
 }
 
 // lex creates a new lexer for the given input string.
@@ -481,6 +487,10 @@ func (lx *lexer) keyCheckKeyword(fallThrough, push stateFn) stateFn {
 	key := strings.ToLower(lx.input[lx.start:lx.pos])
 	switch key {
 	case "include":
+		// Record the column of the include keyword before ignore()
+		// consumes it. The parser needs this for correct indentation
+		// in round-trip emission.
+		lx.includeKeywordCol = lx.start - lx.ilstart
 		lx.ignore()
 		if push != nil {
 			lx.push(push)

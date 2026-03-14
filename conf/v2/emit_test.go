@@ -1029,3 +1029,115 @@ func TestEmitPreservesIntegerRaw(t *testing.T) {
 		t.Fatalf("Expected '1MB' suffix preserved, got:\n%s", result)
 	}
 }
+
+// TestEmitIncludeRoundTrip verifies that comments before include directives
+// stay before them after a round-trip through ParseASTRaw + Emit.
+// This tests Bug 1: comment reordering.
+func TestEmitIncludeRoundTrip(t *testing.T) {
+	input := `port = 4222
+
+# Include sub-config
+include './first.conf'
+`
+	doc, err := ParseASTRaw(input)
+	if err != nil {
+		t.Fatalf("ParseASTRaw error: %v", err)
+	}
+	emitted, err := Emit(doc)
+	if err != nil {
+		t.Fatalf("Emit error: %v", err)
+	}
+	result := string(emitted)
+	if result != input {
+		t.Fatalf("Round-trip mismatch.\nExpected:\n%s\nGot:\n%s", input, result)
+	}
+}
+
+// TestEmitIncludeIndentation verifies that include directives at column 0
+// emit at column 0 with no extra indentation.
+// This tests Bug 2: include indentation corruption.
+func TestEmitIncludeIndentation(t *testing.T) {
+	input := `include './first.conf'
+`
+	doc, err := ParseASTRaw(input)
+	if err != nil {
+		t.Fatalf("ParseASTRaw error: %v", err)
+	}
+	emitted, err := Emit(doc)
+	if err != nil {
+		t.Fatalf("Emit error: %v", err)
+	}
+	result := string(emitted)
+	if result != input {
+		t.Fatalf("Round-trip mismatch.\nExpected:\n%q\nGot:\n%q", input, result)
+	}
+}
+
+// TestEmitIncludeCommentOrderAndIndentation verifies the exact user scenario:
+// a config with port, comment, and include round-trips faithfully.
+func TestEmitIncludeCommentOrderAndIndentation(t *testing.T) {
+	input := `port = 4222
+# Include sub-config
+include './first.conf'
+`
+	doc, err := ParseASTRaw(input)
+	if err != nil {
+		t.Fatalf("ParseASTRaw error: %v", err)
+	}
+	emitted, err := Emit(doc)
+	if err != nil {
+		t.Fatalf("Emit error: %v", err)
+	}
+	result := string(emitted)
+	if result != input {
+		t.Fatalf("Round-trip mismatch.\nExpected:\n%s\nGot:\n%s", input, result)
+	}
+}
+
+// TestEmitIncludeWithDigestRoundTrip verifies that include directives with
+// digests round-trip correctly (used by --lock).
+func TestEmitIncludeWithDigestRoundTrip(t *testing.T) {
+	input := `port = 4222
+
+# Include sub-config
+include './first.conf' 'sha256:abc123'
+`
+	doc, err := ParseASTRaw(input)
+	if err != nil {
+		t.Fatalf("ParseASTRaw error: %v", err)
+	}
+	emitted, err := Emit(doc)
+	if err != nil {
+		t.Fatalf("Emit error: %v", err)
+	}
+	result := string(emitted)
+	if result != input {
+		t.Fatalf("Round-trip mismatch.\nExpected:\n%s\nGot:\n%s", input, result)
+	}
+}
+
+// TestEmitIncludeBlankLinesPreserved verifies blank lines between items
+// are preserved exactly when includes are present.
+func TestEmitIncludeBlankLinesPreserved(t *testing.T) {
+	input := `# Main configuration file
+server_name = my_server
+
+# Include sub-config
+include './sub.conf'
+
+# More settings
+debug = true
+`
+	doc, err := ParseASTRaw(input)
+	if err != nil {
+		t.Fatalf("ParseASTRaw error: %v", err)
+	}
+	emitted, err := Emit(doc)
+	if err != nil {
+		t.Fatalf("Emit error: %v", err)
+	}
+	result := string(emitted)
+	if result != input {
+		t.Fatalf("Round-trip mismatch.\nExpected:\n%s\nGot:\n%s", input, result)
+	}
+}

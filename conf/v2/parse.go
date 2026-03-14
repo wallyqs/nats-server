@@ -292,13 +292,55 @@ func keySeparatorFromLexer(lx *lexer) KeySeparator {
 	return lx.lastKeySep
 }
 
+// rawColumn computes a corrected 0-based column value for use in raw-mode
+// AST nodes. The lexer's item positions have a systematic +1 offset for
+// tokens on lines after the first (because lstart points at the preceding
+// newline, not the start of the line). This method subtracts that offset
+// so the emitter can produce correct indentation.
+func rawColumn(it item) int {
+	col := it.pos
+	if it.line > 1 {
+		col--
+	}
+	if col < 0 {
+		col = 0
+	}
+	return col
+}
+
+// rawCommentColumn computes a corrected 0-based column for a comment's
+// starting position. In addition to the line offset (see rawColumn),
+// comment tokens have an additional offset equal to the delimiter length
+// (1 for #, 2 for //) because the lexer consumes the delimiter before
+// emitting ItemCommentStart.
+func rawCommentColumn(it item, style CommentStyle) int {
+	col := it.pos
+	if it.line > 1 {
+		col--
+	}
+	switch style {
+	case CommentHash:
+		col--
+	case CommentSlash:
+		col -= 2
+	}
+	if col < 0 {
+		col = 0
+	}
+	return col
+}
+
 func (p *parser) processItem(it item, fp string) error {
 	switch it.typ {
 	case ItemError:
 		return fmt.Errorf("Parse error on line %d: '%s'", it.line, it.val)
 
 	case ItemKey:
-		pos := Position{Line: it.line, Column: it.pos, File: fp}
+		col := it.pos
+		if p.raw {
+			col = rawColumn(it)
+		}
+		pos := Position{Line: it.line, Column: col, File: fp}
 		key := &KeyNode{
 			NodeBase: NodeBase{Pos: pos},
 			Name:     it.val,
@@ -309,8 +351,12 @@ func (p *parser) processItem(it item, fp string) error {
 		p.pushKeyItem(it)
 
 	case ItemMapStart:
+		col := it.pos
+		if p.raw {
+			col = rawColumn(it)
+		}
 		mapNode := &MapNode{
-			NodeBase: NodeBase{Pos: Position{Line: it.line, Column: it.pos, File: fp}},
+			NodeBase: NodeBase{Pos: Position{Line: it.line, Column: col, File: fp}},
 			Items:    make([]Node, 0),
 		}
 		p.pushContext(mapNode)
@@ -320,7 +366,11 @@ func (p *parser) processItem(it item, fp string) error {
 		p.setValue(mapNode)
 
 	case ItemString:
-		pos := Position{Line: it.line, Column: it.pos, File: fp}
+		col := it.pos
+		if p.raw {
+			col = rawColumn(it)
+		}
+		pos := Position{Line: it.line, Column: col, File: fp}
 		node := &StringNode{
 			NodeBase: NodeBase{Pos: pos},
 			Value:    it.val,
@@ -328,7 +378,11 @@ func (p *parser) processItem(it item, fp string) error {
 		p.setValue(node)
 
 	case ItemInteger:
-		pos := Position{Line: it.line, Column: it.pos, File: fp}
+		col := it.pos
+		if p.raw {
+			col = rawColumn(it)
+		}
+		pos := Position{Line: it.line, Column: col, File: fp}
 		value, err := parseIntegerValue(it.val)
 		if err != nil {
 			return err
@@ -341,7 +395,11 @@ func (p *parser) processItem(it item, fp string) error {
 		p.setValue(node)
 
 	case ItemFloat:
-		pos := Position{Line: it.line, Column: it.pos, File: fp}
+		col := it.pos
+		if p.raw {
+			col = rawColumn(it)
+		}
+		pos := Position{Line: it.line, Column: col, File: fp}
 		num, err := strconv.ParseFloat(it.val, 64)
 		if err != nil {
 			if e, ok := err.(*strconv.NumError); ok && e.Err == strconv.ErrRange {
@@ -362,7 +420,11 @@ func (p *parser) processItem(it item, fp string) error {
 		p.setValue(node)
 
 	case ItemBool:
-		pos := Position{Line: it.line, Column: it.pos, File: fp}
+		col := it.pos
+		if p.raw {
+			col = rawColumn(it)
+		}
+		pos := Position{Line: it.line, Column: col, File: fp}
 		var val bool
 		switch strings.ToLower(it.val) {
 		case "true", "yes", "on":
@@ -382,7 +444,11 @@ func (p *parser) processItem(it item, fp string) error {
 		p.setValue(node)
 
 	case ItemDatetime:
-		pos := Position{Line: it.line, Column: it.pos, File: fp}
+		col := it.pos
+		if p.raw {
+			col = rawColumn(it)
+		}
+		pos := Position{Line: it.line, Column: col, File: fp}
 		dt, err := time.Parse("2006-01-02T15:04:05Z", it.val)
 		if err != nil {
 			return fmt.Errorf("expected Zulu formatted DateTime, but got '%s'", it.val)
@@ -397,8 +463,12 @@ func (p *parser) processItem(it item, fp string) error {
 		p.setValue(node)
 
 	case ItemArrayStart:
+		col := it.pos
+		if p.raw {
+			col = rawColumn(it)
+		}
 		arr := &ArrayNode{
-			NodeBase: NodeBase{Pos: Position{Line: it.line, Column: it.pos, File: fp}},
+			NodeBase: NodeBase{Pos: Position{Line: it.line, Column: col, File: fp}},
 			Elements: make([]Node, 0),
 		}
 		p.pushContext(arr)
@@ -408,7 +478,11 @@ func (p *parser) processItem(it item, fp string) error {
 		p.setValue(arr)
 
 	case ItemVariable:
-		pos := Position{Line: it.line, Column: it.pos, File: fp}
+		col := it.pos
+		if p.raw {
+			col = rawColumn(it)
+		}
+		pos := Position{Line: it.line, Column: col, File: fp}
 		if p.raw {
 			// In raw mode, preserve variable reference as VariableNode.
 			node := &VariableNode{
@@ -445,12 +519,26 @@ func (p *parser) processItem(it item, fp string) error {
 
 		if p.raw {
 			// In raw mode, preserve include directive as IncludeNode.
-			pos := Position{Line: it.line, Column: it.pos, File: fp}
+			// Use the include keyword column (recorded by the lexer before
+			// ignore()) rather than the token's pos, which points at the
+			// path value after the keyword has been consumed.
+			// Apply the line offset correction (same as rawColumn).
+			col := p.lx.includeKeywordCol
+			if it.line > 1 {
+				col--
+			}
+			if col < 0 {
+				col = 0
+			}
+			pos := Position{Line: it.line, Column: col, File: fp}
 			node := &IncludeNode{
 				NodeBase: NodeBase{Pos: pos},
 				Path:     it.val,
 				Digest:   digest,
 			}
+			// Flush pending comments so they appear before the include
+			// in the AST Items list, preserving source order.
+			p.flushPendingComments()
 			p.addToContext(node)
 		} else {
 			if err := p.processInclude(it, fp, digest); err != nil {
@@ -466,7 +554,11 @@ func (p *parser) processItem(it item, fp string) error {
 			text = textIt.val
 		}
 		style := p.lx.lastCommentStyle
-		pos := Position{Line: it.line, Column: it.pos, File: fp}
+		col := it.pos
+		if p.raw {
+			col = rawCommentColumn(it, style)
+		}
+		pos := Position{Line: it.line, Column: col, File: fp}
 		comment := &CommentNode{
 			NodeBase: NodeBase{Pos: pos},
 			Style:    style,
@@ -476,7 +568,11 @@ func (p *parser) processItem(it item, fp string) error {
 
 	case ItemComment:
 		// v2-style complete comment token.
-		pos := Position{Line: it.line, Column: it.pos, File: fp}
+		col := it.pos
+		if p.raw {
+			col = rawCommentColumn(it, CommentHash)
+		}
+		pos := Position{Line: it.line, Column: col, File: fp}
 		comment := &CommentNode{
 			NodeBase: NodeBase{Pos: pos},
 			Style:    CommentHash,
