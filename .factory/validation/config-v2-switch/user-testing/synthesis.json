@@ -1,0 +1,17 @@
+{
+  "milestone": "config-v2-switch",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null,
+  "notes": "The config-v2-switch milestone contains one implementation feature (env-var-config-v2-switch) which has no fulfills assertions. All validation contract assertions are already passed from prior milestones. Verification confirmed: TestConfigV2EnvVar (4 subtests) and TestConfigV2EnvVarReload all pass. go test ./conf/v2/... passes. go build ./... succeeds."
+}
