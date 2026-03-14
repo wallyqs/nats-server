@@ -122,13 +122,24 @@ func ParseFileWithChecksDigest(fp string) (map[string]any, string, error) {
 	}
 	// Remove variable references before computing digest.
 	cleanupUsedEnvVars(m)
-	digest := sha256.New()
-	e := json.NewEncoder(digest)
-	err = e.Encode(m)
+	d, err := computeMapDigest(m)
 	if err != nil {
 		return nil, "", err
 	}
-	return m, fmt.Sprintf("sha256:%x", digest.Sum(nil)), nil
+	return m, d, nil
+}
+
+// computeMapDigest computes a SHA-256 digest of a parsed config map by
+// JSON-encoding it. The digest represents the behavioral configuration,
+// not the raw file contents, so comments and formatting are irrelevant.
+func computeMapDigest(m map[string]any) (string, error) {
+	digest := sha256.New()
+	e := json.NewEncoder(digest)
+	err := e.Encode(m)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sha256:%x", digest.Sum(nil)), nil
 }
 
 // cleanupUsedEnvVars recursively removes entries where the token is

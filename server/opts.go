@@ -6214,6 +6214,14 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 
 	// Parse config if given
 	if configFile != _EMPTY_ {
+		// When --lock is set, skip normal config processing. The lock
+		// path in main.go will handle parsing with raw AST mode that
+		// does not verify include digests, allowing stale digests to
+		// be updated.
+		if opts.LockConfig {
+			opts.ConfigFile = configFile
+			return opts, nil
+		}
 		// This will update the options with values from the config file.
 		var err error
 		if useConfigV2() {

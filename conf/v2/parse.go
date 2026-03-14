@@ -18,7 +18,6 @@
 package v2
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"math"
 	"os"
@@ -668,10 +667,22 @@ func (p *parser) processInclude(it item, fp string, digest string) error {
 		return fmt.Errorf("error parsing include file '%s', %v", it.val, err)
 	}
 
-	// If a digest was provided, verify the file's integrity.
+	// If a digest was provided, verify the file's behavioral integrity.
+	// The digest represents the parsed configuration (JSON-encoded map),
+	// not the raw file bytes. This means comments and formatting changes
+	// do not invalidate the digest.
 	if digest != "" {
-		h := sha256.Sum256(data)
-		actual := fmt.Sprintf("sha256:%x", h[:])
+		m, err := parseCompat(string(data), includePath, true)
+		if err != nil {
+			return fmt.Errorf("include %q: error parsing for digest verification: %v (%d:%d)",
+				includePath, err, it.line, it.pos)
+		}
+		cleanupUsedEnvVars(m)
+		actual, err := computeMapDigest(m)
+		if err != nil {
+			return fmt.Errorf("include %q: error computing digest: %v (%d:%d)",
+				includePath, err, it.line, it.pos)
+		}
 		if actual != digest {
 			return fmt.Errorf("include %q: integrity check failed: expected %s, got %s (%d:%d)",
 				includePath, digest, actual, it.line, it.pos)

@@ -1,6 +1,6 @@
 ---
 name: go-library-worker
-description: Implements Go library features with TDD, targeting the conf/v2 parser package
+description: Implements Go library features with TDD, targeting the conf/v2 parser package and server integration
 ---
 
 # Go Library Worker
@@ -9,10 +9,10 @@ NOTE: Startup and cleanup are handled by `worker-base`. This skill defines the W
 
 ## When to Use This Skill
 
-Use for features that implement Go library code in the `conf/v2/` package:
-- Lexer, parser, AST types
-- Marshal/Unmarshal functions
-- Backwards-compatible API functions
+Use for features that implement Go code in `conf/v2/` or `server/`:
+- Lexer, parser, AST types in conf/v2/
+- Marshal/Unmarshal functions in conf/v2/
+- Server integration (ProcessConfigV2, struct tags on Options)
 - Cross-area integration tests
 
 ## Work Procedure
@@ -73,9 +73,14 @@ go test ./conf/... -count=1
 
 # Build succeeds
 go build ./conf/v2/...
+
+# If server/ files were modified, run server tests:
+# go test ./server/... -count=1 -timeout 600s -p 1
+# NOTE: Server tests are slow (~5-10 min). Run with -run flag to target specific tests when iterating.
+# For full suite, use the timeout and -p 1 flags to avoid parallel resource contention.
 ```
 
-ALL four commands must succeed. If any fail, fix the issue before proceeding.
+ALL commands must succeed for the packages you modified. If any fail, fix the issue before proceeding.
 
 ### 6. Manual Verification
 

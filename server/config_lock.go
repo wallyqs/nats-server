@@ -14,7 +14,6 @@
 package server
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -140,13 +139,13 @@ func lockIncludeNode(inc *v2.IncludeNode, configDir string, visited map[string]b
 	}
 	locked += subLocked
 
-	// Read the (potentially rewritten) included file and compute its digest.
-	data, err := os.ReadFile(includePath)
+	// Compute behavioral digest of the (potentially rewritten) included file.
+	// Uses the same approach as the config digest: parse to map, JSON-encode,
+	// SHA256. This means comments and formatting don't affect the digest.
+	_, digest, err := v2.ParseFileWithChecksDigest(absInclude)
 	if err != nil {
-		return 0, fmt.Errorf("error reading include file '%s': %v", inc.Path, err)
+		return 0, fmt.Errorf("error computing digest for include file '%s': %v", inc.Path, err)
 	}
-	h := sha256.Sum256(data)
-	digest := fmt.Sprintf("sha256:%x", h[:])
 
 	// Update digest if missing or wrong.
 	if inc.Digest != digest {
