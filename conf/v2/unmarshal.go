@@ -216,6 +216,15 @@ func unmarshalMap(m map[string]any, rv reflect.Value, strict bool) error {
 	fields := buildFieldIndex(rv.Type())
 
 	for key, rawVal := range m {
+		// Skip variable definitions that were referenced by $var syntax.
+		// These are config-level variable assignments (e.g., monitoring_port = 8222)
+		// consumed via $monitoring_port elsewhere. They are not real config fields
+		// and must be silently skipped regardless of strict/permissive mode,
+		// matching v1 behavior in server/opts.go (tk.IsUsedVariable() checks).
+		if tk, ok := rawVal.(*token); ok && tk.IsUsedVariable() {
+			continue
+		}
+
 		// Unwrap pedantic token to get the raw value and position info.
 		val, line, col, file := unwrapTokenValue(rawVal)
 

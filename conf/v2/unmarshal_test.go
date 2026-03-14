@@ -798,3 +798,51 @@ top {
 		t.Fatalf("expected deeply nested value=deep, got %q", cfg.Top.Middle.Inner.Value)
 	}
 }
+
+// TestUnmarshalSkipsUsedVariables verifies that variable definitions
+// referenced via $var are silently skipped during unmarshal, even in
+// strict mode. This matches v1 behavior where server/opts.go checks
+// tk.IsUsedVariable() before reporting unknown fields.
+func TestUnmarshalSkipsUsedVariables(t *testing.T) {
+	type Config struct {
+		Port     int    `conf:"port"`
+		HttpPort int    `conf:"http_port"`
+		Host     string `conf:"host"`
+	}
+
+	// Config where monitoring_port is a variable definition consumed
+	// by $monitoring_port in http_port. The unmarshal should NOT reject
+	// monitoring_port as an unknown field.
+	input := `
+monitoring_port = 8222
+port = 4222
+http_port = $monitoring_port
+host = 127.0.0.1
+`
+
+	// Test in strict mode: variable definitions must be skipped.
+	var cfg Config
+	err := UnmarshalWith([]byte(input), &cfg, &UnmarshalOptions{Strict: true})
+	if err != nil {
+		t.Fatalf("unexpected error in strict mode: %v", err)
+	}
+	if cfg.Port != 4222 {
+		t.Fatalf("expected Port=4222, got %d", cfg.Port)
+	}
+	if cfg.HttpPort != 8222 {
+		t.Fatalf("expected HttpPort=8222 (resolved from $monitoring_port), got %d", cfg.HttpPort)
+	}
+	if cfg.Host != "127.0.0.1" {
+		t.Fatalf("expected Host=127.0.0.1, got %q", cfg.Host)
+	}
+
+	// Test in permissive mode as well — should also work.
+	var cfg2 Config
+	err = Unmarshal([]byte(input), &cfg2)
+	if err != nil {
+		t.Fatalf("unexpected error in permissive mode: %v", err)
+	}
+	if cfg2.HttpPort != 8222 {
+		t.Fatalf("expected HttpPort=8222 in permissive mode, got %d", cfg2.HttpPort)
+	}
+}
