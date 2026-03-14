@@ -1,0 +1,33 @@
+{
+  "featureId": "env-var-config-v2-switch",
+  "reviewedAt": "2026-03-14T00:15:00Z",
+  "commitId": "947670ec2",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Implementation is minimal, correct, and well-tested. The envConfigV2 constant and useConfigV2() helper are cleanly defined in opts_v2.go. The two insertion points in opts.go (ConfigureOptions) and reload.go (Reload) use simple if/else on the env var with no restructuring of surrounding code. The error handling in ConfigureOptions was correctly extended to recognize warnings-only errors from both v1 (processConfigErr) and v2 (processConfigV2Err) types, preserving the original semantics. The reload path correctly uses the standalone ProcessConfigV2 (which internally handles warnings-only by returning nil error), consistent with the existing ProcessConfigFile pattern. Five tests provide comprehensive coverage: env var enables v2, empty env var uses v1, equivalence with direct ProcessConfigV2, check config mode with v2, and full reload lifecycle.",
+    "issues": [
+      {
+        "file": "server/opts_v2.go",
+        "line": 34,
+        "severity": "non_blocking",
+        "description": "useConfigV2() is called independently at each call site (ConfigureOptions and Reload), so if the env var were changed between server startup and a reload, the parser path could switch mid-lifecycle. This is unlikely in practice and consistent with typical env var switch patterns, but worth noting for future consideration if a cached-at-startup approach is ever desired."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The go-library-worker skill's Work Procedure step 4 says 'Never modify files outside conf/v2/' but this feature required modifying server/opts.go and server/reload.go. The worker correctly followed the feature description over the skill instruction, and noted this in skillFeedback.suggestedChanges. The skill description mentions 'server integration' but the procedure's hard rule contradicts this.",
+      "evidence": "SKILL.md step 4: 'Never modify files outside conf/v2/'. Handoff skillFeedback.suggestedChanges: 'The go-library-worker skill focuses on conf/v2/ code but this feature required server/ changes. The skill could mention that server/ integration features follow the same TDD and verification patterns but target server/ test files.'"
+    },
+    {
+      "area": "knowledge",
+      "observation": "The new NATS_CONFIG_V2 environment variable is now a project-relevant env var that switches config parsing from v1 to v2, but it is not documented in .factory/library/environment.md. Future workers doing server integration work may need to know about this env var.",
+      "evidence": "server/opts_v2.go:28 defines const envConfigV2 = 'NATS_CONFIG_V2'. .factory/library/environment.md lists Go version and platform but has no mention of NATS_CONFIG_V2."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Feature env-var-config-v2-switch passes review. The implementation is minimal and correct: a constant + helper in opts_v2.go, a simple if/else in opts.go ConfigureOptions, and a matching if/else in reload.go Reload. Error handling properly supports both v1 and v2 warning types. Five comprehensive tests cover all required scenarios (env var set, unset, equivalence, check config, reload). No blocking issues found."
+}
