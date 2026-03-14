@@ -116,7 +116,14 @@ func main() {
 		if err := opts.ProcessConfigFileV2(opts.ConfigFile); err != nil {
 			server.PrintAndDie(fmt.Sprintf("%s: %s", exe, err))
 		}
-		fmt.Fprintf(os.Stderr, "%s\n", opts.ConfigDigest())
+		digest := opts.ConfigDigest()
+		// If --expected-lock was provided, verify the digest matches.
+		if expected := opts.LockConfigExpected; expected != "" {
+			if digest != expected {
+				server.PrintAndDie(fmt.Sprintf("lock verification failed: expected %s, got %s", expected, digest))
+			}
+		}
+		fmt.Fprintf(os.Stderr, "%s\n", digest)
 		os.Exit(0)
 	} else if opts.CheckConfig {
 		fmt.Fprintf(os.Stderr, "%s: configuration file %s is valid (%s)\n", exe, opts.ConfigFile, opts.ConfigDigest())
