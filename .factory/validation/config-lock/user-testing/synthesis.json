@@ -1,0 +1,17 @@
+{
+  "milestone": "config-lock",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "notes": "The config-lock milestone has one implementation feature (config-lock-includes) with an empty fulfills array — no validation contract assertions are mapped to this milestone. All 10 config-lock tests pass (TestLockConfigIncludes, TestLockConfigIncludesAlreadyLocked, TestLockConfigIncludesWrongDigest, TestLockConfigIncludesMultiple, TestLockConfigIncludesRecursive, TestLockConfigIncludesPreservesFormatting, TestLockConfigIncludesInMap, TestLockConfigViaMainFlags, TestLockConfigRequiresCheckConfig, TestLockConfigRequiresConfigV2).",
+  "previousRound": null
+}
