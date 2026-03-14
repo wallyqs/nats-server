@@ -702,8 +702,8 @@ func TestProcessConfigV2EquivalenceSimple(t *testing.T) {
 
 	// Compare fields that should match.
 	simpleFields := []struct {
-		name     string
-		v1, v2   any
+		name   string
+		v1, v2 any
 	}{
 		{"ServerName", v1Opts.ServerName, v2Opts.ServerName},
 		{"Host", v1Opts.Host, v2Opts.Host},
@@ -1057,22 +1057,22 @@ func TestProcessConfigV2EquivalenceComprehensive(t *testing.T) {
 	// - Accounts/Users/Nkeys (complex objects with Account back-refs)
 	// - Fields set by inConfig/inCmdLine tracking
 	excludeFields := map[string]bool{
-		"ConfigFile":      true, // Set differently
-		"TLSConfig":       true, // Runtime pointer
-		"TLSPinnedCerts":  true, // Runtime
-		"tlsConfigOpts":   true, // unexported
-		"inConfig":        true, // unexported
-		"inCmdLine":       true, // unexported
-		"configDigest":    true, // May differ in pedantic handling
-		"authBlockDefined": true, // unexported
-		"maxMemSet":       true, // unexported
-		"maxStoreSet":     true, // unexported
-		"syncSet":         true, // unexported
-		"operatorJWT":     true, // unexported
-		"resolverPreloads": true, // unexported
+		"ConfigFile":             true, // Set differently
+		"TLSConfig":              true, // Runtime pointer
+		"TLSPinnedCerts":         true, // Runtime
+		"tlsConfigOpts":          true, // unexported
+		"inConfig":               true, // unexported
+		"inCmdLine":              true, // unexported
+		"configDigest":           true, // May differ in pedantic handling
+		"authBlockDefined":       true, // unexported
+		"maxMemSet":              true, // unexported
+		"maxStoreSet":            true, // unexported
+		"syncSet":                true, // unexported
+		"operatorJWT":            true, // unexported
+		"resolverPreloads":       true, // unexported
 		"resolverPinnedAccounts": true, // unexported
-		"gatewaysSolicitDelay": true, // unexported
-		"overrideProto":    true, // unexported
+		"gatewaysSolicitDelay":   true, // unexported
+		"overrideProto":          true, // unexported
 	}
 
 	// Use reflect to compare all exported fields.
