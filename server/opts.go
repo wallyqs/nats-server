@@ -287,14 +287,14 @@ type RemoteLeafOpts struct {
 
 // JSLimitOpts are active limits for the meta cluster
 type JSLimitOpts struct {
-	MaxRequestBatch           int           `json:"max_request_batch,omitempty" conf:"max_request_batch"`             // MaxRequestBatch is the maximum amount of updates that can be sent in a batch
-	MaxAckPending             int           `json:"max_ack_pending,omitempty" conf:"max_ack_pending"`                 // MaxAckPending is the server limit for maximum amount of outstanding Acks
-	MaxHAAssets               int           `json:"max_ha_assets,omitempty" conf:"max_ha_assets"`                     // MaxHAAssets is the maximum of Streams and Consumers that may have more than 1 replica
-	Duplicates                time.Duration `json:"max_duplicate_window,omitempty" conf:"duplicate_window"`           // Duplicates is the maximum value for duplicate tracking on Streams
-	MaxBatchInflightPerStream int           `json:"max_batch_inflight_per_stream,omitempty" conf:"-"`                 // MaxBatchInflightPerStream is the maximum amount of open batches per stream
-	MaxBatchInflightTotal     int           `json:"max_batch_inflight_total,omitempty" conf:"-"`                      // MaxBatchInflightTotal is the maximum amount of total open batches per server
-	MaxBatchSize              int           `json:"max_batch_size,omitempty" conf:"-"`                                // MaxBatchSize is the maximum amount of messages allowed in a batch publish to a Stream
-	MaxBatchTimeout           time.Duration `json:"max_batch_timeout,omitempty" conf:"-"`                             // MaxBatchTimeout is the maximum time to receive the commit message after receiving the first message of a batch
+	MaxRequestBatch           int           `json:"max_request_batch,omitempty" conf:"max_request_batch"`   // MaxRequestBatch is the maximum amount of updates that can be sent in a batch
+	MaxAckPending             int           `json:"max_ack_pending,omitempty" conf:"max_ack_pending"`       // MaxAckPending is the server limit for maximum amount of outstanding Acks
+	MaxHAAssets               int           `json:"max_ha_assets,omitempty" conf:"max_ha_assets"`           // MaxHAAssets is the maximum of Streams and Consumers that may have more than 1 replica
+	Duplicates                time.Duration `json:"max_duplicate_window,omitempty" conf:"duplicate_window"` // Duplicates is the maximum value for duplicate tracking on Streams
+	MaxBatchInflightPerStream int           `json:"max_batch_inflight_per_stream,omitempty" conf:"-"`       // MaxBatchInflightPerStream is the maximum amount of open batches per stream
+	MaxBatchInflightTotal     int           `json:"max_batch_inflight_total,omitempty" conf:"-"`            // MaxBatchInflightTotal is the maximum amount of total open batches per server
+	MaxBatchSize              int           `json:"max_batch_size,omitempty" conf:"-"`                      // MaxBatchSize is the maximum amount of messages allowed in a batch publish to a Stream
+	MaxBatchTimeout           time.Duration `json:"max_batch_timeout,omitempty" conf:"-"`                   // MaxBatchTimeout is the maximum time to receive the commit message after receiving the first message of a batch
 }
 
 type JSTpmOpts struct {
@@ -335,62 +335,62 @@ type Options struct {
 	TraceVerbose    bool   `json:"-" conf:"trace_verbose"`
 
 	// TraceHeaders if true will only trace message headers, not the payload.
-	TraceHeaders               bool          `json:"-" conf:"trace_headers"`
-	NoLog                      bool          `json:"-" conf:"-"`
-	NoSigs                     bool          `json:"-" conf:"-"`
-	NoSublistCache             bool          `json:"-" conf:"disable_sublist_cache|no_sublist_cache"`
-	NoHeaderSupport            bool          `json:"-" conf:"no_header_support"`
-	DisableShortFirstPing      bool          `json:"-" conf:"-"`
-	Logtime                    bool          `json:"-" conf:"logtime"`
-	LogtimeUTC                 bool          `json:"-" conf:"logtime_utc"`
-	MaxConn                    int           `json:"max_connections" conf:"max_connections|max_conn"`
-	MaxSubs                    int           `json:"max_subscriptions,omitempty" conf:"max_subscriptions|max_subs"`
-	MaxSubTokens               uint8         `json:"-" conf:"max_sub_tokens|max_subscription_tokens"`
-	Nkeys                      []*NkeyUser   `json:"-" conf:"-"`
-	Users                      []*User       `json:"-" conf:"-"`
-	Accounts                   []*Account    `json:"-" conf:"-"`
-	NoAuthUser                 string        `json:"-" conf:"no_auth_user"`
-	DefaultSentinel            string        `json:"-" conf:"default_sentinel"`
-	SystemAccount              string        `json:"-" conf:"system_account|system"`
-	NoSystemAccount            bool          `json:"-" conf:"no_system_account|no_system|no_sys_acc"`
-	Username                   string        `json:"-" conf:"-"`
-	Password                   string        `json:"-" conf:"-"`
-	ProxyRequired              bool          `json:"-" conf:"-"`
-	ProxyProtocol              bool          `json:"-" conf:"proxy_protocol"`
-	Authorization              string        `json:"-" conf:"-"`
-	AuthCallout                *AuthCallout  `json:"-" conf:"-"`
-	PingInterval               time.Duration `json:"ping_interval" conf:"ping_interval"`
-	MaxPingsOut                int           `json:"ping_max" conf:"ping_max"`
-	HTTPHost                   string        `json:"http_host" conf:"-"`
-	HTTPPort                   int           `json:"http_port" conf:"http_port|monitor_port"`
-	HTTPBasePath               string        `json:"http_base_path" conf:"http_base_path"`
-	HTTPSPort                  int           `json:"https_port" conf:"https_port"`
-	AuthTimeout                float64       `json:"auth_timeout" conf:"-"`
-	MaxControlLine             int32         `json:"max_control_line" conf:"max_control_line"`
-	MaxPayload                 int32         `json:"max_payload" conf:"max_payload"`
-	MaxPending                 int64         `json:"max_pending" conf:"max_pending"`
-	NoFastProducerStall        bool          `json:"-" conf:"no_fast_producer_stall"`
-	Cluster                    ClusterOpts   `json:"cluster,omitempty" conf:"cluster"`
-	Gateway                    GatewayOpts   `json:"gateway,omitempty" conf:"gateway"`
-	LeafNode                   LeafNodeOpts  `json:"leaf,omitempty" conf:"leaf|leafnodes"`
-	JetStream                  bool          `json:"jetstream" conf:"-"`
-	NoJetStreamStrict          bool          `json:"-" conf:"-"` // Strict by default.
-	JetStreamMaxMemory         int64         `json:"-" conf:"-"`
-	JetStreamMaxStore          int64         `json:"-" conf:"-"`
-	JetStreamDomain            string        `json:"-" conf:"-"`
-	JetStreamExtHint           string        `json:"-" conf:"-"`
-	JetStreamKey               string        `json:"-" conf:"-"`
-	JetStreamOldKey            string        `json:"-" conf:"-"`
-	JetStreamCipher            StoreCipher   `json:"-" conf:"-"`
-	JetStreamUniqueTag         string        `conf:"-"`
-	JetStreamLimits            JSLimitOpts   `conf:"-"`
-	JetStreamTpm               JSTpmOpts     `conf:"-"`
-	JetStreamMaxCatchup        int64         `conf:"-"`
-	JetStreamRequestQueueLimit int64         `conf:"-"`
-	JetStreamInfoQueueLimit    int64         `conf:"-"`
-	JetStreamMetaCompact       uint64        `conf:"-"`
-	JetStreamMetaCompactSize   uint64        `conf:"-"`
-	JetStreamMetaCompactSync   bool          `conf:"-"`
+	TraceHeaders               bool              `json:"-" conf:"trace_headers"`
+	NoLog                      bool              `json:"-" conf:"-"`
+	NoSigs                     bool              `json:"-" conf:"-"`
+	NoSublistCache             bool              `json:"-" conf:"disable_sublist_cache|no_sublist_cache"`
+	NoHeaderSupport            bool              `json:"-" conf:"no_header_support"`
+	DisableShortFirstPing      bool              `json:"-" conf:"-"`
+	Logtime                    bool              `json:"-" conf:"logtime"`
+	LogtimeUTC                 bool              `json:"-" conf:"logtime_utc"`
+	MaxConn                    int               `json:"max_connections" conf:"max_connections|max_conn"`
+	MaxSubs                    int               `json:"max_subscriptions,omitempty" conf:"max_subscriptions|max_subs"`
+	MaxSubTokens               uint8             `json:"-" conf:"max_sub_tokens|max_subscription_tokens"`
+	Nkeys                      []*NkeyUser       `json:"-" conf:"-"`
+	Users                      []*User           `json:"-" conf:"-"`
+	Accounts                   []*Account        `json:"-" conf:"-"`
+	NoAuthUser                 string            `json:"-" conf:"no_auth_user"`
+	DefaultSentinel            string            `json:"-" conf:"default_sentinel"`
+	SystemAccount              string            `json:"-" conf:"system_account|system"`
+	NoSystemAccount            bool              `json:"-" conf:"no_system_account|no_system|no_sys_acc"`
+	Username                   string            `json:"-" conf:"-"`
+	Password                   string            `json:"-" conf:"-"`
+	ProxyRequired              bool              `json:"-" conf:"-"`
+	ProxyProtocol              bool              `json:"-" conf:"proxy_protocol"`
+	Authorization              string            `json:"-" conf:"-"`
+	AuthCallout                *AuthCallout      `json:"-" conf:"-"`
+	PingInterval               time.Duration     `json:"ping_interval" conf:"ping_interval"`
+	MaxPingsOut                int               `json:"ping_max" conf:"ping_max"`
+	HTTPHost                   string            `json:"http_host" conf:"-"`
+	HTTPPort                   int               `json:"http_port" conf:"http_port|monitor_port"`
+	HTTPBasePath               string            `json:"http_base_path" conf:"http_base_path"`
+	HTTPSPort                  int               `json:"https_port" conf:"https_port"`
+	AuthTimeout                float64           `json:"auth_timeout" conf:"-"`
+	MaxControlLine             int32             `json:"max_control_line" conf:"max_control_line"`
+	MaxPayload                 int32             `json:"max_payload" conf:"max_payload"`
+	MaxPending                 int64             `json:"max_pending" conf:"max_pending"`
+	NoFastProducerStall        bool              `json:"-" conf:"no_fast_producer_stall"`
+	Cluster                    ClusterOpts       `json:"cluster,omitempty" conf:"cluster"`
+	Gateway                    GatewayOpts       `json:"gateway,omitempty" conf:"gateway"`
+	LeafNode                   LeafNodeOpts      `json:"leaf,omitempty" conf:"leaf|leafnodes"`
+	JetStream                  bool              `json:"jetstream" conf:"-"`
+	NoJetStreamStrict          bool              `json:"-" conf:"-"` // Strict by default.
+	JetStreamMaxMemory         int64             `json:"-" conf:"-"`
+	JetStreamMaxStore          int64             `json:"-" conf:"-"`
+	JetStreamDomain            string            `json:"-" conf:"-"`
+	JetStreamExtHint           string            `json:"-" conf:"-"`
+	JetStreamKey               string            `json:"-" conf:"-"`
+	JetStreamOldKey            string            `json:"-" conf:"-"`
+	JetStreamCipher            StoreCipher       `json:"-" conf:"-"`
+	JetStreamUniqueTag         string            `conf:"-"`
+	JetStreamLimits            JSLimitOpts       `conf:"-"`
+	JetStreamTpm               JSTpmOpts         `conf:"-"`
+	JetStreamMaxCatchup        int64             `conf:"-"`
+	JetStreamRequestQueueLimit int64             `conf:"-"`
+	JetStreamInfoQueueLimit    int64             `conf:"-"`
+	JetStreamMetaCompact       uint64            `conf:"-"`
+	JetStreamMetaCompactSize   uint64            `conf:"-"`
+	JetStreamMetaCompactSync   bool              `conf:"-"`
 	StreamMaxBufferedMsgs      int               `json:"-" conf:"-"`
 	StreamMaxBufferedSize      int64             `json:"-" conf:"-"`
 	StoreDir                   string            `json:"-" conf:"store_dir|storedir"`
@@ -463,6 +463,10 @@ type Options struct {
 	// directives. Requires CheckConfig (-t) and NATS_CONFIG_V2.
 	LockConfig bool `json:"-" conf:"-"`
 
+	// LockConfigExpected is the expected behavioral digest for --lock verification.
+	// When set via --expected-lock=sha256:<hex>, --lock verifies the digest matches.
+	LockConfigExpected string `json:"-" conf:"-"`
+
 	// DisableJetStreamBanner will not print the ascii art on startup for JetStream enabled servers
 	DisableJetStreamBanner bool `json:"-" conf:"-"`
 
@@ -496,9 +500,9 @@ type Options struct {
 	inCmdLine map[string]bool `conf:"-"`
 
 	// private fields for operator mode
-	operatorJWT            []string              `conf:"-"`
-	resolverPreloads       map[string]string     `conf:"-"`
-	resolverPinnedAccounts map[string]struct{}   `conf:"-"`
+	operatorJWT            []string            `conf:"-"`
+	resolverPreloads       map[string]string   `conf:"-"`
+	resolverPinnedAccounts map[string]struct{} `conf:"-"`
 
 	// private fields, used for testing
 	gatewaysSolicitDelay time.Duration `conf:"-"`
@@ -6082,6 +6086,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.StringVar(&configFile, "config", _EMPTY_, "Configuration file.")
 	fs.BoolVar(&opts.CheckConfig, "t", false, "Check configuration and exit.")
 	fs.BoolVar(&opts.LockConfig, "lock", false, "Lock config include directives with SHA-256 digests and exit.")
+	fs.StringVar(&opts.LockConfigExpected, "expected-lock", _EMPTY_, "Expected behavioral digest for --lock verification (sha256:<hex>).")
 	fs.StringVar(&signal, "sl", "", "Send signal to nats-server process (ldm, stop, quit, term, reopen, reload).")
 	fs.StringVar(&signal, "signal", "", "Send signal to nats-server process (ldm, stop, quit, term, reopen, reload).")
 	fs.StringVar(&opts.PidFile, "P", "", "File to store process pid.")

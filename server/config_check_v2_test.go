@@ -574,8 +574,8 @@ func TestConfigCheckV2(t *testing.T) {
 		// Warning: empty config
 		// =================================================================
 		{
-			name: "empty config warns",
-			config: ``,
+			name:       "empty config warns",
+			config:     ``,
 			warningErr: fmt.Errorf("config has no values or is empty"),
 		},
 		{

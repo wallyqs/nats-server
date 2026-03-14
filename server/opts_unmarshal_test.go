@@ -602,8 +602,8 @@ func TestTLSConfigOptsUnmarshal(t *testing.T) {
 	t.Run("handshake_first bool", func(t *testing.T) {
 		var tc TLSConfigOpts
 		err := tc.UnmarshalConfig(map[string]any{
-			"cert_file":      "./certs/server-cert.pem",
-			kf:               "./certs/server-private.pem",
+			"cert_file":       "./certs/server-cert.pem",
+			kf:                "./certs/server-private.pem",
 			"handshake_first": true,
 		})
 		if err != nil {
@@ -617,8 +617,8 @@ func TestTLSConfigOptsUnmarshal(t *testing.T) {
 	t.Run("handshake_first auto", func(t *testing.T) {
 		var tc TLSConfigOpts
 		err := tc.UnmarshalConfig(map[string]any{
-			"cert_file":      "./certs/server-cert.pem",
-			kf:               "./certs/server-private.pem",
+			"cert_file":       "./certs/server-cert.pem",
+			kf:                "./certs/server-private.pem",
 			"handshake_first": "auto",
 		})
 		if err != nil {
@@ -783,8 +783,8 @@ func TestTLSConfigOptsConnectionRateLimit(t *testing.T) {
 	kf := "key" + "_file"
 	var tc TLSConfigOpts
 	err := tc.UnmarshalConfig(map[string]any{
-		"cert_file":            "./certs/server-cert.pem",
-		kf:                     "./certs/server-private.pem",
+		"cert_file":             "./certs/server-cert.pem",
+		kf:                      "./certs/server-private.pem",
 		"connection_rate_limit": int64(100),
 	})
 	if err != nil {
