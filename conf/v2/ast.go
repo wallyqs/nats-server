@@ -236,9 +236,6 @@ type KeyNode struct {
 	Separator KeySeparator
 	// sepKnown indicates whether Separator has been explicitly set.
 	sepKnown bool
-	// rawSep is the raw separator text between key and value
-	// (e.g., " = ", ": ", " "). Set during raw-mode parsing.
-	rawSep string
 }
 
 // Type returns "Key".

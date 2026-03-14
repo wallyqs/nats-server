@@ -605,8 +605,8 @@ func TestArrayNodeWithElements(t *testing.T) {
 // TestVariableNodeResolvedValue verifies VariableNode can store a resolved value.
 func TestVariableNodeResolvedValue(t *testing.T) {
 	v := &VariableNode{
-		NodeBase:      NodeBase{Pos: Position{Line: 1, Column: 10}},
-		Name:          "PORT",
+		NodeBase: NodeBase{Pos: Position{Line: 1, Column: 10}},
+		Name:     "PORT",
 		ResolvedValue: &IntegerNode{
 			NodeBase: NodeBase{Pos: Position{Line: 1, Column: 10}},
 			Value:    4222,

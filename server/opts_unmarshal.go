@@ -37,16 +37,6 @@ func unwrapConfigValue(v any) any {
 	return v
 }
 
-// unwrapConfigMap deeply unwraps all values in a map[string]any that
-// may contain token-wrapped values from pedantic mode parsing.
-func unwrapConfigMap(m map[string]any) map[string]any {
-	result := make(map[string]any, len(m))
-	for k, v := range m {
-		result[k] = unwrapConfigValue(v)
-	}
-	return result
-}
-
 // DurationValue is a wrapper type for time.Duration that implements the
 // conf/v2 Unmarshaler interface. It handles both string durations
 // (e.g., "5s", "2m30s") and int64-as-seconds for backwards compatibility.

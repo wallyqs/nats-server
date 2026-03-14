@@ -124,9 +124,9 @@ func TestUnmarshalAliasRealNATSPatterns(t *testing.T) {
 	}
 
 	tests := []struct {
-		name   string
-		input  string
-		check  func(t *testing.T, cfg *ServerConfig)
+		name  string
+		input string
+		check func(t *testing.T, cfg *ServerConfig)
 	}{
 		{
 			"host primary",

@@ -441,10 +441,6 @@ gb = 22GB
 			// we re-serialize by iterating the map and building config text.
 			// Instead, use the v2 map directly as input to marshal
 			// by wrapping in a struct with map[string]any.
-			type Wrapper struct {
-				Data map[string]any `conf:"data"`
-			}
-
 			// Alternative approach: use the v2 map to create config text
 			// via marshal. We Unmarshal the v2 output into map[string]any
 			// wrapper, then marshal it.

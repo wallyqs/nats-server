@@ -1137,12 +1137,6 @@ func TestUnmarshalComplexConfig(t *testing.T) {
 		CertFile string `conf:"cert_file"`
 		KeyFile  string `conf:"key_file"`
 	}
-	type Authorization struct {
-		Users []struct {
-			User     string
-			Password string
-		}
-	}
 	type Cluster struct {
 		Name   string
 		Port   int
@@ -1151,8 +1145,8 @@ func TestUnmarshalComplexConfig(t *testing.T) {
 	}
 	type Config struct {
 		Port          int
-		ServerName    string `conf:"server_name"`
-		MaxPayload    int64  `conf:"max_payload"`
+		ServerName    string        `conf:"server_name"`
+		MaxPayload    int64         `conf:"max_payload"`
 		PingInterval  time.Duration `conf:"ping_interval"`
 		WriteDeadline time.Duration `conf:"write_deadline"`
 		Debug         bool
