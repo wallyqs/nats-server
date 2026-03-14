@@ -33,16 +33,8 @@ func LockConfigIncludes(configFile string) error {
 	if err != nil {
 		return fmt.Errorf("error resolving config path: %v", err)
 	}
-	locked, err := lockConfigFile(absPath, nil)
-	if err != nil {
-		return err
-	}
-	if locked == 0 {
-		fmt.Fprintf(os.Stderr, "All includes already locked in %s\n", configFile)
-	} else {
-		fmt.Fprintf(os.Stderr, "Locked %d include(s) in %s\n", locked, configFile)
-	}
-	return nil
+	_, err = lockConfigFile(absPath, nil)
+	return err
 }
 
 // lockConfigFile processes a single config file: parses the AST in raw

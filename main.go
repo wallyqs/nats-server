@@ -112,6 +112,11 @@ func main() {
 		if err := server.LockConfigIncludes(opts.ConfigFile); err != nil {
 			server.PrintAndDie(fmt.Sprintf("%s: %s", exe, err))
 		}
+		// Recompute behavioral digest from the rewritten file.
+		if err := opts.ProcessConfigFileV2(opts.ConfigFile); err != nil {
+			server.PrintAndDie(fmt.Sprintf("%s: %s", exe, err))
+		}
+		fmt.Fprintf(os.Stderr, "%s\n", opts.ConfigDigest())
 		os.Exit(0)
 	} else if opts.CheckConfig {
 		fmt.Fprintf(os.Stderr, "%s: configuration file %s is valid (%s)\n", exe, opts.ConfigFile, opts.ConfigDigest())
