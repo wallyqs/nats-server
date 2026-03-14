@@ -14,19 +14,27 @@
 package server
 
 import (
-	"crypto/sha256"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	v2 "github.com/nats-io/nats-server/v2/conf/v2"
 )
 
-// computeTestDigest computes the SHA256 digest for data in "sha256:<hex>" format.
-func computeTestDigest(data []byte) string {
-	h := sha256.Sum256(data)
-	return fmt.Sprintf("sha256:%x", h[:])
+// computeTestDigest computes the behavioral SHA256 digest for a config file
+// by parsing it, JSON-encoding the resulting map, and computing the SHA256.
+// This matches the digest semantics used by lockIncludeNode and processInclude,
+// where comments and formatting don't affect digests.
+func computeTestDigest(t *testing.T, filePath string) string {
+	t.Helper()
+	_, digest, err := v2.ParseFileWithChecksDigest(filePath)
+	if err != nil {
+		t.Fatalf("computeTestDigest: ParseFileWithChecksDigest(%q) error: %v", filePath, err)
+	}
+	return digest
 }
 
 // TestLockConfigIncludes verifies that LockConfigIncludes rewrites a config
@@ -60,7 +68,7 @@ func TestLockConfigIncludes(t *testing.T) {
 	}
 
 	// Verify the digest was added.
-	expectedDigest := computeTestDigest(subContent)
+	expectedDigest := computeTestDigest(t, subFile)
 	resultStr := string(result)
 	if !strings.Contains(resultStr, expectedDigest) {
 		t.Fatalf("expected digest %q in rewritten config, got:\n%s", expectedDigest, resultStr)
@@ -83,7 +91,7 @@ func TestLockConfigIncludesAlreadyLocked(t *testing.T) {
 	}
 
 	// Create the main config file with the correct digest already present.
-	digest := computeTestDigest(subContent)
+	digest := computeTestDigest(t, subFile)
 	mainContent := fmt.Sprintf("include '%s' '%s'\n", subFile, digest)
 	mainFile := filepath.Join(dir, "main.conf")
 	if err := os.WriteFile(mainFile, []byte(mainContent), 0644); err != nil {
@@ -148,7 +156,7 @@ func TestLockConfigIncludesWrongDigest(t *testing.T) {
 	}
 
 	// Verify the wrong digest was replaced with the correct one.
-	correctDigest := computeTestDigest(subContent)
+	correctDigest := computeTestDigest(t, subFile)
 	resultStr := string(result)
 	if strings.Contains(resultStr, wrongDigest) {
 		t.Fatalf("wrong digest should have been replaced, got:\n%s", resultStr)
@@ -196,8 +204,8 @@ func TestLockConfigIncludesMultiple(t *testing.T) {
 	resultStr := string(result)
 
 	// Verify both digests are present.
-	digest1 := computeTestDigest(content1)
-	digest2 := computeTestDigest(content2)
+	digest1 := computeTestDigest(t, file1)
+	digest2 := computeTestDigest(t, file2)
 	if !strings.Contains(resultStr, digest1) {
 		t.Fatalf("expected digest for file1 %q in:\n%s", digest1, resultStr)
 	}
@@ -251,7 +259,7 @@ func TestLockConfigIncludesRecursive(t *testing.T) {
 	}
 	midStr := string(midResult)
 
-	leafDigest := computeTestDigest(leafContent)
+	leafDigest := computeTestDigest(t, leafFile)
 	if !strings.Contains(midStr, leafDigest) {
 		t.Fatalf("expected leaf digest %q in mid.conf, got:\n%s", leafDigest, midStr)
 	}
@@ -261,8 +269,7 @@ func TestLockConfigIncludesRecursive(t *testing.T) {
 	// through recursive lockIncludeNode, then writes the parent).
 	// Actually, let's verify: main.conf should contain a digest for mid.conf.
 	// We need to re-read mid.conf to compute the digest after rewrite.
-	midRewritten, _ := os.ReadFile(midFile)
-	midDigest := computeTestDigest(midRewritten)
+	midDigest := computeTestDigest(t, midFile)
 	if !strings.Contains(mainStr, midDigest) {
 		t.Fatalf("expected mid.conf digest %q in main.conf, got:\n%s", midDigest, mainStr)
 	}
@@ -325,7 +332,7 @@ debug = true
 	}
 
 	// Verify the digest was added.
-	expectedDigest := computeTestDigest(subContent)
+	expectedDigest := computeTestDigest(t, subFile)
 	if !strings.Contains(resultStr, expectedDigest) {
 		t.Fatalf("expected digest %q in:\n%s", expectedDigest, resultStr)
 	}
@@ -363,7 +370,7 @@ func TestLockConfigIncludesInMap(t *testing.T) {
 	resultStr := string(result)
 
 	// Verify the digest was added.
-	expectedDigest := computeTestDigest(authContent)
+	expectedDigest := computeTestDigest(t, authFile)
 	if !strings.Contains(resultStr, expectedDigest) {
 		t.Fatalf("expected digest %q in:\n%s", expectedDigest, resultStr)
 	}
@@ -488,7 +495,7 @@ func TestLockConfigCommentsBeforeInclude(t *testing.T) {
 	resultStr := string(result)
 
 	// Verify digest is present.
-	expectedDigest := computeTestDigest(subContent)
+	expectedDigest := computeTestDigest(t, subFile)
 	if !strings.Contains(resultStr, expectedDigest) {
 		t.Fatalf("expected digest %q in:\n%s", expectedDigest, resultStr)
 	}
@@ -536,7 +543,7 @@ func TestLockConfigCommentsAfterInclude(t *testing.T) {
 	resultStr := string(result)
 
 	// Verify digest is present.
-	expectedDigest := computeTestDigest(subContent)
+	expectedDigest := computeTestDigest(t, subFile)
 	if !strings.Contains(resultStr, expectedDigest) {
 		t.Fatalf("expected digest %q in:\n%s", expectedDigest, resultStr)
 	}
@@ -585,7 +592,7 @@ func TestLockConfigTrailingCommentOnKeyBeforeInclude(t *testing.T) {
 	resultStr := string(result)
 
 	// Verify digest is present.
-	expectedDigest := computeTestDigest(subContent)
+	expectedDigest := computeTestDigest(t, subFile)
 	if !strings.Contains(resultStr, expectedDigest) {
 		t.Fatalf("expected digest %q in:\n%s", expectedDigest, resultStr)
 	}
@@ -658,8 +665,8 @@ include '%s'
 	resultStr := string(result)
 
 	// Verify all three digests are present.
-	for i, content := range [][]byte{content1, content2, content3} {
-		digest := computeTestDigest(content)
+	for i, f := range []string{file1, file2, file3} {
+		digest := computeTestDigest(t, f)
 		if !strings.Contains(resultStr, digest) {
 			t.Fatalf("missing digest for file %d in:\n%s", i+1, resultStr)
 		}
@@ -729,7 +736,7 @@ func TestLockConfigCommentInsideMap(t *testing.T) {
 	resultStr := string(result)
 
 	// Verify digest is present.
-	expectedDigest := computeTestDigest(authContent)
+	expectedDigest := computeTestDigest(t, authFile)
 	if !strings.Contains(resultStr, expectedDigest) {
 		t.Fatalf("expected digest %q in:\n%s", expectedDigest, resultStr)
 	}
@@ -840,7 +847,7 @@ http_port = $monitoring_port
 
 	// --- Verify config A ---
 	// Digest for B should be present in A.
-	digestB := computeTestDigest(resultB) // B was rewritten, use new content.
+	digestB := computeTestDigest(t, fileB) // B was rewritten, use its behavioral digest.
 	if !strings.Contains(resultAStr, digestB) {
 		t.Fatalf("expected digest for B in config A, got:\n%s", resultAStr)
 	}
@@ -869,7 +876,7 @@ http_port = $monitoring_port
 
 	// --- Verify config B ---
 	// Digest for C should be present in B.
-	digestC := computeTestDigest(resultC)
+	digestC := computeTestDigest(t, fileC)
 	if !strings.Contains(resultBStr, digestC) {
 		t.Fatalf("expected digest for C in config B, got:\n%s", resultBStr)
 	}

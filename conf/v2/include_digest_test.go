@@ -14,7 +14,6 @@
 package v2
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,11 +21,17 @@ import (
 	"testing"
 )
 
-// computeFileDigest computes the SHA256 digest of the given data and returns
-// it in the format "sha256:<hex>".
-func computeFileDigest(data []byte) string {
-	h := sha256.Sum256(data)
-	return fmt.Sprintf("sha256:%x", h[:])
+// computeBehavioralDigest computes the behavioral SHA256 digest of a config
+// file by parsing it, JSON-encoding the resulting map, and computing the
+// SHA256 of that. This matches the digest semantics used by processInclude
+// and lockIncludeNode, where comments and formatting don't affect digests.
+func computeBehavioralDigest(t *testing.T, filePath string) string {
+	t.Helper()
+	_, digest, err := ParseFileWithChecksDigest(filePath)
+	if err != nil {
+		t.Fatalf("computeBehavioralDigest: ParseFileWithChecksDigest(%q) error: %v", filePath, err)
+	}
+	return digest
 }
 
 // --- Lexer Tests ---
@@ -169,13 +174,13 @@ func TestItemIncludeDigestString(t *testing.T) {
 func TestIncludeWithMatchingDigest(t *testing.T) {
 	dir := t.TempDir()
 	content := []byte("port = 4222\n")
-	digest := computeFileDigest(content)
 
 	includeFile := filepath.Join(dir, "included.conf")
 	if err := os.WriteFile(includeFile, content, 0644); err != nil {
 		t.Fatal(err)
 	}
 
+	digest := computeBehavioralDigest(t, includeFile)
 	mainContent := fmt.Sprintf("include '%s' '%s'\n", includeFile, digest)
 	m, err := Parse(mainContent)
 	if err != nil {
@@ -232,12 +237,13 @@ func TestIncludeWithoutDigestBackwardsCompat(t *testing.T) {
 func TestIncludeDigestAllPathStyles(t *testing.T) {
 	dir := t.TempDir()
 	content := []byte("port = 4222\n")
-	digest := computeFileDigest(content)
 
 	includeFile := filepath.Join(dir, "included.conf")
 	if err := os.WriteFile(includeFile, content, 0644); err != nil {
 		t.Fatal(err)
 	}
+
+	digest := computeBehavioralDigest(t, includeFile)
 
 	tests := []struct {
 		name  string
@@ -266,12 +272,13 @@ func TestIncludeDigestAllPathStyles(t *testing.T) {
 func TestIncludeDigestInsideMapBlock(t *testing.T) {
 	dir := t.TempDir()
 	content := []byte("user = \"admin\"\npassword = \"secret\"\n")
-	digest := computeFileDigest(content)
 
 	includeFile := filepath.Join(dir, "auth.conf")
 	if err := os.WriteFile(includeFile, content, 0644); err != nil {
 		t.Fatal(err)
 	}
+
+	digest := computeBehavioralDigest(t, includeFile)
 
 	mainContent := fmt.Sprintf("authorization {\n  include '%s' '%s'\n}\n", includeFile, digest)
 	m, err := Parse(mainContent)
@@ -402,12 +409,13 @@ func TestIncludeDigestASTRoundTripNoDigest(t *testing.T) {
 func TestIncludeDigestParseFile(t *testing.T) {
 	dir := t.TempDir()
 	content := []byte("port = 4222\n")
-	digest := computeFileDigest(content)
 
 	includeFile := filepath.Join(dir, "included.conf")
 	if err := os.WriteFile(includeFile, content, 0644); err != nil {
 		t.Fatal(err)
 	}
+
+	digest := computeBehavioralDigest(t, includeFile)
 
 	mainContent := fmt.Sprintf("include '%s' '%s'\n", includeFile, digest)
 	mainFile := filepath.Join(dir, "main.conf")
@@ -429,12 +437,13 @@ func TestIncludeDigestParseFile(t *testing.T) {
 func TestIncludeDigestDoubleQuotedPathDoubleQuotedDigest(t *testing.T) {
 	dir := t.TempDir()
 	content := []byte("port = 4222\n")
-	digest := computeFileDigest(content)
 
 	includeFile := filepath.Join(dir, "included.conf")
 	if err := os.WriteFile(includeFile, content, 0644); err != nil {
 		t.Fatal(err)
 	}
+
+	digest := computeBehavioralDigest(t, includeFile)
 
 	mainContent := fmt.Sprintf("include \"%s\" \"%s\"\n", includeFile, digest)
 	m, err := Parse(mainContent)
@@ -523,5 +532,77 @@ func TestExistingIncludeTestsStillPass(t *testing.T) {
 	}
 	if m["host"] != "localhost" {
 		t.Fatalf("expected host=localhost, got %v", m["host"])
+	}
+}
+
+// TestIncludeDigestIgnoresComments verifies that two files with the same
+// key-value pairs but different comments produce the same behavioral digest.
+// This is the key property of behavioral digests: only the parsed configuration
+// values matter, not comments or formatting.
+func TestIncludeDigestIgnoresComments(t *testing.T) {
+	dir := t.TempDir()
+
+	// File with comments.
+	contentWithComments := []byte("# This is a comment\nport = 4222\n# Another comment\nhost = \"localhost\"\n")
+	fileWithComments := filepath.Join(dir, "with_comments.conf")
+	if err := os.WriteFile(fileWithComments, contentWithComments, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// File without comments, same keys and values.
+	contentWithoutComments := []byte("port = 4222\nhost = \"localhost\"\n")
+	fileWithoutComments := filepath.Join(dir, "without_comments.conf")
+	if err := os.WriteFile(fileWithoutComments, contentWithoutComments, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	digestWithComments := computeBehavioralDigest(t, fileWithComments)
+	digestWithoutComments := computeBehavioralDigest(t, fileWithoutComments)
+
+	if digestWithComments != digestWithoutComments {
+		t.Fatalf("behavioral digests should be the same regardless of comments:\n  with comments:    %s\n  without comments: %s",
+			digestWithComments, digestWithoutComments)
+	}
+
+	// Now verify that an include using this digest works for both files.
+	mainContent := fmt.Sprintf("include '%s' '%s'\n", fileWithComments, digestWithComments)
+	m, err := Parse(mainContent)
+	if err != nil {
+		t.Fatalf("expected no error with behavioral digest for commented file, got: %v", err)
+	}
+	if m["port"] != int64(4222) {
+		t.Fatalf("expected port=4222, got %v", m["port"])
+	}
+
+	// The same digest should also work for the uncommented file.
+	mainContent2 := fmt.Sprintf("include '%s' '%s'\n", fileWithoutComments, digestWithoutComments)
+	m2, err := Parse(mainContent2)
+	if err != nil {
+		t.Fatalf("expected no error with behavioral digest for uncommented file, got: %v", err)
+	}
+	if m2["port"] != int64(4222) {
+		t.Fatalf("expected port=4222, got %v", m2["port"])
+	}
+
+	// But a file with different values should produce a different digest.
+	contentDifferent := []byte("port = 5222\nhost = \"localhost\"\n")
+	fileDifferent := filepath.Join(dir, "different.conf")
+	if err := os.WriteFile(fileDifferent, contentDifferent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	digestDifferent := computeBehavioralDigest(t, fileDifferent)
+	if digestDifferent == digestWithComments {
+		t.Fatalf("different config values should produce different behavioral digests, both got: %s", digestDifferent)
+	}
+
+	// Verify the wrong digest is rejected.
+	mainContent3 := fmt.Sprintf("include '%s' '%s'\n", fileDifferent, digestWithComments)
+	_, err = Parse(mainContent3)
+	if err == nil {
+		t.Fatal("expected error when using wrong behavioral digest")
+	}
+	if !strings.Contains(err.Error(), "integrity check failed") {
+		t.Fatalf("expected 'integrity check failed' error, got: %v", err)
 	}
 }
