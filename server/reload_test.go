@@ -7168,6 +7168,344 @@ func TestConfigReloadAddRemoveRemoteLeafNodes(t *testing.T) {
 	checkLeafs(nil)
 }
 
+func TestCheckConfigsEqual(t *testing.T) {
+	// Use LeafNodeOpts as the test struct since it has a mix of exported/unexported fields.
+	for _, test := range []struct {
+		name   string
+		c1     any
+		c2     any
+		ignore []string
+		errTxt string
+	}{
+		{
+			"identical structs",
+			&LeafNodeOpts{Port: 1234, Host: "127.0.0.1"},
+			&LeafNodeOpts{Port: 1234, Host: "127.0.0.1"},
+			nil,
+			_EMPTY_,
+		},
+		{
+			"different field detected",
+			&LeafNodeOpts{Port: 1234},
+			&LeafNodeOpts{Port: 5678},
+			nil,
+			`field "Port": old=1234, new=5678`,
+		},
+		{
+			"ignored field not flagged",
+			&LeafNodeOpts{Port: 1234},
+			&LeafNodeOpts{Port: 5678},
+			[]string{"Port"},
+			_EMPTY_,
+		},
+		{
+			"multiple ignores",
+			&LeafNodeOpts{Port: 1234, Host: "a"},
+			&LeafNodeOpts{Port: 5678, Host: "b"},
+			[]string{"Port", "Host"},
+			_EMPTY_,
+		},
+		{
+			"first non-ignored difference reported",
+			&LeafNodeOpts{Port: 1234, Host: "a"},
+			&LeafNodeOpts{Port: 5678, Host: "b"},
+			[]string{"Port"},
+			`field "Host"`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := checkConfigsEqual(test.c1, test.c2, test.ignore)
+			if test.errTxt == _EMPTY_ {
+				require_NoError(t, err)
+			} else {
+				require_Error(t, err)
+				require_Contains(t, err.Error(), test.errTxt)
+			}
+		})
+	}
+}
+
+func TestLeafNodeCfgLifecycleMethods(t *testing.T) {
+	t.Run("stillValid", func(t *testing.T) {
+		cfg := newLeafNodeCfg(&RemoteLeafOpts{})
+		// New config should be valid.
+		require_True(t, cfg.stillValid())
+
+		// Disabling makes it not valid.
+		cfg.Lock()
+		cfg.Disabled = true
+		cfg.Unlock()
+		require_False(t, cfg.stillValid())
+
+		// Re-enable.
+		cfg.Lock()
+		cfg.Disabled = false
+		cfg.Unlock()
+		require_True(t, cfg.stillValid())
+
+		// Removing makes it not valid.
+		cfg.markAsRemoved()
+		require_False(t, cfg.stillValid())
+	})
+
+	t.Run("markAsRemoved idempotent", func(t *testing.T) {
+		cfg := newLeafNodeCfg(&RemoteLeafOpts{})
+		cfg.markAsRemoved()
+		require_False(t, cfg.stillValid())
+		// Calling again should not panic or block.
+		cfg.markAsRemoved()
+		require_False(t, cfg.stillValid())
+	})
+
+	t.Run("setConnectInProgress", func(t *testing.T) {
+		cfg := newLeafNodeCfg(&RemoteLeafOpts{})
+		require_False(t, cfg.isConnectInProgress())
+
+		cfg.setConnectInProgress(true)
+		require_True(t, cfg.isConnectInProgress())
+
+		cfg.setConnectInProgress(false)
+		require_False(t, cfg.isConnectInProgress())
+	})
+
+	t.Run("notifyQuitChannel non-blocking", func(t *testing.T) {
+		cfg := newLeafNodeCfg(&RemoteLeafOpts{})
+		// Should not block even if called multiple times (buffered channel of 1).
+		cfg.notifyQuitChannel()
+		cfg.notifyQuitChannel()
+		// Drain it.
+		select {
+		case <-cfg.quitCh:
+		default:
+			t.Fatal("Expected quit signal")
+		}
+		// Should be empty now.
+		select {
+		case <-cfg.quitCh:
+			t.Fatal("Should be empty")
+		default:
+		}
+	})
+
+	t.Run("setConnectInProgress drains quit channel", func(t *testing.T) {
+		cfg := newLeafNodeCfg(&RemoteLeafOpts{})
+		// Send a quit signal.
+		cfg.notifyQuitChannel()
+		// setConnectInProgress should drain it.
+		cfg.setConnectInProgress(true)
+		select {
+		case <-cfg.quitCh:
+			t.Fatal("quit channel should have been drained")
+		default:
+		}
+	})
+}
+
+func TestConfigReloadLeafNodeDisableThenEnable(t *testing.T) {
+	conf1 := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub"
+		leafnodes {
+			port: -1
+		}
+	`))
+	s1, o1 := RunServerWithConfig(conf1)
+	defer s1.Shutdown()
+
+	tmpl2 := `
+		port: -1
+		server_name: "leaf"
+		leafnodes {
+			remotes [
+				{ url: "nats://127.0.0.1:%d"%s }
+			]
+		}
+	`
+	conf2 := createConfFile(t, fmt.Appendf(nil, tmpl2, o1.LeafNode.Port, _EMPTY_))
+	s2, _ := RunServerWithConfig(conf2)
+	defer s2.Shutdown()
+
+	checkLeafNodeConnectedCount(t, s2, 1)
+	checkLeafNodeConnectedCount(t, s1, 1)
+
+	// Disable the remote.
+	reloadUpdateConfig(t, s2, conf2, fmt.Sprintf(tmpl2, o1.LeafNode.Port, ", disabled: true"))
+	checkLeafNodeConnectedCount(t, s2, 0)
+	checkLeafNodeConnectedCount(t, s1, 0)
+
+	// Re-enable the remote.
+	reloadUpdateConfig(t, s2, conf2, fmt.Sprintf(tmpl2, o1.LeafNode.Port, _EMPTY_))
+	checkLeafNodeConnectedCount(t, s2, 1)
+	checkLeafNodeConnectedCount(t, s1, 1)
+}
+
+func TestConfigReloadLeafNodeRemovedConfigCleanup(t *testing.T) {
+	conf1 := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub"
+		leafnodes {
+			port: -1
+		}
+	`))
+	s1, o1 := RunServerWithConfig(conf1)
+	defer s1.Shutdown()
+
+	tmpl2 := `
+		port: -1
+		server_name: "leaf"
+		leafnodes {
+			remotes [
+				%s
+			]
+		}
+	`
+	remote := fmt.Sprintf(`{ url: "nats://127.0.0.1:%d" }`, o1.LeafNode.Port)
+	conf2 := createConfFile(t, fmt.Appendf(nil, tmpl2, remote))
+	s2, _ := RunServerWithConfig(conf2)
+	defer s2.Shutdown()
+
+	checkLeafNodeConnectedCount(t, s2, 1)
+
+	// Remove the remote via reload.
+	reloadUpdateConfig(t, s2, conf2, fmt.Sprintf(tmpl2, _EMPTY_))
+	checkLeafNodeConnectedCount(t, s2, 0)
+
+	// The rmLeafRemoteCfgs map should eventually be cleaned up.
+	checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		s2.mu.RLock()
+		n := len(s2.rmLeafRemoteCfgs)
+		s2.mu.RUnlock()
+		if n > 0 {
+			return fmt.Errorf("expected rmLeafRemoteCfgs to be empty, got %d", n)
+		}
+		return nil
+	})
+
+	// Also verify that leafRemoteCfgs is empty.
+	s2.mu.RLock()
+	n := len(s2.leafRemoteCfgs)
+	s2.mu.RUnlock()
+	require_Equal(t, 0, n)
+}
+
+func TestConfigReloadAddRemoteLeafNodeMessageFlow(t *testing.T) {
+	// This test verifies that after adding a new remote leafnode via config reload,
+	// messages actually flow between the hub and the newly added leaf account.
+	conf1 := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub"
+		leafnodes {
+			port: -1
+		}
+	`))
+	s1, o1 := RunServerWithConfig(conf1)
+	defer s1.Shutdown()
+
+	tmpl2 := `
+		port: -1
+		server_name: "leaf"
+		leafnodes {
+			remotes [
+				%s
+			]
+		}
+	`
+	conf2 := createConfFile(t, fmt.Appendf(nil, tmpl2, _EMPTY_))
+	s2, o2 := RunServerWithConfig(conf2)
+	defer s2.Shutdown()
+
+	checkLeafNodeConnectedCount(t, s2, 0)
+
+	// Connect a subscriber on the hub.
+	ncHub := natsConnect(t, fmt.Sprintf("nats://127.0.0.1:%d", o1.Port))
+	defer ncHub.Close()
+	subHub := natsSubSync(t, ncHub, "test.msg")
+	natsFlush(t, ncHub)
+
+	// Now add remote via config reload.
+	remote := fmt.Sprintf(`{ url: "nats://127.0.0.1:%d" }`, o1.LeafNode.Port)
+	reloadUpdateConfig(t, s2, conf2, fmt.Sprintf(tmpl2, remote))
+	checkLeafNodeConnectedCount(t, s2, 1)
+
+	// Wait for subscription interest to propagate.
+	checkSubInterest(t, s2, globalAccountName, "test.msg", time.Second)
+
+	// Publish from leaf.
+	ncLeaf := natsConnect(t, fmt.Sprintf("nats://127.0.0.1:%d", o2.Port))
+	defer ncLeaf.Close()
+	natsPub(t, ncLeaf, "test.msg", []byte("hello-from-leaf"))
+	natsFlush(t, ncLeaf)
+
+	// Verify message received on hub.
+	msg, err := subHub.NextMsg(2 * time.Second)
+	require_NoError(t, err)
+	require_Equal(t, string(msg.Data), "hello-from-leaf")
+
+	// Verify reverse direction: hub -> leaf.
+	ncLeafSub := natsConnect(t, fmt.Sprintf("nats://127.0.0.1:%d", o2.Port))
+	defer ncLeafSub.Close()
+	subLeaf := natsSubSync(t, ncLeafSub, "test.reverse")
+	natsFlush(t, ncLeafSub)
+
+	checkSubInterest(t, s1, globalAccountName, "test.reverse", time.Second)
+
+	natsPub(t, ncHub, "test.reverse", []byte("hello-from-hub"))
+	natsFlush(t, ncHub)
+
+	msg, err = subLeaf.NextMsg(2 * time.Second)
+	require_NoError(t, err)
+	require_Equal(t, string(msg.Data), "hello-from-hub")
+}
+
+func TestConfigReloadLeafNodeRemoveAndReAdd(t *testing.T) {
+	// Test that removing a remote and then re-adding it works correctly.
+	conf1 := createConfFile(t, []byte(`
+		port: -1
+		server_name: "hub"
+		leafnodes {
+			port: -1
+		}
+	`))
+	s1, o1 := RunServerWithConfig(conf1)
+	defer s1.Shutdown()
+
+	tmpl2 := `
+		port: -1
+		server_name: "leaf"
+		leafnodes {
+			remotes [
+				%s
+			]
+		}
+	`
+	remote := fmt.Sprintf(`{ url: "nats://127.0.0.1:%d" }`, o1.LeafNode.Port)
+	conf2 := createConfFile(t, fmt.Appendf(nil, tmpl2, remote))
+	s2, _ := RunServerWithConfig(conf2)
+	defer s2.Shutdown()
+
+	checkLeafNodeConnectedCount(t, s2, 1)
+
+	// Remove the remote.
+	reloadUpdateConfig(t, s2, conf2, fmt.Sprintf(tmpl2, _EMPTY_))
+	checkLeafNodeConnectedCount(t, s2, 0)
+
+	// Wait for rmLeafRemoteCfgs cleanup.
+	checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		s2.mu.RLock()
+		n := len(s2.rmLeafRemoteCfgs)
+		s2.mu.RUnlock()
+		if n > 0 {
+			return fmt.Errorf("rmLeafRemoteCfgs not yet cleaned up, count=%d", n)
+		}
+		return nil
+	})
+
+	// Re-add the remote.
+	reloadUpdateConfig(t, s2, conf2, fmt.Sprintf(tmpl2, remote))
+	checkLeafNodeConnectedCount(t, s2, 1)
+	checkLeafNodeConnectedCount(t, s1, 1)
+}
+
 func TestConfigReloadNoPanicOnShutdown(t *testing.T) {
 	tmpl := `
 		port: -1
