@@ -8,11 +8,18 @@ thorough implementation. The refactoring from slice to map for `leafRemoteCfgs`,
 the lifecycle management via `quitCh`/`removed`/`connInProgress`, and the
 `RemoteLeafOpts.name()` identity scheme are all solid design choices.
 
+**Update (latest force-push):** The PR author has addressed two of our earlier
+findings (the `goto` loop and minor nits) and added NKey support to identity
+matching. The remaining items below reflect the current state of the PR.
+
 ## Strengths
 
-- **Clean identity scheme**: Using `name()` (URLs + account + credentials) for
-  remote identity with URL redaction is a good approach that prevents credential
-  leakage in logs while providing reliable deduplication.
+- **Clean identity scheme**: Using `name()` (URLs + account + credentials + NKey)
+  for remote identity with URL/NKey redaction is a good approach that prevents
+  credential leakage in logs while providing reliable deduplication. The latest
+  update correctly includes NKey in the identity string, closing a gap where two
+  remotes with different NKeys but same URLs/account would have been treated as
+  identical.
 
 - **Robust lifecycle management**: The `quitCh`, `connInProgress`, and `removed`
   fields with their accessor methods provide clean concurrent state management.
@@ -21,11 +28,15 @@ the lifecycle management via `quitCh`/`removed`/`connInProgress`, and the
 
 - **Reflection-based `checkConfigsEqual()`**: Good generic approach for detecting
   unsupported config changes. The ignore list pattern makes it easy to extend as
-  new reloadable fields are added.
+  new reloadable fields are added. Note: `LocalAccount` was removed from the skip
+  list in the latest update, meaning an account change is now correctly treated as
+  a remove+add (identity change) rather than an unsupported modification.
 
-- **Retry logic in `getLeafNodeOptionsChanges()`**: The `DO_REMOTES` retry loop
-  with backoff for connect-in-progress scenarios handles the inherent race between
-  config reload and active connection attempts gracefully.
+- **Retry logic in `getLeafNodeOptionsChanges()`**: The `forLoop` retry with
+  50ms backoff for connect-in-progress scenarios handles the inherent race between
+  config reload and active connection attempts gracefully. The latest update
+  refactored the `goto DO_REMOTES` pattern into a proper `for` loop with labeled
+  `continue`, which is much more idiomatic.
 
 - **`addLeafNodeConnection()` now returns bool**: The `stillValid()` check under
   the server lock before adding to the leafs map closes a race window where a
@@ -51,18 +62,69 @@ to run under both the server and client locks to prevent a gap where another
 goroutine could observe an inconsistent `connInProgress` flag between removal and
 reconnect (see comment at leafnode.go:2072-2078).
 
-### 2. `DO_REMOTES` goto pattern (stylistic nit)
+### 2. Reload blocking window vs connection timeout (design observation)
 
-The `DO_REMOTES` label with `goto` in `getLeafNodeOptionsChanges()` is functional
-but makes the control flow harder to follow. A `for` loop with `continue` would be
-more idiomatic Go, though this is a stylistic preference and not a correctness
-issue.
+The retry window in `getLeafNodeOptionsChanges()` is **1 second** (20 attempts ×
+50ms), but actual connection establishment can take **5–6+ seconds**:
 
-## Minor Nits
+| Phase                | Default timeout |
+|----------------------|-----------------|
+| TCP dial             | 1s (`DEFAULT_ROUTE_DIAL`) |
+| TLS handshake        | 2s (`DEFAULT_LEAF_TLS_TIMEOUT`) |
+| Reconnect delay      | 1s (`DEFAULT_LEAF_NODE_RECONNECT`) |
+| Jitter               | up to 1s |
 
-- `reload.go:1101` — Log says `lrc.RemoteLeafOpts.name()` but `lrc.name()` would
-  suffice since `leafNodeCfg` embeds `*RemoteLeafOpts`.
-- `reload_test.go:7159` — Comment typo: "Remote remote" should be "Remove remote".
+If `connInProgress` remains true for longer than 1s (e.g. slow TLS handshake),
+the reload fails with "cannot be enabled at the moment, try again". This is
+**by design** (fail-safe over fail-open), and the error message correctly tells
+the operator to retry. However, in environments with high-latency TLS
+connections, operators may experience consistent reload failures during
+reconnection windows. Consider whether `maxAttempts` should be configurable or
+the error message should mention the specific cause (e.g. "connection to remote
+still in progress").
+
+### ~~3. `DO_REMOTES` goto pattern~~ — resolved
+
+The `goto DO_REMOTES` label was refactored into a `for failed := range
+maxAttempts` loop with labeled `continue forLoop`. This is cleaner and also fixes
+a subtle improvement: `nlo` is now re-initialized on each retry iteration,
+preventing stale state from prior failed attempts. The `s.mu.RLock()` is also now
+taken/released per iteration rather than held across retries, reducing lock
+contention.
+
+## ~~Minor Nits~~ — resolved
+
+Both nits from the previous review have been addressed in the latest push:
+- `lrc.RemoteLeafOpts.name()` → `lrc.name()` ✓
+- "Remote remote" → "Remove remote" typo ✓
+- Duplicate remote error messages now use `safeName()` instead of `name()` to
+  avoid leaking credentials ✓
+
+## New Changes in Latest Push
+
+### NKey support in remote identity
+
+`generateRemoteLeafOptsName()` now includes the `Nkey` field (redacted in
+`safeName()`). This means:
+- Two remotes with same URLs/account but different NKeys are correctly treated
+  as distinct remotes
+- NKey changes trigger a remove+add cycle (correct behavior)
+- New test `TestConfigReloadRemoteLeafNodeNkeyChange` validates this end-to-end
+- Unit tests added for identity matching with different accounts, creds, and NKeys
+
+### `LocalAccount` change semantics
+
+`LocalAccount` was removed from the `checkConfigsEqual()` skip list. Previously,
+changing a remote's `LocalAccount` would have been rejected as an unsupported
+modification. Now it's treated as an identity change (remove old + add new),
+which is the correct semantic — the account is part of what identifies a remote.
+
+### Code quality improvements
+
+- `fmt.Appendf` used instead of `[]byte(fmt.Sprintf(...))` in tests — avoids
+  unnecessary string→byte conversion
+- `leafnode.go:220` — duplicate remote validation now uses `safeName()` for
+  error messages (consistent with other error paths)
 
 ## Testing Coverage Gaps Identified & Implemented
 
