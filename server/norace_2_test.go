@@ -3197,6 +3197,102 @@ func TestNoRaceProducerStallLimits(t *testing.T) {
 	}
 }
 
+// TestNoRaceJetStreamInternalClientRespectsStallGate verifies that the JetStream
+// internal client (which delivers messages from streams to push consumers)
+// respects the fast producer stall gate. Before the fix, only regular CLIENT
+// connections would stall, meaning the JS internal client would bypass
+// backpressure and flood the subscriber's output buffer.
+func TestNoRaceJetStreamInternalClientRespectsStallGate(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		listen: "127.0.0.1:-1"
+		jetstream: enabled
+	`))
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	l := &fastProdLogger{gotIt: make(chan struct{}, 10)}
+	s.SetLogger(l, true, false)
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create a stream and a push consumer that delivers to the subscriber.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+	})
+	require_NoError(t, err)
+
+	// Create a slow subscriber that will receive messages from the consumer.
+	ncSlow := natsConnect(t, s.ClientURL(), nats.Name("slow"))
+	defer ncSlow.Close()
+	sub := natsSubSync(t, ncSlow, "deliver")
+	natsFlush(t, ncSlow)
+
+	// Create a push consumer delivering to "deliver".
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:        "cons",
+		DeliverSubject: "deliver",
+		AckPolicy:      nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
+
+	// Find the slow subscriber's client and artificially set a stall channel.
+	cidSlow, err := ncSlow.GetClientID()
+	require_NoError(t, err)
+	slowClient := s.GetClient(cidSlow)
+	require_True(t, slowClient != nil)
+
+	slowClient.mu.Lock()
+	slowClient.out.stc = make(chan struct{})
+	// Set pending bytes high enough to trigger max stall duration.
+	slowClient.out.pb = slowClient.out.mp/4*3 + 100
+	slowClient.mu.Unlock()
+
+	// Publish several messages to the stream. The JetStream internal client
+	// should stall when delivering these to the slow subscriber.
+	for i := 0; i < 5; i++ {
+		_, err = js.Publish("foo", []byte("hello"))
+		require_NoError(t, err)
+	}
+
+	// Wait for the fast producer stall debug messages from the JetStream
+	// internal client delivering to the slow subscriber.
+	select {
+	case <-l.gotIt:
+		// OK - the JetStream internal client was stalled as expected.
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timed out waiting for JetStream internal client stall")
+	}
+
+	// Verify stall counters were incremented on the subscriber's client.
+	totalStalls := atomic.LoadInt64(&slowClient.stalls)
+	if totalStalls == 0 {
+		t.Fatalf("Expected stall count on slow subscriber to be > 0, got %d", totalStalls)
+	}
+
+	// Verify the server-wide stall count is also incremented.
+	if s.NumStalledClients() < 1 {
+		t.Fatalf("Expected server stall count > 0, got %d", s.NumStalledClients())
+	}
+
+	// Now clear the stall and verify messages were still delivered.
+	slowClient.mu.Lock()
+	if slowClient.out.stc != nil {
+		close(slowClient.out.stc)
+		slowClient.out.stc = nil
+	}
+	slowClient.out.pb = 0
+	slowClient.mu.Unlock()
+
+	// Verify messages are received.
+	for i := 0; i < 5; i++ {
+		m, err := sub.NextMsg(2 * time.Second)
+		require_NoError(t, err)
+		require_True(t, m != nil)
+	}
+}
+
 func TestNoRaceJetStreamClusterConsumerDeleteInterestPolicyPerf(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
