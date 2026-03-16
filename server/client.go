@@ -64,6 +64,13 @@ func isInternalClient(kind int) bool {
 	return kind == SYSTEM || kind == JETSTREAM || kind == ACCOUNT
 }
 
+// isRouteKind returns true for inter-server routing connections and internal
+// server clients that have their own flow control and should not be subject
+// to the fast producer stall gate.
+func isRouteKind(kind int) bool {
+	return kind == ROUTER || kind == GATEWAY || kind == LEAF || kind == SYSTEM || kind == ACCOUNT
+}
+
 // Extended type of a CLIENT connection. This is returned by c.clientType()
 // and indicate what type of client connection we are dealing with.
 // If invoked on a non CLIENT connection, NON_CLIENT type is returned.
@@ -1829,8 +1836,9 @@ func (c *client) flushOutbound() bool {
 	}
 
 	// Check if we have a stalled gate and if so and we are recovering release
-	// any stalled producers. Only kind==CLIENT will stall.
-	if c.out.stc != nil && (n == attempted || c.out.pb < c.out.mp/4*3) {
+	// any stalled producers. The release threshold (60%) is lower than the
+	// creation threshold (75%) to provide hysteresis and prevent oscillation.
+	if c.out.stc != nil && (n == attempted || c.out.pb < c.out.mp*3/5) {
 		close(c.out.stc)
 		c.out.stc = nil
 	}
@@ -3809,13 +3817,12 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 		return didDeliver
 	}
 
-	// If we are a client or a JetStream internal client and we detect that the consumer we are
-	// sending to is in a stalled state, go ahead and wait here with a limit.
-	// JetStream internal clients must also respect the stall gate, otherwise they bypass
-	// the backpressure mechanism and keep flooding the subscriber's output buffer, preventing
-	// the stall gate from ever being released and causing regular client producers to stall
-	// indefinitely.
-	if (c.kind == CLIENT || c.kind == JETSTREAM) && client.out.stc != nil {
+	// If the producing connection is not a routing kind (ROUTER, GATEWAY, LEAF,
+	// SYSTEM, ACCOUNT) and we detect that the consumer we are sending to is in
+	// a stalled state, go ahead and wait here with a limit. Routing kinds have
+	// their own flow control. All other producer kinds must respect the stall
+	// gate to prevent bypassing backpressure.
+	if !isRouteKind(c.kind) && client.out.stc != nil {
 		if srv.getOpts().NoFastProducerStall {
 			mt.addEgressEvent(client, sub, errMsgTraceFastProdNoStall)
 			client.mu.Unlock()

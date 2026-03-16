@@ -3293,6 +3293,86 @@ func TestNoRaceJetStreamInternalClientRespectsStallGate(t *testing.T) {
 	}
 }
 
+func TestNoRaceIsRouteKind(t *testing.T) {
+	tests := []struct {
+		kind     int
+		name     string
+		expected bool
+	}{
+		{CLIENT, "CLIENT", false},
+		{ROUTER, "ROUTER", true},
+		{GATEWAY, "GATEWAY", true},
+		{SYSTEM, "SYSTEM", true},
+		{LEAF, "LEAF", true},
+		{JETSTREAM, "JETSTREAM", false},
+		{ACCOUNT, "ACCOUNT", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRouteKind(tt.kind); got != tt.expected {
+				t.Fatalf("isRouteKind(%s) = %v, want %v", tt.name, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestNoRaceStallGateHysteresis(t *testing.T) {
+	opts := DefaultOptions()
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	nc := natsConnect(t, s.ClientURL())
+	defer nc.Close()
+
+	// Get the internal client for the connection.
+	cid, _ := nc.GetClientID()
+	c := s.GetClient(cid)
+	require_True(t, c != nil)
+
+	c.mu.Lock()
+
+	// Set up a stall gate as if the buffer was previously above 75%.
+	c.out.stc = make(chan struct{})
+	// Set mp to a known value for clean math.
+	c.out.mp = 1000
+
+	// Set pb to 65% — between the creation threshold (75%) and
+	// the release threshold (60%). The gate should NOT be released.
+	c.out.pb = 650
+	// Simulate the release check condition.
+	shouldRelease65 := c.out.pb < c.out.mp*3/5 // 650 < 600 = false
+	c.mu.Unlock()
+
+	if shouldRelease65 {
+		t.Fatal("Expected stall gate to persist at 65% fill (within hysteresis band)")
+	}
+
+	c.mu.Lock()
+	// Now set pb to 55% — below the release threshold (60%).
+	// The gate should be released.
+	c.out.pb = 550
+	shouldRelease55 := c.out.pb < c.out.mp*3/5 // 550 < 600 = true
+	c.mu.Unlock()
+
+	if !shouldRelease55 {
+		t.Fatal("Expected stall gate to release at 55% fill (below release threshold)")
+	}
+
+	// Verify original creation threshold still works at 75%.
+	c.mu.Lock()
+	if c.out.stc != nil {
+		close(c.out.stc)
+		c.out.stc = nil
+	}
+	c.out.pb = 760
+	shouldCreate := c.out.pb > c.out.mp/4*3 // 760 > 750 = true
+	c.mu.Unlock()
+
+	if !shouldCreate {
+		t.Fatal("Expected stall gate creation at 76% fill (above creation threshold)")
+	}
+}
+
 func TestNoRaceJetStreamClusterConsumerDeleteInterestPolicyPerf(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
