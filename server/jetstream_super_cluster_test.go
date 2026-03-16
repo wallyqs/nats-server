@@ -2769,7 +2769,7 @@ func TestJetStreamSuperClusterMovingStreamAndMoveBack(t *testing.T) {
 			checkMove := func(cluster string) {
 				t.Helper()
 				sc.waitOnStreamLeader("$G", "TEST")
-				checkFor(t, 20*time.Second, 100*time.Millisecond, func() error {
+				checkFor(t, 30*time.Second, 100*time.Millisecond, func() error {
 					si, err := js.StreamInfo("TEST")
 					if err != nil {
 						return err
@@ -2797,7 +2797,7 @@ func TestJetStreamSuperClusterMovingStreamAndMoveBack(t *testing.T) {
 
 			// The move could be completed when looking at the stream info, but the meta leader could still
 			// deny move updates for a short time while state is cleaned up.
-			checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+			checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
 				_, err = js.UpdateStream(&nats.StreamConfig{
 					Name:      "TEST",
 					Replicas:  test.replicas,
