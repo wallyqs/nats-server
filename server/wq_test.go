@@ -449,9 +449,11 @@ func TestLongClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 				}
 
 				if stream.State.Msgs != streamLeader.State.Msgs {
-					err := fmt.Errorf("Leader %v has %d messages, Follower %v has %d messages",
+					err := fmt.Errorf("Leader %v has %d messages (FirstSeq=%d LastSeq=%d NumDeleted=%d), Follower %v has %d messages (FirstSeq=%d LastSeq=%d NumDeleted=%d)",
 						stream.Cluster.Leader, streamLeader.State.Msgs,
+						streamLeader.State.FirstSeq, streamLeader.State.LastSeq, streamLeader.State.NumDeleted,
 						srv, stream.State.Msgs,
+						stream.State.FirstSeq, stream.State.LastSeq, stream.State.NumDeleted,
 					)
 					errs = append(errs, err)
 				}
@@ -521,15 +523,139 @@ func TestLongClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 			}
 		}
 
+		// Detailed drift diagnostics: find exactly which sequences differ between replicas.
+		dumpDriftDetails := func(t *testing.T) {
+			t.Helper()
+			var msets []*stream
+			var srvNames []string
+			for _, s := range c.servers {
+				acc, err := s.LookupAccount("js")
+				if err != nil {
+					continue
+				}
+				mset, err := acc.lookupStream(sc.Name)
+				if err != nil {
+					continue
+				}
+				msets = append(msets, mset)
+				srvNames = append(srvNames, s.Name())
+			}
+			if len(msets) < 2 {
+				return
+			}
+
+			// Get full state from each replica.
+			type replicaState struct {
+				state StreamState
+			}
+			var states []replicaState
+			for _, mset := range msets {
+				mset.mu.RLock()
+				var ss StreamState
+				mset.store.FastState(&ss)
+				mset.mu.RUnlock()
+				states = append(states, replicaState{state: ss})
+			}
+
+			// Log state summary for each replica.
+			for i, rs := range states {
+				t.Logf("DRIFT-DIAG: %s: Msgs=%d FirstSeq=%d LastSeq=%d NumDeleted=%d",
+					srvNames[i], rs.state.Msgs, rs.state.FirstSeq, rs.state.LastSeq, rs.state.NumDeleted)
+			}
+
+			// Find the overall range across all replicas.
+			var minFirst, maxLast uint64
+			minFirst = states[0].state.FirstSeq
+			maxLast = states[0].state.LastSeq
+			for _, rs := range states[1:] {
+				if rs.state.FirstSeq < minFirst {
+					minFirst = rs.state.FirstSeq
+				}
+				if rs.state.LastSeq > maxLast {
+					maxLast = rs.state.LastSeq
+				}
+			}
+
+			// Compare each sequence across replicas.
+			var smv StoreMsg
+			var driftSeqs []uint64
+			for seq := minFirst; seq <= maxLast; seq++ {
+				exists := make([]bool, len(msets))
+				for i, mset := range msets {
+					mset.mu.RLock()
+					_, err := mset.store.LoadMsg(seq, &smv)
+					mset.mu.RUnlock()
+					exists[i] = (err == nil)
+				}
+				// Check if all replicas agree.
+				allSame := true
+				for i := 1; i < len(exists); i++ {
+					if exists[i] != exists[0] {
+						allSame = false
+						break
+					}
+				}
+				if !allSame {
+					driftSeqs = append(driftSeqs, seq)
+					if len(driftSeqs) <= 20 {
+						existsStr := ""
+						for i, e := range exists {
+							if i > 0 {
+								existsStr += ", "
+							}
+							if e {
+								existsStr += fmt.Sprintf("%s=EXISTS", srvNames[i])
+							} else {
+								existsStr += fmt.Sprintf("%s=DELETED", srvNames[i])
+							}
+						}
+						// Also load subject info from the replica that has the message.
+						subj := "unknown"
+						for i, mset := range msets {
+							if exists[i] {
+								mset.mu.RLock()
+								sm, err := mset.store.LoadMsg(seq, &smv)
+								mset.mu.RUnlock()
+								if err == nil {
+									subj = sm.subj
+								}
+								break
+							}
+						}
+						t.Logf("DRIFT-DIAG: seq=%d subject=%s %s", seq, subj, existsStr)
+					}
+				}
+			}
+			t.Logf("DRIFT-DIAG: total drifted sequences=%d out of range [%d, %d]", len(driftSeqs), minFirst, maxLast)
+
+			// Also dump Raft state for each node.
+			for i, mset := range msets {
+				mset.mu.RLock()
+				node := mset.node
+				mset.mu.RUnlock()
+				if node != nil {
+					_, commit, applied := node.Progress()
+					t.Logf("DRIFT-DIAG: %s raft: commit=%d applied=%d leader=%v",
+						srvNames[i], commit, applied, node.Leader())
+				}
+			}
+		}
+
 		// Wait for test to finish before checking state.
 		wg.Wait()
 
 		// If clustered, check whether leader and followers have drifted.
 		if sc.Replicas > 1 {
 			// If we have drifted do not have to wait too long, usually it's stuck for good.
-			checkFor(t, time.Minute, time.Second, func() error {
+			err := checkForErr(time.Minute, time.Second, func() error {
 				return checkState(t)
 			})
+			if err != nil {
+				// Drift detected - dump detailed diagnostics before failing.
+				t.Logf("Replica drift detected, collecting detailed diagnostics...")
+				dumpDriftDetails(t)
+				t.Fatalf("Replica drift: %v", err)
+			}
 			// If we succeeded now let's check that all messages are also the same.
 			// We may have no messages but for tests that do we make sure each msg is the same
 			// across all replicas.
