@@ -23213,3 +23213,74 @@ func TestJetStreamSourcingDiscardNewPerSubjectWithDedup(t *testing.T) {
 	// foo.2 should not exist (dedup rejected it).
 	require_Equal(t, si.State.Subjects["foo.2"], uint64(0))
 }
+
+// Test that ErrMaxMsgsPerSubject during sourcing does not cause a retry loop.
+// Without the fix, retrySourceConsumerAtSeq(si.sseq) recreates the consumer at the
+// same rejected sequence, looping forever and blocking all subsequent messages.
+// This test verifies that the rejected message is skipped and later messages on
+// different subjects are sourced promptly.
+func TestJetStreamSourcingDiscardNewPerSubjectNoRetryLoop(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "SOURCE",
+		Subjects: []string{"foo.>"},
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:                 "DEST",
+		MaxMsgsPerSubject:    1,
+		Discard:              nats.DiscardNew,
+		DiscardNewPerSubject: true,
+		Sources:              []*nats.StreamSource{{Name: "SOURCE"}},
+	})
+	require_NoError(t, err)
+
+	// Fill the per-subject slot for foo.1 via sourcing.
+	_, err = js.Publish("foo.1", []byte("first"))
+	require_NoError(t, err)
+
+	checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Publish a burst of messages to the same (full) subject.
+	// Without the fix each one triggers retrySourceConsumerAtSeq at the same
+	// sequence, creating a tight retry loop that blocks progress.
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish("foo.1", []byte(fmt.Sprintf("rejected-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Now publish to a new subject that should succeed.
+	_, err = js.Publish("foo.2", []byte("should-arrive"))
+	require_NoError(t, err)
+
+	// With the fix, the consumer skips all rejected messages and processes
+	// foo.2 promptly. Without the fix, the consumer is stuck in a retry loop
+	// on the first rejected foo.1 message and this times out.
+	checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 2 {
+			return fmt.Errorf("expected 2 msgs (foo.1 + foo.2), got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Verify the right subjects are stored.
+	si, err := js.StreamInfo("DEST", &nats.StreamInfoRequest{SubjectsFilter: ">"})
+	require_NoError(t, err)
+	require_Equal(t, si.State.Subjects["foo.1"], uint64(1))
+	require_Equal(t, si.State.Subjects["foo.2"], uint64(1))
+}
