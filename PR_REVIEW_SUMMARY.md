@@ -1,96 +1,68 @@
-# PR Review Summary: Sourcing Skip for DiscardNewPerSubject and Dedup Rejections
+# PR Review Summary: Fix Dedup Window During Sourcing
 
 ## Background: Intentional Backpressure via Retry
 
-When sourcing into a stream configured with `DiscardNew` and a **stream-level**
-limit (`MaxMsgs`), the current retry behavior is **intentional backpressure**.
-The source consumer is torn down and recreated later, effectively pausing
-sourcing until consumers drain messages from the destination stream. Once room
-opens up, sourcing resumes automatically. This is a production pattern used for
-work-queue/interest streams where you want to limit the sourcing stream's size
-while consumers catch up.
+When sourcing into a stream configured with `DiscardNew` and a stream-level
+limit (`MaxMsgs`/`MaxBytes`), the existing retry behavior is **intentional
+backpressure**. The source consumer is torn down and recreated later,
+effectively pausing sourcing until consumers drain messages from the
+destination stream. Once room opens up, sourcing resumes automatically. This is
+a production pattern used for work-queue/interest streams where you want to
+limit the sourcing stream's size while consumers catch up.
 
-**This backpressure behavior must not be changed.** Our fix does not touch it —
-we only handle `ErrMaxMsgsPerSubject` (per-subject limit), not `ErrMaxMsgs`
-(stream-level limit).
+**This backpressure behavior is correct and must not be changed.** The same
+applies when `DiscardNewPerSubject` causes per-subject limit rejections — the
+blocking behavior is consistent, and changing it requires an opt-in mechanism
+(out of scope for this PR).
 
-## Original PR (#7896)
+## The Bug: Broken Dedup Window During Sourcing
 
-The original PR fixed sourcing into streams configured with
-`DiscardNewPerSubject` by skipping messages that hit the per-subject limit
-rather than blocking. It also extended the fix to handle duplicate message IDs
-(`errMsgIdDuplicate`), which fixes currently broken dedup-window behavior
-during sourcing. The per-subject skip was made opt-in via a new boolean flag in
-the source configuration for safer mergeability.
+When a source stream has a shorter dedup window than the destination, a message
+ID can be accepted by the source (dedup expired) but rejected by the
+destination (dedup still active). Without explicit handling, `errMsgIdDuplicate`
+falls into the generic error path which logs a warning and triggers a retry.
+This is wrong — the message is genuinely a duplicate and should simply be
+skipped.
 
-## Why Per-Subject Skip Is Different from Stream-Level Blocking
-
-Stream-level `DiscardNew` blocking is correct: the entire stream is full, so
-pausing sourcing until room opens is the right thing to do.
-
-Per-subject `DiscardNewPerSubject` blocking is problematic: only **one
-subject** is full, but messages on **other subjects** still have room. The
-retry mechanism (`retrySourceConsumerAtSeq(si.sseq)`) recreates the consumer
-starting at the rejected sequence. Since the per-subject slot is still full,
-the same message gets rejected again, blocking all subsequent messages —
-including those on subjects with available capacity.
-
-```
-reject msg on foo.1 (full) → cancel consumer → recreate at same seq → reject again → ...
-meanwhile foo.2, foo.3, etc. are blocked even though they have room
-```
+Unlike `DiscardNew` backpressure (where room may open up later), a dedup
+rejection is permanent for the life of the dedup window. Retrying will never
+succeed for that message ID, so skipping is the only correct behavior.
 
 ## What This PR Changes
 
-### 1. Skip on Per-Subject Rejection and Dedup (`server/stream.go`)
+### Fix: Skip on Dedup Rejection (`server/stream.go`)
 
 ```go
-} else if errors.Is(err, ErrMaxMsgsPerSubject) || errors.Is(err, errMsgIdDuplicate) {
+} else if errors.Is(err, errMsgIdDuplicate) {
+    // Duplicate message ID detected during sourcing. The destination
+    // already has this message by ID within its dedup window. Skip
+    // the message and continue processing.
     return true
 }
 ```
 
-- **`ErrMaxMsgsPerSubject`:** The per-subject slot is full. Retrying will never
-  succeed (unlike stream-level, where consumers can drain room). Skip the
-  message so other subjects continue flowing.
-- **`errMsgIdDuplicate`:** The destination already has this message by ID.
-  Skipping is correct — same as direct-publish dedup behavior. This fixes
-  currently broken dedup-window handling during sourcing.
+The destination already has this message by ID. Skipping is correct — same as
+direct-publish dedup behavior.
 
-**What is NOT changed:** Stream-level `DiscardNew` (`ErrMaxMsgs`) still goes
-through the existing error path. The intentional backpressure behavior is
-preserved.
-
-### 2. Tests Added
+### Tests Added
 
 | Test | Variant | What it validates |
 |------|---------|-------------------|
-| `TestJetStreamSourcingDedupWithoutDiscardNew` | Single + Cluster | Dedup skip works without DiscardNewPerSubject |
-| `TestJetStreamSourcingDiscardNewPerSubjectMixedSubjects` | Single + Cluster | Per-subject rejection on one subject doesn't block others |
-| `TestJetStreamSourcingDiscardNewPerSubjectWithDedup` | Single + Cluster | Combined per-subject + dedup rejections both skip correctly |
-| `TestJetStreamSourcingDiscardNewPerSubjectNoRetryLoop` | Single | Burst of rejections doesn't block messages on other subjects |
+| `TestJetStreamSourcingDedupWithoutDiscardNew` | Single-server | Dedup skip works: duplicate msg ID skipped, next message sourced |
+| `TestJetStreamClusterSourcingDedupWithoutDiscardNew` | 3-node cluster | Same behavior verified in clustered mode |
 
-### 3. Raft Fix (Separate Concern, `server/raft.go`)
+### Raft Fix (Separate Concern, `server/raft.go`)
 
 Entries from previous terms are no longer counted toward commit advancement.
 This prevents a scenario where a leader commits entries that could still be
 overwritten by a leader from an intermediate term it never observed. Existing
 raft tests were updated to match the corrected term-checking behavior.
 
-## Difference from Original PR #7896
+## Out of Scope (Discussed but Not Included)
 
-| Aspect | Original PR #7896 | This PR |
-|--------|-------------------|---------|
-| `ErrMaxMsgsPerSubject` handling | Skip (opt-in via config flag) | Skip (unconditional) |
-| `errMsgIdDuplicate` handling | Skip | Skip |
-| Opt-in config flag | Yes — new boolean in source config | No — always skips |
-| Stream-level `DiscardNew` backpressure | Preserved | Preserved |
-| Tests | Included | 7 tests (4 single-server + 3 clustered) |
-
-## Open Question: Opt-In Flag
-
-The original PR made per-subject skipping opt-in via a new `SkipOnDiscardNew`
-(or similar) boolean in the source configuration. This is more conservative and
-avoids changing default behavior for existing deployments that may rely on the
-current blocking semantics even for per-subject limits. Whether this PR should
-also adopt an opt-in approach is a design decision worth discussing.
+**Skip on `DiscardNewPerSubject`**: When sourcing into a stream with
+`DiscardNewPerSubject`, a per-subject limit rejection blocks sourcing of all
+subjects (including those with available capacity). Skipping would allow other
+subjects to continue flowing. However, this changes existing (albeit
+undocumented) behavior and was deemed to require an opt-in mechanism via a new
+source configuration flag. This is tracked separately from the dedup fix.

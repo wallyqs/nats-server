@@ -4084,10 +4084,10 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 				mset.mu.Lock()
 				mset.retrySourceConsumerAtSeq(iName, si.sseq)
 				mset.mu.Unlock()
-			} else if errors.Is(err, ErrMaxMsgsPerSubject) || errors.Is(err, errMsgIdDuplicate) {
-				// Per-subject limit reached (discard new per subject) or duplicate message ID
-				// detected during sourcing. These are expected conditions that do not require
-				// a consumer retry - skip the message and continue processing.
+			} else if errors.Is(err, errMsgIdDuplicate) {
+				// Duplicate message ID detected during sourcing. The destination
+				// already has this message by ID within its dedup window. Skip
+				// the message and continue processing.
 				return true
 			} else {
 				// Log some warning for errors other than errLastSeqMismatch.
