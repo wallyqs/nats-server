@@ -22977,3 +22977,239 @@ func TestJetStreamMirrorSetupStartGoRoutineFailMissingWgDone(t *testing.T) {
 		t.Fatal("mirror.wg.Wait() blocked indefinitely: missing wg.Done() in startGoRoutine failure path")
 	}
 }
+
+// Test that sourcing with a deduplication window (but without DiscardNewPerSubject)
+// correctly skips duplicate message IDs without causing a full source consumer retry.
+func TestJetStreamSourcingDedupWithoutDiscardNew(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Source stream with a very short dedup window so we can re-publish same msg IDs.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:       "SOURCE",
+		Subjects:   []string{"foo.>"},
+		Duplicates: 100 * time.Millisecond,
+	})
+	require_NoError(t, err)
+
+	// Destination stream sourcing from SOURCE with a longer dedup window.
+	// No DiscardNewPer - using default DiscardOld policy.
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:       "DEST",
+		Duplicates: 10 * time.Second,
+		Sources:    []*nats.StreamSource{{Name: "SOURCE"}},
+	})
+	require_NoError(t, err)
+
+	// Publish a message with a specific Nats-Msg-Id.
+	msg := nats.NewMsg("foo.1")
+	msg.Header.Set(JSMsgId, "msg-1")
+	msg.Data = []byte("first")
+	_, err = js.PublishMsg(msg)
+	require_NoError(t, err)
+
+	// Wait for it to be sourced to DEST.
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Wait for SOURCE's dedup window to expire so SOURCE accepts the re-publish.
+	time.Sleep(200 * time.Millisecond)
+
+	// Re-publish with the same Nats-Msg-Id. SOURCE will accept it (dedup expired),
+	// but DEST should reject it as a duplicate (its window is 10s).
+	msg2 := nats.NewMsg("foo.1")
+	msg2.Header.Set(JSMsgId, "msg-1")
+	msg2.Data = []byte("duplicate")
+	_, err = js.PublishMsg(msg2)
+	require_NoError(t, err)
+
+	// Verify SOURCE now has 2 messages.
+	si, err := js.StreamInfo("SOURCE")
+	require_NoError(t, err)
+	require_Equal(t, si.State.Msgs, uint64(2))
+
+	// Now publish a new message with a different ID to verify sourcing continues.
+	msg3 := nats.NewMsg("foo.2")
+	msg3.Header.Set(JSMsgId, "msg-2")
+	msg3.Data = []byte("second")
+	_, err = js.PublishMsg(msg3)
+	require_NoError(t, err)
+
+	// DEST should have 2 messages: the original msg-1 and msg-2.
+	// The duplicate msg-1 should have been skipped.
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 2 {
+			return fmt.Errorf("expected 2 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+}
+
+// Test that sourcing into a DiscardNewPerSubject stream correctly handles mixed subjects:
+// rejection on one subject must not block processing of other subjects.
+func TestJetStreamSourcingDiscardNewPerSubjectMixedSubjects(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "SOURCE",
+		Subjects: []string{"foo.>"},
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:                 "DEST",
+		MaxMsgsPerSubject:    1,
+		Discard:              nats.DiscardNew,
+		DiscardNewPerSubject: true,
+		Sources:              []*nats.StreamSource{{Name: "SOURCE"}},
+	})
+	require_NoError(t, err)
+
+	// Publish first messages for 3 different subjects.
+	for i := 1; i <= 3; i++ {
+		_, err = js.Publish(fmt.Sprintf("foo.%d", i), []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	// Wait for all 3 to be sourced.
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 3 {
+			return fmt.Errorf("expected 3 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Now publish duplicates for foo.1 and foo.2 (slots are full, should be rejected),
+	// followed by a new subject foo.4 which should succeed.
+	_, err = js.Publish("foo.1", []byte("dup-1"))
+	require_NoError(t, err)
+	_, err = js.Publish("foo.2", []byte("dup-2"))
+	require_NoError(t, err)
+	_, err = js.Publish("foo.4", []byte("msg-4"))
+	require_NoError(t, err)
+
+	// DEST should have 4 messages total: foo.1, foo.2, foo.3, foo.4.
+	// The duplicate publishes to foo.1 and foo.2 should have been skipped
+	// without blocking foo.4.
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 4 {
+			return fmt.Errorf("expected 4 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Verify the right messages are stored per subject.
+	si, err := js.StreamInfo("DEST", &nats.StreamInfoRequest{SubjectsFilter: ">"})
+	require_NoError(t, err)
+	for _, subj := range []string{"foo.1", "foo.2", "foo.3", "foo.4"} {
+		if si.State.Subjects[subj] != 1 {
+			t.Fatalf("expected 1 message on subject %s, got %d", subj, si.State.Subjects[subj])
+		}
+	}
+}
+
+// Test that sourcing into a DiscardNewPerSubject stream with a deduplication window
+// correctly handles all three scenarios: per-subject rejection, dedup rejection,
+// and successful storage.
+func TestJetStreamSourcingDiscardNewPerSubjectWithDedup(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Source stream with short dedup window.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:       "SOURCE",
+		Subjects:   []string{"foo.>"},
+		Duplicates: 100 * time.Millisecond,
+	})
+	require_NoError(t, err)
+
+	// Destination with both DiscardNewPerSubject and a dedup window.
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:                 "DEST",
+		MaxMsgsPerSubject:    1,
+		Discard:              nats.DiscardNew,
+		DiscardNewPerSubject: true,
+		Duplicates:           10 * time.Second,
+		Sources:              []*nats.StreamSource{{Name: "SOURCE"}},
+	})
+	require_NoError(t, err)
+
+	// Phase 1: Publish with msg IDs - first messages should be sourced.
+	msg := nats.NewMsg("foo.1")
+	msg.Header.Set(JSMsgId, "id-1")
+	msg.Data = []byte("first")
+	_, err = js.PublishMsg(msg)
+	require_NoError(t, err)
+
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Phase 2: Wait for SOURCE dedup to expire and re-publish same msg ID on a different subject.
+	// This tests the dedup path specifically: DEST has the msg ID in its dedup window.
+	time.Sleep(200 * time.Millisecond)
+
+	msg2 := nats.NewMsg("foo.2")
+	msg2.Header.Set(JSMsgId, "id-1")
+	msg2.Data = []byte("dup-id-different-subject")
+	_, err = js.PublishMsg(msg2)
+	require_NoError(t, err)
+
+	// Phase 3: Publish a message to foo.1 without msg ID (per-subject rejection).
+	_, err = js.Publish("foo.1", []byte("per-subj-dup"))
+	require_NoError(t, err)
+
+	// Phase 4: Publish a new message with a new msg ID on a new subject (should succeed).
+	msg3 := nats.NewMsg("foo.3")
+	msg3.Header.Set(JSMsgId, "id-2")
+	msg3.Data = []byte("new-msg")
+	_, err = js.PublishMsg(msg3)
+	require_NoError(t, err)
+
+	// DEST should have exactly 2 messages: id-1 on foo.1 and id-2 on foo.3.
+	// The duplicate msg ID on foo.2 was rejected by dedup.
+	// The per-subject dup on foo.1 was rejected by DiscardNewPer.
+	checkFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 2 {
+			return fmt.Errorf("expected 2 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Verify correct subjects.
+	si, err := js.StreamInfo("DEST", &nats.StreamInfoRequest{SubjectsFilter: ">"})
+	require_NoError(t, err)
+	require_Equal(t, si.State.Subjects["foo.1"], uint64(1))
+	require_Equal(t, si.State.Subjects["foo.3"], uint64(1))
+	// foo.2 should not exist (dedup rejected it).
+	require_Equal(t, si.State.Subjects["foo.2"], uint64(0))
+}

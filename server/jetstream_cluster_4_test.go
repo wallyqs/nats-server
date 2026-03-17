@@ -7639,3 +7639,201 @@ func TestJetStreamClusterConsumerSetStoreStateOldUpdateRestart(t *testing.T) {
 		require_NoError(t, err)
 	}
 }
+
+// Clustered variant: Test that sourcing with a dedup window (without DiscardNewPerSubject)
+// correctly skips duplicate message IDs without full source consumer retry.
+func TestJetStreamClusterSourcingDedupWithoutDiscardNew(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:       "SOURCE",
+		Subjects:   []string{"foo.>"},
+		Duplicates: 100 * time.Millisecond,
+		Replicas:   3,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:       "DEST",
+		Duplicates: 10 * time.Second,
+		Sources:    []*nats.StreamSource{{Name: "SOURCE"}},
+		Replicas:   3,
+	})
+	require_NoError(t, err)
+
+	msg := nats.NewMsg("foo.1")
+	msg.Header.Set(JSMsgId, "msg-1")
+	msg.Data = []byte("first")
+	_, err = js.PublishMsg(msg)
+	require_NoError(t, err)
+
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Wait for SOURCE's dedup window to expire.
+	time.Sleep(200 * time.Millisecond)
+
+	// Re-publish same msg ID; SOURCE accepts it, DEST should skip as duplicate.
+	msg2 := nats.NewMsg("foo.1")
+	msg2.Header.Set(JSMsgId, "msg-1")
+	msg2.Data = []byte("duplicate")
+	_, err = js.PublishMsg(msg2)
+	require_NoError(t, err)
+
+	// Publish a new message to verify sourcing continues after the duplicate skip.
+	msg3 := nats.NewMsg("foo.2")
+	msg3.Header.Set(JSMsgId, "msg-2")
+	msg3.Data = []byte("second")
+	_, err = js.PublishMsg(msg3)
+	require_NoError(t, err)
+
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 2 {
+			return fmt.Errorf("expected 2 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+}
+
+// Clustered variant: Test that per-subject rejection doesn't block other subjects.
+func TestJetStreamClusterSourcingDiscardNewPerSubjectMixedSubjects(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "SOURCE",
+		Subjects: []string{"foo.>"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:                 "DEST",
+		MaxMsgsPerSubject:    1,
+		Discard:              nats.DiscardNew,
+		DiscardNewPerSubject: true,
+		Sources:              []*nats.StreamSource{{Name: "SOURCE"}},
+		Replicas:             3,
+	})
+	require_NoError(t, err)
+
+	// Publish first messages for 3 different subjects.
+	for i := 1; i <= 3; i++ {
+		_, err = js.Publish(fmt.Sprintf("foo.%d", i), []byte(fmt.Sprintf("msg-%d", i)))
+		require_NoError(t, err)
+	}
+
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 3 {
+			return fmt.Errorf("expected 3 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Publish duplicates for existing subjects then a new subject.
+	_, err = js.Publish("foo.1", []byte("dup-1"))
+	require_NoError(t, err)
+	_, err = js.Publish("foo.2", []byte("dup-2"))
+	require_NoError(t, err)
+	_, err = js.Publish("foo.4", []byte("msg-4"))
+	require_NoError(t, err)
+
+	// DEST should have 4 messages: foo.1 through foo.4.
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 4 {
+			return fmt.Errorf("expected 4 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+}
+
+// Clustered variant: combined DiscardNewPerSubject + dedup window sourcing.
+func TestJetStreamClusterSourcingDiscardNewPerSubjectWithDedup(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:       "SOURCE",
+		Subjects:   []string{"foo.>"},
+		Duplicates: 100 * time.Millisecond,
+		Replicas:   3,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:                 "DEST",
+		MaxMsgsPerSubject:    1,
+		Discard:              nats.DiscardNew,
+		DiscardNewPerSubject: true,
+		Duplicates:           10 * time.Second,
+		Sources:              []*nats.StreamSource{{Name: "SOURCE"}},
+		Replicas:             3,
+	})
+	require_NoError(t, err)
+
+	msg := nats.NewMsg("foo.1")
+	msg.Header.Set(JSMsgId, "id-1")
+	msg.Data = []byte("first")
+	_, err = js.PublishMsg(msg)
+	require_NoError(t, err)
+
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 1 {
+			return fmt.Errorf("expected 1 msg, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Dedup rejection: same msg ID on different subject.
+	msg2 := nats.NewMsg("foo.2")
+	msg2.Header.Set(JSMsgId, "id-1")
+	msg2.Data = []byte("dup-id")
+	_, err = js.PublishMsg(msg2)
+	require_NoError(t, err)
+
+	// Per-subject rejection on foo.1.
+	_, err = js.Publish("foo.1", []byte("per-subj-dup"))
+	require_NoError(t, err)
+
+	// New message should succeed.
+	msg3 := nats.NewMsg("foo.3")
+	msg3.Header.Set(JSMsgId, "id-2")
+	msg3.Data = []byte("new-msg")
+	_, err = js.PublishMsg(msg3)
+	require_NoError(t, err)
+
+	checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		require_NoError(t, err)
+		if si.State.Msgs != 2 {
+			return fmt.Errorf("expected 2 msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+}
