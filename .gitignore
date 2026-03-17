@@ -53,3 +53,6 @@ coverage.out
 
 # Cross compiled binaries
 pkg
+
+# Claude Code
+.claude/
