@@ -536,12 +536,33 @@ func TestLongClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 			checkMsgsEqual(t)
 		}
 
+		// For clustered streams, force a checkInterestState to ensure cleanup
+		// before checking. This helps distinguish between "slow Raft replication"
+		// and "truly orphaned messages".
+		if sc.Replicas > 1 {
+			leaderSrv := c.streamLeader("js", sc.Name)
+			if leaderSrv != nil {
+				acc, err := leaderSrv.LookupAccount("js")
+				if err == nil {
+					mset, err := acc.lookupStream(sc.Name)
+					if err == nil {
+						mset.checkInterestState()
+						// Give Raft time to process deletions.
+						time.Sleep(2 * time.Second)
+						mset.checkInterestState()
+						time.Sleep(2 * time.Second)
+					}
+				}
+			}
+		}
+
 		err = checkForErr(time.Minute, time.Second, func() error {
 			var consumerPending int
 			var totalAckPending int
 			consumers := make(map[string]int)
 			consumersAck := make(map[string]int)
 			consumersSseq := make(map[string]uint64)
+			consumersAckFloor := make(map[string]uint64)
 			for i := 0; i < 10; i++ {
 				consumerName := fmt.Sprintf("consumer:EEEEE:%d", i)
 				ci, err := js.ConsumerInfo(sc.Name, consumerName)
@@ -553,6 +574,7 @@ func TestLongClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 				consumersAck[consumerName] = ackPending
 				totalAckPending += ackPending
 				consumersSseq[consumerName] = ci.Delivered.Stream + 1
+				consumersAckFloor[consumerName] = ci.AckFloor.Stream
 			}
 
 			// Only check if there are any pending messages.
@@ -567,9 +589,10 @@ func TestLongClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 				// NumPending = messages not yet delivered (from consumer sseq onwards)
 				// NumAckPending = messages delivered but not yet acked (below sseq, in pending map)
 				if streamPending != totalConsumer {
-					return fmt.Errorf("Unexpected number of pending messages, stream=%d, consumers(numPending)=%d, ackPending=%d, (numPending+ackPending)=%d, diff=%d\n subjects: %+v\nconsumers: %+v\nackPending: %+v\nsseq: %+v",
+					return fmt.Errorf("Unexpected number of pending messages, stream=%d, consumers(numPending)=%d, ackPending=%d, (numPending+ackPending)=%d, diff(true orphans)=%d\n subjects: %+v\nconsumers: %+v\nackPending: %+v\nsseq: %+v\nackFloor: %+v\nstreamFirstSeq: %d, streamLastSeq: %d",
 						streamPending, consumerPending, totalAckPending, totalConsumer, streamPending-totalConsumer,
-						si.State.Subjects, consumers, consumersAck, consumersSseq)
+						si.State.Subjects, consumers, consumersAck, consumersSseq, consumersAckFloor,
+						si.State.FirstSeq, si.State.LastSeq)
 				}
 
 				// Additionally check for NumPending drift (the original check).
@@ -702,6 +725,31 @@ func TestLongClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 			Retention:   nats.WorkQueuePolicy,
 			Discard:     nats.DiscardOld,
 			AllowRollup: true,
+			Placement: &nats.Placement{
+				Tags: []string{"test"},
+			},
+		})
+	})
+
+	// Clustered memory based with discard new policy and max msgs limit.
+	t.Run("R3M", func(t *testing.T) {
+		params := &testParams{
+			restartAny:   true,
+			ldmRestart:   true,
+			restarts:     1,
+			checkHealthz: true,
+		}
+		test(t, params, &nats.StreamConfig{
+			Name:        "OWQTEST_R3M",
+			Subjects:    []string{"MSGS.>"},
+			Replicas:    3,
+			MaxAge:      30 * time.Minute,
+			MaxMsgs:     100_000,
+			Duplicates:  5 * time.Minute,
+			Retention:   nats.WorkQueuePolicy,
+			Discard:     nats.DiscardNew,
+			AllowRollup: true,
+			Storage:     nats.MemoryStorage,
 			Placement: &nats.Placement{
 				Tags: []string{"test"},
 			},
