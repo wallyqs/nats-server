@@ -3232,6 +3232,13 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 				} else if n != nil && n.NeedSnapshot() {
 					doSnapshot(false)
 				}
+				// If interest or workqueue retention, check for messages that may
+				// need cleanup. During leadership transitions, consumer acks may
+				// have been applied while no stream leader was available to propose
+				// the corresponding message deletions, leaving orphan messages.
+				if mset != nil && mset.isInterestRetention() && !isRecovering {
+					go mset.checkInterestState()
+				}
 				// Always cancel if this was running.
 				stopDirectMonitoring()
 			} else if !n.Leaderless() {
