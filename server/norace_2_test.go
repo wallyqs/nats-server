@@ -3373,6 +3373,76 @@ func TestNoRaceStallGateHysteresis(t *testing.T) {
 	}
 }
 
+// TestNoRaceRouteStcNotSetOnRouteConnections verifies that stall channels (stc)
+// are not created on ROUTE connections. Before the fix, queueOutbound() would
+// set stc on any connection whose pending bytes exceeded 75% of max pending,
+// including routes. This caused innocent CLIENT producers to stall when their
+// messages were delivered to a congested route (e.g. during JetStream API calls
+// traversing a service import to a system account with busy replication routes).
+func TestNoRaceRouteStcNotSetOnRouteConnections(t *testing.T) {
+	optsA := DefaultOptions()
+	srvA := RunServer(optsA)
+	defer srvA.Shutdown()
+
+	optsB := DefaultOptions()
+	optsB.Routes = RoutesFromStr(fmt.Sprintf("nats://%s:%d", optsA.Cluster.Host, optsA.Cluster.Port))
+	srvB := RunServer(optsB)
+	defer srvB.Shutdown()
+
+	checkClusterFormed(t, srvA, srvB)
+
+	// Subscribe on server B so messages from server A route through.
+	ncSub := natsConnect(t, srvB.ClientURL(), nats.Name("sub"))
+	defer ncSub.Close()
+	sub := natsSub(t, ncSub, "foo", func(m *nats.Msg) {})
+	natsFlush(t, ncSub)
+	_ = sub
+
+	// Wait for the subscription to propagate to server A.
+	checkSubInterest(t, srvA, globalAccountName, "foo", time.Second)
+
+	// Get the route client on server A that connects to server B.
+	var rc *client
+	srvA.mu.RLock()
+	srvA.forEachRoute(func(r *client) {
+		rc = r
+	})
+	srvA.mu.RUnlock()
+	require_True(t, rc != nil)
+
+	// Confirm route has the standard max pending (64MB).
+	rc.mu.Lock()
+	mp := rc.out.mp
+	rc.mu.Unlock()
+	require_Equal(t, mp, MAX_PENDING_SIZE)
+
+	// Simulate the route being congested by setting pending bytes above 75%.
+	// With the fix, queueOutbound should NOT create stc on route kinds.
+	rc.mu.Lock()
+	rc.out.pb = rc.out.mp/4*3 + 100
+	rc.mu.Unlock()
+
+	// Connect a producer on server A and publish.
+	ncProd := natsConnect(t, srvA.ClientURL(), nats.Name("prod"))
+	defer ncProd.Close()
+
+	// Publish a message — this triggers queueOutbound on the route.
+	err := ncProd.Publish("foo", []byte("hello"))
+	require_NoError(t, err)
+	natsFlush(t, ncProd)
+
+	// Verify that stc was NOT set on the route connection.
+	rc.mu.Lock()
+	stc := rc.out.stc
+	// Clean up the artificial pending bytes.
+	rc.out.pb = 0
+	rc.mu.Unlock()
+
+	if stc != nil {
+		t.Fatal("Expected stc to NOT be set on route connection, but it was")
+	}
+}
+
 func TestNoRaceJetStreamClusterConsumerDeleteInterestPolicyPerf(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()

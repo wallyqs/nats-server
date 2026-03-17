@@ -2522,7 +2522,11 @@ func (c *client) queueOutbound(data []byte) {
 	// We do this here since if we wait for consumer's writeLoop it could be
 	// too late with large number of fan in producers.
 	// If the outbound connection is > 75% of maximum pending allowed, create a stall gate.
-	if c.out.pb > c.out.mp/4*3 && c.out.stc == nil {
+	// We skip route kinds (ROUTER, GATEWAY, LEAF, SYSTEM, ACCOUNT) since they have their
+	// own flow control (WriteTimeoutPolicyRetry) and are never disconnected for exceeding
+	// max pending. Setting stc on them would stall innocent CLIENT producers (e.g. a CLI
+	// making a JetStream API call that traverses a service import to a congested route).
+	if c.out.pb > c.out.mp/4*3 && c.out.stc == nil && !isRouteKind(c.kind) {
 		c.out.stc = make(chan struct{})
 	}
 }
