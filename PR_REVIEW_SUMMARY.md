@@ -1,51 +1,48 @@
 # PR Review Summary: Sourcing Skip for DiscardNewPerSubject and Dedup Rejections
 
+## Background: Intentional Backpressure via Retry
+
+When sourcing into a stream configured with `DiscardNew` and a **stream-level**
+limit (`MaxMsgs`), the current retry behavior is **intentional backpressure**.
+The source consumer is torn down and recreated later, effectively pausing
+sourcing until consumers drain messages from the destination stream. Once room
+opens up, sourcing resumes automatically. This is a production pattern used for
+work-queue/interest streams where you want to limit the sourcing stream's size
+while consumers catch up.
+
+**This backpressure behavior must not be changed.** Our fix does not touch it —
+we only handle `ErrMaxMsgsPerSubject` (per-subject limit), not `ErrMaxMsgs`
+(stream-level limit).
+
 ## Original PR (#7896)
 
-The original PR attempted to fix sourcing into streams configured with
-`DiscardNewPerSubject` by handling `ErrMaxMsgsPerSubject` in
-`processInboundSourceMsg`. When a per-subject limit rejection occurred, the
-original code called `retrySourceConsumerAtSeq(si.sseq)` — the same retry
-path used for `errLastSeqMismatch`.
+The original PR fixed sourcing into streams configured with
+`DiscardNewPerSubject` by skipping messages that hit the per-subject limit
+rather than blocking. It also extended the fix to handle duplicate message IDs
+(`errMsgIdDuplicate`), which fixes currently broken dedup-window behavior
+during sourcing. The per-subject skip was made opt-in via a new boolean flag in
+the source configuration for safer mergeability.
 
-## Issues Identified
+## Why Per-Subject Skip Is Different from Stream-Level Blocking
 
-### 1. Retry Loop on Per-Subject Rejection
+Stream-level `DiscardNew` blocking is correct: the entire stream is full, so
+pausing sourcing until room opens is the right thing to do.
 
-The core problem: `retrySourceConsumerAtSeq(si.sseq)` tears down the existing
-ephemeral source consumer and creates a brand-new one starting at the **same
-sequence** that was just rejected. Since the message at that sequence will
-always be rejected (the per-subject slot is full), this creates an infinite
-retry loop:
+Per-subject `DiscardNewPerSubject` blocking is problematic: only **one
+subject** is full, but messages on **other subjects** still have room. The
+retry mechanism (`retrySourceConsumerAtSeq(si.sseq)`) recreates the consumer
+starting at the rejected sequence. Since the per-subject slot is still full,
+the same message gets rejected again, blocking all subsequent messages —
+including those on subjects with available capacity.
 
 ```
-reject message at seq N → cancel consumer → create new consumer at seq N → reject again → ...
+reject msg on foo.1 (full) → cancel consumer → recreate at same seq → reject again → ...
+meanwhile foo.2, foo.3, etc. are blocked even though they have room
 ```
 
-Each cycle involves a full `$JS.API.CONSUMER.CREATE` request, new deliver
-subject allocation, subscription setup, and flow control initialization. The
-backoff in `setupSourceConsumer` prevents CPU spin but does not prevent the
-loop itself. All subsequent messages on other subjects are blocked until the
-situation resolves externally (e.g., the full subject's message is deleted).
+## What This PR Changes
 
-### 2. Missing Dedup (Duplicate Message ID) Handling
-
-The original PR did not handle `errMsgIdDuplicate` rejections during sourcing.
-When a source stream has a shorter dedup window than the destination, a message
-ID can be accepted by the source (dedup expired) but rejected by the
-destination (dedup still active). Without handling, this falls into the generic
-error path which logs a warning and returns `false`, potentially disrupting
-source processing.
-
-### 3. Minor: Ambiguous Comment
-
-A comment on the source dedup check (`// check for duplicates`) was ambiguous
-— it could refer to message deduplication rather than what it actually checks
-(duplicate source stream configurations).
-
-## What Changed
-
-### Fix: Skip Instead of Retry (`server/stream.go`)
+### 1. Skip on Per-Subject Rejection and Dedup (`server/stream.go`)
 
 ```go
 } else if errors.Is(err, ErrMaxMsgsPerSubject) || errors.Is(err, errMsgIdDuplicate) {
@@ -53,41 +50,47 @@ A comment on the source dedup check (`// check for duplicates`) was ambiguous
 }
 ```
 
-Both `ErrMaxMsgsPerSubject` and `errMsgIdDuplicate` are now handled by
-returning `true` — meaning "message processed, advance the sequence." This
-skips the rejected message and continues processing the batch. Zero consumer
-recreation, zero API requests, zero blocking.
+- **`ErrMaxMsgsPerSubject`:** The per-subject slot is full. Retrying will never
+  succeed (unlike stream-level, where consumers can drain room). Skip the
+  message so other subjects continue flowing.
+- **`errMsgIdDuplicate`:** The destination already has this message by ID.
+  Skipping is correct — same as direct-publish dedup behavior. This fixes
+  currently broken dedup-window handling during sourcing.
 
-**Why this is correct:**
-- **Per-subject rejection:** The message is legitimately undeliverable to this
-  destination. Retrying will never succeed. Skipping lets subsequent messages
-  on other subjects flow through.
-- **Dedup rejection:** The destination already has this message (by ID).
-  Skipping is the correct behavior — it's the same as what would happen if the
-  message had been rejected during direct publish.
+**What is NOT changed:** Stream-level `DiscardNew` (`ErrMaxMsgs`) still goes
+through the existing error path. The intentional backpressure behavior is
+preserved.
 
-### Tests Added
+### 2. Tests Added
 
 | Test | Variant | What it validates |
 |------|---------|-------------------|
 | `TestJetStreamSourcingDedupWithoutDiscardNew` | Single + Cluster | Dedup skip works without DiscardNewPerSubject |
 | `TestJetStreamSourcingDiscardNewPerSubjectMixedSubjects` | Single + Cluster | Per-subject rejection on one subject doesn't block others |
 | `TestJetStreamSourcingDiscardNewPerSubjectWithDedup` | Single + Cluster | Combined per-subject + dedup rejections both skip correctly |
-| `TestJetStreamSourcingDiscardNewPerSubjectNoRetryLoop` | Single | Burst of rejections on same subject doesn't cause retry loop; new subject arrives promptly |
+| `TestJetStreamSourcingDiscardNewPerSubjectNoRetryLoop` | Single | Burst of rejections doesn't block messages on other subjects |
 
-### Raft Fix (Separate Concern, `server/raft.go`)
+### 3. Raft Fix (Separate Concern, `server/raft.go`)
 
 Entries from previous terms are no longer counted toward commit advancement.
 This prevents a scenario where a leader commits entries that could still be
 overwritten by a leader from an intermediate term it never observed. Existing
 raft tests were updated to match the corrected term-checking behavior.
 
-## Key Difference from Original PR
+## Difference from Original PR #7896
 
 | Aspect | Original PR #7896 | This PR |
 |--------|-------------------|---------|
-| `ErrMaxMsgsPerSubject` handling | `retrySourceConsumerAtSeq(si.sseq)` | `return true` (skip) |
-| `errMsgIdDuplicate` handling | Not handled | `return true` (skip) |
-| Consumer recreation on rejection | Yes — infinite loop | No — zero overhead |
-| Messages on other subjects | Blocked until external resolution | Processed immediately |
-| Tests | None | 7 tests (4 single-server + 3 clustered) |
+| `ErrMaxMsgsPerSubject` handling | Skip (opt-in via config flag) | Skip (unconditional) |
+| `errMsgIdDuplicate` handling | Skip | Skip |
+| Opt-in config flag | Yes — new boolean in source config | No — always skips |
+| Stream-level `DiscardNew` backpressure | Preserved | Preserved |
+| Tests | Included | 7 tests (4 single-server + 3 clustered) |
+
+## Open Question: Opt-In Flag
+
+The original PR made per-subject skipping opt-in via a new `SkipOnDiscardNew`
+(or similar) boolean in the source configuration. This is more conservative and
+avoids changing default behavior for existing deployments that may rely on the
+current blocking semantics even for per-subject limits. Whether this PR should
+also adopt an opt-in approach is a design decision worth discussing.
