@@ -943,6 +943,7 @@ func TestLongClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 			Subjects:   []string{"MSGS.>"},
 			Replicas:   3,
 			Duplicates: 30 * time.Second,
+			Retention:  nats.WorkQueuePolicy,
 			Discard:    nats.DiscardOld,
 			Placement: &nats.Placement{
 				Tags: []string{"test"},
