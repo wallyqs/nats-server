@@ -3886,3 +3886,160 @@ func TestNoRaceStallGateHysteresisOscillation(t *testing.T) {
 	t.Log("rate close to the producer's fill rate, which is the common case")
 	t.Log("for borderline-slow consumers.")
 }
+
+// BenchmarkRouteCongestedPublishLatency measures the publish latency impact
+// of route congestion with and without the stc fix.
+//
+// "WithStcOnRoute" simulates the old behavior where queueOutbound would set
+// stc on congested routes, causing the server's readLoop to stall for ≥2ms
+// each time it delivers a message to that route via deliverMsg→stalledWait.
+//
+// "WithFix" shows the current behavior where routes never get stc, so
+// CLIENT publish throughput is unaffected by route buffer congestion.
+//
+// The benchmark uses request-reply to measure end-to-end latency per message,
+// which captures the server-side stall in the producer's readLoop.
+func BenchmarkRouteCongestedPublishLatency(b *testing.B) {
+	// Create a 2-node cluster.
+	optsA := DefaultOptions()
+	srvA := RunServer(optsA)
+	defer srvA.Shutdown()
+
+	optsB := DefaultOptions()
+	optsB.Routes = RoutesFromStr(fmt.Sprintf("nats://%s:%d", optsA.Cluster.Host, optsA.Cluster.Port))
+	srvB := RunServer(optsB)
+	defer srvB.Shutdown()
+
+	checkClusterFormed(b, srvA, srvB)
+
+	// Create a responder on server B — replies go back through the route.
+	ncResp, err := nats.Connect(srvB.ClientURL())
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer ncResp.Close()
+
+	_, err = ncResp.Subscribe("bench.req", func(m *nats.Msg) {
+		m.Respond([]byte("ok"))
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	ncResp.Flush()
+
+	// Wait for subscription to propagate to server A.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		acc, err := srvA.LookupAccount(globalAccountName)
+		if err == nil && acc.SubscriptionInterest("bench.req") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Collect ALL route clients on server A (there may be multiple due to pooling).
+	var routes []*client
+	srvA.mu.RLock()
+	srvA.forEachRoute(func(r *client) {
+		routes = append(routes, r)
+	})
+	srvA.mu.RUnlock()
+	if len(routes) == 0 {
+		b.Fatal("No route clients found")
+	}
+	b.Logf("Found %d route connections on server A", len(routes))
+
+	payload := make([]byte, 512)
+	timeout := 2 * time.Second
+
+	// Helper to set stc on all route connections.
+	setStcOnAllRoutes := func() chan struct{} {
+		stc := make(chan struct{})
+		for _, rc := range routes {
+			rc.mu.Lock()
+			rc.out.pb = rc.out.mp/4*3 + 1024
+			rc.out.stc = stc
+			rc.mu.Unlock()
+		}
+		return stc
+	}
+
+	// Helper to clear stc on all route connections.
+	clearAllRoutes := func(stc chan struct{}) {
+		if stc != nil {
+			close(stc)
+		}
+		for _, rc := range routes {
+			rc.mu.Lock()
+			rc.out.stc = nil
+			rc.out.pb = 0
+			rc.mu.Unlock()
+		}
+	}
+
+	// Helper to set high pb on all routes (but no stc — simulating fix behavior).
+	setHighPbOnAllRoutes := func() {
+		for _, rc := range routes {
+			rc.mu.Lock()
+			rc.out.pb = rc.out.mp/4*3 + 1024
+			rc.out.stc = nil
+			rc.mu.Unlock()
+		}
+	}
+
+	// Warmup: verify request-reply works.
+	ncWarm, _ := nats.Connect(srvA.ClientURL())
+	if _, err := ncWarm.Request("bench.req", payload, timeout); err != nil {
+		b.Fatalf("warmup request failed: %v", err)
+	}
+	ncWarm.Close()
+
+	b.Run("WithStcOnRoute", func(b *testing.B) {
+		ncPub, err := nats.Connect(srvA.ClientURL())
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer ncPub.Close()
+
+		stallsBefore := atomic.LoadInt64(&srvA.stalls)
+
+		// Simulate old behavior: set stc on ALL congested routes.
+		stc := setStcOnAllRoutes()
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			ncPub.Request("bench.req", payload, timeout)
+		}
+		b.StopTimer()
+
+		stallsAfter := atomic.LoadInt64(&srvA.stalls)
+		b.ReportMetric(float64(stallsAfter-stallsBefore)/float64(b.N), "stalls/op")
+
+		clearAllRoutes(stc)
+	})
+
+	b.Run("WithFix", func(b *testing.B) {
+		ncPub, err := nats.Connect(srvA.ClientURL())
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer ncPub.Close()
+
+		stallsBefore := atomic.LoadInt64(&srvA.stalls)
+
+		// Current behavior: routes have high pending bytes but stc is never
+		// set because isRouteKind(rc.kind) returns true.
+		setHighPbOnAllRoutes()
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			ncPub.Request("bench.req", payload, timeout)
+		}
+		b.StopTimer()
+
+		stallsAfter := atomic.LoadInt64(&srvA.stalls)
+		b.ReportMetric(float64(stallsAfter-stallsBefore)/float64(b.N), "stalls/op")
+
+		clearAllRoutes(nil)
+	})
+}
