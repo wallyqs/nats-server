@@ -4084,26 +4084,28 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 				mset.mu.Lock()
 				mset.retrySourceConsumerAtSeq(iName, si.sseq)
 				mset.mu.Unlock()
-			} else if errors.Is(err, errMsgIdDuplicate) {
-				// Duplicate message ID detected during sourcing. The destination
-				// already has this message by ID within its dedup window. Skip
-				// the message and continue processing.
-				return true
 			} else {
 				// Log some warning for errors other than errLastSeqMismatch.
 				if !errors.Is(err, errLastSeqMismatch) {
 					s.RateLimitWarnf("Error processing inbound source %q for '%s' > '%s': %v",
 						iName, accName, sname, err)
 				}
-				// Retry in all type of errors if we are still leader.
-				if mset.isLeader() {
-					// This will make sure the source is still in mset.sources map,
-					// find the last sequence and then call setupSourceConsumer.
-					iNameMap := map[string]struct{}{iName: {}}
-					mset.setStartingSequenceForSources(iNameMap)
-					mset.mu.Lock()
-					mset.retrySourceConsumerAtSeq(iName, si.sseq+1)
-					mset.mu.Unlock()
+				if !errors.Is(err, errMsgIdDuplicate) {
+					// Retry in all type of errors if we are still leader.
+					if mset.isLeader() {
+						// This will make sure the source is still in mset.sources map,
+						// find the last sequence and then call setupSourceConsumer.
+						iNameMap := map[string]struct{}{iName: {}}
+						mset.setStartingSequenceForSources(iNameMap)
+						mset.mu.Lock()
+						mset.retrySourceConsumerAtSeq(iName, si.sseq+1)
+						mset.mu.Unlock()
+					}
+				} else {
+					// Duplicate message ID detected during sourcing. The destination
+					// already has this message by ID within its dedup window. Skip
+					// the message and keep processing the rest of the batch.
+					return true
 				}
 			}
 		}
