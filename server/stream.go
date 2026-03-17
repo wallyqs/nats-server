@@ -1910,7 +1910,7 @@ func (s *Server) checkStreamCfg(config *StreamConfig, acc *Account, pedantic boo
 		}
 	}
 
-	// check for duplicates
+	// check sources for duplicates
 	var iNames = make(map[string]struct{})
 	for _, src := range cfg.Sources {
 		if src == nil || !isValidName(src.Name) {
@@ -4084,6 +4084,11 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 				mset.mu.Lock()
 				mset.retrySourceConsumerAtSeq(iName, si.sseq)
 				mset.mu.Unlock()
+			} else if errors.Is(err, ErrMaxMsgsPerSubject) || errors.Is(err, errMsgIdDuplicate) {
+				// Per-subject limit reached (discard new per subject) or duplicate message ID
+				// detected during sourcing. These are expected conditions that do not require
+				// a consumer retry - skip the message and continue processing.
+				return true
 			} else {
 				// Log some warning for errors other than errLastSeqMismatch.
 				if !errors.Is(err, errLastSeqMismatch) {
