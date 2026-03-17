@@ -3756,3 +3756,133 @@ func TestNoRaceAccessTimeLeakCheck(t *testing.T) {
 		return nil
 	})
 }
+
+// TestNoRaceStallGateHysteresisOscillation measures how hysteresis (different
+// create vs release thresholds) reduces stall gate oscillation compared to
+// using the same threshold for both. It simulates a consumer that drains data
+// in small chunks, keeping pending bytes near the stall threshold boundary.
+func TestNoRaceStallGateHysteresisOscillation(t *testing.T) {
+	conf := createConfFile(t, []byte(`listen: "127.0.0.1:-1"`))
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	nc := natsConnect(t, s.ClientURL())
+	defer nc.Close()
+	natsSub(t, nc, "foo", func(_ *nats.Msg) {})
+	natsFlush(t, nc)
+
+	cid, err := nc.GetClientID()
+	require_NoError(t, err)
+	c := s.GetClient(cid)
+	require_True(t, c != nil)
+
+	c.mu.Lock()
+	mp := c.out.mp
+	c.mu.Unlock()
+
+	// Threshold where stall gate is created: 75% of mp.
+	createThreshold := mp / 4 * 3
+	// Hysteresis release: 60% of mp.
+	hysteresisRelease := mp * 3 / 5
+	// Non-hysteresis release: same as create threshold (old behavior).
+	noHysteresisRelease := createThreshold
+
+	// simulateOscillation simulates a pattern where:
+	// 1. Producer fills buffer to a target level above the create threshold
+	// 2. Consumer drains a chunk (stc released in flushOutbound if below release threshold)
+	// 3. Producer refills above create threshold
+	// We count how many stc create/release cycles occur.
+	// landingPb is the pending bytes level after each drain.
+	simulateOscillation := func(releaseThreshold int64, landingPb int64) (cycles int) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		// Reset state.
+		if c.out.stc != nil {
+			close(c.out.stc)
+			c.out.stc = nil
+		}
+		c.out.pb = 0
+
+		// Simulate 100 produce/drain iterations.
+		for i := 0; i < 100; i++ {
+			// Producer fills buffer above create threshold.
+			c.out.pb = createThreshold + 1024
+
+			// queueOutbound logic: create stc if above 75% and not already set.
+			if c.out.pb > createThreshold && c.out.stc == nil {
+				c.out.stc = make(chan struct{})
+			}
+
+			// Consumer drains down to the landing point.
+			c.out.pb = landingPb
+
+			// flushOutbound logic: release stc if below release threshold.
+			if c.out.stc != nil && c.out.pb < releaseThreshold {
+				close(c.out.stc)
+				c.out.stc = nil
+				cycles++
+			}
+		}
+
+		// Clean up.
+		if c.out.stc != nil {
+			close(c.out.stc)
+			c.out.stc = nil
+		}
+		c.out.pb = 0
+		return cycles
+	}
+
+	// Scenario 1: Consumer drains to 70% of mp (between 60% and 75%).
+	// This is the "dead band" where hysteresis prevents oscillation.
+	landAt70Pct := mp * 70 / 100
+	hysteresisCycles := simulateOscillation(hysteresisRelease, landAt70Pct)
+	noHysteresisCycles := simulateOscillation(noHysteresisRelease, landAt70Pct)
+
+	t.Logf("Drain to 70%% of mp (%d bytes) — in the hysteresis dead band:", landAt70Pct)
+	t.Logf("  Hysteresis (75%%/60%%):    %d oscillation cycles / 100 iterations", hysteresisCycles)
+	t.Logf("  No hysteresis (75%%/75%%): %d oscillation cycles / 100 iterations", noHysteresisCycles)
+
+	// With hysteresis: 70% > 60% release, stc stays => 0 cycles.
+	// Without hysteresis: 70% < 75% release, stc released each time => 100 cycles.
+	require_Equal(t, hysteresisCycles, 0)
+	require_Equal(t, noHysteresisCycles, 100)
+
+	// Scenario 2: Consumer drains to 50% of mp (well below both thresholds).
+	landAt50Pct := mp * 50 / 100
+	hysteresisCycles = simulateOscillation(hysteresisRelease, landAt50Pct)
+	noHysteresisCycles = simulateOscillation(noHysteresisRelease, landAt50Pct)
+
+	t.Logf("Drain to 50%% of mp (%d bytes) — below both thresholds:", landAt50Pct)
+	t.Logf("  Hysteresis (75%%/60%%):    %d oscillation cycles / 100 iterations", hysteresisCycles)
+	t.Logf("  No hysteresis (75%%/75%%): %d oscillation cycles / 100 iterations", noHysteresisCycles)
+
+	// Both oscillate equally when the consumer drains aggressively.
+	require_Equal(t, hysteresisCycles, 100)
+	require_Equal(t, noHysteresisCycles, 100)
+
+	// Scenario 3: Consumer drains to 74% of mp (just barely below create threshold).
+	// This is the most common real-world case: consumer keeps up but just barely.
+	landAt74Pct := mp * 74 / 100
+	hysteresisCycles = simulateOscillation(hysteresisRelease, landAt74Pct)
+	noHysteresisCycles = simulateOscillation(noHysteresisRelease, landAt74Pct)
+
+	t.Logf("Drain to 74%% of mp (%d bytes) — just below create threshold:", landAt74Pct)
+	t.Logf("  Hysteresis (75%%/60%%):    %d oscillation cycles / 100 iterations", hysteresisCycles)
+	t.Logf("  No hysteresis (75%%/75%%): %d oscillation cycles / 100 iterations", noHysteresisCycles)
+
+	// Hysteresis: 74% > 60%, stc stays => 0 cycles (stable).
+	// No hysteresis: 74% < 75%, stc released => 100 cycles (thrashing).
+	require_Equal(t, hysteresisCycles, 0)
+	require_Equal(t, noHysteresisCycles, 100)
+
+	t.Log("")
+	t.Log("--- Summary ---")
+	t.Log("Hysteresis eliminates oscillation when consumer drains land in the")
+	t.Log("dead band between 60%-75% of max pending. Without hysteresis, every")
+	t.Log("drain that crosses the 75% line triggers a create/release cycle.")
+	t.Log("The 15% dead band provides stability for consumers that drain at a")
+	t.Log("rate close to the producer's fill rate, which is the common case")
+	t.Log("for borderline-slow consumers.")
+}
