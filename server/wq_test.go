@@ -881,4 +881,72 @@ func TestLongClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 			},
 		})
 	})
+
+	// Clustered file based with discard new policy and max msgs limit.
+	t.Run("R3F_DN", func(t *testing.T) {
+		params := &testParams{
+			restartAny:   true,
+			ldmRestart:   true,
+			restarts:     1,
+			checkHealthz: true,
+		}
+		test(t, params, &nats.StreamConfig{
+			Name:        "OWQTEST_R3F_DN",
+			Subjects:    []string{"MSGS.>"},
+			Replicas:    3,
+			MaxAge:      30 * time.Minute,
+			MaxMsgs:     100_000,
+			Duplicates:  5 * time.Minute,
+			Retention:   nats.WorkQueuePolicy,
+			Discard:     nats.DiscardNew,
+			AllowRollup: true,
+			Placement: &nats.Placement{
+				Tags: []string{"test"},
+			},
+		})
+	})
+
+	// Clustered file based with discard old policy and max msgs limit.
+	t.Run("R3F_DO", func(t *testing.T) {
+		params := &testParams{
+			restartAny:   true,
+			ldmRestart:   true,
+			restarts:     1,
+			checkHealthz: true,
+		}
+		test(t, params, &nats.StreamConfig{
+			Name:        "OWQTEST_R3F_DO",
+			Subjects:    []string{"MSGS.>"},
+			Replicas:    3,
+			MaxAge:      30 * time.Minute,
+			MaxMsgs:     100_000,
+			Duplicates:  5 * time.Minute,
+			Retention:   nats.WorkQueuePolicy,
+			Discard:     nats.DiscardOld,
+			AllowRollup: true,
+			Placement: &nats.Placement{
+				Tags: []string{"test"},
+			},
+		})
+	})
+
+	// Clustered file based with discard old policy and no limits.
+	t.Run("R3F_DO_NOLIMIT", func(t *testing.T) {
+		params := &testParams{
+			restartAny:   true,
+			ldmRestart:   true,
+			restarts:     1,
+			checkHealthz: true,
+		}
+		test(t, params, &nats.StreamConfig{
+			Name:       "OWQTEST_R3F_DO_NOLIMIT",
+			Subjects:   []string{"MSGS.>"},
+			Replicas:   3,
+			Duplicates: 30 * time.Second,
+			Discard:    nats.DiscardOld,
+			Placement: &nats.Placement{
+				Tags: []string{"test"},
+			},
+		})
+	})
 }
