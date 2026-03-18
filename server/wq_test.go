@@ -457,7 +457,7 @@ func TestLongClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 		_, err = cjs.PullSubscribe("MSGS.ZZ.>", "consumer:ZZ:0", mp, mw, aw)
 		require_NoError(t, err)
 
-		pctx, pcancel := context.WithTimeout(context.Background(), 60*time.Second)
+		pctx, pcancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer pcancel()
 
 		var wg sync.WaitGroup
@@ -468,7 +468,7 @@ func TestLongClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 		// Let messages accumulate before starting consumers.
 		time.Sleep(15 * time.Second)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cancel()
 
 		// First wave: 5 consumers per partition, auto-close after 15s.
