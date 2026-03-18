@@ -1217,8 +1217,14 @@ func TestMsgTraceWithLeafNode(t *testing.T) {
 					}
 					check()
 					check()
-					// Make sure we are not receiving more traces
-					if tm, err := traceSub.NextMsg(250 * time.Millisecond); err == nil {
+					// Make sure we are not receiving more traces.
+					// Use a longer timeout since trace events from the
+					// leaf travel an async path (sendq ->
+					// internalSendLoop -> leaf connection -> hub parser)
+					// that under load can exceed shorter timeouts,
+					// causing a late trace from this sub-test to leak
+					// into the next one.
+					if tm, err := traceSub.NextMsg(time.Second); err == nil {
 						t.Fatalf("Should not have received trace message: %s", tm.Data)
 					}
 				})
