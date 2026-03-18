@@ -259,7 +259,6 @@ const (
 
 type msgTrace struct {
 	ready int32
-	sent  int32
 	srv   *Server
 	acc   *Account
 	// Origin account name, set only if acc is nil when acc lookup failed.
@@ -795,10 +794,6 @@ func (t *msgTrace) sendEvent() {
 		if !ready {
 			return
 		}
-	}
-	// Ensure a trace event is sent at most once.
-	if !atomic.CompareAndSwapInt32(&t.sent, 0, 1) {
-		return
 	}
 	t.srv.sendInternalAccountSysMsg(t.acc, t.dest, &t.event.Server, t.event, t.ct)
 }
