@@ -7639,3 +7639,106 @@ func TestJetStreamClusterConsumerSetStoreStateOldUpdateRestart(t *testing.T) {
 		require_NoError(t, err)
 	}
 }
+
+// TestJetStreamClusterInterestRetentionOrphanMsgsOnLeadershipChange tests that
+// when consumer acks are processed during a stream leadership transition (where
+// no stream leader is available to propose message deletions), the orphaned
+// messages are cleaned up promptly when a new stream leader is elected.
+// This validates the fix that triggers checkInterestState on leadership change.
+func TestJetStreamClusterInterestRetentionOrphanMsgsOnLeadershipChange(t *testing.T) {
+	for _, retention := range []nats.RetentionPolicy{nats.InterestPolicy, nats.WorkQueuePolicy} {
+		name := "Interest"
+		if retention == nats.WorkQueuePolicy {
+			name = "WorkQueue"
+		}
+		t.Run(name, func(t *testing.T) {
+			c := createJetStreamClusterExplicit(t, "R3S", 3)
+			defer c.shutdown()
+
+			nc, js := jsClientConnect(t, c.randomServer())
+			defer nc.Close()
+
+			streamName := "TEST"
+			_, err := js.AddStream(&nats.StreamConfig{
+				Name:      streamName,
+				Subjects:  []string{"foo"},
+				Replicas:  3,
+				Retention: retention,
+			})
+			require_NoError(t, err)
+
+			sub, err := js.PullSubscribe("foo", "CONSUMER", nats.BindStream(streamName))
+			require_NoError(t, err)
+
+			// Ensure the stream leader and consumer leader are on different servers.
+			// This is important because acks are processed by the consumer leader,
+			// while message delete proposals must come from the stream leader.
+			c.waitOnStreamLeader(globalAccountName, streamName)
+			c.waitOnConsumerLeader(globalAccountName, streamName, "CONSUMER")
+			sl := c.streamLeader(globalAccountName, streamName)
+			cl := c.consumerLeader(globalAccountName, streamName, "CONSUMER")
+			if sl == cl {
+				// Step down the stream leader to get them on different nodes.
+				_, err = nc.Request(fmt.Sprintf(JSApiStreamLeaderStepDownT, streamName), nil, time.Second)
+				require_NoError(t, err)
+				c.waitOnStreamLeader(globalAccountName, streamName)
+				sl = c.streamLeader(globalAccountName, streamName)
+				// If still the same, step down the consumer leader instead.
+				if sl == cl {
+					_, err = nc.Request(fmt.Sprintf(JSApiConsumerLeaderStepDownT, streamName, "CONSUMER"), nil, time.Second)
+					require_NoError(t, err)
+					c.waitOnConsumerLeader(globalAccountName, streamName, "CONSUMER")
+					cl = c.consumerLeader(globalAccountName, streamName, "CONSUMER")
+				}
+				require_NotEqual(t, sl, cl)
+			}
+
+			// Publish messages.
+			numMsgs := 10
+			for i := 0; i < numMsgs; i++ {
+				_, err = js.Publish("foo", []byte("msg"))
+				require_NoError(t, err)
+			}
+
+			// Verify all messages are stored.
+			si, err := js.StreamInfo(streamName)
+			require_NoError(t, err)
+			require_Equal(t, si.State.Msgs, uint64(numMsgs))
+
+			// Fetch all messages (but don't ack yet).
+			msgs := fetchMsgs(t, sub, numMsgs, 5*time.Second)
+			require_Len(t, len(msgs), numMsgs)
+
+			// Now step down the stream leader. This creates a window where
+			// consumer acks are processed but no stream leader can propose
+			// the corresponding message deletions.
+			mset, err := sl.globalAccount().lookupStream(streamName)
+			require_NoError(t, err)
+			node := mset.raftNode()
+			require_NoError(t, node.StepDown())
+
+			// Ack all messages while the stream leader is transitioning.
+			for _, m := range msgs {
+				err = m.AckSync()
+				require_NoError(t, err)
+			}
+
+			// Wait for a new stream leader to be elected.
+			c.waitOnStreamLeader(globalAccountName, streamName)
+
+			// The fix triggers checkInterestState on the new leader immediately,
+			// so messages should be cleaned up well before the periodic 2+ minute timer.
+			// We check within 10 seconds to confirm the fix works.
+			checkFor(t, 10*time.Second, 250*time.Millisecond, func() error {
+				si, err := js.StreamInfo(streamName)
+				if err != nil {
+					return fmt.Errorf("unexpected error: %v", err)
+				}
+				if si.State.Msgs != 0 {
+					return fmt.Errorf("expected 0 msgs, got %d", si.State.Msgs)
+				}
+				return nil
+			})
+		})
+	}
+}
