@@ -7670,28 +7670,8 @@ func TestJetStreamClusterInterestRetentionOrphanMsgsOnLeadershipChange(t *testin
 			sub, err := js.PullSubscribe("foo", "CONSUMER", nats.BindStream(streamName))
 			require_NoError(t, err)
 
-			// Ensure the stream leader and consumer leader are on different servers.
-			// This is important because acks are processed by the consumer leader,
-			// while message delete proposals must come from the stream leader.
 			c.waitOnStreamLeader(globalAccountName, streamName)
 			c.waitOnConsumerLeader(globalAccountName, streamName, "CONSUMER")
-			sl := c.streamLeader(globalAccountName, streamName)
-			cl := c.consumerLeader(globalAccountName, streamName, "CONSUMER")
-			if sl == cl {
-				// Step down the stream leader to get them on different nodes.
-				_, err = nc.Request(fmt.Sprintf(JSApiStreamLeaderStepDownT, streamName), nil, time.Second)
-				require_NoError(t, err)
-				c.waitOnStreamLeader(globalAccountName, streamName)
-				sl = c.streamLeader(globalAccountName, streamName)
-				// If still the same, step down the consumer leader instead.
-				if sl == cl {
-					_, err = nc.Request(fmt.Sprintf(JSApiConsumerLeaderStepDownT, streamName, "CONSUMER"), nil, time.Second)
-					require_NoError(t, err)
-					c.waitOnConsumerLeader(globalAccountName, streamName, "CONSUMER")
-					cl = c.consumerLeader(globalAccountName, streamName, "CONSUMER")
-				}
-				require_NotEqual(t, sl, cl)
-			}
 
 			// Publish messages.
 			numMsgs := 10
@@ -7709,18 +7689,45 @@ func TestJetStreamClusterInterestRetentionOrphanMsgsOnLeadershipChange(t *testin
 			msgs := fetchMsgs(t, sub, numMsgs, 5*time.Second)
 			require_Len(t, len(msgs), numMsgs)
 
-			// Now step down the stream leader. This creates a window where
-			// consumer acks are processed but no stream leader can propose
-			// the corresponding message deletions.
-			mset, err := sl.globalAccount().lookupStream(streamName)
-			require_NoError(t, err)
-			node := mset.raftNode()
-			require_NoError(t, node.StepDown())
+			// Pause stream raft on all follower nodes so no new leader can be elected.
+			sl := c.streamLeader(globalAccountName, streamName)
+			var streamNodes []RaftNode
+			for _, s := range c.servers {
+				if s == sl {
+					continue
+				}
+				mset, err := s.globalAccount().lookupStream(streamName)
+				require_NoError(t, err)
+				n := mset.raftNode()
+				require_NoError(t, n.PauseApply())
+				streamNodes = append(streamNodes, n)
+			}
 
-			// Ack all messages while the stream leader is transitioning.
+			// Now step down the stream leader. Since followers are paused,
+			// no new stream leader can be elected.
+			slMset, err := sl.globalAccount().lookupStream(streamName)
+			require_NoError(t, err)
+			slNode := slMset.raftNode()
+			require_NoError(t, slNode.StepDown())
+
+			// Pause the former leader too.
+			require_NoError(t, slNode.PauseApply())
+			streamNodes = append(streamNodes, slNode)
+
+			// Ack all messages while there's no stream leader.
+			// The consumer raft group processes these acks, but ackMsg on each
+			// server sees !isLeader() and returns without proposing deletions.
 			for _, m := range msgs {
 				err = m.AckSync()
 				require_NoError(t, err)
+			}
+
+			// Brief wait to ensure all consumer ack applies have propagated.
+			time.Sleep(250 * time.Millisecond)
+
+			// Resume stream raft on all nodes, allowing a new leader to be elected.
+			for _, n := range streamNodes {
+				n.ResumeApply()
 			}
 
 			// Wait for a new stream leader to be elected.
