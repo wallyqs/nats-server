@@ -3232,6 +3232,13 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 				} else if n != nil && n.NeedSnapshot() {
 					doSnapshot(false)
 				}
+				// On becoming leader, check interest state to clean up any orphan
+				// messages that accumulated during the leadership transition.
+				// The previous leader may have stopped proposing deletes before we
+				// took over, leaving acked messages in the stream.
+				if mset != nil && mset.isInterestRetention() && !isRecovering {
+					go mset.checkInterestState()
+				}
 				// Always cancel if this was running.
 				stopDirectMonitoring()
 			} else if !n.Leaderless() {
