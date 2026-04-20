@@ -144,9 +144,23 @@ response. Two small notes:
 - `dseq`/`sseq` are `uint64`; `<= 0` reads as signed and should be `== 0` for
   clarity.
 - This masks a real window where the consumer reports `Delivered: 0/0` before
-  its start seq has been chosen. Consumers of `info()` that make assumptions
-  about monotonicity during that window may see values that later "jump" to
-  the scanned sequence. Worth mentioning in the code comment.
+  its start seq has been chosen. Clients that poll `ConsumerInfo` during
+  initialization will see `0/0`, which is indistinguishable from "initialized,
+  nothing delivered yet." The existence of this window is non-obvious from
+  the guard itself — a future reader will ask "when can dseq/sseq be zero?"
+  and the answer (the deferred scan on clustered non-direct consumers) is the
+  whole reason the branch exists. Suggested comment:
+
+  ```go
+  // For clustered non-direct consumers, selectStartingSeqNo is deferred to
+  // setLeader so dseq/sseq can briefly be 0 on followers (until
+  // applyConsumerEntries bootstraps dseq) and on a newly-elected leader
+  // (until the deferred scan runs). Clamp to 1 here so the Delivered
+  // sequence pair does not underflow uint64 arithmetic.
+  dseq, sseq := o.dseq, o.sseq
+  if dseq == 0 { dseq = 1 }
+  if sseq == 0 { sseq = 1 }
+  ```
 
 ### `applyConsumerEntries` dseq bootstrap
 
