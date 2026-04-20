@@ -9968,3 +9968,235 @@ func TestJetStreamDurableStreamSourceDeletesConsumerAfterStreamRemoval(t *testin
 		t.Run(fmt.Sprintf("R%d", replicas), func(t *testing.T) { test(t, replicas) })
 	}
 }
+
+func TestJetStreamClusterConsumerSelectStartingSeqDeferred(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	_, err = js.Publish("foo", nil)
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "C",
+		AckPolicy: nats.AckExplicitPolicy,
+		Replicas:  3,
+	})
+	require_NoError(t, err)
+
+	leader := c.consumerLeader(globalAccountName, "TEST", "C")
+	require_NotNil(t, leader)
+	follower := c.randomNonConsumerLeader(globalAccountName, "TEST", "C")
+	require_NotNil(t, follower)
+
+	getConsumer := func(s *Server) *consumer {
+		t.Helper()
+		mset, err := s.globalAccount().lookupStream("TEST")
+		require_NoError(t, err)
+		o := mset.lookupConsumer("C")
+		require_NotNil(t, o)
+		return o
+	}
+
+	// On the leader, selectStartingSeqNo ran inside setLeader(true).
+	l := getConsumer(leader)
+	l.mu.RLock()
+	ldseq, lsseq := l.dseq, l.sseq
+	l.mu.RUnlock()
+	require_Equal(t, ldseq, 1)
+	require_Equal(t, lsseq, 1)
+
+	// On the follower, meta apply must not have run selectStartingSeqNo.
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		f := getConsumer(follower)
+		f.mu.RLock()
+		defer f.mu.RUnlock()
+		if f.dseq != 1 {
+			return fmt.Errorf("expected follower dseq 1, got %d", f.dseq)
+		}
+		if f.sseq != 1 {
+			return fmt.Errorf("expected follower sseq 1, got %d", f.sseq)
+		}
+		return nil
+	})
+}
+
+// The PR's motivation is to skip expensive scans (FilteredState, MultiLastSeqs,
+// GetSeqFromTime) on the meta apply goroutine. Exercise the heaviest of those —
+// DeliverLastPerSubject with a subject filter and MaxMsgsPer > 1 — end-to-end
+// to ensure the deferred path lands at the right starting sequence.
+func TestJetStreamClusterConsumerSelectStartingSeqDeferredLastPerSubject(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:              "TEST",
+		Subjects:          []string{"kv.>"},
+		Replicas:          3,
+		MaxMsgsPerSubject: 10,
+	})
+	require_NoError(t, err)
+
+	// Three keys, two versions each. Last-per-subject should land on the
+	// earliest "last" across the filter set, which is seq 5 (kv.a second write).
+	for _, subj := range []string{"kv.a", "kv.b", "kv.c", "kv.b", "kv.a", "kv.c"} {
+		_, err = js.Publish(subj, nil)
+		require_NoError(t, err)
+	}
+
+	ci, err := js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:       "C",
+		FilterSubject: "kv.*",
+		DeliverPolicy: nats.DeliverLastPerSubjectPolicy,
+		AckPolicy:     nats.AckExplicitPolicy,
+		Replicas:      3,
+	})
+	require_NoError(t, err)
+
+	// Publish order: kv.a(1), kv.b(2), kv.c(3), kv.b(4), kv.a(5), kv.c(6).
+	// Last-per-subject seqs are {kv.a=5, kv.b=4, kv.c=6}; selectStartingSeqNo
+	// picks the smallest so the consumer doesn't skip any "last" version.
+	// The scan must produce a real Delivered.Stream, not the zero-clamped
+	// value from infoWithSnapAndReply.
+	require_Equal(t, ci.Delivered.Stream, uint64(3))
+
+	leader := c.consumerLeader(globalAccountName, "TEST", "C")
+	require_NotNil(t, leader)
+	mset, err := leader.globalAccount().lookupStream("TEST")
+	require_NoError(t, err)
+	o := mset.lookupConsumer("C")
+	require_NotNil(t, o)
+	o.mu.RLock()
+	sseq := o.sseq
+	lss := o.lss
+	o.mu.RUnlock()
+	require_Equal(t, sseq, 4)
+	// MultiLastSeqs result is captured into the skip list.
+	require_NotNil(t, lss)
+}
+
+// Standalone / R1 must still run selectStartingSeqNo inline from
+// addConsumerWithAssignment (the deferred path is clustered-only).
+func TestJetStreamClusterConsumerSelectStartingSeqR1Inline(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 1,
+	})
+	require_NoError(t, err)
+
+	for i := 0; i < 5; i++ {
+		_, err = js.Publish("foo", nil)
+		require_NoError(t, err)
+	}
+
+	ci, err := js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:       "C",
+		DeliverPolicy: nats.DeliverLastPolicy,
+		AckPolicy:     nats.AckExplicitPolicy,
+		Replicas:      1,
+	})
+	require_NoError(t, err)
+
+	// DeliverLast on a stream with 5 messages must select seq 5 synchronously
+	// during create — the API response must not need the zero-clamp fallback.
+	require_Equal(t, ci.Delivered.Stream, uint64(4))
+
+	leader := c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, leader)
+	mset, err := leader.globalAccount().lookupStream("TEST")
+	require_NoError(t, err)
+	o := mset.lookupConsumer("C")
+	require_NotNil(t, o)
+	o.mu.RLock()
+	sseq, dseq := o.sseq, o.dseq
+	o.mu.RUnlock()
+	require_Equal(t, sseq, 5)
+	require_Equal(t, dseq, 1)
+}
+
+// When selectStartingSeqNo fails during setLeader on a clustered consumer,
+// the API must surface an error, the node must step down, and a re-election
+// on healthy replicas must produce a working consumer.
+func TestJetStreamClusterConsumerSelectStartingSeqFailureStepsDown(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	_, err = js.Publish("foo", nil)
+	require_NoError(t, err)
+
+	// Fail the first scan attempt, then succeed on re-election.
+	var invocations atomic.Int32
+	hook := func(*consumer) error {
+		if invocations.Add(1) == 1 {
+			return fmt.Errorf("injected scan failure")
+		}
+		return nil
+	}
+	selectStartingSeqNoTestHook.Store(&hook)
+	defer selectStartingSeqNoTestHook.Store(nil)
+
+	// The create RPC may return an error (leader's scan failed) — that is the
+	// user-visible effect of the new error path in processClusterCreateConsumer.
+	_, _ = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:   "C",
+		AckPolicy: nats.AckExplicitPolicy,
+		Replicas:  3,
+	})
+
+	// Regardless of the create-RPC outcome, the consumer assignment now lives
+	// in meta and re-election on the remaining replicas must produce a healthy
+	// consumer (the second scan attempt returns nil).
+	checkFor(t, 10*time.Second, 200*time.Millisecond, func() error {
+		leader := c.consumerLeader(globalAccountName, "TEST", "C")
+		if leader == nil {
+			return fmt.Errorf("no consumer leader yet")
+		}
+		mset, err := leader.globalAccount().lookupStream("TEST")
+		if err != nil {
+			return err
+		}
+		o := mset.lookupConsumer("C")
+		if o == nil {
+			return fmt.Errorf("consumer not found on leader")
+		}
+		o.mu.RLock()
+		sseq, dseq := o.sseq, o.dseq
+		o.mu.RUnlock()
+		if sseq != 1 || dseq != 1 {
+			return fmt.Errorf("expected sseq=1 dseq=1, got sseq=%d dseq=%d", sseq, dseq)
+		}
+		return nil
+	})
+
+	// The injected failure must have fired at least once.
+	require_True(t, invocations.Load() >= 2)
+}

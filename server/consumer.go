@@ -6132,7 +6132,17 @@ func (o *consumer) reconcileStateWithStream(streamLastSeq uint64) {
 }
 
 // Will select the starting sequence.
+// Test-only hook: when non-nil, short-circuits selectStartingSeqNo with the
+// returned error. Allows tests to exercise the scan-failure / stepdown path
+// in setLeader without needing to corrupt the underlying store.
+var selectStartingSeqNoTestHook atomic.Pointer[func(*consumer) error]
+
 func (o *consumer) selectStartingSeqNo() error {
+	if h := selectStartingSeqNoTestHook.Load(); h != nil {
+		if err := (*h)(o); err != nil {
+			return err
+		}
+	}
 	if o.mset == nil || o.mset.store == nil {
 		o.sseq = 1
 	} else {
