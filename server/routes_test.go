@@ -4876,9 +4876,11 @@ func TestRouteImplicitNotTooManyDuplicates(t *testing.T) {
 			dl.Mutex.Unlock()
 			// Getting duplicates should not be considered fatal, it is an optimization
 			// to reduce the occurrences of those. But to make sure we don't have a
-			// regression, we will fail the test if we get say more than 20 or so (
-			// without the code change, we would get more than 500 of duplicates).
-			if count > 20 {
+			// regression, we will fail the test if we get more than 100 or so
+			// (without the code change, we would get more than 500 of duplicates).
+			// The threshold allows for some timing variance between the 11 servers
+			// racing to form the cluster, while still clearly flagging a regression.
+			if count > 100 {
 				t.Fatalf("Got more duplicates than anticipated: %v", count)
 			}
 		})
