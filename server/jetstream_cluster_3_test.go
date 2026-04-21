@@ -10062,3 +10062,145 @@ func TestJetStreamClusterProposeFailureDoesNotDriftClseq(t *testing.T) {
 	}
 }
 
+// TestJetStreamClusterClseqStableAcrossRealElectionRoundTrip exercises the
+// fix from a real-election angle rather than the synthetic state-swap used
+// in TestJetStreamClusterProposeFailureDoesNotDriftClseq. It repeatedly
+// cycles leadership via StepDown so that the stream leader actually moves
+// between servers, interleaves inbound publishes (including failed Propose
+// attempts during the race window) with the transitions, and then verifies:
+//
+//   - All replicas agree on lseq / FirstSeq / LastSeq via checkState.
+//   - No replica reports errLastSeqMismatch (which would trigger
+//     resetClusteredState and can destroy the raft state).
+//   - No replica's Raft node ends up IsDeleted.
+//   - Publishing resumes correctly after every leader change, with the
+//     expected final message count.
+//
+// Regression test for nats-io/nats-server#8057.
+func TestJetStreamClusterClseqStableAcrossRealElectionRoundTrip(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := jsStreamCreate(t, nc, &StreamConfig{
+		Name:               "TEST",
+		Subjects:           []string{"foo"},
+		Replicas:           3,
+		Storage:            FileStorage,
+		AllowAtomicPublish: true,
+	})
+	require_NoError(t, err)
+
+	// Baseline: 5 messages published cleanly.
+	for range 5 {
+		_, err = js.Publish("foo", nil)
+		require_NoError(t, err)
+	}
+	checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+		return checkState(t, c, globalAccountName, "TEST")
+	})
+
+	// Round-trip through three elections. On each round we:
+	//   1. Force an errNotLeader on the current leader (reproducing the
+	//      original race where Propose fails while the upper layer still
+	//      thinks we are the leader).
+	//   2. StepDown to trigger an actual election.
+	//   3. Wait for a new leader and publish more messages through it.
+	expectedMsgs := uint64(5)
+	seenLeaders := map[string]bool{}
+	for round := 0; round < 3; round++ {
+		sl := c.streamLeader(globalAccountName, "TEST")
+		require_NotNil(t, sl)
+		seenLeaders[sl.Name()] = true
+
+		mset, err := sl.globalAccount().lookupStream("TEST")
+		require_NoError(t, err)
+		rn := mset.raftNode().(*raft)
+
+		// Force a Propose failure while still "leader" from the upper
+		// layer's perspective. clseq must not advance on failure.
+		mset.clMu.Lock()
+		before := mset.clseq
+		mset.clMu.Unlock()
+
+		prev := rn.state.Swap(int32(Follower))
+		err = mset.processClusteredInboundMsg("foo", _EMPTY_, nil, nil, nil, false)
+		rn.state.Store(prev)
+		require_Error(t, err, errNotLeader)
+
+		mset.clMu.Lock()
+		after := mset.clseq
+		mset.clMu.Unlock()
+		require_Equal(t, after, before)
+
+		// Trigger a real election.
+		require_NoError(t, rn.StepDown())
+		c.waitOnStreamLeader(globalAccountName, "TEST")
+
+		newSL := c.streamLeader(globalAccountName, "TEST")
+		require_NotNil(t, newSL)
+
+		// Publish a few messages through the new leader. This validates
+		// that recalculateClusteredSeq repopulates clseq correctly (since
+		// processStreamLeaderChange now clears it on every transition)
+		// and that the next proposal uses the right sequence.
+		for range 5 {
+			_, err = js.Publish("foo", nil)
+			require_NoError(t, err)
+			expectedMsgs++
+		}
+
+		// After each round, all replicas must agree. If clseq had drifted,
+		// followers would hit errLastSeqMismatch and this check would fail.
+		checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+			state, err := checkStateAndErr(t, c, globalAccountName, "TEST")
+			if err != nil {
+				return err
+			}
+			if state.Msgs != expectedMsgs {
+				return fmt.Errorf("expected %d messages, got %d", expectedMsgs, state.Msgs)
+			}
+			return nil
+		})
+
+		// Also exercise the ProposeMulti path across the transition.
+		_, err = js.PublishMsg(&nats.Msg{
+			Subject: "foo",
+			Header: nats.Header{
+				"Nats-Batch-Id":       []string{fmt.Sprintf("batch-%d", round)},
+				"Nats-Batch-Sequence": []string{"1"},
+				"Nats-Batch-Commit":   []string{"1"},
+			},
+		})
+		require_NoError(t, err)
+		expectedMsgs++
+
+		checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+			state, err := checkStateAndErr(t, c, globalAccountName, "TEST")
+			if err != nil {
+				return err
+			}
+			if state.Msgs != expectedMsgs {
+				return fmt.Errorf("expected %d messages, got %d", expectedMsgs, state.Msgs)
+			}
+			return nil
+		})
+	}
+
+	// Leadership should have moved across nodes at least once.
+	require_True(t, len(seenLeaders) >= 2)
+
+	// Final invariants: no replica's Raft node is marked deleted. If the
+	// buggy clseq drift had caused a mismatch, resetClusteredState would
+	// have been invoked and the underlying raft state could have been
+	// torn down.
+	for _, s := range c.servers {
+		mset, err := s.globalAccount().lookupStream("TEST")
+		require_NoError(t, err)
+		rn := mset.raftNode().(*raft)
+		require_NotNil(t, rn)
+		require_False(t, rn.IsDeleted())
+	}
+}
