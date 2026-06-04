@@ -12341,3 +12341,94 @@ func TestJetStreamConsumerStreamNumPendingClearedOnStepDown(t *testing.T) {
 		return nil
 	})
 }
+
+// TestJetStreamConsumerMultiFilterPrefetchOracle drives a real multi-filtered
+// pull consumer end-to-end (the getNextMultiFiltered prefetch path) and compares
+// the delivered stream sequences, in order, against an independent oracle: the
+// log of published sequences whose subject is in the filter set. Matches are
+// scattered through the stream and number several multiples of
+// multiFilterPrefetch, so the prefetch buffer refills and crosses its batch
+// boundary repeatedly. Runs on both file and memory storage.
+func TestJetStreamConsumerMultiFilterPrefetchOracle(t *testing.T) {
+	for _, st := range []StorageType{FileStorage, MemoryStorage} {
+		t.Run(st.String(), func(t *testing.T) {
+			s := RunBasicJetStreamServer(t)
+			defer s.Shutdown()
+
+			nc, js := jsClientConnect(t, s)
+			defer nc.Close()
+			acc := s.GlobalAccount()
+
+			mset, err := acc.addStream(&StreamConfig{
+				Name:     "TEST",
+				Subjects: []string{"ev.>"},
+				Storage:  st,
+			})
+			require_NoError(t, err)
+
+			// A scattered subset of literal subjects (>1 => o.filters is set and
+			// the multi-filter prefetch path is used).
+			matchSet := map[string]struct{}{}
+			var filters []string
+			for _, k := range []int{0, 1, 3, 7, 11, 17, 23, 31, 41, 49} {
+				subj := fmt.Sprintf("ev.%d", k)
+				filters = append(filters, subj)
+				matchSet[subj] = struct{}{}
+			}
+
+			const numSubjects = 50
+			const numMsgs = 5000
+			var want []uint64
+			for i := 0; i < numMsgs; i++ {
+				subj := fmt.Sprintf("ev.%d", i%numSubjects)
+				pa, err := js.Publish(subj, []byte("data"))
+				require_NoError(t, err)
+				if _, ok := matchSet[subj]; ok {
+					want = append(want, pa.Sequence)
+				}
+			}
+			// Ensure we genuinely exercise multiple prefetch refills.
+			require_True(t, len(want) > 3*multiFilterPrefetch)
+
+			_, err = mset.addConsumer(&ConsumerConfig{
+				Durable:        "c",
+				FilterSubjects: filters,
+				AckPolicy:      AckExplicit,
+			})
+			require_NoError(t, err)
+
+			sub, err := js.PullSubscribe(_EMPTY_, "c", nats.Bind("TEST", "c"))
+			require_NoError(t, err)
+
+			var got []uint64
+			deadline := time.Now().Add(30 * time.Second)
+			for len(got) < len(want) && time.Now().Before(deadline) {
+				msgs, err := sub.Fetch(200, nats.MaxWait(2*time.Second))
+				if err != nil && err != nats.ErrTimeout {
+					require_NoError(t, err)
+				}
+				for _, m := range msgs {
+					md, err := m.Metadata()
+					require_NoError(t, err)
+					// A multi-filtered consumer must never deliver a non-matching subject.
+					_, ok := matchSet[m.Subject]
+					require_True(t, ok)
+					got = append(got, md.Sequence.Stream)
+					require_NoError(t, m.Ack())
+				}
+			}
+
+			// Exact, ordered equality against the oracle.
+			require_Equal(t, len(got), len(want))
+			for i := range want {
+				require_Equal(t, got[i], want[i])
+			}
+
+			// Everything matched has been delivered and acked.
+			ci, err := js.ConsumerInfo("TEST", "c")
+			require_NoError(t, err)
+			require_Equal(t, ci.NumPending, uint64(0))
+			require_Equal(t, ci.NumAckPending, 0)
+		})
+	}
+}
