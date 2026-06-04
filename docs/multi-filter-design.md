@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Implemented (Phases 1 & 3); Phases 2/4/5 proposed — see `PHASES.md`. **A pre-merge review pass found open issues — see §12.** |
+| **Status** | Implemented (Phases 1 & 3); Phases 2/4/5 proposed — see `PHASES.md`. **A pre-merge review pass fixed a data race and the delivery error handling; some test-coverage gaps remain — see §12.** |
 | **Branch** | `claude/better-multi-filter-v0qig` |
 | **Components** | `server/consumer.go`, `server/filestore.go`, `server/memstore.go`, `server/store.go` |
 | **Related** | `PHASES.md` (roadmap), `docs/multi-filter-scaling-report.html` (illustrated summary) |
@@ -385,33 +385,38 @@ Suggested order: **4 → 2 → 5**.
 A pre-merge review pass (correctness / concurrency / coverage / performance /
 design) surfaced the items below. Each was confirmed against the code unless
 marked otherwise. They are the inputs to the companion **test plan**; the
-inline notes in §5–§10 above point back here.
+inline notes in §5–§10 above point back here. Items marked **✅ Fixed** were
+addressed on this branch; the rest remain open.
 
 **Must-fix before merge**
 
-1. **Data race in `memStore` multi-filter narrowing (High).**
-   `nextMultiMatchLocked` → `recalculateForSubj` mutates the shared `fss`
+1. **✅ Fixed — Data race in `memStore` multi-filter narrowing (High).**
+   `nextMultiMatchLocked` → `recalculateForSubj` mutated the shared `fss`
    `SimpleState` in place under `RLock`; single-filter `LoadNextMsg` does the
    same mutation under a write `Lock`. Two concurrent multi-filter readers (or a
    multi reader racing the single-filter path) write/write the same struct.
-   Reproduces under `-race` with the tree-narrowing branch active and dirty
-   `firstNeedsUpdate`/`lastNeedsUpdate` flags. Fix: take a write `Lock`, or
-   recalculate into a local copy. The Phase 3 change also added this to the
-   pre-existing `LoadNextMsgMulti`, so it affects `checkStateForInterestStream`,
-   not just the prefetch path.
+   **Fix:** both `LoadNextMsgMulti` and `LoadNextMsgsMulti` now take `ms.mu.Lock()`.
+   Regression test `TestMemStoreLoadNextMsgsMultiConcurrentRace` reproduces the
+   race under `-race` before the fix and is clean after. (Note: the Phase 3
+   change had also added this to the pre-existing `LoadNextMsgMulti`, affecting
+   `checkStateForInterestStream`; the lock fix covers that path too.)
 
 **Should-fix / decide intentionally**
 
-2. **`ErrStoreClosed` advances `o.sseq` (Med).** `getNextMultiFiltered` returns
-   the buffered seq on store-closed; legacy returned `skip = 0`. Return
-   `(nil, 0, ErrStoreClosed)` to match.
-3. **Over-broad "removed" classification (Med).** All non-`ErrStoreClosed`
-   `LoadMsg` errors (including transient cache/corruption) are treated as
-   removals and durably skip the sequence. Decide whether transient block errors
-   should instead retry/wait as the single-filter loop does.
-4. **Missing guards on `LoadNextMsgsMulti` (Low).** No `nil` / full-wildcard /
-   single-filter delegation; a **nil sublist panics**. Add the guards for
-   symmetry with `LoadNextMsgMulti`, or document the precondition.
+2. **✅ Fixed — `ErrStoreClosed` advanced `o.sseq` (Med).** `getNextMultiFiltered`
+   now returns `(nil, 0, err)` for any non-removal error (see item 3), matching
+   `LoadNextMsgMulti`'s contract and no longer corrupting the cursor on close.
+3. **✅ Fixed — Over-broad "removed" classification (Med).** Only a genuine
+   removal (`ErrStoreMsgNotFound`, `errDeletedMsg`, or a nil message with no
+   error) is now skipped with `o.sseq` advanced; every other error is surfaced
+   to the delivery loop (which logs/retries or terminates on close) instead of
+   silently dropping a possibly-live message. Covered by
+   `TestJetStreamConsumerMultiFilterRemovalMidDelivery`.
+4. **✅ Fixed — Missing guards on `LoadNextMsgsMulti` (Low).** A nil sublist now
+   returns `(0, 0, ErrStoreEOF)` (both stores) instead of panicking; the 2+-entry
+   precondition is documented (§5.1). `TestStoreLoadNextMsgsMultiNilSublist`.
+   (Full-wildcard / single-filter sublists already produce correct results via
+   the scan, so no delegation is required for correctness.)
 
 **Doc/heuristic accuracy (addressed inline above)**
 
@@ -425,14 +430,19 @@ inline notes in §5–§10 above point back here.
 
 **Test-suite gaps (drive the test plan)**
 
-9. No consumer end-to-end coverage of the prefetch path; differential test uses
-   a self-comparing oracle; no wildcard/overlap/zero/dup filters, no multi-block
-   / 256-boundary / reload / compression cases (§7 caveats).
-10. `TestNoRaceFileStoreLoadNextMsgsMultiScaling` gates on a zero-margin
-    wall-clock comparison (`require_LessThan(batched, perMsg)`) and is
-    flake-prone. Replace with operation-count assertions (search invocations ≈
-    `ceil(M/256)`, `LoadMsg` calls == M) plus an allocations-per-op ceiling; keep
-    wall-clock only as a logged smoke signal.
+9. **Partially addressed.** Consumer end-to-end coverage now exists
+   (`TestJetStreamConsumerMultiFilterPrefetchOracle` and
+   `...RemovalMidDelivery`, both file + mem, crossing the 256 prefetch boundary
+   with an independent oracle). **Still open:** the store differential test still
+   uses a self-comparing oracle (replace with brute force); no wildcard/overlap/
+   zero/dup filter cases; no multi-block / reload / compression cases; no
+   redelivery-rewind, filter-update-reset, or cluster (R3) coverage.
+10. **✅ Fixed — flaky scaling assertion.**
+    `TestNoRaceFileStoreLoadNextMsgsMultiScaling` no longer gates on wall-clock;
+    it asserts on search-call counts (per-message ≈ `M+1`, batched ≈
+    `ceil(M/256)+1`), with wall-clock kept only as a logged signal. An
+    allocations-per-op ceiling test (flat across filter count) is still a useful
+    addition.
 
 **Open questions (confirm at runtime)**
 
