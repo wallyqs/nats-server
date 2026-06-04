@@ -159,7 +159,11 @@ allocation.
   from amortizing block re-entry / lock / `selectMsgBlock`, **not** from a
   cheaper per-block search. High-cardinality blocks with few matches among many
   subjects can therefore scan *more* than the per-message intersection path did
-  (see §6 and Phase 4/5 in `PHASES.md`).
+  (see §6 and Phase 4/5 in `PHASES.md`). It also `cacheLookup`s **every** message
+  body in a scanned block to read its subject, whereas `firstMatchingMulti` can
+  use the block `fss` to skip a non-matching block without loading bodies — so on
+  **very sparse / non-selective blocks** the batched path loads bodies the
+  per-message path avoids (a memory cost — see §10 and the sparse benchmark).
 
 ### 5.3 Mem store (`server/memstore.go`)
 
@@ -347,7 +351,23 @@ throughput figures.*
   assert on operation counts (search invocations / lock acquisitions) instead of
   time.
 - **Memory.** The prefetch buffer is `multiFilterPrefetch` × 8 bytes (~2KB) per
-  multi-filter consumer; reused across refills.
+  multi-filter consumer; reused across refills. **However**, on very sparse /
+  clustered streams the batched search itself allocates more than the legacy
+  path: `collectMatchingMulti` loads (`cacheLookup`) every message body in each
+  scanned block, including non-matching interior "gap" blocks, while the
+  per-message `firstMatchingMulti` uses the block `fss` to skip such blocks
+  without loading bodies. `Benchmark_FileStoreLoadNextMsgsMultiSparse` (two small
+  match clusters separated by a growing non-matching gap) measured ~19× more
+  bytes/op for the batched path at a 100k-message gap (48 MB vs 2.5 MB), at
+  roughly equal wall-clock. Addressed by Phase 2/5.
+- **Very sparse / clustered streams.** Neither the batched nor the legacy
+  per-message path skips a large *interior* run of non-matching blocks — `psi`
+  records only `fblk`/`lblk` per subject, so neither can tell an interior block
+  is empty (the `checkSkipFirstBlockMulti` skip only fires on the first block of
+  a refill). Both scan the gap (≈ the unfiltered baseline), so this is **not a
+  time regression** versus the legacy path (the sparse benchmark shows batched
+  within ~1.5× at a 1k gap and faster at larger gaps), but it is the clearest
+  motivation for Phase 5 interior-block skipping (and the memory point above).
 - **Scope containment.** The new prefetch *path* is gated on `o.filters != nil`,
   so single-filter and unfiltered consumers take the same call site as before.
   **But this is not purely additive:** the per-message `memStore.LoadNextMsgMulti`

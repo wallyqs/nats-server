@@ -312,6 +312,18 @@ touched per batch is bounded by the number of blocks actually containing
 matches (instrument via a counter), plus a memory benchmark for the extended
 `psi`.
 
+The current (pre-Phase-5) behavior is already pinned and measured:
+`TestFileStoreLoadNextMsgsMultiVerySparse` (correctness) and
+`Benchmark_FileStoreLoadNextMsgsMultiSparse` (two small match clusters separated
+by a growing non-matching gap). The benchmark confirms **both** the batched and
+the legacy per-message paths scan the interior gap (neither skips it, since
+`psi` only has `fblk`/`lblk`), so batched is within ~1.5× on time — but the
+batched path allocates ~19× more bytes in the gap because `collectMatchingMulti`
+loads every body while `firstMatchingMulti` uses `fss` to skip non-matching
+blocks. Phase 5 (per-block membership) eliminates the interior scan for both;
+giving `collectMatchingMulti` an `fss`-intersection fast path (Phase 2-ish)
+would remove the memory overhead even before full block-membership tracking.
+
 ---
 
 ## Suggested order for the remaining work
