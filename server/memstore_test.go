@@ -22,6 +22,7 @@ import (
 	"math/rand"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -1727,4 +1728,80 @@ func Benchmark_MemStoreLoadNextMsgFiltered(b *testing.B) {
 			}
 		})
 	}
+}
+
+// TestMemStoreLoadNextMsgsMultiConcurrentRace exercises the multi-filter
+// subject-tree narrowing path concurrently. That path
+// (LoadNextMsgMulti / LoadNextMsgsMulti -> nextMultiMatchLocked ->
+// recalculateForSubj) mutates the SimpleState stored in ms.fss in place. Both
+// methods must hold the write lock (like the single-filter LoadNextMsg); when
+// they held only an RLock, concurrent callers raced on ss.First /
+// ss.firstNeedsUpdate. Run with -race: before the fix this reports a DATA RACE,
+// after it is clean.
+func TestMemStoreLoadNextMsgsMultiConcurrentRace(t *testing.T) {
+	ms, err := newMemStore(&StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: MemoryStorage})
+	require_NoError(t, err)
+	defer ms.Stop()
+
+	const numSubjects = 1000
+	const perSubject = 3
+	for r := 0; r < perSubject; r++ {
+		for s := 0; s < numSubjects; s++ {
+			_, _, err := ms.StoreMsg(fmt.Sprintf("foo.%d", s), nil, []byte("ZZZ"), 0)
+			require_NoError(t, err)
+		}
+	}
+	// Delete the leading messages: this is the first occurrence of those subjects,
+	// so it sets firstNeedsUpdate=true on their SimpleState and makes
+	// recalculateForSubj actually write ss.First (the racy mutation). We only
+	// delete a small prefix so LastSeq-start stays large and shouldLinearScanMulti
+	// returns false (i.e. we take the tree-narrowing path, not the linear scan).
+	for seq := uint64(1); seq <= 300; seq++ {
+		_, err := ms.RemoveMsg(seq)
+		require_NoError(t, err)
+	}
+
+	// 2+ literal subjects => a genuine multi-filter sublist (single-filter would
+	// take the LoadNextMsg fast path and not exercise nextMultiMatchLocked).
+	sl := gsl.NewSublist[struct{}]()
+	for s := 0; s < 200; s++ {
+		require_NoError(t, sl.Insert(fmt.Sprintf("foo.%d", s), struct{}{}))
+	}
+	// Sanity: confirm we are on the narrowing (non-linear) path.
+	ms.mu.RLock()
+	narrowing := !ms.shouldLinearScanMulti(ms.state.FirstSeq)
+	ms.mu.RUnlock()
+	require_True(t, narrowing)
+
+	const readers = 8
+	const iters = 40
+	var wg sync.WaitGroup
+	wg.Add(readers)
+	for i := 0; i < readers; i++ {
+		go func() {
+			defer wg.Done()
+			var smv StoreMsg
+			seqs := make([]uint64, 0, 256)
+			for it := 0; it < iters; it++ {
+				// Batched path.
+				for start := uint64(1); ; {
+					seqs = seqs[:0]
+					n, _, err := ms.LoadNextMsgsMulti(sl, start, 256, &seqs)
+					if n == 0 || err != nil {
+						break
+					}
+					start = seqs[len(seqs)-1] + 1
+				}
+				// Per-message path (shares nextMultiMatchLocked).
+				for start := uint64(1); ; {
+					_, nseq, err := ms.LoadNextMsgMulti(sl, start, &smv)
+					if err != nil {
+						break
+					}
+					start = nseq + 1
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

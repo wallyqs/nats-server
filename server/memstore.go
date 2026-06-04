@@ -1792,7 +1792,8 @@ func (ms *memStore) loadLastLocked(subject string, smp *StoreMsg) (*StoreMsg, er
 // Returns (first, last, true) if there is at least one matching subject at or
 // after start (start <= first <= last). Returns (0, 0, false) if no matching
 // subject has messages at or after start.
-// Lock should be held.
+// The WRITE lock must be held: recalculateForSubj mutates the shared SimpleState
+// (ss) in ms.fss in place, so callers must hold ms.mu.Lock(), not RLock().
 func (ms *memStore) nextMultiMatchLocked(sl *gsl.SimpleSublist, start uint64) (uint64, uint64, bool) {
 	found := false
 	first, last := ms.state.LastSeq, uint64(0)
@@ -1819,8 +1820,12 @@ func (ms *memStore) nextMultiMatchLocked(sl *gsl.SimpleSublist, start uint64) (u
 
 // LoadNextMsgMulti will find the next message matching any entry in the sublist.
 func (ms *memStore) LoadNextMsgMulti(sl *gsl.SimpleSublist, start uint64, smp *StoreMsg) (sm *StoreMsg, skip uint64, err error) {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
+	// Note: this takes a write lock (not RLock) because the subject-tree
+	// narrowing path (nextMultiMatchLocked -> recalculateForSubj) mutates the
+	// shared SimpleState stored in ms.fss in place. The single-filter LoadNextMsg
+	// does the same for the same reason.
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
 
 	if start < ms.state.FirstSeq {
 		start = ms.state.FirstSeq
@@ -1878,8 +1883,11 @@ func (ms *memStore) LoadNextMsgsMulti(sl *gsl.SimpleSublist, start uint64, maxSe
 	if maxSeqs <= 0 {
 		maxSeqs = 1
 	}
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
+	// Note: write lock (not RLock) because the subject-tree narrowing path
+	// (nextMultiMatchLocked -> recalculateForSubj) mutates the shared SimpleState
+	// stored in ms.fss in place, same as the single-filter LoadNextMsg.
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
 
 	if start < ms.state.FirstSeq {
 		start = ms.state.FirstSeq
