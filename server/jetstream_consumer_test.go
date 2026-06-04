@@ -12564,3 +12564,197 @@ func TestJetStreamConsumerMultiFilterRemovalMidDelivery(t *testing.T) {
 		})
 	}
 }
+
+// TestJetStreamConsumerMultiFilterUpdateFilterSet changes a multi-filter
+// consumer's filter set mid-delivery. updateConfig must call
+// resetMultiFilterPrefetch so prefetched matches from the OLD set are never
+// delivered after the switch.
+func TestJetStreamConsumerMultiFilterUpdateFilterSet(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+	acc := s.GlobalAccount()
+
+	mset, err := acc.addStream(&StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"ev.>"},
+		Storage:  FileStorage,
+	})
+	require_NoError(t, err)
+
+	// Disjoint filter sets A and B.
+	setA := []string{"ev.0", "ev.2", "ev.4", "ev.6", "ev.8"}
+	setB := []string{"ev.1", "ev.3", "ev.5", "ev.7", "ev.9"}
+	inB := map[string]struct{}{}
+	for _, s := range setB {
+		inB[s] = struct{}{}
+	}
+
+	const numSubjects = 20
+	const numMsgs = 4000
+	for i := 0; i < numMsgs; i++ {
+		_, err := js.Publish(fmt.Sprintf("ev.%d", i%numSubjects), []byte("data"))
+		require_NoError(t, err)
+	}
+
+	_, err = mset.addConsumer(&ConsumerConfig{
+		Durable:        "c",
+		FilterSubjects: setA,
+		AckPolicy:      AckExplicit,
+	})
+	require_NoError(t, err)
+
+	sub, err := js.PullSubscribe(_EMPTY_, "c", nats.Bind("TEST", "c"))
+	require_NoError(t, err)
+
+	// Consume a chunk under set A, populating the prefetch buffer with A matches.
+	msgs, err := sub.Fetch(50, nats.MaxWait(5*time.Second))
+	require_NoError(t, err)
+	require_True(t, len(msgs) == 50)
+	for _, m := range msgs {
+		require_True(t, m.Subject == "ev.0" || m.Subject == "ev.2" || m.Subject == "ev.4" || m.Subject == "ev.6" || m.Subject == "ev.8")
+		require_NoError(t, m.Ack())
+	}
+
+	// Switch to the disjoint set B. This must discard the A-match prefetch buffer.
+	_, err = mset.addConsumer(&ConsumerConfig{
+		Durable:        "c",
+		FilterSubjects: setB,
+		AckPolicy:      AckExplicit,
+	})
+	require_NoError(t, err)
+
+	// Everything delivered from here on must be in set B; if the stale A buffer
+	// were served, we'd see an A-only subject.
+	var afterUpdate int
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		msgs, err := sub.Fetch(200, nats.MaxWait(1*time.Second))
+		if err != nil && err != nats.ErrTimeout {
+			require_NoError(t, err)
+		}
+		if len(msgs) == 0 {
+			// Drained.
+			ci, err := js.ConsumerInfo("TEST", "c")
+			require_NoError(t, err)
+			if ci.NumPending == 0 {
+				break
+			}
+			continue
+		}
+		for _, m := range msgs {
+			_, ok := inB[m.Subject]
+			require_True(t, ok)
+			afterUpdate++
+			require_NoError(t, m.Ack())
+		}
+	}
+	require_True(t, afterUpdate > 0)
+}
+
+// TestJetStreamConsumerMultiFilterRedelivery validates redelivery for a
+// multi-filtered consumer: NAK'd messages are redelivered, every match is
+// eventually delivered and acked, and no non-matching subject is ever delivered.
+func TestJetStreamConsumerMultiFilterRedelivery(t *testing.T) {
+	for _, st := range []StorageType{FileStorage, MemoryStorage} {
+		t.Run(st.String(), func(t *testing.T) {
+			s := RunBasicJetStreamServer(t)
+			defer s.Shutdown()
+
+			nc, js := jsClientConnect(t, s)
+			defer nc.Close()
+			acc := s.GlobalAccount()
+
+			mset, err := acc.addStream(&StreamConfig{
+				Name:     "TEST",
+				Subjects: []string{"ev.>"},
+				Storage:  st,
+			})
+			require_NoError(t, err)
+
+			matchSet := map[string]struct{}{}
+			var filters []string
+			for _, k := range []int{0, 1, 3, 7, 11, 17, 23, 31, 41, 49} {
+				subj := fmt.Sprintf("ev.%d", k)
+				filters = append(filters, subj)
+				matchSet[subj] = struct{}{}
+			}
+
+			const numSubjects = 50
+			const numMsgs = 4000
+			matchCount := 0
+			for i := 0; i < numMsgs; i++ {
+				subj := fmt.Sprintf("ev.%d", i%numSubjects)
+				_, err := js.Publish(subj, []byte("data"))
+				require_NoError(t, err)
+				if _, ok := matchSet[subj]; ok {
+					matchCount++
+				}
+			}
+			require_True(t, matchCount > multiFilterPrefetch)
+
+			_, err = mset.addConsumer(&ConsumerConfig{
+				Durable:        "c",
+				FilterSubjects: filters,
+				AckPolicy:      AckExplicit,
+				AckWait:        2 * time.Second,
+			})
+			require_NoError(t, err)
+
+			sub, err := js.PullSubscribe(_EMPTY_, "c", nats.Bind("TEST", "c"))
+			require_NoError(t, err)
+
+			delivered := map[uint64]int{} // stream seq -> times delivered
+			nakedOnce := map[uint64]bool{}
+			acked := map[uint64]struct{}{}
+
+			deadline := time.Now().Add(40 * time.Second)
+			for len(acked) < matchCount && time.Now().Before(deadline) {
+				msgs, err := sub.Fetch(100, nats.MaxWait(1*time.Second))
+				if err != nil && err != nats.ErrTimeout {
+					require_NoError(t, err)
+				}
+				for _, m := range msgs {
+					md, err := m.Metadata()
+					require_NoError(t, err)
+					_, ok := matchSet[m.Subject]
+					require_True(t, ok)
+					seq := md.Sequence.Stream
+					delivered[seq]++
+					// NAK every 10th distinct message once; ack everything else
+					// (and ack the NAK'd ones when they come back).
+					if seq%10 == 0 && !nakedOnce[seq] {
+						nakedOnce[seq] = true
+						require_NoError(t, m.Nak())
+					} else {
+						require_NoError(t, m.Ack())
+						acked[seq] = struct{}{}
+					}
+				}
+			}
+
+			// Every match was eventually delivered and acked.
+			require_Equal(t, len(acked), matchCount)
+			// Every NAK'd message was delivered at least twice.
+			for seq := range nakedOnce {
+				require_True(t, delivered[seq] >= 2)
+			}
+
+			checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+				ci, err := js.ConsumerInfo("TEST", "c")
+				if err != nil {
+					return err
+				}
+				if ci.NumPending != 0 {
+					return fmt.Errorf("expected 0 pending, got %d", ci.NumPending)
+				}
+				if ci.NumAckPending != 0 {
+					return fmt.Errorf("expected 0 ack pending, got %d", ci.NumAckPending)
+				}
+				return nil
+			})
+		})
+	}
+}
