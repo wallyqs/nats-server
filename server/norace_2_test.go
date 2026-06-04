@@ -1924,10 +1924,13 @@ func TestNoRaceFileStoreLoadNextMsgsMultiScaling(t *testing.T) {
 
 		var smv StoreMsg
 
-		// Old path: one LoadNextMsgMulti per delivered message.
-		var perMsgCount int
+		// Old path: one LoadNextMsgMulti per delivered message. perMsgSearches is
+		// the number of (expensive) multi-subject searches performed: one per
+		// delivered message plus the final EOF call.
+		var perMsgCount, perMsgSearches int
 		start := time.Now()
 		for seq := uint64(1); ; {
+			perMsgSearches++
 			sm, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
 			if err != nil {
 				break
@@ -1938,12 +1941,15 @@ func TestNoRaceFileStoreLoadNextMsgsMultiScaling(t *testing.T) {
 		}
 		perMsg := time.Since(start)
 
-		// New path: batched LoadNextMsgsMulti + a fresh LoadMsg per delivered message.
-		var batchedCount int
+		// New path: batched LoadNextMsgsMulti + a fresh LoadMsg per delivered
+		// message. batchedSearches counts the multi-subject searches, which the
+		// batch amortizes (~one per multiFilterPrefetch matches).
+		var batchedCount, batchedSearches int
 		seqs := make([]uint64, 0, multiFilterPrefetch)
 		start = time.Now()
 		for seq := uint64(1); ; {
 			seqs = seqs[:0]
+			batchedSearches++
 			n, _, err := fs.LoadNextMsgsMulti(sl, seq, multiFilterPrefetch, &seqs)
 			if n == 0 {
 				require_Error(t, err, ErrStoreEOF)
@@ -1958,11 +1964,19 @@ func TestNoRaceFileStoreLoadNextMsgsMultiScaling(t *testing.T) {
 		}
 		batched := time.Since(start)
 
+		// Both paths must deliver exactly the same matches.
 		require_Equal(t, perMsgCount, batchedCount)
-		t.Logf("filters=%-3d matches=%-7d  per-message=%-12v  batched=%-12v  speedup=%.1fx",
-			fc, perMsgCount, perMsg, batched, float64(perMsg)/float64(batched))
-		// Batched (even including a per-message LoadMsg) should never be slower.
-		require_LessThan(t, batched, perMsg)
+
+		t.Logf("filters=%-3d matches=%-7d  per-message=%-12v (%d searches)  batched=%-12v (%d searches)  speedup=%.1fx",
+			fc, perMsgCount, perMsg, perMsgSearches, batched, batchedSearches, float64(perMsg)/float64(batched))
+
+		// Assert on search counts (deterministic) rather than wall-clock (which is
+		// flaky on noisy CI). The per-message path runs one search per delivered
+		// message; the batched path runs ~ceil(matches/multiFilterPrefetch), i.e.
+		// dramatically fewer, which is the whole point of the change.
+		require_Equal(t, perMsgSearches, perMsgCount+1)
+		require_LessThan(t, batchedSearches, perMsgCount/multiFilterPrefetch+3) // ~ceil(matches/prefetch)+1
+		require_LessThan(t, batchedSearches*10, perMsgSearches)                 // >=10x fewer searches
 	}
 }
 

@@ -1883,6 +1883,11 @@ func (ms *memStore) LoadNextMsgsMulti(sl *gsl.SimpleSublist, start uint64, maxSe
 	if maxSeqs <= 0 {
 		maxSeqs = 1
 	}
+	// Only used for genuine multi-subject (2+) sublists; guard nil defensively so
+	// a direct store caller cannot panic in the scan path (sl.HasInterest).
+	if sl == nil {
+		return 0, 0, ErrStoreEOF
+	}
 	// Note: write lock (not RLock) because the subject-tree narrowing path
 	// (nextMultiMatchLocked -> recalculateForSubj) mutates the shared SimpleState
 	// stored in ms.fss in place, same as the single-filter LoadNextMsg.

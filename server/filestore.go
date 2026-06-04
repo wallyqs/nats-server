@@ -9228,6 +9228,12 @@ func (fs *fileStore) LoadNextMsgsMulti(sl *gsl.SimpleSublist, start uint64, maxS
 	if fs.isClosed() {
 		return 0, 0, ErrStoreClosed
 	}
+	// This batched path is only used for genuine multi-subject (2+) sublists; the
+	// consumer guarantees o.filters is non-nil. Guard nil defensively so a direct
+	// store caller cannot panic in the scan path (sl.HasInterest / IntersectGSL).
+	if sl == nil {
+		return 0, 0, ErrStoreEOF
+	}
 	if maxSeqs <= 0 {
 		maxSeqs = 1
 	}

@@ -189,6 +189,27 @@ func TestStoreLoadNextMsgsMulti(t *testing.T) {
 	)
 }
 
+// A nil sublist must not panic in the batched multi-filter scan path. The
+// consumer never passes nil (o.filters is non-nil for 2+ filters), but the
+// store API should be defensive for direct callers.
+func TestStoreLoadNextMsgsMultiNilSublist(t *testing.T) {
+	testAllStoreAllPermutations(
+		t, false,
+		StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}},
+		func(t *testing.T, fs StreamStore) {
+			for i := 0; i < 10; i++ {
+				_, _, err := fs.StoreMsg(fmt.Sprintf("foo.%d", i), nil, []byte("ZZZ"), 0)
+				require_NoError(t, err)
+			}
+			seqs := make([]uint64, 0, 8)
+			n, _, err := fs.LoadNextMsgsMulti(nil, 1, 8, &seqs)
+			require_Equal(t, n, 0)
+			require_Error(t, err, ErrStoreEOF)
+			require_Equal(t, len(seqs), 0)
+		},
+	)
+}
+
 func TestStoreLoadNextMsgWildcardStartBeforeFirstMatch(t *testing.T) {
 	testAllStoreAllPermutations(
 		t, false,
