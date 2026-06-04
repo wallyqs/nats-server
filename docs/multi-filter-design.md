@@ -226,6 +226,31 @@ for {
 - `resetMultiFilterPrefetch()` clears the buffer; called from `updateConfig`
   whenever the filter set changes.
 
+#### Which delivery paths this affects
+
+The change touches only the **forward multi-filter delivery scan**. Two adjacent
+paths in `getNextMsg` are intentionally untouched:
+
+- **Redeliveries** are served first (`getNextToRedeliver` → direct `LoadMsg`),
+  before the multi-filter branch, so a NAK / ack-wait redelivery never enters
+  `getNextMultiFiltered` and does not rewind `o.sseq`.
+- **`DeliverLastPerSubject`** does **not** use this path at all. For a
+  multi-filter consumer the initial "last message per subject" set is computed
+  once at setup via `store.MultiLastSeqs(o.filters, 0, 0)` and held in the
+  `o.lss` skip list; `getNextMsg` then serves those sequences directly with
+  `LoadMsg` (the `o.hasSkipListPending()` branch) and never calls
+  `getNextMultiFiltered`. So **this work neither improves nor regresses
+  last-per-subject performance.** It does not need to: `MultiLastSeqs` is already
+  subject-indexed (`psim.Match` to find matching subjects, then `fss.IterFast`
+  over the few blocks they occupy), so it scales with the number of *matching
+  subjects*, not `messages × filters` — it never had the per-message blow-up that
+  motivated this change. Only **after** the `o.lss` snapshot is drained (`o.sseq`
+  advanced to `o.lss.resume`) does ongoing delivery of newly-arriving matches
+  flow through `getNextMultiFiltered` and pick up the batching / `fss` fast path.
+
+  (If last-per-subject latency ever becomes a concern, the target is
+  `MultiLastSeqs`, a separate API, not the batched forward scan.)
+
 ---
 
 ## 6. Why it scales
