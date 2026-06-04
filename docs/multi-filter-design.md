@@ -430,13 +430,17 @@ addressed on this branch; the rest remain open.
 
 **Test-suite gaps (drive the test plan)**
 
-9. **Partially addressed.** Consumer end-to-end coverage now exists
-   (`TestJetStreamConsumerMultiFilterPrefetchOracle` and
-   `...RemovalMidDelivery`, both file + mem, crossing the 256 prefetch boundary
-   with an independent oracle). **Still open:** the store differential test still
-   uses a self-comparing oracle (replace with brute force); no wildcard/overlap/
-   zero/dup filter cases; no multi-block / reload / compression cases; no
-   redelivery-rewind, filter-update-reset, or cluster (R3) coverage.
+9. **Largely addressed.** Added store-level: `TestStoreLoadNextMsgsMultiBruteForceOracle`
+   (independent brute-force oracle across both stores + the full cipher/compression
+   matrix, deletes around the 256 boundary), `...WildcardsAndOverlap`,
+   `TestFileStoreLoadNextMsgsMultiMultiBlockAndReload` (many blocks + Stop/reopen),
+   and `...NilSublist`. Added consumer end-to-end (file + mem):
+   `TestJetStreamConsumerMultiFilterPrefetchOracle`, `...RemovalMidDelivery`,
+   `...UpdateFilterSet`, `...Redelivery`, and the R3
+   `TestNoRaceJetStreamClusterMultiFilterConsumer` (with a consumer leader
+   stepdown). **Still open (nice-to-have, non-blocking):** an allocations-per-op
+   ceiling test (flat across filter count) and the selectivity/cardinality
+   benchmarks for the open performance question below.
 10. **✅ Fixed — flaky scaling assertion.**
     `TestNoRaceFileStoreLoadNextMsgsMultiScaling` no longer gates on wall-clock;
     it asserts on search-call counts (per-message ≈ `M+1`, batched ≈
