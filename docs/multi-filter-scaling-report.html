@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Scaling Multi-Subject Filters for JetStream Pull Consumers</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --ink:#e6edf3; --muted:#9aa7b4;
+    --line:#283041; --accent:#3fb950; --accent2:#58a6ff; --warn:#d29922; --bad:#f85149;
+    --code:#0b0f15; --chip:#21304a;
+    --mono:'SF Mono',ui-monospace,'JetBrains Mono',Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:linear-gradient(180deg,#0a0d12,#0d1117 240px);color:var(--ink);
+       font-family:var(--sans);line-height:1.62;font-size:16px}
+  .wrap{max-width:980px;margin:0 auto;padding:0 22px 120px}
+  header.hero{padding:64px 0 40px;border-bottom:1px solid var(--line);margin-bottom:8px}
+  .eyebrow{font:600 12px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--accent);
+           display:inline-block;padding:7px 12px;border:1px solid #1f3a26;border-radius:999px;background:#0e2114}
+  h1{font-size:40px;line-height:1.12;margin:20px 0 14px;letter-spacing:-.02em}
+  h1 .grad{background:linear-gradient(90deg,#58a6ff,#3fb950);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .lede{font-size:18px;color:var(--muted);max-width:74ch;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:26px}
+  .meta .tag{font:500 12.5px/1 var(--mono);color:var(--muted);background:var(--chip);border:1px solid var(--line);
+             padding:8px 11px;border-radius:8px}
+  h2{font-size:25px;margin:54px 0 8px;letter-spacing:-.01em;scroll-margin-top:20px}
+  h2 .n{font:700 13px/1 var(--mono);color:var(--accent2);margin-right:10px;vertical-align:middle}
+  h3{font-size:18px;margin:30px 0 6px;color:#cdd9e5}
+  p{margin:12px 0}
+  a{color:var(--accent2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .sub{color:var(--muted)}
+  code{font-family:var(--mono);font-size:13.5px;background:#1b2330;border:1px solid var(--line);
+       padding:1.5px 6px;border-radius:6px;color:#d6e2ee}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:16px 18px;overflow:auto;
+      font-family:var(--mono);font-size:13px;line-height:1.65;margin:16px 0}
+  pre .c{color:#6b7785}      /* comment */
+  pre .k{color:#ff7b72}      /* keyword */
+  pre .f{color:#d2a8ff}      /* func */
+  pre .s{color:#a5d6ff}      /* string */
+  pre .t{color:#7ee787}      /* type/good */
+  pre .m{color:#79c0ff}      /* number/ident */
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin:18px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}.toc{position:static!important}}
+  .callout{border-left:3px solid var(--accent2);background:#0f1a2b;border-radius:0 10px 10px 0;
+           padding:14px 18px;margin:18px 0;color:#cddcea}
+  .callout.bad{border-left-color:var(--bad);background:#1d1113}
+  .callout.good{border-left-color:var(--accent);background:#0e1b12}
+  .callout b{color:#fff}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14.5px}
+  th,td{text-align:left;padding:11px 13px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font:600 12px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase}
+  td.mono,th.mono{font-family:var(--mono)}
+  tbody tr:hover td{background:#131a24}
+  .pill{display:inline-block;font:600 12px/1 var(--mono);padding:4px 8px;border-radius:6px}
+  .pill.green{color:#7ee787;background:#0e2114;border:1px solid #1f3a26}
+  .pill.red{color:#ff9d96;background:#2a1416;border:1px solid #4d2226}
+  /* chart */
+  .chart{margin:8px 0 4px}
+  .bargroup{margin:14px 0}
+  .barlabel{display:flex;justify-content:space-between;font:600 13px/1 var(--mono);color:#cdd9e5;margin-bottom:7px}
+  .barlabel .muted{color:var(--muted);font-weight:500}
+  .track{position:relative;height:30px;background:#0b0f15;border:1px solid var(--line);border-radius:7px;overflow:hidden;margin-bottom:7px}
+  .bar{position:absolute;left:0;top:0;bottom:0;display:flex;align-items:center;padding-left:10px;
+       font:600 12px/1 var(--mono);color:#04130a;border-radius:6px;white-space:nowrap}
+  .bar.old{background:linear-gradient(90deg,#f85149,#ff7b72);color:#1a0606}
+  .bar.new{background:linear-gradient(90deg,#3fb950,#56d364);color:#04130a}
+  .legend{display:flex;gap:18px;margin:6px 0 0;font:500 13px/1 var(--mono);color:var(--muted)}
+  .legend .sw{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:7px;vertical-align:-1px}
+  .speed{font:700 13px/1 var(--mono);color:var(--accent)}
+  /* flow diagram */
+  .flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+  .node{flex:1;min-width:130px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+        padding:12px 13px;text-align:center;font:600 13px/1.35 var(--sans)}
+  .node small{display:block;color:var(--muted);font-weight:500;font-family:var(--mono);font-size:11px;margin-top:5px}
+  .arrow{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:20px;padding:0 8px}
+  .node.hot{border-color:#5b2326;background:#1c1214}
+  .node.cool{border-color:#1f3a26;background:#0e1b12}
+  .toc{position:sticky;top:18px}
+  .toc ol{list-style:none;margin:0;padding:0;counter-reset:s}
+  .toc li{counter-increment:s;margin:0}
+  .toc a{display:block;padding:7px 10px;border-radius:8px;color:var(--muted);font-size:14px;border:1px solid transparent}
+  .toc a:hover{background:var(--panel);color:var(--ink);text-decoration:none;border-color:var(--line)}
+  .toc a::before{content:counter(s);font:700 11px/1 var(--mono);color:var(--accent2);margin-right:9px}
+  .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:24px 0}
+  .kpi{background:linear-gradient(180deg,#15202e,#121822);border:1px solid var(--line);border-radius:14px;padding:18px}
+  .kpi .v{font:800 30px/1 var(--sans);letter-spacing:-.02em;background:linear-gradient(90deg,#58a6ff,#3fb950);
+          -webkit-background-clip:text;background-clip:text;color:transparent}
+  .kpi .l{color:var(--muted);font-size:13px;margin-top:8px}
+  footer{margin-top:60px;padding-top:24px;border-top:1px solid var(--line);color:var(--muted);font-size:13.5px}
+  hr.soft{border:0;border-top:1px solid var(--line);margin:40px 0}
+  .filechip{font-family:var(--mono);font-size:12.5px;color:#9fd0ff;background:#0e1a2b;border:1px solid #1d3350;
+            padding:3px 8px;border-radius:6px;display:inline-block;margin:2px 4px 2px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <span class="eyebrow">NATS Server · JetStream · Performance</span>
+  <h1>Scaling <span class="grad">multi-subject filters</span><br/>for pull consumers</h1>
+  <p class="lede">Why filtering on 10, 30, 50 or 90 subjects used to fall off a cliff — and how
+  batching the store lookup makes per-message delivery cost flat instead of growing with the
+  number of filters.</p>
+  <div class="meta">
+    <span class="tag">branch: claude/better-multi-filter-v0qig</span>
+    <span class="tag">filestore · memstore · consumer</span>
+    <span class="tag">+469 / −2 lines</span>
+    <span class="tag">16×–125× faster</span>
+  </div>
+</header>
+
+<div class="grid2" style="grid-template-columns:1fr 250px;align-items:start;gap:34px">
+  <div>
+
+  <h2 id="s1"><span class="n">01</span>The symptom</h2>
+  <p>A JetStream pull consumer can filter the stream by a set of subjects. Operators reported that as
+  the filter set grew — 10, 30, 50, 90 subjects — delivery throughput dropped sharply and latency rose.
+  In the worst cases it was <em>faster to remove the filter entirely</em>, push every message over the
+  network, and let the client throw away what it didn't want.</p>
+
+  <div class="callout bad">
+    <b>The tell.</b> The hot path was <code>calling LoadNextMsgMulti once per delivered message</code>.
+    The cost of that one call grows with the number of filter subjects, so total delivery cost scaled
+    like <code>messages × filters</code> instead of just <code>messages</code>.
+  </div>
+
+  <h2 id="s2"><span class="n">02</span>How delivery worked (before)</h2>
+  <p>The consumer's delivery loop, <code>loopAndGatherMsgs</code>, pulls exactly one message per
+  iteration via <code>getNextMsg</code>. For a multi-filtered consumer that meant one store call —
+  <code>LoadNextMsgMulti</code> — for every single message:</p>
+
+  <div class="panel">
+    <div class="flow">
+      <div class="node">loopAndGatherMsgs<small>1 msg / iteration</small></div>
+      <div class="arrow">→</div>
+      <div class="node">getNextMsg<small>holds o.mu</small></div>
+      <div class="arrow">→</div>
+      <div class="node hot">LoadNextMsgMulti<small>once&nbsp;per&nbsp;message</small></div>
+    </div>
+    <p class="sub" style="margin:14px 0 0;font-size:14px">Every call starts from scratch — it keeps no
+    memory of where the previous match was.</p>
+  </div>
+
+  <p>Inside that one call, the store does real work <em>every time</em>:</p>
+  <ul>
+    <li>re-acquire the store read lock (<code>fs.mu.RLock</code>);</li>
+    <li>re-select the starting message block from the cursor (<code>selectMsgBlockWithIndex</code>);</li>
+    <li>walk the block's per-subject tree (<code>fss</code>) and <b>intersect it against the sublist</b>
+        of filter subjects (<code>IntersectGSL</code>) — or linearly scan the block — just to locate the
+        <em>single</em> next match, then return.</li>
+  </ul>
+
+  <p>That intersection / scan is the part whose cost rises with the number of filter subjects and the
+  number of distinct subjects in the block. Doing it per message is the bottleneck.</p>
+
+  <div class="callout bad">
+    <b>memstore was worse.</b> Its <code>LoadNextMsgMulti</code> was an explicit
+    <span class="sub">"simple linear walk to get started"</span> — a full scan from the cursor with no
+    subject-index acceleration at all. Sparse matches on a memory stream degrade toward
+    <code>O(M²)</code> across a delivery.
+  </div>
+
+  <h2 id="s3"><span class="n">03</span>The idea: amortize the search</h2>
+  <p>The expensive thing is <em>searching</em> for matches; the cheap thing is <em>reading</em> a message
+  by sequence. The fix decouples them: do the multi-subject search <b>once per batch</b>, remember the
+  matching sequence numbers, then serve those sequences with plain, cheap lookups.</p>
+
+  <div class="panel">
+    <div class="flow">
+      <div class="node">getNextMsg</div>
+      <div class="arrow">→</div>
+      <div class="node cool">prefetch buffer<small>matching seqs</small></div>
+      <div class="arrow">→</div>
+      <div class="node cool">LoadMsg(seq)<small>fresh, by sequence</small></div>
+    </div>
+    <div class="flow" style="margin-top:12px">
+      <div class="node" style="flex:0 0 auto;min-width:170px">buffer empty?</div>
+      <div class="arrow">→</div>
+      <div class="node hot" style="flex:0 0 auto;min-width:230px">LoadNextMsgsMulti<small>search once · fills up to 256 seqs</small></div>
+    </div>
+  </div>
+
+  <p>So in steady state, delivering a message costs one <code>LoadMsg</code> by sequence — the same as the
+  no-filter baseline operators already found acceptable. The multi-subject search happens roughly once
+  every 256 messages instead of every message.</p>
+
+  <h3>Why prefetch <em>sequences</em>, not message bodies?</h3>
+  <p>Prefetching whole messages would risk delivering a message that was acked or removed in the window
+  between prefetch and delivery. Prefetching only the matching <b>sequence numbers</b> keeps the body load
+  lazy and fresh: if a message disappeared after prefetch, its <code>LoadMsg</code> simply fails and the
+  consumer skips it. Sequences in NATS are immutable — a sequence maps to one message forever or to
+  nothing — so a buffered sequence can never point at the wrong message.</p>
+
+  <h2 id="s4"><span class="n">04</span>What changed, concretely</h2>
+
+  <h3>Store engine — a batched API</h3>
+  <p>A new method on the store interface gathers many matches per call:</p>
+<pre><span class="c">// Append up to maxSeqs matching sequences (ascending) at or after start.</span>
+<span class="k">func</span> <span class="f">LoadNextMsgsMulti</span>(sl *gsl.SimpleSublist, start <span class="t">uint64</span>,
+        maxSeqs <span class="t">int</span>, seqs *[]<span class="t">uint64</span>) (n <span class="t">int</span>, last <span class="t">uint64</span>, err <span class="t">error</span>)</pre>
+
+  <ul>
+    <li><span class="filechip">filestore.go</span> <code>LoadNextMsgsMulti</code> reuses the existing
+      <code>psim</code> block-skipping to jump to the first block that can contain a match, then
+      <code>msgBlock.collectMatchingMulti</code> gathers <em>all</em> the block's matches in a single
+      sequential pass — instead of one intersection per message.</li>
+    <li><span class="filechip">memstore.go</span> <code>LoadNextMsgMulti</code> now narrows the scan using
+      the <code>fss</code> subject tree (computing the lowest matching <code>First</code> across matched
+      subjects), and the batched <code>LoadNextMsgsMulti</code> is added alongside it.</li>
+    <li><span class="filechip">store.go</span> the method is added to the <code>StreamStore</code> interface.</li>
+  </ul>
+
+  <h3>Consumer — a prefetch buffer</h3>
+  <p><span class="filechip">consumer.go</span> <code>getNextMultiFiltered</code> replaces the per-message
+  <code>LoadNextMsgMulti</code> call. It mirrors that method's contract exactly (same EOF semantics, same
+  cursor advancement) so the surrounding delivery, skip and num-pending logic is untouched:</p>
+<pre><span class="k">if</span> o.sseq &lt;= o.mflast {           <span class="c">// rewound (e.g. redelivery retry) → buffer is stale</span>
+    o.<span class="f">resetMultiFilterPrefetch</span>()
+}
+<span class="k">for</span> {
+    <span class="c">// drop prefetched seqs now behind the cursor</span>
+    <span class="k">for</span> o.mfidx &lt; <span class="f">len</span>(o.mfseqs) &amp;&amp; o.mfseqs[o.mfidx] &lt; o.sseq { o.mfidx++ }
+    <span class="k">if</span> o.mfidx &gt;= <span class="f">len</span>(o.mfseqs) {           <span class="c">// refill: the search, done once per ~256 msgs</span>
+        n, last, err := store.<span class="f">LoadNextMsgsMulti</span>(o.filters, o.sseq, <span class="m">256</span>, &amp;o.mfseqs)
+        <span class="k">if</span> n == <span class="m">0</span> { <span class="k">return</span> <span class="k">nil</span>, last, err }  <span class="c">// EOF, same as before</span>
+    }
+    seq := o.mfseqs[o.mfidx]; o.mfidx++; o.mflast = seq
+    sm, err := store.<span class="f">LoadMsg</span>(seq, smp)        <span class="c">// fresh body load</span>
+    <span class="k">if</span> err != <span class="k">nil</span> { o.sseq = seq + <span class="m">1</span>; <span class="k">continue</span> } <span class="c">// removed since prefetch → skip</span>
+    <span class="k">return</span> sm, seq, <span class="k">nil</span>
+}</pre>
+
+  <p>The buffer is invalidated whenever it could be stale: a backward cursor move (redelivery), or a
+  change to the consumer's filter set (handled in <code>updateConfig</code>). Forward cursor jumps are
+  safe — stale-but-still-ahead sequences are simply dropped and the buffer refills.</p>
+
+  <h2 id="s5"><span class="n">05</span>Why it helps — the complexity</h2>
+  <p>Let <b>M</b> = messages delivered, <b>F</b> = filter subjects, <b>S</b> = distinct subjects in a block.
+  The search cost per call is roughly proportional to the subject-tree intersection it performs.</p>
+
+  <table>
+    <thead><tr><th>Path</th><th>Search cost</th><th>Per delivered message</th><th>Total over a delivery</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Before — per message</td>
+        <td class="mono">~O(S) intersect</td>
+        <td><span class="pill red">1 full search</span></td>
+        <td class="mono">O(M · search)</td>
+      </tr>
+      <tr>
+        <td>After — batched</td>
+        <td class="mono">~O(S) intersect</td>
+        <td><span class="pill green">1 LoadMsg + 1/256 search</span></td>
+        <td class="mono">O(M + (M/256)·search)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>The search term doesn't get cheaper — it gets <b>amortized by ~256×</b>. The per-message cost drops to
+  a plain sequence lookup, which is independent of <code>F</code>. That's why the "after" line in the chart
+  below is flat across filter counts while the "before" line climbs.</p>
+
+  <h2 id="s6"><span class="n">06</span>Results</h2>
+  <p>Benchmark <code>TestNoRaceFileStoreLoadNextMsgsMultiScaling</code>: 200,000 messages round-robined
+  across 1,000 subjects (matches scattered throughout the stream), file-backed store. The "before" path
+  calls <code>LoadNextMsgMulti</code> per message; the "after" path uses the batched API <em>plus</em> a
+  fresh <code>LoadMsg</code> per delivered message, so the comparison is end-to-end fair.</p>
+
+  <div class="kpis">
+    <div class="kpi"><div class="v">flat</div><div class="l">after-path stays ~30&nbsp;ms regardless of filter count</div></div>
+    <div class="kpi"><div class="v">125×</div><div class="l">faster at 90 filters (3.97&nbsp;s → 32&nbsp;ms)</div></div>
+    <div class="kpi"><div class="v">0</div><div class="l">change to delivery semantics or message correctness</div></div>
+  </div>
+
+  <div class="panel chart">
+    <!-- bars scaled to 3972ms full width -->
+    <div class="bargroup">
+      <div class="barlabel"><span>10 filters</span><span class="muted">2,000 matches · <span class="speed">16.2× faster</span></span></div>
+      <div class="track"><div class="bar old" style="width:11.3%">447 ms &nbsp;before</div></div>
+      <div class="track"><div class="bar new" style="width:6%">28 ms &nbsp;after</div></div>
+    </div>
+    <div class="bargroup">
+      <div class="barlabel"><span>30 filters</span><span class="muted">6,000 matches · <span class="speed">46.2× faster</span></span></div>
+      <div class="track"><div class="bar old" style="width:32.8%">1.30 s &nbsp;before</div></div>
+      <div class="track"><div class="bar new" style="width:6%">28 ms &nbsp;after</div></div>
+    </div>
+    <div class="bargroup">
+      <div class="barlabel"><span>50 filters</span><span class="muted">10,000 matches · <span class="speed">75.5× faster</span></span></div>
+      <div class="track"><div class="bar old" style="width:60.9%">2.42 s &nbsp;before</div></div>
+      <div class="track"><div class="bar new" style="width:6%">32 ms &nbsp;after</div></div>
+    </div>
+    <div class="bargroup">
+      <div class="barlabel"><span>90 filters</span><span class="muted">18,000 matches · <span class="speed">125.2× faster</span></span></div>
+      <div class="track"><div class="bar old" style="width:100%">3.97 s &nbsp;before</div></div>
+      <div class="track"><div class="bar new" style="width:6%">32 ms &nbsp;after</div></div>
+    </div>
+    <div class="legend">
+      <span><span class="sw" style="background:#f85149"></span>before — LoadNextMsgMulti per message</span>
+      <span><span class="sw" style="background:#3fb950"></span>after — batched + LoadMsg per message</span>
+    </div>
+  </div>
+
+  <table>
+    <thead><tr><th>Filters</th><th class="mono">Matches</th><th class="mono">Before</th><th class="mono">After</th><th class="mono">Speedup</th></tr></thead>
+    <tbody>
+      <tr><td>10</td><td class="mono">2,000</td><td class="mono">447.07 ms</td><td class="mono">27.56 ms</td><td class="mono"><span class="pill green">16.2×</span></td></tr>
+      <tr><td>30</td><td class="mono">6,000</td><td class="mono">1,304.93 ms</td><td class="mono">28.27 ms</td><td class="mono"><span class="pill green">46.2×</span></td></tr>
+      <tr><td>50</td><td class="mono">10,000</td><td class="mono">2,418.08 ms</td><td class="mono">32.03 ms</td><td class="mono"><span class="pill green">75.5×</span></td></tr>
+      <tr><td>90</td><td class="mono">18,000</td><td class="mono">3,972.12 ms</td><td class="mono">31.74 ms</td><td class="mono"><span class="pill green">125.2×</span></td></tr>
+    </tbody>
+  </table>
+  <p class="sub" style="font-size:13.5px">Notice the "before" column tracks the filter count almost
+  linearly — that is the <code>messages × filters</code> blow-up. The "after" column is essentially
+  constant: the search has been amortized out of the per-message path.</p>
+
+  <h2 id="s7"><span class="n">07</span>Correctness — what was preserved</h2>
+  <div class="grid2">
+    <div class="callout good"><b>Fresh bodies.</b> Messages are loaded by sequence at delivery time, never
+      from a stale prefetch. A message removed after prefetch fails its <code>LoadMsg</code> and is skipped.</div>
+    <div class="callout good"><b>Redelivery / rewind.</b> If the cursor moves back to or below the last
+      sequence served, the buffer is discarded and rebuilt from the new position.</div>
+    <div class="callout good"><b>Filter changes.</b> <code>updateConfig</code> resets the buffer whenever the
+      consumer's subject filters change, so old matches are never served under a new filter.</div>
+    <div class="callout good"><b>EOF &amp; skip accounting.</b> The helper returns the same
+      <code>(nil, lastSeq, ErrStoreEOF)</code> contract as before, so cursor advancement,
+      <code>updateSkipped</code> for replicas, and num-pending math are unchanged.</div>
+  </div>
+  <p>Validated across all store permutations and the multi-filter, pull-consumer and work-queue consumer
+  suites, including under the Go race detector.</p>
+
+  <h2 id="s8"><span class="n">08</span>Known limitations &amp; next steps</h2>
+  <ul>
+    <li><b>Interior block skipping.</b> Empty interior blocks are still skipped only on the first probed
+      block (the pre-existing <code>psim</code> design). Tracking <em>all</em> blocks per subject (a "v2"
+      <code>psim</code>) would let very sparse streams skip empty interior blocks per batch too.</li>
+    <li><b>Adaptive selectivity.</b> When a filter set matches most of the stream, deliberately fall back
+      to a contiguous unfiltered scan with an inline interest test — formalizing the "just drop the
+      filter" instinct, but without shipping non-matching messages over the wire.</li>
+    <li><b>Prefetch depth.</b> The batch size is a fixed <code>256</code>; it could be tuned to the pull
+      request's own batch size / max-bytes.</li>
+  </ul>
+
+  <footer>
+    NATS Server — JetStream multi-subject filter scaling.
+    Methodology &amp; measurements generated for branch
+    <code>claude/better-multi-filter-v0qig</code>.
+    Numbers from <code>TestNoRaceFileStoreLoadNextMsgsMultiScaling</code> on the development machine;
+    treat absolute timings as relative, not as published throughput figures.
+  </footer>
+
+  </div>
+
+  <nav class="toc">
+    <div class="panel" style="padding:14px 12px">
+      <div style="font:600 11px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:8px">On this page</div>
+      <a href="#s1">The symptom</a>
+      <a href="#s2">How it worked (before)</a>
+      <a href="#s3">The idea</a>
+      <a href="#s4">What changed</a>
+      <a href="#s5">Why it helps</a>
+      <a href="#s6">Results</a>
+      <a href="#s7">Correctness</a>
+      <a href="#s8">Next steps</a>
+      <div style="border-top:1px solid var(--line);margin:12px 0"></div>
+      <div style="font:600 11px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:8px">Touched files</div>
+      <span class="filechip">consumer.go</span>
+      <span class="filechip">filestore.go</span>
+      <span class="filechip">memstore.go</span>
+      <span class="filechip">store.go</span>
+      <span class="filechip">store_test.go</span>
+      <span class="filechip">norace_2_test.go</span>
+    </div>
+  </nav>
+</div>
+
+</div>
+</body>
+</html>
