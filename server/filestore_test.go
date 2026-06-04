@@ -8329,6 +8329,76 @@ func Benchmark_FileStoreLoadNextMsgLiteralSubject(b *testing.B) {
 	}
 }
 
+// Benchmark_FileStoreLoadNextMsgsMulti compares the cost of delivering all
+// messages matching a multi-subject filter via the legacy per-message path
+// (LoadNextMsgMulti, one search per message) against the batched path
+// (LoadNextMsgsMulti + a per-message LoadMsg). Each iteration delivers every
+// match once, so ns/op is the time to sweep the whole stream for that filter
+// count. Run e.g.:
+//
+//	go test ./server/ -run '^$' -bench Benchmark_FileStoreLoadNextMsgsMulti -benchmem
+func Benchmark_FileStoreLoadNextMsgsMulti(b *testing.B) {
+	const numMsgs = 100_000
+	const numSubjects = 1000
+
+	fs, err := newFileStore(
+		FileStoreConfig{StoreDir: b.TempDir()},
+		StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: FileStorage})
+	require_NoError(b, err)
+	defer fs.Stop()
+
+	msg := []byte("ok")
+	// Round-robin the subjects so matches are scattered through the stream.
+	for i := 0; i < numMsgs; i++ {
+		subj := fmt.Sprintf("foo.%d", i%numSubjects)
+		fs.StoreMsg(subj, nil, msg, 0)
+	}
+
+	for _, fc := range []int{1, 10, 30, 50, 90} {
+		sl := gsl.NewSublist[struct{}]()
+		for s := 0; s < fc; s++ {
+			require_NoError(b, sl.Insert(fmt.Sprintf("foo.%d", s), struct{}{}))
+		}
+
+		b.Run(fmt.Sprintf("PerMessage/filters=%d", fc), func(b *testing.B) {
+			var smv StoreMsg
+			b.ReportAllocs()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				for seq := uint64(1); ; {
+					_, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+					if err != nil {
+						break
+					}
+					seq = nseq + 1
+				}
+			}
+		})
+
+		b.Run(fmt.Sprintf("Batched/filters=%d", fc), func(b *testing.B) {
+			var smv StoreMsg
+			seqs := make([]uint64, 0, multiFilterPrefetch)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				for seq := uint64(1); ; {
+					seqs = seqs[:0]
+					cnt, _, err := fs.LoadNextMsgsMulti(sl, seq, multiFilterPrefetch, &seqs)
+					if cnt == 0 {
+						_ = err
+						break
+					}
+					// Mirror the consumer: a fresh per-message body load.
+					for _, s := range seqs {
+						fs.LoadMsg(s, &smv)
+					}
+					seq = seqs[len(seqs)-1] + 1
+				}
+			}
+		})
+	}
+}
+
 func Benchmark_FileStoreLoadNextMsgNoMsgsFirstSeq(b *testing.B) {
 	fs, err := newFileStore(
 		FileStoreConfig{StoreDir: b.TempDir(), BlockSize: 8192},
