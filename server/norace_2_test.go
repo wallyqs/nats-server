@@ -1980,6 +1980,115 @@ func TestNoRaceFileStoreLoadNextMsgsMultiScaling(t *testing.T) {
 	}
 }
 
+// TestNoRaceJetStreamClusterMultiFilterConsumer drives an R3 multi-filtered pull
+// consumer to completion across a consumer leader stepdown, verifying that every
+// matching message is delivered (failover may redeliver in-flight unacked
+// messages, so duplicates are tolerated but gaps are not), only matching
+// subjects are delivered, and NumPending settles to zero on the new leader.
+func TestNoRaceJetStreamClusterMultiFilterConsumer(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"ev.>"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+
+	matchSet := map[string]struct{}{}
+	var filters []string
+	for _, k := range []int{0, 1, 3, 7, 11, 17, 23, 31, 41, 49} {
+		subj := fmt.Sprintf("ev.%d", k)
+		filters = append(filters, subj)
+		matchSet[subj] = struct{}{}
+	}
+
+	const numSubjects = 50
+	const numMsgs = 5000
+	var want []uint64
+	for i := 0; i < numMsgs; i++ {
+		subj := fmt.Sprintf("ev.%d", i%numSubjects)
+		pa, err := js.Publish(subj, []byte("data"))
+		require_NoError(t, err)
+		if _, ok := matchSet[subj]; ok {
+			want = append(want, pa.Sequence)
+		}
+	}
+	require_True(t, len(want) > 3*multiFilterPrefetch)
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Durable:        "c",
+		AckPolicy:      nats.AckExplicitPolicy,
+		AckWait:        5 * time.Second,
+		FilterSubjects: filters,
+		Replicas:       3,
+	})
+	require_NoError(t, err)
+	c.waitOnConsumerLeader(globalAccountName, "TEST", "c")
+
+	sub, err := js.PullSubscribe(_EMPTY_, "c", nats.Bind("TEST", "c"))
+	require_NoError(t, err)
+
+	seen := map[uint64]struct{}{}
+	collect := func(msgs []*nats.Msg) {
+		for _, m := range msgs {
+			_, ok := matchSet[m.Subject]
+			require_True(t, ok)
+			md, err := m.Metadata()
+			require_NoError(t, err)
+			seen[md.Sequence.Stream] = struct{}{}
+			m.Ack()
+		}
+	}
+
+	// Consume about half, then step down the consumer leader, then finish.
+	half := len(want) / 2
+	deadline := time.Now().Add(60 * time.Second)
+	for len(seen) < half && time.Now().Before(deadline) {
+		msgs, err := sub.Fetch(100, nats.MaxWait(2*time.Second))
+		if err != nil && err != nats.ErrTimeout {
+			require_NoError(t, err)
+		}
+		collect(msgs)
+	}
+
+	require_NotNil(t, c.consumerLeader(globalAccountName, "TEST", "c"))
+	_, err = nc.Request(fmt.Sprintf(JSApiConsumerLeaderStepDownT, "TEST", "c"), nil, 5*time.Second)
+	require_NoError(t, err)
+	c.waitOnConsumerLeader(globalAccountName, "TEST", "c")
+
+	for len(seen) < len(want) && time.Now().Before(deadline) {
+		msgs, err := sub.Fetch(100, nats.MaxWait(2*time.Second))
+		if err != nil && err != nats.ErrTimeout {
+			require_NoError(t, err)
+		}
+		collect(msgs)
+	}
+
+	// Every match received (duplicates from failover allowed, gaps are not).
+	require_Equal(t, len(seen), len(want))
+	for _, w := range want {
+		_, ok := seen[w]
+		require_True(t, ok)
+	}
+
+	checkFor(t, 10*time.Second, 200*time.Millisecond, func() error {
+		ci, err := js.ConsumerInfo("TEST", "c")
+		if err != nil {
+			return err
+		}
+		if ci.NumPending != 0 {
+			return fmt.Errorf("expected 0 pending, got %d", ci.NumPending)
+		}
+		return nil
+	})
+}
+
 func TestNoRaceWQAndMultiSubjectFilters(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
