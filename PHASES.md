@@ -53,7 +53,7 @@ message. Cheap by-sequence reads (`LoadMsg`) carry the per-message path.
 | 2 | Stateful cursor + cached matched-subject set (psim generation) | ⚠️ Partial |
 | 3 | memstore multi narrowed via `fss` | ✅ Done |
 | 4 | Adaptive selectivity (sequential scan + post-filter) | ❌ Not started |
-| 5 | v2 interior-block skipping + per-subject block tracking / merge heap | ❌ Not started |
+| 5 | v2 interior-block skipping + per-subject block tracking / merge heap | ⚠️ Partial — `collectMatchingMulti` `fss` fast path landed (skips non-matching low-cardinality blocks); interior-block skipping still open |
 
 Supporting artifacts (done): correctness tests
 (`TestStoreLoadNextMsgsMulti`), scaling test
@@ -312,17 +312,24 @@ touched per batch is bounded by the number of blocks actually containing
 matches (instrument via a counter), plus a memory benchmark for the extended
 `psi`.
 
-The current (pre-Phase-5) behavior is already pinned and measured:
-`TestFileStoreLoadNextMsgsMultiVerySparse` (correctness) and
-`Benchmark_FileStoreLoadNextMsgsMultiSparse` (two small match clusters separated
-by a growing non-matching gap). The benchmark confirms **both** the batched and
-the legacy per-message paths scan the interior gap (neither skips it, since
-`psi` only has `fblk`/`lblk`), so batched is within ~1.5× on time — but the
-batched path allocates ~19× more bytes in the gap because `collectMatchingMulti`
-loads every body while `firstMatchingMulti` uses `fss` to skip non-matching
-blocks. Phase 5 (per-block membership) eliminates the interior scan for both;
-giving `collectMatchingMulti` an `fss`-intersection fast path (Phase 2-ish)
-would remove the memory overhead even before full block-membership tracking.
+The behavior is pinned and measured: `TestFileStoreLoadNextMsgsMultiVerySparse`
+(correctness, both gap cardinalities) and `Benchmark_FileStoreLoadNextMsgsMultiSparse`
+(two small match clusters separated by a growing non-matching gap, run for
+unique-subject and few-subject fillers).
+
+**Partially done — `collectMatchingMulti` `fss` fast path.** The suggested
+Phase-2-ish fast path is implemented: `collectMatchingMulti` now intersects the
+sublist against the block `fss` (when `fss.Size() < span`) to skip a non-matching
+block without loading bodies and to narrow the scan. On a **low-cardinality**
+gap the batched path dropped from ~47 MB / 102k allocs to ~224 KB / 695 allocs at
+a 100k-message gap (~210× less memory, ~50× faster, parity with per-message).
+
+**Still Phase 5.** Two cases remain: (a) a gap of **all-unique** non-matching
+subjects (`fss.Size() ≈ span`) still takes the linear body scan — the fss gate
+does not engage; and (b) a large **interior run of non-matching blocks** that a
+matching subject spans is scanned by both the batched and legacy paths, since
+`psi` holds only `fblk`/`lblk`. Per-block membership tracking (Approach A) skips
+the interior for both and also lets the unique-subject gap be skipped.
 
 ---
 

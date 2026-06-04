@@ -149,21 +149,32 @@ allocation.
   On a first-block miss it consults `checkSkipFirstBlockMulti` to skip leading
   empty blocks (same mechanism `LoadNextMsgMulti` uses).
 - `msgBlock.collectMatchingMulti` is the batched counterpart of
-  `firstMatchingMulti`: a single sequential pass over the block that appends
-  every matching sequence (testing `sl.HasInterest(subj)`), bounded by the
-  remaining batch size. One block scan yields many matches instead of one.
-  **Note:** unlike `firstMatchingMulti`, `collectMatchingMulti` does **not** use
-  the per-block `fss` subject-tree intersection branch — it is an
-  *unconditional* linear scan over `[start, lseq]` with one `HasInterest` per
-  live message. The win comes from gathering many matches per block scan and
-  from amortizing block re-entry / lock / `selectMsgBlock`, **not** from a
-  cheaper per-block search. High-cardinality blocks with few matches among many
-  subjects can therefore scan *more* than the per-message intersection path did
-  (see §6 and Phase 4/5 in `PHASES.md`). It also `cacheLookup`s **every** message
-  body in a scanned block to read its subject, whereas `firstMatchingMulti` can
-  use the block `fss` to skip a non-matching block without loading bodies — so on
-  **very sparse / non-selective blocks** the batched path loads bodies the
-  per-message path avoids (a memory cost — see §10 and the sparse benchmark).
+  `firstMatchingMulti`: it appends every matching sequence in the block (testing
+  `sl.HasInterest(subj)`), bounded by the remaining batch size, so one block
+  pass yields many matches instead of one. It mirrors `firstMatchingMulti`'s
+  two-strategy structure:
+  - **`fss` fast path** (when the block has fewer distinct subjects than its
+    sequence span, `mb.fss.Size() < lseq-start`): intersect the sublist against
+    the block `fss` subject tree (`IntersectGSL`) to compute the bounds
+    `[lo, hi]` of the matching subjects (`lo = min over matching subjects of
+    max(start, First)`, `hi = max of Last`). If **no** subject matches, return
+    without loading the message cache at all — a block dominated by non-matching
+    subjects is skipped without reading a single body. Otherwise the body-loading
+    `HasInterest` scan is narrowed to `[lo, hi]` (leading/trailing non-matching
+    runs are skipped). This is what keeps memory and time off the per-block path
+    on sparse / non-selective blocks (e.g. a few high-volume subjects a consumer
+    filters out — the "drop the filter" case).
+  - **Linear scan** (when subjects are as dense as sequences, `fss.Size() >=
+    lseq-start`): a plain `[start, lseq]` pass with one `HasInterest` per live
+    message, the same as the per-message path takes in that regime.
+  The `recalculateForSubj` calls in the `fss` path mutate the block `SimpleState`
+  under `mb.mu.Lock()` (held throughout), exactly as `firstMatchingMulti` does.
+  **Limitation:** the `fss` fast path skips a *non-matching block* only when its
+  subject cardinality is low enough to take the intersection branch; a block of
+  all-unique non-matching subjects (`fss.Size() ≈ span`) still falls to the
+  linear scan. And neither path skips a large **interior run of non-matching
+  blocks** that a matching subject spans — `psi` records only `fblk`/`lblk`, so
+  that remains Phase 5 (see §10 and Phase 5 in `PHASES.md`).
 
 ### 5.3 Mem store (`server/memstore.go`)
 
@@ -223,16 +234,19 @@ Let **M** = messages delivered, **F** = filter subjects, **S** = distinct
 subjects in a block.
 
 > **Correction (review).** The original text here claimed the per-call search
-> cost is "`~O(S)` subject-tree intersection." That is **not** what the batched
-> filestore path does. `collectMatchingMulti` performs **no** per-block tree
-> intersection — its cost is `O(sum of live messages in the touched blocks)`
-> plus one `HasInterest` per live message. The **memstore** batched path *does*
-> narrow via `IntersectGSL` when `shouldLinearScanMulti` is false. The reason
-> the batched line is flat across filter counts is **amortization** (≈256× fewer
-> searches) collapsing the per-message path to a by-sequence read whose cost is
-> independent of `F` — *not* a cheaper per-block search. High-cardinality,
-> **sparse** interiors get no intersection speedup in the batched filestore path
-> (Phase 5).
+> cost is a "`~O(S)` subject-tree intersection." The real picture: within a block
+> `collectMatchingMulti` chooses, like `firstMatchingMulti`, between an `fss`
+> intersection (when `fss.Size() < span` — skips a non-matching block without
+> loading bodies and narrows the scan to the matching-subject range) and a plain
+> linear `HasInterest` scan (when subjects are as dense as sequences). The
+> **memstore** batched path narrows via `IntersectGSL` when
+> `shouldLinearScanMulti` is false. The reason the batched line is flat across
+> filter counts is primarily **amortization** (≈256× fewer searches) collapsing
+> the per-message path to a by-sequence read whose cost is independent of `F`;
+> the `fss` fast path additionally keeps low-cardinality non-selective blocks off
+> the body-load path. What is **not** yet optimized: a large interior run of
+> *non-matching blocks* that a matching subject spans — `psi` holds only
+> `fblk`/`lblk`, so neither the batched nor the legacy path skips it (Phase 5).
 
 | Path | Per delivered message | Total over a delivery |
 |---|---|---|
@@ -351,23 +365,27 @@ throughput figures.*
   assert on operation counts (search invocations / lock acquisitions) instead of
   time.
 - **Memory.** The prefetch buffer is `multiFilterPrefetch` × 8 bytes (~2KB) per
-  multi-filter consumer; reused across refills. **However**, on very sparse /
-  clustered streams the batched search itself allocates more than the legacy
-  path: `collectMatchingMulti` loads (`cacheLookup`) every message body in each
-  scanned block, including non-matching interior "gap" blocks, while the
-  per-message `firstMatchingMulti` uses the block `fss` to skip such blocks
-  without loading bodies. `Benchmark_FileStoreLoadNextMsgsMultiSparse` (two small
-  match clusters separated by a growing non-matching gap) measured ~19× more
-  bytes/op for the batched path at a 100k-message gap (48 MB vs 2.5 MB), at
-  roughly equal wall-clock. Addressed by Phase 2/5.
+  multi-filter consumer; reused across refills. The batched block search itself
+  takes the `fss` fast path (§5.2) on low-cardinality / non-selective blocks, so
+  a block dominated by non-matching subjects is skipped without loading bodies —
+  in `Benchmark_FileStoreLoadNextMsgsMultiSparse` with a low-cardinality gap this
+  brought the batched path from ~47 MB / 102k allocs to ~224 KB / 695 allocs at a
+  100k-message gap (~210× less memory, ~50× faster), at parity with the
+  per-message path. *Caveat:* the fast path engages only when the block's subject
+  cardinality is below its sequence span; a gap of **all-unique** non-matching
+  subjects (`fss.Size() ≈ span`) still falls to the linear body scan (~48 MB at a
+  100k gap), which the legacy per-message path avoids via the psim/`fblk` skip.
+  Closing that remaining case is Phase 5 (interior-block skipping).
 - **Very sparse / clustered streams.** Neither the batched nor the legacy
-  per-message path skips a large *interior* run of non-matching blocks — `psi`
-  records only `fblk`/`lblk` per subject, so neither can tell an interior block
-  is empty (the `checkSkipFirstBlockMulti` skip only fires on the first block of
-  a refill). Both scan the gap (≈ the unfiltered baseline), so this is **not a
-  time regression** versus the legacy path (the sparse benchmark shows batched
-  within ~1.5× at a 1k gap and faster at larger gaps), but it is the clearest
-  motivation for Phase 5 interior-block skipping (and the memory point above).
+  per-message path skips a large *interior* run of non-matching blocks that a
+  matching subject spans — `psi` records only `fblk`/`lblk` per subject, so
+  neither can tell an arbitrary interior block is empty (the batched
+  `checkSkipFirstBlockMulti` skip only fires on the first block of a refill).
+  For the **unique-subject** gap this means the batched path scans the gap
+  (≈ the unfiltered baseline) — **not a time regression** versus the legacy path
+  (the sparse benchmark shows batched within ~1.5× at a 1k gap and faster at
+  larger gaps). For a **low-cardinality** gap the `fss` fast path above already
+  skips it. Full interior-block skipping is the Phase 5 motivation.
 - **Scope containment.** The new prefetch *path* is gated on `o.filters != nil`,
   so single-filter and unfiltered consumers take the same call site as before.
   **But this is not purely additive:** the per-message `memStore.LoadNextMsgMulti`
@@ -441,8 +459,13 @@ addressed on this branch; the rest remain open.
 **Doc/heuristic accuracy (addressed inline above)**
 
 5. `last` return value = last *match*, not last *considered* (§5.1).
-6. `collectMatchingMulti` is an unconditional linear scan, not an `fss`
-   intersection; §6 complexity model corrected accordingly (§5.2, §6).
+6. `collectMatchingMulti` was an unconditional linear scan at review time; §6
+   complexity model corrected. **✅ Since given an `fss` fast path** (§5.2): on
+   low-cardinality / non-selective blocks it now intersects the sublist against
+   the block `fss` to skip non-matching blocks without loading bodies and to
+   narrow the scan — ~210× less memory / ~50× faster on the low-cardinality
+   sparse benchmark. (High-cardinality unique-subject interior gaps remain
+   Phase 5.)
 7. `shouldLinearScanMulti` mirrors only one term of the single-filter heuristic
    (§5.3).
 8. Scope is not "byte-for-byte unaffected" — the per-message `LoadNextMsgMulti`
