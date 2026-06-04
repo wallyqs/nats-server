@@ -103,8 +103,12 @@ NATS, so a buffered sequence can never point at a different message.
   returns the same `(nil, lastSeq, ErrStoreEOF)` contract the caller expects.
 
 **Validation.** `Benchmark_FileStoreLoadNextMsgsMulti` shows the batched path
-flat (~10–13 ms/op, ~110k allocs) across 10→90 filters while the per-message
-path grows linearly (170 ms → 1.67 s; up to 8.1M allocs). ~16×–130× faster.
+flat across 10→90 filters while the per-message path grows linearly. *(The
+figures in this paragraph and in `docs/multi-filter-design.md` §8 are from
+different runs and disagree (~10–13 ms vs ~14–16 ms; 1.67 s vs 2.02 s); treat the
+§8 table as canonical and re-measure on a fixed machine before publishing. The
+`require_LessThan(batched, perMsg)` gate in `TestNoRaceFileStoreLoadNextMsgsMultiScaling`
+should be replaced with operation-count assertions — see design-doc §12.)*
 
 **Known limitation.** Prefetch depth is a fixed constant
 (`multiFilterPrefetch = 256`); see Phase 4 notes for tuning it to the pull
@@ -122,9 +126,11 @@ request batch size.
   (`IntersectGSL`), computing the lowest matching `First` (≥ start) and highest
   `Last` across matched subjects to produce `[fseq, lseq]` bounds, skipping
   leading/trailing gaps.
-- `shouldLinearScanMulti(start)`: mirrors the single-filter `shouldLinearScan`
-  heuristic — when `2*(LastSeq-start) < fss.Size()` a plain linear scan is
-  cheaper than walking the subject tree, so skip the narrowing.
+- `shouldLinearScanMulti(start)`: mirrors **only the message-count term** of the
+  single-filter `shouldLinearScan` — when `2*(LastSeq-start) < fss.Size()` a plain
+  linear scan is cheaper than walking the subject tree, so skip the narrowing. It
+  omits `shouldLinearScan`'s `isAll` short-circuit and `wc && fss.Size() > 256`
+  term (see `docs/multi-filter-design.md` §5.3, §12).
 - `LoadNextMsgMulti` now uses these bounds; `LoadNextMsgsMulti` (batched) is
   added alongside and shares the same narrowing.
 
@@ -227,11 +233,14 @@ lseq-start`), lifted to the batch / consumer level.
      no per-subject ranges — just a linear walk that the OS/page cache loves.
    - **Low selectivity →** keep today's `psim`/`fss` block-skipping path.
 3. **Where.** Implement as a branch at the top of `LoadNextMsgsMulti` (and the
-   memstore equivalent), selecting between `collectMatchingMulti` (linear
-   already) and a future sparse gatherer; for filestore the linear path is
-   essentially what `collectMatchingMulti` does today, so Phase 4 is mostly
-   *choosing not to* attempt block-skip / intersection when selectivity is high,
-   plus avoiding the per-refill `psim` walk.
+   memstore equivalent). Note `collectMatchingMulti` **already** scans a block
+   linearly and never intersects `fss`, so for filestore Phase 4 is **not** about
+   switching the block-internal strategy — it reduces to (a) skipping the
+   per-refill `psim`/`IntersectGSL` + `checkSkipFirstBlockMulti` when selectivity
+   is high, and (b) prefetch-depth tuning. The real linear-vs-narrow switch lives
+   only in memstore (`shouldLinearScanMulti`). High-cardinality **sparse** cases
+   (where the linear block scan may lose to the old per-message intersection) are
+   the open question to benchmark first (design-doc §12).
 4. **Prefetch depth tuning (related).** Pass the waiting pull request's batch
    size / max-bytes down so `multiFilterPrefetch` adapts (small batches →
    smaller prefetch, avoiding over-reading; large batches → deeper prefetch).

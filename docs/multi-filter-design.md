@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Implemented (Phases 1 & 3); Phases 2/4/5 proposed — see `PHASES.md` |
+| **Status** | Implemented (Phases 1 & 3); Phases 2/4/5 proposed — see `PHASES.md`. **A pre-merge review pass found open issues — see §12.** |
 | **Branch** | `claude/better-multi-filter-v0qig` |
 | **Components** | `server/consumer.go`, `server/filestore.go`, `server/memstore.go`, `server/store.go` |
 | **Related** | `PHASES.md` (roadmap), `docs/multi-filter-scaling-report.html` (illustrated summary) |
@@ -126,6 +126,21 @@ LoadNextMsgsMulti(sl *gsl.SimpleSublist, start uint64, maxSeqs int, seqs *[]uint
 The `*[]uint64` is caller-owned and reused across refills to avoid per-batch
 allocation.
 
+> **Note (review correction).** `last` is documented above as the *last
+> sequence considered*, but the implementation returns, on success (`n > 0`),
+> the **last *matching* sequence** (`(*seqs)[len-1]`) — which can be lower than
+> the last sequence actually scanned. On EOF (`n == 0`) it returns the stream's
+> `LastSeq`. Callers must therefore only rely on `last` on the `n == 0` branch
+> (which the consumer does — it serves matched sequences directly and uses
+> `last` only for the EOF/`updateSkipped` path). Also: `*seqs` is **appended
+> to, not truncated** — callers must reset it (`seqs[:0]`) before each refill
+> (the consumer does this in `getNextMultiFiltered`). Finally, unlike
+> `LoadNextMsgMulti`, the batched methods do **not** implement the `nil` /
+> full-wildcard / single-filter fast-path delegations: a **nil sublist will
+> panic** in the scan path. They are intended only for genuine 2+-entry
+> sublists; direct store-interface callers must respect that (or guards should
+> be added for symmetry). See §12.
+
 ### 5.2 File store (`server/filestore.go`)
 
 - `LoadNextMsgsMulti` reuses the existing `psim` first-block skip (jump to the
@@ -137,16 +152,34 @@ allocation.
   `firstMatchingMulti`: a single sequential pass over the block that appends
   every matching sequence (testing `sl.HasInterest(subj)`), bounded by the
   remaining batch size. One block scan yields many matches instead of one.
+  **Note:** unlike `firstMatchingMulti`, `collectMatchingMulti` does **not** use
+  the per-block `fss` subject-tree intersection branch — it is an
+  *unconditional* linear scan over `[start, lseq]` with one `HasInterest` per
+  live message. The win comes from gathering many matches per block scan and
+  from amortizing block re-entry / lock / `selectMsgBlock`, **not** from a
+  cheaper per-block search. High-cardinality blocks with few matches among many
+  subjects can therefore scan *more* than the per-message intersection path did
+  (see §6 and Phase 4/5 in `PHASES.md`).
 
 ### 5.3 Mem store (`server/memstore.go`)
 
 - `nextMultiMatchLocked(sl, start)` intersects the sublist against `ms.fss` to
   compute `[fseq, lseq]` bounds (lowest matching `First` ≥ start, highest
   `Last`), skipping leading/trailing gaps.
-- `shouldLinearScanMulti(start)` mirrors the single-filter heuristic: when
-  `2*(LastSeq-start) < fss.Size()`, a plain linear scan beats walking the tree.
+- `shouldLinearScanMulti(start)` mirrors **only the message-count-vs-subject-count
+  term** of the single-filter heuristic: when `2*(LastSeq-start) < fss.Size()`, a
+  plain linear scan beats walking the tree. It intentionally omits the
+  single-filter `isAll` short-circuit and the `wc && fss.Size() > linearScanMaxFSS`
+  (256) term, so a high-cardinality **wildcard** multi-filter will still attempt
+  tree narrowing where the single-filter path would have chosen a linear scan.
+  Precondition: callers clamp `start` into `[FirstSeq, LastSeq]` before calling,
+  so `LastSeq-start ≥ 0` (the `int()` cast — and the unsigned subtraction —
+  assume this; both `LoadNextMsgMulti` and `LoadNextMsgsMulti` return EOF for
+  `start > LastSeq` before reaching the heuristic).
 - `LoadNextMsgMulti` now uses these bounds (previously a naive linear walk);
-  `LoadNextMsgsMulti` is added and shares the narrowing.
+  `LoadNextMsgsMulti` is added and shares the narrowing. **Note:** because the
+  per-message `LoadNextMsgMulti` changed too, this is not purely a multi-filter
+  *prefetch* change — see §10 and §12.
 
 ### 5.4 Consumer (`server/consumer.go`)
 
@@ -183,9 +216,19 @@ for {
 ## 6. Why it scales
 
 Let **M** = messages delivered, **F** = filter subjects, **S** = distinct
-subjects in a block. The search cost per call is roughly proportional to the
-subject-tree intersection it performs (`~O(S)`), independent of how many filters
-express it but rising with subject cardinality and filter overlap.
+subjects in a block.
+
+> **Correction (review).** The original text here claimed the per-call search
+> cost is "`~O(S)` subject-tree intersection." That is **not** what the batched
+> filestore path does. `collectMatchingMulti` performs **no** per-block tree
+> intersection — its cost is `O(sum of live messages in the touched blocks)`
+> plus one `HasInterest` per live message. The **memstore** batched path *does*
+> narrow via `IntersectGSL` when `shouldLinearScanMulti` is false. The reason
+> the batched line is flat across filter counts is **amortization** (≈256× fewer
+> searches) collapsing the per-message path to a by-sequence read whose cost is
+> independent of `F` — *not* a cheaper per-block search. High-cardinality,
+> **sparse** interiors get no intersection speedup in the batched filestore path
+> (Phase 5).
 
 | Path | Per delivered message | Total over a delivery |
 |---|---|---|
@@ -204,18 +247,41 @@ counts.
 | Concern | Handling |
 |---|---|
 | Stale bodies | Bodies loaded by sequence at delivery time; a removed message fails `LoadMsg` and is skipped, never delivered. |
-| Redelivery / rewind | If `o.sseq <= o.mflast` the buffer is discarded and rebuilt from the new position. |
+| Redelivery / rewind | If `o.sseq <= o.mflast` the buffer is discarded and rebuilt from the new position. **Note:** the pull-consumer `o.sseq--` redo (request exceeds `max_bytes` → 409, or an expired request) *also* trips this and discards the whole 256-entry buffer — correct (never delivers wrong data) but costs a full rebuild, bounded to once per ill-fitting/expired pull. |
 | Forward cursor jumps | Stale-but-ahead sequences dropped; buffer refills; still-valid matches remain valid (filter unchanged). |
 | Filter set change | `updateConfig` calls `resetMultiFilterPrefetch`. |
-| Removed message | Skipped; `o.sseq` advanced past it for forward progress (no re-scan on refill). |
-| EOF / `updateSkipped` / num-pending | Unchanged — helper returns the same `(nil, lastSeq, ErrStoreEOF)` contract the caller already handles. |
+| Removed message | Skipped; `o.sseq` advanced past it for forward progress (no re-scan on refill). **Caveat (review):** *all* non-`ErrStoreClosed` `LoadMsg` errors are treated as removals — including transient cache/corruption errors (`errPartialCache`/`errNoCache`/checksum) and block read errors — and durably advance `o.sseq`. This differs from the single-filter delivery loop's log-and-wait on such errors; confirm it is intended (§12). |
+| Store closed mid-buffer | **Divergence (review):** on `ErrStoreClosed` the helper currently returns `(nil, seq, ErrStoreClosed)` with the buffered (nonzero) `seq`, which advances `o.sseq`; legacy `LoadNextMsgMulti` returned `skip = 0` (no advance). Filestore-only (memstore never returns `ErrStoreClosed`). Should return `(nil, 0, ErrStoreClosed)` — §12. |
+| Partial batch + block error | filestore `LoadNextMsgsMulti` returns `(n>0, last=0, err)` when a *later* block errors after earlier matches; the consumer serves the buffered matches (it inspects only `n==0`) and the error resurfaces on the next refill. |
+| EOF / `updateSkipped` / num-pending | Unchanged — helper returns the same `(nil, lastSeq, ErrStoreEOF)` contract the caller already handles. (Verified: EOF is deferred to the call *after* the last match in both the legacy and batched paths — behavior is identical.) |
 | Sequence immutability | A buffered sequence resolves to its original message or to nothing — never a different message. |
 
 **Tests.** `TestStoreLoadNextMsgsMulti` cross-checks batched output against
 per-message `LoadNextMsgMulti` across both Memory and File stores, with
-scattered subjects, interior deletes, batch sizes 1/7/64/10000, and EOF. The
-full upstream CI suite (stores, JetStream consumers, no-race, cluster matrix,
-raft, jwt) passed on this branch, including under the race detector.
+scattered subjects, interior deletes, batch sizes 1/7/64/10000, and EOF.
+
+> **Review caveats — coverage is narrower than this paragraph implies.**
+> - **No consumer-level coverage.** Nothing exercises `getNextMultiFiltered`,
+>   the prefetch buffer, rewind reset, filter-change reset, or the
+>   EOF/`updateSkipped` path. The existing tests are store-level only.
+> - **Self-comparing oracle.** `TestStoreLoadNextMsgsMulti` uses
+>   `LoadNextMsgMulti` as ground truth, but the two share
+>   `nextMultiMatchLocked`/`shouldLinearScanMulti`, so a shared-helper bug
+>   corrupts both sides equally and the test still passes. Use an independent
+>   brute-force oracle.
+> - **Race detector.** The suite is *not* clean under `-race`:
+>   `memStore.nextMultiMatchLocked` calls `recalculateForSubj`, which mutates
+>   the **shared** `fss` `SimpleState` (a tree-resident pointer) in place while
+>   both `LoadNextMsgsMulti` and the now-modified `LoadNextMsgMulti` hold only
+>   `RLock`. Single-filter `LoadNextMsg` does the equivalent mutation under a
+>   write `Lock`. This is a real data race (§12); the existing tests are
+>   single-threaded and do not surface it.
+> - The change also leaves several scenarios untested: wildcard/overlapping/
+>   zero-match/duplicate filter entries, multi-block stores, batch sizes around
+>   the 256 prefetch boundary, store reload, and compression/encryption (the
+>   current test sets `compressionAndEncryption=false`).
+>
+> See §12 and the companion test plan for the full list.
 
 ---
 
@@ -282,8 +348,15 @@ throughput figures.*
   time.
 - **Memory.** The prefetch buffer is `multiFilterPrefetch` × 8 bytes (~2KB) per
   multi-filter consumer; reused across refills.
-- **Scope containment.** All changes are gated on `o.filters != nil`. Single-
-  filter and unfiltered consumers are byte-for-byte unaffected.
+- **Scope containment.** The new prefetch *path* is gated on `o.filters != nil`,
+  so single-filter and unfiltered consumers take the same call site as before.
+  **But this is not purely additive:** the per-message `memStore.LoadNextMsgMulti`
+  itself changed (it now narrows via `fss` instead of a linear walk), so any
+  multi-filter caller of the *non-batched* method changed behavior too — notably
+  `checkStateForInterestStream` (`consumer.go` interest-stream reconciliation),
+  which is not on the prefetch path and remains per-message. Single-filter and
+  unfiltered consumers are unaffected; multi-filter consumers are affected on
+  both paths. (See §12 — this also widens the data race's blast radius.)
 - **Rollout.** No config flag or protocol change; behavior is identical from the
   client's perspective, only faster. Ships as a normal server change.
 
@@ -304,3 +377,70 @@ See `PHASES.md` for detailed, code-referenced plans:
   steady-state delivery.
 
 Suggested order: **4 → 2 → 5**.
+
+---
+
+## 12. Review findings & open issues
+
+A pre-merge review pass (correctness / concurrency / coverage / performance /
+design) surfaced the items below. Each was confirmed against the code unless
+marked otherwise. They are the inputs to the companion **test plan**; the
+inline notes in §5–§10 above point back here.
+
+**Must-fix before merge**
+
+1. **Data race in `memStore` multi-filter narrowing (High).**
+   `nextMultiMatchLocked` → `recalculateForSubj` mutates the shared `fss`
+   `SimpleState` in place under `RLock`; single-filter `LoadNextMsg` does the
+   same mutation under a write `Lock`. Two concurrent multi-filter readers (or a
+   multi reader racing the single-filter path) write/write the same struct.
+   Reproduces under `-race` with the tree-narrowing branch active and dirty
+   `firstNeedsUpdate`/`lastNeedsUpdate` flags. Fix: take a write `Lock`, or
+   recalculate into a local copy. The Phase 3 change also added this to the
+   pre-existing `LoadNextMsgMulti`, so it affects `checkStateForInterestStream`,
+   not just the prefetch path.
+
+**Should-fix / decide intentionally**
+
+2. **`ErrStoreClosed` advances `o.sseq` (Med).** `getNextMultiFiltered` returns
+   the buffered seq on store-closed; legacy returned `skip = 0`. Return
+   `(nil, 0, ErrStoreClosed)` to match.
+3. **Over-broad "removed" classification (Med).** All non-`ErrStoreClosed`
+   `LoadMsg` errors (including transient cache/corruption) are treated as
+   removals and durably skip the sequence. Decide whether transient block errors
+   should instead retry/wait as the single-filter loop does.
+4. **Missing guards on `LoadNextMsgsMulti` (Low).** No `nil` / full-wildcard /
+   single-filter delegation; a **nil sublist panics**. Add the guards for
+   symmetry with `LoadNextMsgMulti`, or document the precondition.
+
+**Doc/heuristic accuracy (addressed inline above)**
+
+5. `last` return value = last *match*, not last *considered* (§5.1).
+6. `collectMatchingMulti` is an unconditional linear scan, not an `fss`
+   intersection; §6 complexity model corrected accordingly (§5.2, §6).
+7. `shouldLinearScanMulti` mirrors only one term of the single-filter heuristic
+   (§5.3).
+8. Scope is not "byte-for-byte unaffected" — the per-message `LoadNextMsgMulti`
+   changed too (§10).
+
+**Test-suite gaps (drive the test plan)**
+
+9. No consumer end-to-end coverage of the prefetch path; differential test uses
+   a self-comparing oracle; no wildcard/overlap/zero/dup filters, no multi-block
+   / 256-boundary / reload / compression cases (§7 caveats).
+10. `TestNoRaceFileStoreLoadNextMsgsMultiScaling` gates on a zero-margin
+    wall-clock comparison (`require_LessThan(batched, perMsg)`) and is
+    flake-prone. Replace with operation-count assertions (search invocations ≈
+    `ceil(M/256)`, `LoadMsg` calls == M) plus an allocations-per-op ceiling; keep
+    wall-clock only as a logged smoke signal.
+
+**Open questions (confirm at runtime)**
+
+- Does the always-linear `collectMatchingMulti` ever go *net slower* than the
+  per-message path at high subject cardinality / low selectivity? Mechanism is
+  real; the consequence needs a benchmark across selectivity (1/25/50/90%) and
+  cardinality (1k…1M subjects) before deciding whether a pre-merge selectivity
+  heuristic is warranted (folds into Phase 4).
+- Is the search/body-read split window (cache expiry between prefetch and
+  `LoadMsg` + a genuine block error) actually reachable in practice, and can any
+  transient class durably skip a *live* message? Settle with fault injection.
