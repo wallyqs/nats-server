@@ -438,9 +438,11 @@ addressed on this branch; the rest remain open.
    `TestJetStreamConsumerMultiFilterPrefetchOracle`, `...RemovalMidDelivery`,
    `...UpdateFilterSet`, `...Redelivery`, and the R3
    `TestNoRaceJetStreamClusterMultiFilterConsumer` (with a consumer leader
-   stepdown). **Still open (nice-to-have, non-blocking):** an allocations-per-op
-   ceiling test (flat across filter count) and the selectivity/cardinality
-   benchmarks for the open performance question below.
+   stepdown). Added benchmarks: `Benchmark_FileStoreLoadNextMsgsMultiSelectivity`
+   (with an unfiltered baseline arm), `...Cardinality`, and the previously-missing
+   `Benchmark_MemStoreLoadNextMsgsMulti`. **Still open (nice-to-have,
+   non-blocking):** an allocations-per-op ceiling *assertion* test (flat across
+   filter count).
 10. **✅ Fixed — flaky scaling assertion.**
     `TestNoRaceFileStoreLoadNextMsgsMultiScaling` no longer gates on wall-clock;
     it asserts on search-call counts (per-message ≈ `M+1`, batched ≈
@@ -451,10 +453,17 @@ addressed on this branch; the rest remain open.
 **Open questions (confirm at runtime)**
 
 - Does the always-linear `collectMatchingMulti` ever go *net slower* than the
-  per-message path at high subject cardinality / low selectivity? Mechanism is
-  real; the consequence needs a benchmark across selectivity (1/25/50/90%) and
-  cardinality (1k…1M subjects) before deciding whether a pre-merge selectivity
-  heuristic is warranted (folds into Phase 4).
+  per-message path at high subject cardinality / low selectivity? **Answered (no,
+  in the tested range).** `Benchmark_FileStoreLoadNextMsgsMultiCardinality`
+  (200k msgs, 10 filters): batched beats per-message at every cardinality —
+  ~16× at 1k subjects, narrowing to ~5× at 100k (batched ~13 ms → ~27 ms as
+  matches grow sparser, per-message ~150–215 ms). `...Selectivity` shows batched
+  stays flat (~13–24 ms across 1→90% match) and within ~1.5× of the unfiltered
+  "ship everything" baseline even at 90% selectivity. So batching is not a
+  regression anywhere measured; the narrowing margin at very high cardinality /
+  sparse interiors is the Phase 4/5 opportunity, not a correctness or
+  worse-than-baseline risk. (Numbers are dev-machine, relative; cardinality
+  beyond 100k was not measured due to store-size.)
 - Is the search/body-read split window (cache expiry between prefetch and
   `LoadMsg` + a genuine block error) actually reachable in practice, and can any
   transient class durably skip a *live* message? Settle with fault injection.
