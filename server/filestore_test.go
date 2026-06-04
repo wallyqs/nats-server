@@ -8490,6 +8490,181 @@ func Benchmark_FileStoreLoadNextMsgsMulti(b *testing.B) {
 	}
 }
 
+// Benchmark_FileStoreLoadNextMsgsMultiSelectivity sweeps a stream delivering all
+// matches at increasing selectivity (the fraction of the stream a filter set
+// matches), comparing the per-message path, the batched path, and an unfiltered
+// "deliver everything" baseline (LoadNextMsg with no filter — the floor an
+// operator gets by dropping the filter and post-filtering on the client).
+// Selectivity is controlled by the number of filtered subjects (K of
+// numSubjects), so the filter count grows with selectivity. ns/match is reported
+// for cross-row comparison. Run:
+//
+//	go test ./server/ -run '^$' -bench Benchmark_FileStoreLoadNextMsgsMultiSelectivity -benchmem
+func Benchmark_FileStoreLoadNextMsgsMultiSelectivity(b *testing.B) {
+	const numMsgs = 200_000
+	const numSubjects = 1000
+
+	fs, err := newFileStore(
+		FileStoreConfig{StoreDir: b.TempDir()},
+		StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: FileStorage})
+	require_NoError(b, err)
+	defer fs.Stop()
+
+	msg := []byte("ok")
+	for i := 0; i < numMsgs; i++ {
+		fs.StoreMsg(fmt.Sprintf("foo.%d", i%numSubjects), nil, msg, 0)
+	}
+
+	// Unfiltered "ship everything" baseline (independent of selectivity).
+	b.Run("UnfilteredBaseline", func(b *testing.B) {
+		var smv StoreMsg
+		b.ReportAllocs()
+		b.ResetTimer()
+		for n := 0; n < b.N; n++ {
+			for seq := uint64(1); ; {
+				_, nseq, err := fs.LoadNextMsg(_EMPTY_, false, seq, &smv)
+				if err != nil {
+					break
+				}
+				seq = nseq + 1
+			}
+		}
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(numMsgs), "ns/match")
+	})
+
+	for _, sel := range []struct {
+		name string
+		k    int
+	}{{"1pct", 10}, {"25pct", 250}, {"50pct", 500}, {"90pct", 900}} {
+		sl := gsl.NewSublist[struct{}]()
+		for s := 0; s < sel.k; s++ {
+			require_NoError(b, sl.Insert(fmt.Sprintf("foo.%d", s), struct{}{}))
+		}
+		matches := (numMsgs / numSubjects) * sel.k
+
+		b.Run("PerMessage/"+sel.name, func(b *testing.B) {
+			var smv StoreMsg
+			b.ReportAllocs()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				for seq := uint64(1); ; {
+					_, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+					if err != nil {
+						break
+					}
+					seq = nseq + 1
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(matches), "ns/match")
+		})
+
+		b.Run("Batched/"+sel.name, func(b *testing.B) {
+			var smv StoreMsg
+			seqs := make([]uint64, 0, multiFilterPrefetch)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				for seq := uint64(1); ; {
+					seqs = seqs[:0]
+					cnt, _, err := fs.LoadNextMsgsMulti(sl, seq, multiFilterPrefetch, &seqs)
+					if cnt == 0 {
+						_ = err
+						break
+					}
+					for _, s := range seqs {
+						fs.LoadMsg(s, &smv)
+					}
+					seq = seqs[len(seqs)-1] + 1
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(matches), "ns/match")
+		})
+	}
+}
+
+// Benchmark_FileStoreLoadNextMsgsMultiCardinality fixes the filter count and
+// varies the number of distinct subjects in the stream (matches grow sparser as
+// cardinality rises). It probes whether the batched path's unconditional
+// per-block linear scan ever loses to the per-message fss-intersection path at
+// high subject cardinality (the open Phase 4/5 question). ns/op is the full
+// stream sweep; ns/match is also reported. Run:
+//
+//	go test ./server/ -run '^$' -bench Benchmark_FileStoreLoadNextMsgsMultiCardinality -benchmem
+func Benchmark_FileStoreLoadNextMsgsMultiCardinality(b *testing.B) {
+	const numMsgs = 200_000
+	const filterCount = 10
+
+	for _, card := range []int{1_000, 10_000, 100_000} {
+		fs, err := newFileStore(
+			FileStoreConfig{StoreDir: b.TempDir()},
+			StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: FileStorage})
+		require_NoError(b, err)
+
+		msg := []byte("ok")
+		for i := 0; i < numMsgs; i++ {
+			fs.StoreMsg(fmt.Sprintf("foo.%d", i%card), nil, msg, 0)
+		}
+		sl := gsl.NewSublist[struct{}]()
+		for s := 0; s < filterCount; s++ {
+			require_NoError(b, sl.Insert(fmt.Sprintf("foo.%d", s), struct{}{}))
+		}
+		// Count matches once (untimed) for the ns/match metric.
+		matches := 0
+		var smv StoreMsg
+		for seq := uint64(1); ; {
+			_, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+			if err != nil {
+				break
+			}
+			matches++
+			seq = nseq + 1
+		}
+		if matches == 0 {
+			matches = 1
+		}
+
+		b.Run(fmt.Sprintf("PerMessage/subjects=%d", card), func(b *testing.B) {
+			var smv StoreMsg
+			b.ReportAllocs()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				for seq := uint64(1); ; {
+					_, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+					if err != nil {
+						break
+					}
+					seq = nseq + 1
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(matches), "ns/match")
+		})
+
+		b.Run(fmt.Sprintf("Batched/subjects=%d", card), func(b *testing.B) {
+			var smv StoreMsg
+			seqs := make([]uint64, 0, multiFilterPrefetch)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				for seq := uint64(1); ; {
+					seqs = seqs[:0]
+					cnt, _, err := fs.LoadNextMsgsMulti(sl, seq, multiFilterPrefetch, &seqs)
+					if cnt == 0 {
+						_ = err
+						break
+					}
+					for _, s := range seqs {
+						fs.LoadMsg(s, &smv)
+					}
+					seq = seqs[len(seqs)-1] + 1
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(matches), "ns/match")
+		})
+
+		fs.Stop()
+	}
+}
+
 func Benchmark_FileStoreLoadNextMsgNoMsgsFirstSeq(b *testing.B) {
 	fs, err := newFileStore(
 		FileStoreConfig{StoreDir: b.TempDir(), BlockSize: 8192},

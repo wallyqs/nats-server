@@ -1805,3 +1805,70 @@ func TestMemStoreLoadNextMsgsMultiConcurrentRace(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// Benchmark_MemStoreLoadNextMsgsMulti mirrors Benchmark_FileStoreLoadNextMsgsMulti
+// for the in-memory store, comparing the per-message multi-subject path against
+// the batched path as the filter count grows. The memstore narrows via fss
+// (shouldLinearScanMulti), so this also exercises the per-refill IntersectGSL +
+// recalculateForSubj cost. Run:
+//
+//	go test ./server/ -run '^$' -bench Benchmark_MemStoreLoadNextMsgsMulti -benchmem
+func Benchmark_MemStoreLoadNextMsgsMulti(b *testing.B) {
+	const numMsgs = 100_000
+	const numSubjects = 1000
+
+	ms, err := newMemStore(&StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: MemoryStorage})
+	require_NoError(b, err)
+	defer ms.Stop()
+
+	msg := []byte("ok")
+	for i := 0; i < numMsgs; i++ {
+		ms.StoreMsg(fmt.Sprintf("foo.%d", i%numSubjects), nil, msg, 0)
+	}
+
+	for _, fc := range []int{1, 10, 30, 50, 90} {
+		sl := gsl.NewSublist[struct{}]()
+		for s := 0; s < fc; s++ {
+			require_NoError(b, sl.Insert(fmt.Sprintf("foo.%d", s), struct{}{}))
+		}
+		matches := (numMsgs / numSubjects) * fc
+
+		b.Run(fmt.Sprintf("PerMessage/filters=%d", fc), func(b *testing.B) {
+			var smv StoreMsg
+			b.ReportAllocs()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				for seq := uint64(1); ; {
+					_, nseq, err := ms.LoadNextMsgMulti(sl, seq, &smv)
+					if err != nil {
+						break
+					}
+					seq = nseq + 1
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(matches), "ns/match")
+		})
+
+		b.Run(fmt.Sprintf("Batched/filters=%d", fc), func(b *testing.B) {
+			var smv StoreMsg
+			seqs := make([]uint64, 0, multiFilterPrefetch)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				for seq := uint64(1); ; {
+					seqs = seqs[:0]
+					cnt, _, err := ms.LoadNextMsgsMulti(sl, seq, multiFilterPrefetch, &seqs)
+					if cnt == 0 {
+						_ = err
+						break
+					}
+					for _, s := range seqs {
+						ms.LoadMsg(s, &smv)
+					}
+					seq = seqs[len(seqs)-1] + 1
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(matches), "ns/match")
+		})
+	}
+}
