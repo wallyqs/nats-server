@@ -8420,6 +8420,125 @@ func TestFileStoreLoadNextMsgsMultiMultiBlockAndReload(t *testing.T) {
 	}
 }
 
+// TestFileStoreLoadNextMsgsMultiVerySparse verifies correctness for a very
+// sparse / clustered stream: two small clusters of matches separated by a large
+// run of non-matching messages spanning many blocks. This is the layout where
+// the batched path linearly scans the interior gap (the empty-block skip only
+// fires on the first block of a refill — see Phase 5), so it is the most
+// important sparse case to pin for correctness even though it is the worst case
+// for performance (measured by Benchmark_FileStoreLoadNextMsgsMultiSparse).
+func TestFileStoreLoadNextMsgsMultiVerySparse(t *testing.T) {
+	fs, err := newFileStore(
+		FileStoreConfig{StoreDir: t.TempDir(), BlockSize: 32 * 1024},
+		StreamConfig{Name: "zzz", Subjects: []string{"foo.>"}, Storage: FileStorage})
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	body := make([]byte, 128)
+	store := func(prefix string, n int) {
+		for i := 0; i < n; i++ {
+			_, _, err := fs.StoreMsg(fmt.Sprintf("%s.%d", prefix, i), nil, body, 0)
+			require_NoError(t, err)
+		}
+	}
+	store("foo.match.a", 40)    // lead cluster
+	store("foo.filler", 30_000) // large non-matching gap (many blocks)
+	store("foo.match.b", 40)    // trail cluster
+
+	sl := gsl.NewSublist[struct{}]()
+	require_NoError(t, sl.Insert("foo.match.a.>", struct{}{}))
+	require_NoError(t, sl.Insert("foo.match.b.>", struct{}{}))
+
+	fs.mu.RLock()
+	nblks := len(fs.blks)
+	fs.mu.RUnlock()
+	require_True(t, nblks > 20) // gap really does span many blocks
+
+	want := bruteForceMultiMatches(t, fs, sl)
+	require_Equal(t, len(want), 80)
+	for _, batch := range []int{1, 7, multiFilterPrefetch} {
+		got := gatherMultiBatched(t, fs, sl, batch)
+		require_Equal(t, len(got), len(want))
+		for i := range want {
+			require_Equal(t, got[i], want[i])
+		}
+	}
+}
+
+// Benchmark_FileStoreLoadNextMsgsMultiSparse measures a very sparse / clustered
+// stream: two small clusters of matches separated by a growing run of
+// non-matching messages. The legacy per-message path skips the gap per call via
+// checkSkipFirstBlockMulti; the batched path linearly scans interior gap blocks
+// within a refill (the empty-block skip only fires on a refill's first block),
+// so this is the layout where batched can lose to per-message (the Phase 5
+// opportunity). Both still only deliver the 80 matches. Run:
+//
+//	go test ./server/ -run '^$' -bench Benchmark_FileStoreLoadNextMsgsMultiSparse -benchmem
+func Benchmark_FileStoreLoadNextMsgsMultiSparse(b *testing.B) {
+	const matches = 80
+
+	for _, gap := range []int{1_000, 10_000, 100_000} {
+		fs, err := newFileStore(
+			FileStoreConfig{StoreDir: b.TempDir(), BlockSize: 32 * 1024},
+			StreamConfig{Name: "zzz", Subjects: []string{"foo.>"}, Storage: FileStorage})
+		require_NoError(b, err)
+
+		body := make([]byte, 128)
+		store := func(prefix string, n int) {
+			for i := 0; i < n; i++ {
+				fs.StoreMsg(fmt.Sprintf("%s.%d", prefix, i), nil, body, 0)
+			}
+		}
+		store("foo.match.a", matches/2)
+		store("foo.filler", gap)
+		store("foo.match.b", matches/2)
+
+		sl := gsl.NewSublist[struct{}]()
+		require_NoError(b, sl.Insert("foo.match.a.>", struct{}{}))
+		require_NoError(b, sl.Insert("foo.match.b.>", struct{}{}))
+
+		b.Run(fmt.Sprintf("PerMessage/gap=%d", gap), func(b *testing.B) {
+			var smv StoreMsg
+			b.ReportAllocs()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				for seq := uint64(1); ; {
+					_, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+					if err != nil {
+						break
+					}
+					seq = nseq + 1
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(matches), "ns/match")
+		})
+
+		b.Run(fmt.Sprintf("Batched/gap=%d", gap), func(b *testing.B) {
+			var smv StoreMsg
+			seqs := make([]uint64, 0, multiFilterPrefetch)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				for seq := uint64(1); ; {
+					seqs = seqs[:0]
+					cnt, _, err := fs.LoadNextMsgsMulti(sl, seq, multiFilterPrefetch, &seqs)
+					if cnt == 0 {
+						_ = err
+						break
+					}
+					for _, s := range seqs {
+						fs.LoadMsg(s, &smv)
+					}
+					seq = seqs[len(seqs)-1] + 1
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(matches), "ns/match")
+		})
+
+		fs.Stop()
+	}
+}
+
 // Benchmark_FileStoreLoadNextMsgsMulti compares the cost of delivering all
 // messages matching a multi-subject filter via the legacy per-message path
 // (LoadNextMsgMulti, one search per message) against the batched path
