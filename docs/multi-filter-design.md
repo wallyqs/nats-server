@@ -73,7 +73,9 @@ without that tradeoff.
 **Non-goals (this phase)**
 - Changing the single-filter or unfiltered paths.
 - Eliminating the subject-tree intersection entirely (that is Phase 2).
-- Interior-block skipping for very sparse streams (Phase 5).
+- Full per-subject block-membership tracking to skip gaps a matched subject
+  *spans* (residual Phase 5). Position-aware interior-block skipping for
+  *localized* (clustered) subjects **is** implemented in the batched path — see §5.2.
 - A new client/protocol surface — this is purely server-internal.
 
 ---
@@ -146,8 +148,25 @@ allocation.
 - `LoadNextMsgsMulti` reuses the existing `psim` first-block skip (jump to the
   first block any matched subject can occupy), then iterates blocks calling
   `msgBlock.collectMatchingMulti`, accumulating matches until `maxSeqs` or EOF.
-  On a first-block miss it consults `checkSkipFirstBlockMulti` to skip leading
-  empty blocks (same mechanism `LoadNextMsgMulti` uses).
+  On **any** empty-block miss (not just the first block probed) it consults
+  `checkSkipInteriorBlocksMulti` to skip a run of non-matching blocks — see the
+  interior-skip note below.
+- **Interior block skipping (position-aware).** A batch can collect matches in
+  early blocks and then walk into a long non-matching gap from a block other than
+  the first one it probed. The legacy skip (`checkSkipFirstBlockMulti`, still used
+  by the per-message `LoadNextMsgMulti`) collapses all matched subjects into one
+  global `[min fblk, max lblk]` range, which is **defeated** by a clustered layout
+  where a matched subject lives entirely behind the gap: its low `fblk` drags the
+  global minimum below the cursor and no skip happens. `checkSkipInteriorBlocksMulti`
+  is position-aware: for the current block index `cur` it drops subjects whose
+  `lblk < cur`, takes the minimum `fblk` of subjects starting strictly ahead, and
+  otherwise (a subject spanning `cur`) clamps to `cur+1`. So it jumps the gap when
+  matched subjects are **localized to regions** of the stream, and falls back to a
+  one-block advance only for a subject that genuinely **spans** the gap (psim
+  records only `fblk`/`lblk`, so an interior block of a spanning subject cannot be
+  proven empty — that residual case is the full per-subject-membership Phase 5).
+  This keeps the batched path flat as gap size grows (see the sparse benchmark),
+  whereas the per-message path, lacking this, scales with the gap.
 - `msgBlock.collectMatchingMulti` is the batched counterpart of
   `firstMatchingMulti`: a single sequential pass over the block that appends
   every matching sequence (testing `sl.HasInterest(subj)`), bounded by the
@@ -339,7 +358,9 @@ throughput figures.*
   filter is non-selective, wasteful when it is selective. Captured as the
   *adaptive* **Phase 4** so it is chosen only when selectivity warrants it.
 - **Per-subject min-heap merge / v2 `psim` block tracking.** Largest change;
-  only needed for very sparse interior matches. Captured as **Phase 5**.
+  now only needed for the residual case of a matched subject that *spans* a sparse
+  interior gap (localized clusters are already skipped by
+  `checkSkipInteriorBlocksMulti`). Captured as **Phase 5**.
 
 ---
 
@@ -351,23 +372,27 @@ throughput figures.*
   assert on operation counts (search invocations / lock acquisitions) instead of
   time.
 - **Memory.** The prefetch buffer is `multiFilterPrefetch` × 8 bytes (~2KB) per
-  multi-filter consumer; reused across refills. **However**, on very sparse /
-  clustered streams the batched search itself allocates more than the legacy
-  path: `collectMatchingMulti` loads (`cacheLookup`) every message body in each
-  scanned block, including non-matching interior "gap" blocks, while the
-  per-message `firstMatchingMulti` uses the block `fss` to skip such blocks
-  without loading bodies. `Benchmark_FileStoreLoadNextMsgsMultiSparse` (two small
-  match clusters separated by a growing non-matching gap) measured ~19× more
-  bytes/op for the batched path at a 100k-message gap (48 MB vs 2.5 MB), at
-  roughly equal wall-clock. Addressed by Phase 2/5.
-- **Very sparse / clustered streams.** Neither the batched nor the legacy
-  per-message path skips a large *interior* run of non-matching blocks — `psi`
-  records only `fblk`/`lblk` per subject, so neither can tell an interior block
-  is empty (the `checkSkipFirstBlockMulti` skip only fires on the first block of
-  a refill). Both scan the gap (≈ the unfiltered baseline), so this is **not a
-  time regression** versus the legacy path (the sparse benchmark shows batched
-  within ~1.5× at a 1k gap and faster at larger gaps), but it is the clearest
-  motivation for Phase 5 interior-block skipping (and the memory point above).
+  multi-filter consumer; reused across refills. With position-aware interior
+  block skipping (`checkSkipInteriorBlocksMulti`) the batched path no longer loads
+  the bodies of non-matching interior "gap" blocks for clustered layouts, so the
+  earlier allocation blow-up is gone: `Benchmark_FileStoreLoadNextMsgsMultiSparse`
+  (two small match clusters separated by a growing non-matching gap) now measures
+  the batched path **flat** as the gap grows (~13 KB/op, ~660 allocs/op at a 100k
+  gap) while the per-message path scales with the gap (~2.3 MB/op, ~104k allocs/op)
+  — i.e. the batched path now allocates **~175× less**, the reverse of the
+  pre-skip behavior. The residual spanning-subject case (below) can still load a
+  gap block per scanned block.
+- **Spanning-subject interiors (residual Phase 5).** Interior skipping jumps a
+  non-matching gap when matched subjects are *localized* (each lives wholly behind
+  or ahead of the gap). It cannot skip a gap that a matched subject **spans**
+  (`fblk` before the gap, `lblk` after it): `psi` records only `fblk`/`lblk`, so
+  an interior block of a spanning subject cannot be proven empty, and the scan
+  advances one block at a time through it (≈ the unfiltered baseline — **not a
+  time regression** versus the legacy path, which cannot skip it either). The
+  per-message `LoadNextMsgMulti` still uses the old global-range
+  `checkSkipFirstBlockMulti` and so does not even skip the *localized* gap; only
+  the batched path does. Eliminating the residual spanning case needs full
+  per-subject block-membership tracking — see Phase 5 in `PHASES.md`.
 - **Scope containment.** The new prefetch *path* is gated on `o.filters != nil`,
   so single-filter and unfiltered consumers take the same call site as before.
   **But this is not purely additive:** the per-message `memStore.LoadNextMsgMulti`
@@ -392,9 +417,11 @@ See `PHASES.md` for detailed, code-referenced plans:
 - **Phase 4** — adaptive selectivity: estimate match fraction from `psi.total`
   and pick a contiguous post-filter scan when the filter is non-selective; tune
   prefetch depth to the pull request's batch size.
-- **Phase 5** — track per-subject block membership in `psim` for interior-block
-  skipping, optionally with a `(nextSeq, subject)` min-heap for `O(log F)`
-  steady-state delivery.
+- **Phase 5** — _partially implemented._ Position-aware interior-block skipping
+  for *localized* matched subjects now lands in the batched filestore path
+  (`checkSkipInteriorBlocksMulti`). Remaining: full per-subject block-membership
+  tracking in `psim` to also skip gaps a matched subject *spans*, optionally with
+  a `(nextSeq, subject)` min-heap for `O(log F)` steady-state delivery.
 
 Suggested order: **4 → 2 → 5**.
 

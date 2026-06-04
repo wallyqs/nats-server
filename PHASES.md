@@ -38,7 +38,7 @@ message. Cheap by-sequence reads (`LoadMsg`) carry the per-message path.
 | File store per-msg search | `server/filestore.go` `LoadNextMsgMulti`, `msgBlock.firstMatchingMulti` |
 | Stream-level subject index | `server/filestore.go` `psim *stree.SubjectTree[psi]`, `psi{total,fblk,lblk}`, `bim` |
 | Per-block subject index | `server/filestore.go` `msgBlock.fss *stree.SubjectTree[SimpleState]` |
-| Block skip helpers | `server/filestore.go` `checkSkipFirstBlockMulti`, `selectSkipFirstBlock` |
+| Block skip helpers | `server/filestore.go` `checkSkipFirstBlockMulti`, `checkSkipInteriorBlocksMulti`, `selectSkipFirstBlock` |
 | Mem store search | `server/memstore.go` `LoadNextMsgMulti`, `LoadNextMsgsMulti`, `nextMultiMatchLocked`, `shouldLinearScanMulti`, `fss` |
 | Sublist matching | `server/gsl/gsl.go` `HasInterest`, `MatchesFullWildcard`, `MatchesSingleFilter`; `server/stree/stree.go` `IntersectGSL` |
 | Store interface | `server/store.go` `StreamStore` |
@@ -53,7 +53,7 @@ message. Cheap by-sequence reads (`LoadMsg`) carry the per-message path.
 | 2 | Stateful cursor + cached matched-subject set (psim generation) | ⚠️ Partial |
 | 3 | memstore multi narrowed via `fss` | ✅ Done |
 | 4 | Adaptive selectivity (sequential scan + post-filter) | ❌ Not started |
-| 5 | v2 interior-block skipping + per-subject block tracking / merge heap | ❌ Not started |
+| 5 | Interior-block skipping (position-aware, batched path) ✓; per-subject block tracking / merge heap pending | 🟡 Partial |
 
 Supporting artifacts (done): correctness tests
 (`TestStoreLoadNextMsgsMulti`), scaling test
@@ -256,13 +256,32 @@ of the two strategies at each point.
 
 ---
 
-## Phase 5 — v2 interior-block skipping + merge heap ❌ Not started
+## Phase 5 — interior-block skipping + merge heap 🟡 Partially implemented
 
-**Goal.** Today block-skipping only works on the *first* probed block
-(`checkSkipFirstBlockMulti`); interior empty blocks are scanned. The `psi` entry
-only records `fblk`/`lblk` (first/last block for a subject), so we cannot tell
-whether a subject has any message in an arbitrary interior block. This is the
-pre-existing `// For v2 will track all blocks that have matches for psim` TODO.
+**Done (position-aware interior skipping, batched path).** The batched
+`LoadNextMsgsMulti` now skips interior runs of non-matching blocks via
+`checkSkipInteriorBlocksMulti`, which is consulted on **every** empty-block miss
+(not just the first probed block). Unlike the legacy global-range
+`checkSkipFirstBlockMulti`, it is position-aware: for the current block index it
+drops matched subjects whose `lblk` is behind the cursor, jumps to the minimum
+`fblk` of subjects starting ahead, and clamps to the next block for a subject
+spanning the current one. This skips the gap whenever matched subjects are
+**localized to regions** of the stream — the case the global-range skip could not
+handle because a leading match cluster's low `fblk` defeated it. Validated by
+`TestFileStoreLoadNextMsgsMultiInteriorSkip` (asserts gap blocks are never
+cache-loaded) and `TestFileStoreLoadNextMsgsMultiClusteredOracle` (40 randomized
+clustered layouts × 4 batch sizes vs a brute-force oracle).
+`Benchmark_FileStoreLoadNextMsgsMultiSparse` now shows the batched path **flat**
+as the gap grows (~13 KB/op at a 100k gap) versus the per-message path's
+~2.3 MB/op — the allocation blow-up the pre-skip batched path had is gone.
+
+**Remaining (Approach A below).** The residual case is a matched subject that
+*spans* a gap (`fblk` before, `lblk` after): `psi` records only `fblk`/`lblk`, so
+an interior block of a spanning subject cannot be proven empty and is still
+scanned one block at a time. The legacy per-message `LoadNextMsgMulti` still uses
+the old global-range skip and does not even skip the localized case. Closing both
+needs full per-subject block-membership tracking — the pre-existing
+`// For v2 will track all blocks that have matches for psim` TODO.
 
 ### Approach A — track per-subject block membership in `psim`
 
@@ -312,17 +331,18 @@ touched per batch is bounded by the number of blocks actually containing
 matches (instrument via a counter), plus a memory benchmark for the extended
 `psi`.
 
-The current (pre-Phase-5) behavior is already pinned and measured:
-`TestFileStoreLoadNextMsgsMultiVerySparse` (correctness) and
-`Benchmark_FileStoreLoadNextMsgsMultiSparse` (two small match clusters separated
-by a growing non-matching gap). The benchmark confirms **both** the batched and
-the legacy per-message paths scan the interior gap (neither skips it, since
-`psi` only has `fblk`/`lblk`), so batched is within ~1.5× on time — but the
-batched path allocates ~19× more bytes in the gap because `collectMatchingMulti`
-loads every body while `firstMatchingMulti` uses `fss` to skip non-matching
-blocks. Phase 5 (per-block membership) eliminates the interior scan for both;
-giving `collectMatchingMulti` an `fss`-intersection fast path (Phase 2-ish)
-would remove the memory overhead even before full block-membership tracking.
+Behavior is pinned and measured: `TestFileStoreLoadNextMsgsMultiVerySparse` and
+`TestFileStoreLoadNextMsgsMultiInteriorSkip` (correctness + the skip actually
+avoids loading gap blocks), `TestFileStoreLoadNextMsgsMultiClusteredOracle`
+(randomized clustered layouts), and `Benchmark_FileStoreLoadNextMsgsMultiSparse`
+(two small match clusters separated by a growing non-matching gap). With
+position-aware interior skipping the batched path now jumps the localized gap and
+stays flat (~13 KB/op, ~660 allocs/op at a 100k gap) while the legacy per-message
+path scales with the gap (~2.3 MB/op, ~104k allocs/op). The remaining
+per-subject-membership work (Approach A) would additionally skip gaps a matched
+subject *spans* and let the per-message path skip too; giving
+`collectMatchingMulti` an `fss`-intersection fast path (Phase 2-ish) would cut
+per-block scan cost on dense high-cardinality blocks.
 
 ---
 

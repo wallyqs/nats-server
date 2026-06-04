@@ -8465,13 +8465,153 @@ func TestFileStoreLoadNextMsgsMultiVerySparse(t *testing.T) {
 	}
 }
 
+// countLoadedBlocks returns how many message blocks currently have their message
+// body cache loaded. Used to prove that a scan skipped blocks rather than reading
+// every one of them.
+func countLoadedBlocks(fs *fileStore) int {
+	var loaded int
+	fs.mu.RLock()
+	for _, mb := range fs.blks {
+		mb.mu.RLock()
+		if mb.cacheAlreadyLoaded() {
+			loaded++
+		}
+		mb.mu.RUnlock()
+	}
+	fs.mu.RUnlock()
+	return loaded
+}
+
+// TestFileStoreLoadNextMsgsMultiInteriorSkip proves that a batched multi-filter
+// scan skips runs of non-matching blocks via the psim index instead of loading
+// and scanning every block - including interior gaps the batch walks into *after*
+// its first probed block. We verify the skip by checking that the dozens of
+// non-matching gap blocks never have their message cache loaded by the scan.
+func TestFileStoreLoadNextMsgsMultiInteriorSkip(t *testing.T) {
+	sd := t.TempDir()
+	fsCfg := FileStoreConfig{StoreDir: sd, BlockSize: 32 * 1024}
+	strCfg := StreamConfig{Name: "zzz", Subjects: []string{"foo.>"}, Storage: FileStorage}
+	fs, err := newFileStore(fsCfg, strCfg)
+	require_NoError(t, err)
+	defer func() { fs.Stop() }()
+
+	body := make([]byte, 128)
+	store := func(prefix string, n int) {
+		for i := 0; i < n; i++ {
+			_, _, err := fs.StoreMsg(fmt.Sprintf("%s.%d", prefix, i), nil, body, 0)
+			require_NoError(t, err)
+		}
+	}
+	// Two small clusters of matches separated by a large non-matching gap that
+	// spans many blocks. The first cluster's 40 matches are collected first (well
+	// under one prefetch batch), so the scan walks INTO the gap from a block other
+	// than the first probed block - exercising the interior-skip path.
+	store("foo.match.a", 40)
+	store("foo.filler", 30_000)
+	store("foo.match.b", 40)
+
+	sl := gsl.NewSublist[struct{}]()
+	require_NoError(t, sl.Insert("foo.match.a.>", struct{}{}))
+	require_NoError(t, sl.Insert("foo.match.b.>", struct{}{}))
+
+	// Oracle. This loads caches, so compute it before reopening the store cold.
+	want := bruteForceMultiMatches(t, fs, sl)
+	require_Equal(t, len(want), 80)
+
+	// Reopen cold so no message body caches are loaded going into the scan.
+	require_NoError(t, fs.Stop())
+	fs, err = newFileStore(fsCfg, strCfg)
+	require_NoError(t, err)
+
+	fs.mu.RLock()
+	nblks := len(fs.blks)
+	fs.mu.RUnlock()
+	require_True(t, nblks > 20) // The gap really does span many blocks.
+
+	// A single full-prefetch batch should drain all 80 matches.
+	got := gatherMultiBatched(t, fs, sl, multiFilterPrefetch)
+	require_Equal(t, len(got), len(want))
+	for i := range want {
+		require_Equal(t, got[i], want[i])
+	}
+
+	// Only the two blocks holding the match clusters should have been cache-loaded
+	// by the scan (plus possibly the active write block). The dozens of interior
+	// gap blocks must have been skipped via psim - without interior skipping the
+	// whole gap would be loaded and scanned, so loaded would be ~nblks.
+	loaded := countLoadedBlocks(fs)
+	require_True(t, loaded <= 3)
+}
+
+// TestFileStoreLoadNextMsgsMultiClusteredOracle stress-tests the position-aware
+// interior block skip across many randomized clustered layouts: subjects are
+// localized to regions of the stream (so a matched subject can live entirely
+// behind, ahead of, or spanning the current scan position), which is exactly the
+// shape the global min-fblk skip could not handle. Each layout is cross-checked
+// against an independent brute-force oracle at several batch sizes.
+func TestFileStoreLoadNextMsgsMultiClusteredOracle(t *testing.T) {
+	rng := rand.New(rand.NewSource(0xC0FFEE))
+	body := make([]byte, 64)
+
+	for iter := 0; iter < 40; iter++ {
+		sd := t.TempDir()
+		fs, err := newFileStore(
+			FileStoreConfig{StoreDir: sd, BlockSize: 4 * 1024},
+			StreamConfig{Name: "zzz", Subjects: []string{"foo.>"}, Storage: FileStorage})
+		require_NoError(t, err)
+
+		// Build a stream from random segments. Each segment emits a run of messages
+		// drawn from a small random subset of subjects, so subjects cluster into
+		// regions instead of spanning the whole stream.
+		const numSubjects = 30
+		segments := 5 + rng.Intn(15)
+		for s := 0; s < segments; s++ {
+			active := 1 + rng.Intn(4)
+			subs := make([]int, active)
+			for i := range subs {
+				subs[i] = rng.Intn(numSubjects)
+			}
+			runLen := 20 + rng.Intn(400)
+			for i := 0; i < runLen; i++ {
+				subj := fmt.Sprintf("foo.%d", subs[rng.Intn(len(subs))])
+				_, _, err := fs.StoreMsg(subj, nil, body, 0)
+				require_NoError(t, err)
+			}
+		}
+		// Sprinkle some interior deletes.
+		st := fs.State()
+		for d := 0; d < 10; d++ {
+			seq := st.FirstSeq + uint64(rng.Int63n(int64(st.LastSeq-st.FirstSeq+1)))
+			fs.RemoveMsg(seq)
+		}
+
+		// Random filter set (literals, a couple of which may not exist).
+		sl := gsl.NewSublist[struct{}]()
+		nf := 1 + rng.Intn(6)
+		for f := 0; f < nf; f++ {
+			require_NoError(t, sl.Insert(fmt.Sprintf("foo.%d", rng.Intn(numSubjects+4)), struct{}{}))
+		}
+
+		want := bruteForceMultiMatches(t, fs, sl)
+		for _, batch := range []int{1, 3, 17, multiFilterPrefetch} {
+			got := gatherMultiBatched(t, fs, sl, batch)
+			require_Equal(t, len(got), len(want))
+			for i := range want {
+				require_Equal(t, got[i], want[i])
+			}
+		}
+		fs.Stop()
+	}
+}
+
 // Benchmark_FileStoreLoadNextMsgsMultiSparse measures a very sparse / clustered
 // stream: two small clusters of matches separated by a growing run of
-// non-matching messages. The legacy per-message path skips the gap per call via
-// checkSkipFirstBlockMulti; the batched path linearly scans interior gap blocks
-// within a refill (the empty-block skip only fires on a refill's first block),
-// so this is the layout where batched can lose to per-message (the Phase 5
-// opportunity). Both still only deliver the 80 matches. Run:
+// non-matching messages. The per-message path (LoadNextMsgMulti) cannot skip the
+// gap here - its global min-fblk block skip is defeated by the leading match
+// cluster sitting behind the gap - so its cost grows with the gap size. The
+// batched path uses position-aware interior block skipping
+// (checkSkipInteriorBlocksMulti), so it jumps the gap via psim and stays flat as
+// the gap grows. Both still only deliver the 80 matches. Run:
 //
 //	go test ./server/ -run '^$' -bench Benchmark_FileStoreLoadNextMsgsMultiSparse -benchmem
 func Benchmark_FileStoreLoadNextMsgsMultiSparse(b *testing.B) {

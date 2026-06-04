@@ -3563,6 +3563,64 @@ func (fs *fileStore) checkSkipFirstBlockMulti(sl *gsl.SimpleSublist, bi int) (in
 	return fs.selectSkipFirstBlock(bi, start, stop)
 }
 
+// checkSkipInteriorBlocksMulti is a position-aware block skip for the batched
+// multi-filter scan. Given the array index i of a block that was just scanned
+// with no match, it returns the array index of the next block that could contain
+// a match for the sublist, or -1, ErrStoreEOF if no matching subject has any
+// message at or after block i.
+//
+// Unlike checkSkipFirstBlockMulti, it does not collapse all matched subjects into
+// a single global [min fblk, max lblk] range - that range is defeated by a
+// clustered layout where one matched subject lives entirely behind the current
+// position (its low fblk drags the global minimum below us and no skip happens).
+// Here each matched subject is considered relative to the current block: subjects
+// whose lblk is behind us are dropped, a subject starting ahead contributes its
+// fblk, and a subject spanning the current block forces us to the immediately
+// following block (psim only tracks first/last block, so we cannot prove an
+// interior block is empty for a spanning subject).
+// fs lock should be held.
+func (fs *fileStore) checkSkipInteriorBlocksMulti(sl *gsl.SimpleSublist, i int) (int, error) {
+	// Don't bother if full wildcard or very high cardinality (psim walk too costly).
+	if sl.MatchesFullWildcard() || fs.psim.Size() > highCardinalityThreshold {
+		return i + 1, nil
+	}
+	cur := fs.blks[i].getIndex()
+	best := uint32(math.MaxUint32)
+	stree.IntersectGSL(fs.psim, sl, func(subj []byte, psi *psi) bool {
+		// Subject is entirely behind us; it cannot contribute a forward match.
+		if psi.lblk < cur {
+			return true
+		}
+		// A subject starting ahead can only appear from its fblk onwards. One that
+		// spans the current block may reappear as soon as the next block (we already
+		// scanned cur and missed), so clamp to cur+1.
+		cand := psi.fblk
+		if cand <= cur {
+			cand = cur + 1
+		}
+		if cand < best {
+			best = cand
+		}
+		// cur+1 is the best we can ever do, stop once we reach it.
+		return best > cur+1
+	})
+	// No matching subject has messages at or after the current block.
+	if best == uint32(math.MaxUint32) {
+		return -1, ErrStoreEOF
+	}
+	// We can only skip past the immediately following block when every matched
+	// subject starts strictly ahead of it; otherwise just advance one block.
+	if best <= cur+1 {
+		return i + 1, nil
+	}
+	if mb := fs.bim[best]; mb != nil {
+		if ni, _ := fs.selectMsgBlockWithIndex(atomic.LoadUint64(&mb.first.seq)); ni > i {
+			return ni, nil
+		}
+	}
+	return i + 1, nil
+}
+
 func (fs *fileStore) selectSkipFirstBlock(bi int, start, stop uint32) (int, error) {
 	// Can not be nil so ok to inline dereference.
 	mbi := fs.blks[bi].getIndex()
@@ -9282,11 +9340,17 @@ func (fs *fileStore) LoadNextMsgsMulti(sl *gsl.SimpleSublist, start uint64, maxS
 			if err != nil && err != ErrStoreMsgNotFound {
 				return n, 0, err
 			}
-			// Nothing found in this block. If this was the first block we probed,
-			// consult the psim to see if we can skip empty blocks ahead.
-			if len(*seqs) == before && i == bi && i < len(fs.blks)-1 {
-				nbi, err := fs.checkSkipFirstBlockMulti(sl, bi)
+			// Nothing found in this block. Consult the psim to see if we can skip
+			// any run of non-matching blocks ahead, both for the first block we
+			// probed and for interior gaps we walk into mid-batch (a batch can
+			// collect matches in earlier blocks and then enter a long non-matching
+			// gap from a block other than bi - without interior skipping that gap
+			// would be scanned message-by-message). checkSkipInteriorBlocksMulti is
+			// keyed on the current block i, not bi, so it works at any position.
+			if len(*seqs) == before && i < len(fs.blks)-1 {
+				nbi, err := fs.checkSkipInteriorBlocksMulti(sl, i)
 				if err == ErrStoreEOF {
+					// No further matching blocks. Return what we have (or EOF).
 					if n == 0 {
 						return 0, fs.state.LastSeq, ErrStoreEOF
 					}
