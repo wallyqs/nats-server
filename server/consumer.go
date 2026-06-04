@@ -4848,18 +4848,25 @@ func (o *consumer) getNextMultiFiltered(smp *StoreMsg) (*StoreMsg, uint64, error
 
 		sm, err := store.LoadMsg(seq, smp)
 		if err != nil || sm == nil {
-			// Message was removed between prefetch and delivery. Skip past it
-			// and move on. Advancing o.sseq here is safe and consistent with
-			// LoadNextMsgMulti, which would also skip removed messages and only
-			// return the next live match. It also guarantees forward progress
-			// so we never re-scan a removed sequence on refill.
-			if err == ErrStoreClosed {
-				return nil, seq, err
+			// Only a genuinely removed message is skipped here. A message removed
+			// between prefetch and delivery (ErrStoreMsgNotFound/errDeletedMsg, or
+			// a nil message with no error) is gone, but the stream may have later
+			// matches, so we skip past it and advance o.sseq for forward progress
+			// (consistent with LoadNextMsgMulti, which also skips removed messages
+			// and only returns the next live match, and so we never re-scan it on
+			// refill).
+			if err == nil || err == ErrStoreMsgNotFound || err == errDeletedMsg {
+				if seq >= o.sseq {
+					o.sseq = seq + 1
+				}
+				continue
 			}
-			if seq >= o.sseq {
-				o.sseq = seq + 1
-			}
-			continue
+			// Any other error (e.g. ErrStoreClosed, a block read/corruption error)
+			// is surfaced to the caller with skip == 0, mirroring LoadNextMsgMulti's
+			// contract. We do not advance o.sseq: that avoids corrupting the cursor
+			// on a closed store and avoids silently dropping a possibly-live message
+			// on a transient error (the delivery loop logs and retries instead).
+			return nil, 0, err
 		}
 		return sm, seq, nil
 	}

@@ -12424,11 +12424,143 @@ func TestJetStreamConsumerMultiFilterPrefetchOracle(t *testing.T) {
 				require_Equal(t, got[i], want[i])
 			}
 
-			// Everything matched has been delivered and acked.
-			ci, err := js.ConsumerInfo("TEST", "c")
+			// Everything matched has been delivered and acked. Acks are async so
+			// poll until the consumer settles.
+			checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+				ci, err := js.ConsumerInfo("TEST", "c")
+				if err != nil {
+					return err
+				}
+				if ci.NumPending != 0 {
+					return fmt.Errorf("expected 0 pending, got %d", ci.NumPending)
+				}
+				if ci.NumAckPending != 0 {
+					return fmt.Errorf("expected 0 ack pending, got %d", ci.NumAckPending)
+				}
+				return nil
+			})
+		})
+	}
+}
+
+// TestJetStreamConsumerMultiFilterRemovalMidDelivery deletes matching messages
+// after they have been prefetched into the multi-filter buffer but before they
+// are delivered, exercising the getNextMultiFiltered removed-message skip path
+// (LoadMsg returns ErrStoreMsgNotFound). The consumer must skip the removed
+// sequences, keep making forward progress, and deliver exactly the surviving
+// matches in order.
+func TestJetStreamConsumerMultiFilterRemovalMidDelivery(t *testing.T) {
+	for _, st := range []StorageType{FileStorage, MemoryStorage} {
+		t.Run(st.String(), func(t *testing.T) {
+			s := RunBasicJetStreamServer(t)
+			defer s.Shutdown()
+
+			nc, js := jsClientConnect(t, s)
+			defer nc.Close()
+			acc := s.GlobalAccount()
+
+			mset, err := acc.addStream(&StreamConfig{
+				Name:     "TEST",
+				Subjects: []string{"ev.>"},
+				Storage:  st,
+			})
 			require_NoError(t, err)
-			require_Equal(t, ci.NumPending, uint64(0))
-			require_Equal(t, ci.NumAckPending, 0)
+
+			matchSet := map[string]struct{}{}
+			var filters []string
+			for _, k := range []int{0, 1, 3, 7, 11, 17, 23, 31, 41, 49} {
+				subj := fmt.Sprintf("ev.%d", k)
+				filters = append(filters, subj)
+				matchSet[subj] = struct{}{}
+			}
+
+			const numSubjects = 50
+			const numMsgs = 5000
+			var want []uint64
+			for i := 0; i < numMsgs; i++ {
+				subj := fmt.Sprintf("ev.%d", i%numSubjects)
+				pa, err := js.Publish(subj, []byte("data"))
+				require_NoError(t, err)
+				if _, ok := matchSet[subj]; ok {
+					want = append(want, pa.Sequence)
+				}
+			}
+			// Need more than one prefetch batch so we can delete buffered entries.
+			require_True(t, len(want) > multiFilterPrefetch)
+
+			_, err = mset.addConsumer(&ConsumerConfig{
+				Durable:        "c",
+				FilterSubjects: filters,
+				AckPolicy:      AckExplicit,
+			})
+			require_NoError(t, err)
+
+			sub, err := js.PullSubscribe(_EMPTY_, "c", nats.Bind("TEST", "c"))
+			require_NoError(t, err)
+
+			var got []uint64
+			collect := func(msgs []*nats.Msg) {
+				for _, m := range msgs {
+					md, err := m.Metadata()
+					require_NoError(t, err)
+					_, ok := matchSet[m.Subject]
+					require_True(t, ok)
+					got = append(got, md.Sequence.Stream)
+					require_NoError(t, m.Ack())
+				}
+			}
+
+			// Deliver a first small batch; this fills the prefetch buffer (the first
+			// multiFilterPrefetch matches) while leaving most of it undelivered.
+			msgs, err := sub.Fetch(20, nats.MaxWait(5*time.Second))
+			require_NoError(t, err)
+			collect(msgs)
+
+			// Delete matching sequences that are buffered but not yet delivered
+			// (indices well past the 20 delivered, still within the first batch).
+			deleted := map[uint64]struct{}{}
+			for _, idx := range []int{50, 100, 150, 200, 201, 202} {
+				seq := want[idx]
+				require_NoError(t, js.DeleteMsg("TEST", seq))
+				deleted[seq] = struct{}{}
+			}
+
+			// Oracle: everything matched except what we removed (all removed entries
+			// were undelivered, so order is otherwise preserved).
+			var expected []uint64
+			for _, seq := range want {
+				if _, gone := deleted[seq]; !gone {
+					expected = append(expected, seq)
+				}
+			}
+
+			deadline := time.Now().Add(30 * time.Second)
+			for len(got) < len(expected) && time.Now().Before(deadline) {
+				msgs, err := sub.Fetch(200, nats.MaxWait(2*time.Second))
+				if err != nil && err != nats.ErrTimeout {
+					require_NoError(t, err)
+				}
+				collect(msgs)
+			}
+
+			require_Equal(t, len(got), len(expected))
+			for i := range expected {
+				require_Equal(t, got[i], expected[i])
+				// A removed sequence must never be delivered.
+				_, gone := deleted[got[i]]
+				require_False(t, gone)
+			}
+
+			checkFor(t, 5*time.Second, 100*time.Millisecond, func() error {
+				ci, err := js.ConsumerInfo("TEST", "c")
+				if err != nil {
+					return err
+				}
+				if ci.NumPending != 0 {
+					return fmt.Errorf("expected 0 pending, got %d", ci.NumPending)
+				}
+				return nil
+			})
 		})
 	}
 }
