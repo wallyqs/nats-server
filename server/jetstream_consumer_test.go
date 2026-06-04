@@ -12758,3 +12758,168 @@ func TestJetStreamConsumerMultiFilterRedelivery(t *testing.T) {
 		})
 	}
 }
+
+// TestJetStreamConsumerMultiFilterDeliverByStartSequence starts a multi-filter
+// consumer mid-stream (DeliverByStartSequence). This exercises the start >
+// FirstSeq path in LoadNextMsgsMulti, which skips the psim first-block-skip used
+// on a fresh (start <= FirstSeq) call — a different code path than DeliverAll.
+func TestJetStreamConsumerMultiFilterDeliverByStartSequence(t *testing.T) {
+	for _, st := range []StorageType{FileStorage, MemoryStorage} {
+		t.Run(st.String(), func(t *testing.T) {
+			s := RunBasicJetStreamServer(t)
+			defer s.Shutdown()
+
+			nc, js := jsClientConnect(t, s)
+			defer nc.Close()
+			acc := s.GlobalAccount()
+
+			mset, err := acc.addStream(&StreamConfig{
+				Name:     "TEST",
+				Subjects: []string{"ev.>"},
+				Storage:  st,
+			})
+			require_NoError(t, err)
+
+			matchSet := map[string]struct{}{}
+			var filters []string
+			for _, k := range []int{0, 1, 3, 7, 11, 17, 23, 31, 41, 49} {
+				subj := fmt.Sprintf("ev.%d", k)
+				filters = append(filters, subj)
+				matchSet[subj] = struct{}{}
+			}
+
+			const numSubjects = 50
+			const numMsgs = 5000
+			var allMatches []uint64
+			for i := 0; i < numMsgs; i++ {
+				subj := fmt.Sprintf("ev.%d", i%numSubjects)
+				pa, err := js.Publish(subj, []byte("data"))
+				require_NoError(t, err)
+				if _, ok := matchSet[subj]; ok {
+					allMatches = append(allMatches, pa.Sequence)
+				}
+			}
+
+			// Start mid-stream.
+			startSeq := uint64(numMsgs / 2)
+			var want []uint64
+			for _, seq := range allMatches {
+				if seq >= startSeq {
+					want = append(want, seq)
+				}
+			}
+			require_True(t, len(want) > multiFilterPrefetch && len(want) < len(allMatches))
+
+			_, err = mset.addConsumer(&ConsumerConfig{
+				Durable:        "c",
+				FilterSubjects: filters,
+				AckPolicy:      AckExplicit,
+				DeliverPolicy:  DeliverByStartSequence,
+				OptStartSeq:    startSeq,
+			})
+			require_NoError(t, err)
+
+			sub, err := js.PullSubscribe(_EMPTY_, "c", nats.Bind("TEST", "c"))
+			require_NoError(t, err)
+
+			var got []uint64
+			deadline := time.Now().Add(30 * time.Second)
+			for len(got) < len(want) && time.Now().Before(deadline) {
+				msgs, err := sub.Fetch(200, nats.MaxWait(2*time.Second))
+				if err != nil && err != nats.ErrTimeout {
+					require_NoError(t, err)
+				}
+				for _, m := range msgs {
+					md, err := m.Metadata()
+					require_NoError(t, err)
+					_, ok := matchSet[m.Subject]
+					require_True(t, ok)
+					require_True(t, md.Sequence.Stream >= startSeq)
+					got = append(got, md.Sequence.Stream)
+					require_NoError(t, m.Ack())
+				}
+			}
+
+			require_Equal(t, len(got), len(want))
+			for i := range want {
+				require_Equal(t, got[i], want[i])
+			}
+		})
+	}
+}
+
+// TestJetStreamSourceMultiFilterViaSubjectTransforms exercises the multi-filter
+// batched path through an INTERNAL source consumer: a stream sourcing another
+// with 2+ subject transforms gets FilterSubjects (a multi-filter consumer), so
+// getNextMultiFiltered drives the sourcing. This is a production path created
+// outside the client consumer API.
+func TestJetStreamSourceMultiFilterViaSubjectTransforms(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+	acc := s.GlobalAccount()
+
+	_, err := acc.addStream(&StreamConfig{
+		Name:     "ORIGIN",
+		Subjects: []string{"ev.>"},
+		Storage:  FileStorage,
+	})
+	require_NoError(t, err)
+
+	matchSet := map[string]struct{}{}
+	var transforms []SubjectTransformConfig
+	for _, k := range []int{0, 2, 4, 6, 8} {
+		subj := fmt.Sprintf("ev.%d", k)
+		transforms = append(transforms, SubjectTransformConfig{Source: subj, Destination: subj})
+		matchSet[subj] = struct{}{}
+	}
+
+	const numSubjects = 20
+	const numMsgs = 4000
+	matchCount := 0
+	for i := 0; i < numMsgs; i++ {
+		subj := fmt.Sprintf("ev.%d", i%numSubjects)
+		_, err := js.Publish(subj, []byte("data"))
+		require_NoError(t, err)
+		if _, ok := matchSet[subj]; ok {
+			matchCount++
+		}
+	}
+	require_True(t, matchCount > multiFilterPrefetch)
+
+	// Sourcing with 2+ subject transforms => internal source consumer is
+	// multi-filtered (FilterSubjects), so it uses getNextMultiFiltered.
+	_, err = acc.addStream(&StreamConfig{
+		Name:    "DEST",
+		Storage: FileStorage,
+		Sources: []*StreamSource{{
+			Name:              "ORIGIN",
+			SubjectTransforms: transforms,
+		}},
+	})
+	require_NoError(t, err)
+
+	// DEST should end up with exactly the matched messages.
+	checkFor(t, 30*time.Second, 200*time.Millisecond, func() error {
+		si, err := js.StreamInfo("DEST")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(matchCount) {
+			return fmt.Errorf("expected %d sourced msgs, got %d", matchCount, si.State.Msgs)
+		}
+		return nil
+	})
+
+	// Every message in DEST must be a matching (transformed) subject.
+	si, err := js.StreamInfo("DEST")
+	require_NoError(t, err)
+	for seq := si.State.FirstSeq; seq <= si.State.LastSeq; seq += si.State.LastSeq/20 + 1 {
+		m, err := js.GetMsg("DEST", seq)
+		require_NoError(t, err)
+		_, ok := matchSet[m.Subject]
+		require_True(t, ok)
+	}
+}
