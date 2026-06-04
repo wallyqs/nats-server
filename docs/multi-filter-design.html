@@ -98,11 +98,14 @@
   per-message delivery cost independent of the filter count — by doing the multi-subject search once per
   batch instead of once per message.</p>
   <div class="statusbar">
-    <div>Status&nbsp; <b>Implemented</b> <span class="pill green">Phase 1</span> <span class="pill green">Phase 3</span> <span class="pill amber">Phase 2 partial</span> <span class="pill gray">Phase 4·5 proposed</span></div>
+    <div>Status&nbsp; <b>Implemented</b> <span class="pill green">Phase 1</span> <span class="pill green">Phase 3</span> <span class="pill amber">Phase 2 partial</span> <span class="pill amber">Phase 5 partial</span> <span class="pill gray">Phase 4 proposed</span></div>
     <div>Branch&nbsp; <b class="mono">claude/better-multi-filter-v0qig</b></div>
     <div>Components&nbsp; <span class="mono sub">consumer · filestore · memstore · store</span></div>
     <div>Related&nbsp; <span class="mono sub">PHASES.md · multi-filter-scaling-report.html</span></div>
   </div>
+  <div class="callout" style="margin-top:18px"><b>Pre-merge review.</b> A review pass fixed a data race in the
+  memstore multi-filter narrowing, tightened the delivery error handling, added an <code>fss</code> fast path to
+  <code>collectMatchingMulti</code>, and broadened test &amp; benchmark coverage. See <a href="#s12">§12</a>.</div>
 </header>
 
 <main>
@@ -197,17 +200,32 @@
     <li><code>LoadNextMsgsMulti</code> reuses the <code>psim</code> first-block skip, then iterates blocks
       calling <code>msgBlock.collectMatchingMulti</code> until <code>maxSeqs</code> or EOF; on a first-block
       miss it skips leading empty blocks via <code>checkSkipFirstBlockMulti</code>.</li>
-    <li><code>collectMatchingMulti</code> is the batched counterpart of <code>firstMatchingMulti</code>: a
-      single sequential pass over the block that appends every matching sequence — one scan yields many
-      matches instead of one.</li>
+    <li><code>collectMatchingMulti</code> is the batched counterpart of <code>firstMatchingMulti</code> and
+      mirrors its two strategies. When the block has fewer distinct subjects than its sequence span it takes an
+      <b>fss fast path</b>: intersect the sublist against the block <code>fss</code> to get the
+      <code>[lo, hi]</code> bounds of matching subjects — if <em>none</em> match, return without loading the
+      message cache (a block of non-matching subjects is skipped without reading a single body); otherwise
+      narrow the body-loading <code>HasInterest</code> scan to <code>[lo, hi]</code>. Otherwise it does a plain
+      linear pass. One block visit yields many matches instead of one.
+      <span class="sub">The <code>recalculateForSubj</code> mutation runs under the block write lock, as in
+      <code>firstMatchingMulti</code>.</span></li>
   </ul>
+  <div class="callout good"><b>fss fast path — sparse / "dominant subject" win.</b> On a block dominated by
+  non-matching subjects (a high-volume subject a consumer filters out), the batched path now skips it without
+  loading bodies. On the low-cardinality sparse benchmark this took the batched path from <b>~47 MB / 102k allocs</b>
+  to <b>~224 KB / 695 allocs</b> at a 100k-message gap (~210× less memory, ~50× faster — parity with the
+  per-message path). <b>Caveat:</b> the gate engages only when subject cardinality is below the sequence span;
+  a gap of <em>all-unique</em> non-matching subjects, and a large interior run of non-matching blocks a matching
+  subject spans, still fall back to scanning — those remain <a href="#s11">Phase 5</a>.</div>
 
   <h3>5.3 — Mem store (<span class="filechip">memstore.go</span>)</h3>
   <ul>
     <li><code>nextMultiMatchLocked</code> intersects the sublist against <code>ms.fss</code> to compute
       <code>[fseq, lseq]</code> bounds (lowest matching <code>First</code> ≥ start, highest <code>Last</code>).</li>
-    <li><code>shouldLinearScanMulti</code> mirrors the single-filter heuristic — skip the tree walk when the
-      scan range is small relative to subject count.</li>
+    <li><code>shouldLinearScanMulti</code> mirrors <em>only the message-count term</em> of the single-filter
+      heuristic — skip the tree walk when the scan range is small relative to subject count. It omits the
+      single-filter <code>isAll</code> short-circuit and the <code>wc &amp;&amp; fss.Size() &gt; 256</code> term.
+      Callers clamp <code>start</code> into <code>[FirstSeq, LastSeq]</code> first, so the subtraction can't wrap.</li>
     <li><code>LoadNextMsgMulti</code> now narrows via these bounds (was a naive linear walk); the batched
       <code>LoadNextMsgsMulti</code> shares the narrowing.</li>
   </ul>
@@ -232,11 +250,25 @@
 }</pre>
   <p><code>resetMultiFilterPrefetch</code> is also called from <code>updateConfig</code> whenever the filter
   set changes.</p>
+  <div class="callout"><b>Which delivery paths this affects.</b> Only the <b>forward multi-filter delivery
+  scan</b>. <b>Redeliveries</b> are served first (<code>getNextToRedeliver</code> → direct <code>LoadMsg</code>),
+  so a NAK / ack-wait redelivery never enters <code>getNextMultiFiltered</code> and never rewinds
+  <code>o.sseq</code>. <b><code>DeliverLastPerSubject</code></b> does not use this path at all: the per-subject
+  "last" set is computed once at setup via <code>store.MultiLastSeqs(o.filters, 0, 0)</code> and held in the
+  <code>o.lss</code> skip list, then served directly with <code>LoadMsg</code> — so this work <b>neither improves
+  nor regresses</b> last-per-subject. It doesn't need to: <code>MultiLastSeqs</code> is already subject-indexed
+  (<code>psim.Match</code> + <code>fss.IterFast</code>), scaling with <em>matching subjects</em>, not
+  <code>messages × filters</code>. Only after the <code>o.lss</code> snapshot drains do newly-arriving matches
+  flow through the batched path.</div>
 
   <h2 id="s6"><span class="n">6</span>Why it scales</h2>
-  <p>Let <b>M</b> = messages, <b>F</b> = filter subjects, <b>S</b> = distinct subjects per block. The search
-  cost per call is roughly <code>~O(S)</code> — independent of how many filters express it, but rising with
-  subject cardinality.</p>
+  <p>Let <b>M</b> = messages, <b>F</b> = filter subjects, <b>S</b> = distinct subjects per block. Within a block
+  the search chooses, like <code>firstMatchingMulti</code>, between an <code>fss</code> intersection (when
+  <code>fss.Size() &lt; span</code> — skips a non-matching block without loading bodies and narrows the scan)
+  and a plain linear <code>HasInterest</code> pass. The batched line is flat across filter counts primarily
+  because of <b>amortization</b> (≈256× fewer searches), which collapses the per-message path to a by-sequence
+  read whose cost is independent of <code>F</code>; the <code>fss</code> fast path additionally keeps
+  low-cardinality non-selective blocks off the body-load path.</p>
   <table>
     <thead><tr><th>Path</th><th>Per delivered message</th><th>Total over a delivery</th></tr></thead>
     <tbody>
@@ -255,15 +287,23 @@
       <tr><td>Redelivery / rewind</td><td>If <code>o.sseq ≤ o.mflast</code> the buffer is discarded and rebuilt.</td></tr>
       <tr><td>Forward cursor jumps</td><td>Stale-but-ahead seqs dropped; buffer refills; still-valid matches stay valid.</td></tr>
       <tr><td>Filter set change</td><td><code>updateConfig</code> → <code>resetMultiFilterPrefetch</code>.</td></tr>
-      <tr><td>Removed message</td><td>Skipped; <code>o.sseq</code> advanced past it (forward progress, no re-scan).</td></tr>
-      <tr><td>EOF / updateSkipped / num-pending</td><td>Unchanged — same <code>(nil, lastSeq, ErrStoreEOF)</code> contract.</td></tr>
+      <tr><td>Removed message</td><td>Only a genuine removal (<code>ErrStoreMsgNotFound</code> / <code>errDeletedMsg</code> / nil msg) is skipped with <code>o.sseq</code> advanced (forward progress). <b>Any other error</b> (store closed, block/corruption) is surfaced with <code>skip = 0</code> — the cursor is not advanced and the delivery loop logs/retries (or terminates on close).</td></tr>
+      <tr><td>EOF / updateSkipped / num-pending</td><td>Unchanged — same <code>(nil, lastSeq, ErrStoreEOF)</code> contract; EOF is deferred to the call after the last match in both the legacy and batched paths.</td></tr>
       <tr><td>Sequence immutability</td><td>A buffered sequence resolves to its original message or to nothing.</td></tr>
     </tbody>
   </table>
-  <p><code>TestStoreLoadNextMsgsMulti</code> cross-checks batched output against per-message
-  <code>LoadNextMsgMulti</code> across Memory and File stores (scattered subjects, interior deletes, batch
-  sizes 1/7/64/10000, EOF). The full upstream CI suite — stores, JetStream consumers, no-race, cluster
-  matrix, raft, jwt — passed on this branch, including under the race detector.</p>
+  <div class="callout bad"><b>Data race found &amp; fixed.</b> <code>memStore.nextMultiMatchLocked</code> →
+  <code>recalculateForSubj</code> mutates the shared <code>fss</code> <code>SimpleState</code> in place; both
+  <code>LoadNextMsgMulti</code> and <code>LoadNextMsgsMulti</code> held only an <code>RLock</code> (single-filter
+  <code>LoadNextMsg</code> uses a write lock for the same mutation). Fixed by taking <code>ms.mu.Lock()</code>;
+  <code>TestMemStoreLoadNextMsgsMultiConcurrentRace</code> reproduces it under <code>-race</code> before the fix
+  and is clean after.</div>
+  <p>Coverage: an independent brute-force oracle
+  (<code>TestStoreLoadNextMsgsMultiBruteForceOracle</code>, both stores + full cipher/compression matrix)
+  replaces the original self-comparing oracle; plus wildcard/overlap, multi-block/reload, and consumer
+  end-to-end tests (pull/push oracle, removal-mid-delivery, filter-set update, redelivery, mid-stream
+  start-sequence, R3 cluster with leader stepdown, and stream sourcing via subject transforms). See
+  <a href="#s12">§12</a>.</p>
 
   <h2 id="s8"><span class="n">8</span>Benchmarks</h2>
   <p class="sub" style="font-size:14px"><code>Benchmark_FileStoreLoadNextMsgsMulti</code> — file store,
@@ -325,12 +365,21 @@
 
   <h2 id="s10"><span class="n">10</span>Risks &amp; rollout</h2>
   <ul>
-    <li><b>Timing-test flakiness.</b> The scaling test asserts a wall-clock comparison; margin is &gt;10× and
-      it passed CI, but if it ever flakes, switch the assertion to operation counts (search invocations /
-      lock acquisitions) rather than time.</li>
-    <li><b>Memory.</b> ~2 KB prefetch buffer per multi-filter consumer, reused across refills.</li>
-    <li><b>Scope.</b> All changes gated on <code>o.filters != nil</code>; single-filter and unfiltered
-      consumers are unaffected.</li>
+    <li><b>Timing-test flakiness — fixed.</b> The scaling test no longer asserts wall-clock; it asserts on
+      search-call counts (per-message ≈ <code>M+1</code>, batched ≈ <code>ceil(M/256)+1</code>), with
+      wall-clock kept only as a logged signal.</li>
+    <li><b>Memory.</b> ~2 KB prefetch buffer per multi-filter consumer, reused across refills. The
+      <code>fss</code> fast path (§5.2) keeps low-cardinality non-selective blocks off the body-load path.
+      <em>Caveat:</em> a gap of all-unique non-matching subjects (<code>fss.Size() ≈ span</code>) still falls
+      to the linear body scan — Phase 5.</li>
+    <li><b>Very sparse / clustered streams.</b> Neither the batched nor the legacy path skips a large interior
+      run of non-matching blocks a matching subject spans (<code>psi</code> holds only <code>fblk</code>/<code>lblk</code>),
+      so the unique-subject gap is scanned (≈ the unfiltered baseline) — <b>not a time regression</b> (batched
+      within ~1.5× at a 1k gap, faster at larger gaps). Full interior-block skipping is Phase 5.</li>
+    <li><b>Scope.</b> The new prefetch <em>path</em> is gated on <code>o.filters != nil</code>, so single-filter
+      and unfiltered consumers are unaffected. But the per-message <code>memStore.LoadNextMsgMulti</code> also
+      changed (now narrows via <code>fss</code>), so multi-filter callers of the non-batched method —
+      e.g. <code>checkStateForInterestStream</code> — changed too.</li>
     <li><b>Rollout.</b> No config flag or protocol change — identical from the client's perspective, only
       faster.</li>
   </ul>
@@ -345,14 +394,46 @@
     <div class="panel"><h3 style="margin-top:2px">Phase 4 — adaptive selectivity</h3>
       <p class="sub" style="font-size:14px">Estimate match fraction from <code>psi.total</code>; pick a
       contiguous post-filter scan when non-selective. Tune prefetch depth to the pull request batch size.</p></div>
-    <div class="panel"><h3 style="margin-top:2px">Phase 5 — interior-block skipping</h3>
-      <p class="sub" style="font-size:14px">Track per-subject block membership in <code>psim</code> for
-      interior skips on every block; optional <code>(nextSeq, subject)</code> min-heap for
-      <code>O(log F)</code> steady state.</p></div>
+    <div class="panel"><h3 style="margin-top:2px">Phase 5 — interior-block skipping <span class="pill amber">partial</span></h3>
+      <p class="sub" style="font-size:14px">The <code>collectMatchingMulti</code> <code>fss</code> fast path
+      landed (skips non-matching low-cardinality blocks without loading bodies). Still open: track per-subject
+      block membership in <code>psim</code> for interior skips on <em>every</em> block (covers all-unique gaps
+      and interior runs); optional <code>(nextSeq, subject)</code> min-heap for <code>O(log F)</code> steady
+      state.</p></div>
     <div class="panel"><h3 style="margin-top:2px">Suggested order</h3>
       <p class="sub" style="font-size:14px"><b>4 → 2 → 5.</b> Phase 4 is cheapest and highest value; Phase 5
       is largest and only if profiling shows interior sparseness still dominates.</p></div>
   </div>
+
+  <h2 id="s12"><span class="n">12</span>Review findings &amp; status</h2>
+  <p>A pre-merge review pass (correctness / concurrency / coverage / performance / design). Items below were
+  confirmed against the code; full detail is in <code>docs/multi-filter-design.md</code> §12.</p>
+  <div class="grid2">
+    <div class="panel"><h3 style="margin-top:2px">Fixed</h3>
+      <ul>
+        <li><span class="pill green">fix</span> Data race in <code>memStore</code> multi-filter narrowing (write lock).</li>
+        <li><span class="pill green">fix</span> Delivery now surfaces non-removal errors with <code>skip=0</code> instead of skipping (incl. <code>ErrStoreClosed</code> cursor).</li>
+        <li><span class="pill green">fix</span> <code>nil</code> sublist no longer panics in the batched store API.</li>
+        <li><span class="pill green">fix</span> Flaky wall-clock scaling test → deterministic search-count assertions.</li>
+        <li><span class="pill green">perf</span> <code>collectMatchingMulti</code> <code>fss</code> fast path (≈210× less memory on the low-cardinality sparse case).</li>
+      </ul>
+    </div>
+    <div class="panel"><h3 style="margin-top:2px">Doc corrections</h3>
+      <ul>
+        <li><code>last</code> = last <em>matching</em> sequence, not "last considered" (§5.1).</li>
+        <li><code>collectMatchingMulti</code> complexity model (§5.2, §6).</li>
+        <li><code>shouldLinearScanMulti</code> mirrors only the message-count term (§5.3).</li>
+        <li>Scope: the per-message <code>LoadNextMsgMulti</code> changed too (§10).</li>
+      </ul>
+    </div>
+  </div>
+  <div class="panel"><h3 style="margin-top:2px">Open / Phase 5</h3>
+    <p class="sub" style="font-size:14px">A gap of <em>all-unique</em> non-matching subjects (<code>fss.Size() ≈ span</code>)
+    and a large interior run of non-matching blocks a matching subject spans are still scanned — both need
+    per-subject block-membership tracking in <code>psim</code> (Phase 5). An allocations-per-op ceiling
+    assertion test is a remaining nice-to-have. The selectivity / cardinality / sparse benchmarks confirm the
+    batched path beats per-message at every measured point and stays within ~1.5× of the unfiltered baseline,
+    so no pre-merge selectivity heuristic is needed.</p></div>
 
   <footer>
     NATS Server — JetStream multi-subject filter scaling design.
@@ -375,6 +456,7 @@
     <a href="#s9">9 · Alternatives</a>
     <a href="#s10">10 · Risks &amp; rollout</a>
     <a href="#s11">11 · Future work</a>
+    <a href="#s12">12 · Review findings</a>
     <div style="border-top:1px solid var(--line);margin:11px 0"></div>
     <div class="toclabel">Touched files</div>
     <span class="filechip">consumer.go</span>
