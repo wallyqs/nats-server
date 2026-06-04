@@ -2956,15 +2956,26 @@ func (mb *msgBlock) firstMatchingMulti(sl *gsl.SimpleSublist, start uint64, sm *
 	return nil, didLoad, ErrStoreMsgNotFound
 }
 
-// collectMatchingMulti appends up to max matching sequences (ascending) at or
-// after start to *seqs in a single pass over the block. This is the batched
+// collectMatchingMulti appends up to maxSeqs matching sequences (ascending) at
+// or after start to *seqs in a single pass over the block. This is the batched
 // counterpart to firstMatchingMulti: it amortizes the per-block setup (cache
 // load, fss load) and the subject matching across many messages so a caller
 // does not have to re-enter the block once per delivered message.
-// Returns the highest sequence scanned in this block and an error. When no
-// matches are found ErrStoreMsgNotFound is returned (mirroring firstMatchingMulti).
+//
+// Like firstMatchingMulti, when the block has fewer distinct subjects than its
+// sequence span it intersects the sublist against the block fss first. That lets
+// it (a) skip a block whose subjects do not match the filter at all WITHOUT
+// loading the message cache, and (b) narrow the body-loading scan to the
+// [lo, hi] range actually covered by matching subjects. This avoids the
+// per-block body loads the previous unconditional linear scan paid on sparse /
+// non-selective blocks (e.g. large non-matching interior runs).
+//
+// Returns the highest sequence considered and an error. When no matches are
+// found ErrStoreMsgNotFound is returned (mirroring firstMatchingMulti). The
+// returned sequence is advisory; LoadNextMsgsMulti relies on the appended seqs
+// and the error, not on the returned sequence.
 // fs lock should be held.
-func (mb *msgBlock) collectMatchingMulti(sl *gsl.SimpleSublist, start uint64, max int, seqs *[]uint64) (uint64, error) {
+func (mb *msgBlock) collectMatchingMulti(sl *gsl.SimpleSublist, start uint64, maxSeqs int, seqs *[]uint64) (uint64, error) {
 	mb.mu.Lock()
 	var updateLLTS bool
 	defer func() {
@@ -2993,34 +3004,82 @@ func (mb *msgBlock) collectMatchingMulti(sl *gsl.SimpleSublist, start uint64, ma
 		return lseq, ErrStoreMsgNotFound
 	}
 
-	// Need messages loaded from here on out.
-	if mb.cacheNotLoaded() {
-		if err := mb.loadMsgsWithLock(); err != nil {
+	added := 0
+	smv := new(StoreMsg)
+
+	// scan does the body-loading linear pass over [lo, hi], appending matches.
+	// The message cache is loaded lazily here so a block that the fss
+	// intersection has already shown to have no matching subject is never loaded.
+	scan := func(lo, hi uint64) error {
+		if mb.cacheNotLoaded() {
+			if err := mb.loadMsgsWithLock(); err != nil {
+				return err
+			}
+		}
+		for seq := lo; seq <= hi && added < maxSeqs; seq++ {
+			if mb.dmap.Exists(seq) {
+				// Optimisation to avoid calling cacheLookup which hits time.Now().
+				// Instead we will update it only once in a defer.
+				updateLLTS = true
+				continue
+			}
+			fsm, err := mb.cacheLookup(seq, smv)
+			if err != nil {
+				continue
+			}
+			updateLLTS = false // cacheLookup already updated it.
+			if sl.HasInterest(fsm.subj) {
+				*seqs = append(*seqs, seq)
+				added++
+			}
+		}
+		return nil
+	}
+
+	// If the block has fewer distinct subjects than the sequence span, use the
+	// fss intersection to skip a non-matching block (without loading bodies) and
+	// to narrow the scan range. Otherwise a plain linear scan is cheaper. This
+	// mirrors the heuristic in firstMatchingMulti.
+	if uint64(mb.fss.Size()) < lseq-start {
+		lo, hi := uint64(math.MaxUint64), uint64(0)
+		var ierr error
+		stree.IntersectGSL(mb.fss, sl, func(subj []byte, ss *SimpleState) bool {
+			if ss.firstNeedsUpdate || ss.lastNeedsUpdate {
+				// mb fss is loaded so this should be fast-ish.
+				if ierr = mb.recalculateForSubj(bytesToString(subj), ss); ierr != nil {
+					return false
+				}
+			}
+			first := max(start, ss.First)
+			if first > ss.Last {
+				// All of this subject's messages are below our start floor.
+				return true
+			}
+			if first < lo {
+				lo = first
+			}
+			if ss.Last > hi {
+				hi = ss.Last
+			}
+			return true
+		})
+		if ierr != nil {
+			return 0, ierr
+		}
+		if hi == 0 {
+			// No matching subject has messages at/after start in this block; the
+			// message cache was never loaded.
+			return lseq, ErrStoreMsgNotFound
+		}
+		if err := scan(lo, hi); err != nil {
+			return 0, err
+		}
+	} else {
+		if err := scan(start, lseq); err != nil {
 			return 0, err
 		}
 	}
 
-	smv := new(StoreMsg)
-	added := 0
-	for seq := start; seq <= lseq; seq++ {
-		if mb.dmap.Exists(seq) {
-			// Optimisation to avoid calling cacheLookup which hits time.Now().
-			// Instead we will update it only once in a defer.
-			updateLLTS = true
-			continue
-		}
-		fsm, err := mb.cacheLookup(seq, smv)
-		if err != nil {
-			continue
-		}
-		updateLLTS = false // cacheLookup already updated it.
-		if sl.HasInterest(fsm.subj) {
-			*seqs = append(*seqs, seq)
-			if added++; added >= max {
-				return seq, nil
-			}
-		}
-	}
 	if added > 0 {
 		return lseq, nil
 	}

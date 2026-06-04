@@ -8420,122 +8420,143 @@ func TestFileStoreLoadNextMsgsMultiMultiBlockAndReload(t *testing.T) {
 	}
 }
 
-// TestFileStoreLoadNextMsgsMultiVerySparse verifies correctness for a very
-// sparse / clustered stream: two small clusters of matches separated by a large
-// run of non-matching messages spanning many blocks. This is the layout where
-// the batched path linearly scans the interior gap (the empty-block skip only
-// fires on the first block of a refill — see Phase 5), so it is the most
-// important sparse case to pin for correctness even though it is the worst case
-// for performance (measured by Benchmark_FileStoreLoadNextMsgsMultiSparse).
-func TestFileStoreLoadNextMsgsMultiVerySparse(t *testing.T) {
+// sparseStore builds a very sparse / clustered stream: two small clusters of
+// matches (foo.match.a.*, foo.match.b.*) separated by a large run of
+// non-matching foo.filler.* messages spanning many blocks. fillerDistinct == 0
+// uses a unique subject per filler message (high cardinality, so each gap block
+// has ~as many subjects as messages); fillerDistinct > 0 reuses that many
+// subjects (low cardinality, dominant non-matching subjects).
+func sparseStore(tb testing.TB, gap, fillerDistinct int) (*fileStore, *gsl.SimpleSublist) {
+	tb.Helper()
 	fs, err := newFileStore(
-		FileStoreConfig{StoreDir: t.TempDir(), BlockSize: 32 * 1024},
+		FileStoreConfig{StoreDir: tb.TempDir(), BlockSize: 32 * 1024},
 		StreamConfig{Name: "zzz", Subjects: []string{"foo.>"}, Storage: FileStorage})
-	require_NoError(t, err)
-	defer fs.Stop()
+	require_NoError(tb, err)
 
 	body := make([]byte, 128)
-	store := func(prefix string, n int) {
+	store := func(prefix string, n, distinct int) {
 		for i := 0; i < n; i++ {
-			_, _, err := fs.StoreMsg(fmt.Sprintf("%s.%d", prefix, i), nil, body, 0)
-			require_NoError(t, err)
+			var subj string
+			if distinct <= 0 {
+				subj = fmt.Sprintf("%s.%d", prefix, i)
+			} else {
+				subj = fmt.Sprintf("%s.%d", prefix, i%distinct)
+			}
+			_, _, err := fs.StoreMsg(subj, nil, body, 0)
+			require_NoError(tb, err)
 		}
 	}
-	store("foo.match.a", 40)    // lead cluster
-	store("foo.filler", 30_000) // large non-matching gap (many blocks)
-	store("foo.match.b", 40)    // trail cluster
+	store("foo.match.a", 40, 0)
+	store("foo.filler", gap, fillerDistinct)
+	store("foo.match.b", 40, 0)
 
 	sl := gsl.NewSublist[struct{}]()
-	require_NoError(t, sl.Insert("foo.match.a.>", struct{}{}))
-	require_NoError(t, sl.Insert("foo.match.b.>", struct{}{}))
+	require_NoError(tb, sl.Insert("foo.match.a.>", struct{}{}))
+	require_NoError(tb, sl.Insert("foo.match.b.>", struct{}{}))
+	return fs, sl
+}
 
-	fs.mu.RLock()
-	nblks := len(fs.blks)
-	fs.mu.RUnlock()
-	require_True(t, nblks > 20) // gap really does span many blocks
+// TestFileStoreLoadNextMsgsMultiVerySparse verifies correctness for a very
+// sparse / clustered stream, for both a high-cardinality (unique-subject) gap —
+// which takes collectMatchingMulti's linear-scan branch — and a low-cardinality
+// gap — which takes its fss-intersection fast path (skips non-matching blocks
+// without loading bodies). Both are compared against the brute-force oracle.
+func TestFileStoreLoadNextMsgsMultiVerySparse(t *testing.T) {
+	for _, fc := range []struct {
+		name     string
+		distinct int
+	}{
+		{"uniqueFiller", 0},
+		{"fewFiller", 8},
+	} {
+		t.Run(fc.name, func(t *testing.T) {
+			fs, sl := sparseStore(t, 30_000, fc.distinct)
+			defer fs.Stop()
 
-	want := bruteForceMultiMatches(t, fs, sl)
-	require_Equal(t, len(want), 80)
-	for _, batch := range []int{1, 7, multiFilterPrefetch} {
-		got := gatherMultiBatched(t, fs, sl, batch)
-		require_Equal(t, len(got), len(want))
-		for i := range want {
-			require_Equal(t, got[i], want[i])
-		}
+			fs.mu.RLock()
+			nblks := len(fs.blks)
+			fs.mu.RUnlock()
+			require_True(t, nblks > 20) // gap really does span many blocks
+
+			want := bruteForceMultiMatches(t, fs, sl)
+			require_Equal(t, len(want), 80)
+			for _, batch := range []int{1, 7, multiFilterPrefetch} {
+				got := gatherMultiBatched(t, fs, sl, batch)
+				require_Equal(t, len(got), len(want))
+				for i := range want {
+					require_Equal(t, got[i], want[i])
+				}
+			}
+		})
 	}
 }
 
 // Benchmark_FileStoreLoadNextMsgsMultiSparse measures a very sparse / clustered
-// stream: two small clusters of matches separated by a growing run of
-// non-matching messages. The legacy per-message path skips the gap per call via
-// checkSkipFirstBlockMulti; the batched path linearly scans interior gap blocks
-// within a refill (the empty-block skip only fires on a refill's first block),
-// so this is the layout where batched can lose to per-message (the Phase 5
-// opportunity). Both still only deliver the 80 matches. Run:
+// stream as the non-matching gap grows, for both a high-cardinality
+// (unique-subject) gap and a low-cardinality (few-subject, "dominant
+// non-matching subjects") gap. Both deliver the same 80 matches.
+//
+// For the low-cardinality gap, collectMatchingMulti's fss-intersection fast path
+// skips gap blocks without loading bodies, so the batched path's memory drops to
+// roughly the per-message path's. For the high-cardinality (unique-subject) gap
+// the fss gate does not engage (fss.Size ~= span), so the batched path still
+// scans the gap (the legacy per-message path skips it via psim/fblk —
+// interior-block skipping for batched is Phase 5). Run:
 //
 //	go test ./server/ -run '^$' -bench Benchmark_FileStoreLoadNextMsgsMultiSparse -benchmem
 func Benchmark_FileStoreLoadNextMsgsMultiSparse(b *testing.B) {
 	const matches = 80
 
-	for _, gap := range []int{1_000, 10_000, 100_000} {
-		fs, err := newFileStore(
-			FileStoreConfig{StoreDir: b.TempDir(), BlockSize: 32 * 1024},
-			StreamConfig{Name: "zzz", Subjects: []string{"foo.>"}, Storage: FileStorage})
-		require_NoError(b, err)
+	for _, fc := range []struct {
+		name     string
+		distinct int
+	}{
+		{"uniqueFiller", 0},
+		{"fewFiller", 8},
+	} {
+		for _, gap := range []int{10_000, 100_000} {
+			fs, sl := sparseStore(b, gap, fc.distinct)
 
-		body := make([]byte, 128)
-		store := func(prefix string, n int) {
-			for i := 0; i < n; i++ {
-				fs.StoreMsg(fmt.Sprintf("%s.%d", prefix, i), nil, body, 0)
-			}
+			b.Run(fmt.Sprintf("PerMessage/%s/gap=%d", fc.name, gap), func(b *testing.B) {
+				var smv StoreMsg
+				b.ReportAllocs()
+				b.ResetTimer()
+				for n := 0; n < b.N; n++ {
+					for seq := uint64(1); ; {
+						_, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+						if err != nil {
+							break
+						}
+						seq = nseq + 1
+					}
+				}
+				b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(matches), "ns/match")
+			})
+
+			b.Run(fmt.Sprintf("Batched/%s/gap=%d", fc.name, gap), func(b *testing.B) {
+				var smv StoreMsg
+				seqs := make([]uint64, 0, multiFilterPrefetch)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for n := 0; n < b.N; n++ {
+					for seq := uint64(1); ; {
+						seqs = seqs[:0]
+						cnt, _, err := fs.LoadNextMsgsMulti(sl, seq, multiFilterPrefetch, &seqs)
+						if cnt == 0 {
+							_ = err
+							break
+						}
+						for _, s := range seqs {
+							fs.LoadMsg(s, &smv)
+						}
+						seq = seqs[len(seqs)-1] + 1
+					}
+				}
+				b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(matches), "ns/match")
+			})
+
+			fs.Stop()
 		}
-		store("foo.match.a", matches/2)
-		store("foo.filler", gap)
-		store("foo.match.b", matches/2)
-
-		sl := gsl.NewSublist[struct{}]()
-		require_NoError(b, sl.Insert("foo.match.a.>", struct{}{}))
-		require_NoError(b, sl.Insert("foo.match.b.>", struct{}{}))
-
-		b.Run(fmt.Sprintf("PerMessage/gap=%d", gap), func(b *testing.B) {
-			var smv StoreMsg
-			b.ReportAllocs()
-			b.ResetTimer()
-			for n := 0; n < b.N; n++ {
-				for seq := uint64(1); ; {
-					_, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
-					if err != nil {
-						break
-					}
-					seq = nseq + 1
-				}
-			}
-			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(matches), "ns/match")
-		})
-
-		b.Run(fmt.Sprintf("Batched/gap=%d", gap), func(b *testing.B) {
-			var smv StoreMsg
-			seqs := make([]uint64, 0, multiFilterPrefetch)
-			b.ReportAllocs()
-			b.ResetTimer()
-			for n := 0; n < b.N; n++ {
-				for seq := uint64(1); ; {
-					seqs = seqs[:0]
-					cnt, _, err := fs.LoadNextMsgsMulti(sl, seq, multiFilterPrefetch, &seqs)
-					if cnt == 0 {
-						_ = err
-						break
-					}
-					for _, s := range seqs {
-						fs.LoadMsg(s, &smv)
-					}
-					seq = seqs[len(seqs)-1] + 1
-				}
-			}
-			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(matches), "ns/match")
-		})
-
-		fs.Stop()
 	}
 }
 
