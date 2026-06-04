@@ -8329,6 +8329,97 @@ func Benchmark_FileStoreLoadNextMsgLiteralSubject(b *testing.B) {
 	}
 }
 
+// TestFileStoreLoadNextMsgsMultiMultiBlockAndReload exercises the batched
+// multi-filter lookup across many message blocks (small BlockSize) with interior
+// deletes that straddle block boundaries — driving checkSkipFirstBlockMulti and
+// the cross-block iteration — and verifies the results survive a Stop/reopen
+// (psim/bim rebuilt from disk). Compared against an independent brute-force oracle.
+func TestFileStoreLoadNextMsgsMultiMultiBlockAndReload(t *testing.T) {
+	sd := t.TempDir()
+	newFS := func() *fileStore {
+		fs, err := newFileStore(
+			FileStoreConfig{StoreDir: sd, BlockSize: 4096},
+			StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: FileStorage})
+		require_NoError(t, err)
+		return fs
+	}
+	fs := newFS()
+
+	const numMsgs = 5000
+	const numSubjects = 50
+	for i := 0; i < numMsgs; i++ {
+		_, _, err := fs.StoreMsg(fmt.Sprintf("foo.%d", i%numSubjects), nil, []byte("0123456789ABCDEF"), 0)
+		require_NoError(t, err)
+	}
+	// Interior deletes straddling block boundaries.
+	for _, seq := range []uint64{1, 2, 100, 101, 102, 2500, 4999, 5000} {
+		_, err := fs.RemoveMsg(seq)
+		require_NoError(t, err)
+	}
+
+	sl := gsl.NewSublist[struct{}]()
+	for _, s := range []int{0, 7, 13, 49} {
+		require_NoError(t, sl.Insert(fmt.Sprintf("foo.%d", s), struct{}{}))
+	}
+
+	brute := func() []uint64 {
+		var smv StoreMsg
+		var out []uint64
+		state := fs.State()
+		for seq := state.FirstSeq; seq <= state.LastSeq; seq++ {
+			sm, err := fs.LoadMsg(seq, &smv)
+			if err != nil || sm == nil {
+				continue
+			}
+			if sl.HasInterest(sm.subj) {
+				out = append(out, seq)
+			}
+		}
+		return out
+	}
+	gather := func() []uint64 {
+		var out []uint64
+		seqs := make([]uint64, 0, multiFilterPrefetch)
+		for start := uint64(1); ; {
+			seqs = seqs[:0]
+			n, _, err := fs.LoadNextMsgsMulti(sl, start, multiFilterPrefetch, &seqs)
+			if n == 0 {
+				require_Error(t, err, ErrStoreEOF)
+				break
+			}
+			out = append(out, seqs...)
+			start = seqs[len(seqs)-1] + 1
+		}
+		return out
+	}
+
+	want := brute()
+	require_True(t, len(want) > 0)
+
+	// Confirm we really have many blocks so the cross-block path is exercised.
+	fs.mu.RLock()
+	nblks := len(fs.blks)
+	fs.mu.RUnlock()
+	require_True(t, nblks > 5)
+
+	got := gather()
+	require_Equal(t, len(got), len(want))
+	for i := range want {
+		require_Equal(t, got[i], want[i])
+	}
+
+	// Reload from disk and re-verify against the same oracle.
+	require_NoError(t, fs.Stop())
+	fs = newFS()
+	defer fs.Stop()
+
+	got2 := gather()
+	require_Equal(t, len(got2), len(want))
+	for i := range want {
+		require_Equal(t, got2[i], want[i])
+	}
+}
+
 // Benchmark_FileStoreLoadNextMsgsMulti compares the cost of delivering all
 // messages matching a multi-subject filter via the legacy per-message path
 // (LoadNextMsgMulti, one search per message) against the batched path

@@ -210,6 +210,151 @@ func TestStoreLoadNextMsgsMultiNilSublist(t *testing.T) {
 	)
 }
 
+// bruteForceMultiMatches is an oracle independent of the multi-filter narrowing
+// code (LoadNextMsgMulti / nextMultiMatchLocked / shouldLinearScanMulti): it just
+// walks every live sequence and tests sl.HasInterest. Use this instead of
+// LoadNextMsgMulti so a bug in a shared helper cannot corrupt both sides equally.
+func bruteForceMultiMatches(t *testing.T, fs StreamStore, sl *gsl.SimpleSublist) []uint64 {
+	t.Helper()
+	var smv StoreMsg
+	var out []uint64
+	state := fs.State()
+	for seq := state.FirstSeq; seq <= state.LastSeq && state.Msgs > 0; seq++ {
+		sm, err := fs.LoadMsg(seq, &smv)
+		if err != nil || sm == nil {
+			continue
+		}
+		if sl.HasInterest(sm.subj) {
+			out = append(out, seq)
+		}
+	}
+	return out
+}
+
+// gatherMultiBatched drains LoadNextMsgsMulti at the given batch size and returns
+// the concatenated matching sequences, validating the (n, last, err) contract.
+func gatherMultiBatched(t *testing.T, fs StreamStore, sl *gsl.SimpleSublist, batch int) []uint64 {
+	t.Helper()
+	var out []uint64
+	seqs := make([]uint64, 0, batch)
+	for start := uint64(1); ; {
+		seqs = seqs[:0]
+		n, last, err := fs.LoadNextMsgsMulti(sl, start, batch, &seqs)
+		if n == 0 {
+			require_Error(t, err, ErrStoreEOF)
+			break
+		}
+		require_Equal(t, n, len(seqs))
+		require_Equal(t, last, seqs[len(seqs)-1])
+		out = append(out, seqs...)
+		start = seqs[len(seqs)-1] + 1
+	}
+	return out
+}
+
+// TestStoreLoadNextMsgsMultiBruteForceOracle cross-checks the batched lookup
+// against an independent brute-force oracle (not LoadNextMsgMulti), across both
+// stores and the full file-store cipher/compression matrix, with scattered
+// subjects, interior deletes, and batch sizes including the prefetch size.
+func TestStoreLoadNextMsgsMultiBruteForceOracle(t *testing.T) {
+	testAllStoreAllPermutations(
+		t, true,
+		StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}},
+		func(t *testing.T, fs StreamStore) {
+			const numMsgs = 1000
+			const numSubjects = 50
+			for i := 0; i < numMsgs; i++ {
+				_, _, err := fs.StoreMsg(fmt.Sprintf("foo.%d", i%numSubjects), nil, []byte("ZZZ"), 0)
+				require_NoError(t, err)
+			}
+			// Interior deletes, including around a prefetch boundary (256).
+			for _, seq := range []uint64{1, 2, 3, 10, 255, 256, 257, 500, 999, 1000} {
+				_, err := fs.RemoveMsg(seq)
+				require_NoError(t, err)
+			}
+			sl := gsl.NewSublist[struct{}]()
+			for _, s := range []int{0, 3, 7, 13, 21, 34, 49} {
+				require_NoError(t, sl.Insert(fmt.Sprintf("foo.%d", s), struct{}{}))
+			}
+
+			want := bruteForceMultiMatches(t, fs, sl)
+			require_True(t, len(want) > 0)
+
+			for _, batch := range []int{1, 7, multiFilterPrefetch, 100000} {
+				got := gatherMultiBatched(t, fs, sl, batch)
+				require_Equal(t, len(got), len(want))
+				for i := range want {
+					require_Equal(t, got[i], want[i])
+				}
+			}
+
+			// EOF past the last match.
+			seqs := make([]uint64, 0, 8)
+			n, _, err := fs.LoadNextMsgsMulti(sl, want[len(want)-1]+1, 8, &seqs)
+			require_Equal(t, n, 0)
+			require_Error(t, err, ErrStoreEOF)
+		},
+	)
+}
+
+// TestStoreLoadNextMsgsMultiWildcardsAndOverlap exercises wildcard filter
+// entries, overlapping (wildcard subsuming literal), and zero-match entries,
+// comparing against the brute-force oracle on both stores.
+func TestStoreLoadNextMsgsMultiWildcardsAndOverlap(t *testing.T) {
+	testAllStoreAllPermutations(
+		t, false,
+		StreamConfig{Name: "zzz", Subjects: []string{"foo.>"}},
+		func(t *testing.T, fs StreamStore) {
+			tokens := []string{"a", "b", "c", "d", "e"}
+			const numMsgs = 1000
+			for i := 0; i < numMsgs; i++ {
+				subj := fmt.Sprintf("foo.%s.%d", tokens[i%len(tokens)], i%10)
+				_, _, err := fs.StoreMsg(subj, nil, []byte("ZZZ"), 0)
+				require_NoError(t, err)
+			}
+			for _, seq := range []uint64{5, 6, 7, 300, 700} {
+				_, err := fs.RemoveMsg(seq)
+				require_NoError(t, err)
+			}
+
+			ins := func(sl *gsl.SimpleSublist, subj string) {
+				require_NoError(t, sl.Insert(subj, struct{}{}))
+			}
+			check := func(name string, build func(sl *gsl.SimpleSublist)) {
+				t.Run(name, func(t *testing.T) {
+					sl := gsl.NewSublist[struct{}]()
+					build(sl)
+					want := bruteForceMultiMatches(t, fs, sl)
+					got := gatherMultiBatched(t, fs, sl, 64)
+					require_Equal(t, len(got), len(want))
+					for i := range want {
+						require_Equal(t, got[i], want[i])
+					}
+				})
+			}
+
+			check("wildcard-mix", func(sl *gsl.SimpleSublist) {
+				ins(sl, "foo.a.*")
+				ins(sl, "foo.c.*")
+				ins(sl, "foo.e.5")
+			})
+			check("overlap-wildcard-subsumes-literal", func(sl *gsl.SimpleSublist) {
+				ins(sl, "foo.a.*")
+				ins(sl, "foo.a.3")
+				ins(sl, "foo.b.1")
+			})
+			check("zero-match-alongside-real", func(sl *gsl.SimpleSublist) {
+				ins(sl, "foo.a.0")
+				ins(sl, "foo.zzz.*")
+			})
+			check("gt-tail-wildcards", func(sl *gsl.SimpleSublist) {
+				ins(sl, "foo.a.>")
+				ins(sl, "foo.b.>")
+			})
+		},
+	)
+}
+
 func TestStoreLoadNextMsgWildcardStartBeforeFirstMatch(t *testing.T) {
 	testAllStoreAllPermutations(
 		t, false,
