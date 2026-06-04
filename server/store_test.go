@@ -116,6 +116,79 @@ func TestStoreMsgLoadNextMsgMulti(t *testing.T) {
 	)
 }
 
+func TestStoreLoadNextMsgsMulti(t *testing.T) {
+	testAllStoreAllPermutations(
+		t, false,
+		StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}},
+		func(t *testing.T, fs StreamStore) {
+			const numMsgs = 1000
+			const numSubjects = 50
+			// Round-robin subjects so matches are scattered.
+			for i := 0; i < numMsgs; i++ {
+				subj := fmt.Sprintf("foo.%d", i%numSubjects)
+				_, _, err := fs.StoreMsg(subj, nil, []byte("ZZZ"), 0)
+				require_NoError(t, err)
+			}
+			// Delete a scattering of interior messages to exercise gaps.
+			for _, seq := range []uint64{10, 11, 12, 200, 201, 750} {
+				_, err := fs.RemoveMsg(seq)
+				require_NoError(t, err)
+			}
+
+			// Build a sublist matching a sparse subset of subjects.
+			sl := gsl.NewSublist[struct{}]()
+			matchSubjects := map[string]bool{}
+			for _, s := range []int{0, 3, 7, 13, 21, 34, 49} {
+				subj := fmt.Sprintf("foo.%d", s)
+				require_NoError(t, sl.Insert(subj, struct{}{}))
+				matchSubjects[subj] = true
+			}
+
+			// Ground truth: walk one at a time with LoadNextMsgMulti.
+			var smv StoreMsg
+			var want []uint64
+			for seq := uint64(1); ; {
+				sm, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+				if err != nil {
+					break
+				}
+				require_True(t, matchSubjects[sm.subj])
+				want = append(want, nseq)
+				seq = nseq + 1
+			}
+			require_True(t, len(want) > 0)
+
+			// Now gather the same matches in batches and compare exactly.
+			for _, batch := range []int{1, 7, 64, 10000} {
+				var got []uint64
+				seqs := make([]uint64, 0, batch)
+				for start := uint64(1); ; {
+					seqs = seqs[:0]
+					n, last, err := fs.LoadNextMsgsMulti(sl, start, batch, &seqs)
+					if n == 0 {
+						require_Error(t, err, ErrStoreEOF)
+						break
+					}
+					require_Equal(t, n, len(seqs))
+					require_Equal(t, last, seqs[len(seqs)-1])
+					got = append(got, seqs...)
+					start = seqs[len(seqs)-1] + 1
+				}
+				require_Equal(t, len(got), len(want))
+				for i := range want {
+					require_Equal(t, got[i], want[i])
+				}
+			}
+
+			// EOF semantics when starting past the last match.
+			seqs := make([]uint64, 0, 8)
+			n, _, err := fs.LoadNextMsgsMulti(sl, want[len(want)-1]+1, 8, &seqs)
+			require_Equal(t, n, 0)
+			require_Error(t, err, ErrStoreEOF)
+		},
+	)
+}
+
 func TestStoreLoadNextMsgWildcardStartBeforeFirstMatch(t *testing.T) {
 	testAllStoreAllPermutations(
 		t, false,

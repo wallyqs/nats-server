@@ -430,6 +430,9 @@ type consumer struct {
 	sseq              uint64             // next stream sequence
 	subjf             subjectFilters     // subject filters and their sequences
 	filters           *gsl.SimpleSublist // When we have multiple filters we will use LoadNextMsgMulti and pass this in.
+	mfseqs            []uint64           // Prefetched matching sequences for multi-filter delivery (amortizes LoadNextMsgsMulti).
+	mfidx             int                // Index of next entry to consume in mfseqs.
+	mflast            uint64             // Last sequence served from the multi-filter prefetch buffer (for rewind detection).
 	dseq              uint64             // delivered consumer sequence
 	adflr             uint64             // ack delivery floor
 	asflr             uint64             // ack store floor
@@ -2591,6 +2594,8 @@ func (o *consumer) updateConfig(cfg *ConsumerConfig) error {
 	newSubjects := gatherSubjectFilters(cfg.FilterSubject, cfg.FilterSubjects)
 	updatedFilters := !subjectSliceEqual(newSubjects, o.subjf.subjects())
 	if updatedFilters {
+		// Filter set is changing, drop any prefetched multi-filter matches.
+		o.resetMultiFilterPrefetch()
 		newSubjf := make(subjectFilters, 0, len(newSubjects))
 		for _, newFilter := range newSubjects {
 			fs := &subjectFilter{
@@ -4789,6 +4794,77 @@ var (
 	errNoInterest    = errors.New("consumer requires interest for delivery subject when ephemeral")
 )
 
+// Number of matching sequences to prefetch per multi-filter store lookup. This
+// amortizes the cost of the multi-subject search across many delivered messages
+// instead of paying it once per message.
+const multiFilterPrefetch = 256
+
+// resetMultiFilterPrefetch discards any prefetched multi-filter sequences. It
+// must be called whenever the filter set changes so we do not serve stale matches.
+// Lock should be held.
+func (o *consumer) resetMultiFilterPrefetch() {
+	o.mfseqs = o.mfseqs[:0]
+	o.mfidx = 0
+	o.mflast = 0
+}
+
+// getNextMultiFiltered returns the next message matching our multi-subject
+// filter, mirroring the contract of store.LoadNextMsgMulti (on EOF it returns a
+// nil message, the last sequence considered, and ErrStoreEOF).
+//
+// Rather than performing a full multi-subject search per call, it prefetches a
+// batch of matching sequences via store.LoadNextMsgsMulti and then serves them
+// with plain (fresh) LoadMsg lookups. Bodies are loaded lazily so a message
+// removed after prefetch is simply skipped instead of being delivered stale.
+// Lock should be held.
+func (o *consumer) getNextMultiFiltered(smp *StoreMsg) (*StoreMsg, uint64, error) {
+	store := o.mset.store
+
+	// If o.sseq has moved at or below the last sequence we served then we have
+	// rewound (e.g. a redelivery retry), so the prefetched matches are stale.
+	if o.sseq <= o.mflast {
+		o.resetMultiFilterPrefetch()
+	}
+
+	for {
+		// Drop any prefetched sequences that are now behind our cursor.
+		for o.mfidx < len(o.mfseqs) && o.mfseqs[o.mfidx] < o.sseq {
+			o.mfidx++
+		}
+		// Refill if we have exhausted the buffer.
+		if o.mfidx >= len(o.mfseqs) {
+			o.mfseqs = o.mfseqs[:0]
+			o.mfidx = 0
+			n, last, err := store.LoadNextMsgsMulti(o.filters, o.sseq, multiFilterPrefetch, &o.mfseqs)
+			if n == 0 {
+				// No further matches. Mirror LoadNextMsgMulti's EOF contract.
+				return nil, last, err
+			}
+		}
+
+		seq := o.mfseqs[o.mfidx]
+		o.mfidx++
+		o.mflast = seq
+
+		sm, err := store.LoadMsg(seq, smp)
+		if err != nil || sm == nil {
+			// Message was removed between prefetch and delivery. Skip past it
+			// and move on. Advancing o.sseq here is safe and consistent with
+			// LoadNextMsgMulti, which would also skip removed messages and only
+			// return the next live match. It also guarantees forward progress
+			// so we never re-scan a removed sequence on refill.
+			if err == ErrStoreClosed {
+				return nil, seq, err
+			}
+			if seq >= o.sseq {
+				o.sseq = seq + 1
+			}
+			continue
+		}
+		return sm, seq, nil
+	}
+}
+
 // Get next available message from underlying store.
 // Is partition aware and redeliver aware.
 // Lock should be held.
@@ -4877,7 +4953,7 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 	filters, subjf, fseq := o.filters, o.subjf, o.sseq
 	// Check if we are multi-filtered or not.
 	if filters != nil {
-		sm, sseq, err = o.mset.store.LoadNextMsgMulti(filters, fseq, &pmsg.StoreMsg)
+		sm, sseq, err = o.getNextMultiFiltered(&pmsg.StoreMsg)
 	} else if len(subjf) > 0 { // Means single filtered subject since o.filters means > 1.
 		filter, wc := subjf[0].subject, subjf[0].hasWildcard
 		sm, sseq, err = o.mset.store.LoadNextMsg(filter, wc, fseq, &pmsg.StoreMsg)

@@ -1788,9 +1788,37 @@ func (ms *memStore) loadLastLocked(subject string, smp *StoreMsg) (*StoreMsg, er
 	return smp, nil
 }
 
+// Find sequence bounds matching any entry in the sublist from ms.fss.
+// Returns (first, last, true) if there is at least one matching subject at or
+// after start (start <= first <= last). Returns (0, 0, false) if no matching
+// subject has messages at or after start.
+// Lock should be held.
+func (ms *memStore) nextMultiMatchLocked(sl *gsl.SimpleSublist, start uint64) (uint64, uint64, bool) {
+	found := false
+	first, last := ms.state.LastSeq, uint64(0)
+	stree.IntersectGSL(ms.fss, sl, func(subj []byte, ss *SimpleState) bool {
+		ms.recalculateForSubj(bytesToString(subj), ss)
+		// Skip subjects whose messages are all below our starting sequence.
+		if start > ss.Last {
+			return true
+		}
+		found = true
+		if ss.First < first {
+			first = ss.First
+		}
+		if ss.Last > last {
+			last = ss.Last
+		}
+		return true
+	})
+	if !found {
+		return 0, 0, false
+	}
+	return max(first, start), last, true
+}
+
 // LoadNextMsgMulti will find the next message matching any entry in the sublist.
 func (ms *memStore) LoadNextMsgMulti(sl *gsl.SimpleSublist, start uint64, smp *StoreMsg) (sm *StoreMsg, skip uint64, err error) {
-	// TODO(dlc) - for now simple linear walk to get started.
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
 
@@ -1806,6 +1834,16 @@ func (ms *memStore) LoadNextMsgMulti(sl *gsl.SimpleSublist, start uint64, smp *S
 	// Initial setup.
 	fseq, lseq := start, ms.state.LastSeq
 
+	// Unless the scan range is small relative to the number of subjects, use the
+	// subject tree to narrow the [fseq, lseq] bounds and skip leading/trailing gaps.
+	if !ms.shouldLinearScanMulti(start) {
+		if mfseq, mlseq, found := ms.nextMultiMatchLocked(sl, start); found {
+			fseq, lseq = mfseq, mlseq
+		} else {
+			return nil, ms.state.LastSeq, ErrStoreEOF
+		}
+	}
+
 	for nseq := fseq; nseq <= lseq; nseq++ {
 		sm, ok := ms.msgs[nseq]
 		if !ok {
@@ -1820,6 +1858,60 @@ func (ms *memStore) LoadNextMsgMulti(sl *gsl.SimpleSublist, start uint64, smp *S
 		}
 	}
 	return nil, ms.state.LastSeq, ErrStoreEOF
+}
+
+// Returns true if a multi-subject load should perform a plain linear scan,
+// false if it should use the subject tree to narrow the search space.
+// Mirrors shouldLinearScan for the multi-filter case.
+// Lock should be held.
+func (ms *memStore) shouldLinearScanMulti(start uint64) bool {
+	return 2*int(ms.state.LastSeq-start) < ms.fss.Size()
+}
+
+// LoadNextMsgsMulti finds up to maxSeqs sequences (in ascending order) at or
+// after start matching any entry in the sublist, appending them to *seqs.
+// Returns the number appended, the last sequence considered (for skip/EOF
+// accounting by the caller), and ErrStoreEOF if no further matches exist.
+// This amortizes the cost of the multi-subject search across many messages so
+// callers do not need to perform a full lookup per delivered message.
+func (ms *memStore) LoadNextMsgsMulti(sl *gsl.SimpleSublist, start uint64, maxSeqs int, seqs *[]uint64) (int, uint64, error) {
+	if maxSeqs <= 0 {
+		maxSeqs = 1
+	}
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+
+	if start < ms.state.FirstSeq {
+		start = ms.state.FirstSeq
+	}
+	if start > ms.state.LastSeq || ms.state.Msgs == 0 {
+		return 0, ms.state.LastSeq, ErrStoreEOF
+	}
+
+	fseq, lseq := start, ms.state.LastSeq
+	if !ms.shouldLinearScanMulti(start) {
+		if mfseq, mlseq, found := ms.nextMultiMatchLocked(sl, start); found {
+			fseq, lseq = mfseq, mlseq
+		} else {
+			return 0, ms.state.LastSeq, ErrStoreEOF
+		}
+	}
+
+	n := 0
+	for nseq := fseq; nseq <= lseq && n < maxSeqs; nseq++ {
+		sm, ok := ms.msgs[nseq]
+		if !ok {
+			continue
+		}
+		if sl.HasInterest(sm.subj) {
+			*seqs = append(*seqs, nseq)
+			n++
+		}
+	}
+	if n == 0 {
+		return 0, ms.state.LastSeq, ErrStoreEOF
+	}
+	return n, (*seqs)[len(*seqs)-1], nil
 }
 
 // LoadNextMsg will find the next message matching the filter subject starting at the start sequence.

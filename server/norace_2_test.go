@@ -1898,6 +1898,74 @@ func TestNoRaceFileStoreMsgLoadNextMsgMultiPerf(t *testing.T) {
 	require_LessThan(t, elapsed, 3*baseline)
 }
 
+// Demonstrates that batched multi-subject lookup (LoadNextMsgsMulti) scales far
+// better than calling LoadNextMsgMulti once per delivered message as the number
+// of filter subjects grows, when matches are sparse/scattered across the stream.
+func TestNoRaceFileStoreLoadNextMsgsMultiScaling(t *testing.T) {
+	fs, err := newFileStore(
+		FileStoreConfig{StoreDir: t.TempDir()},
+		StreamConfig{Name: "zzz", Subjects: []string{"foo.*"}, Storage: FileStorage})
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	const numMsgs = 200_000
+	const numSubjects = 1000
+	for i := 0; i < numMsgs; i++ {
+		subj := fmt.Sprintf("foo.%d", i%numSubjects)
+		_, _, err = fs.StoreMsg(subj, nil, []byte("ZZZ"), 0)
+		require_NoError(t, err)
+	}
+
+	for _, fc := range []int{10, 30, 50, 90} {
+		sl := gsl.NewSublist[struct{}]()
+		for s := 0; s < fc; s++ {
+			require_NoError(t, sl.Insert(fmt.Sprintf("foo.%d", s), struct{}{}))
+		}
+
+		var smv StoreMsg
+
+		// Old path: one LoadNextMsgMulti per delivered message.
+		var perMsgCount int
+		start := time.Now()
+		for seq := uint64(1); ; {
+			sm, nseq, err := fs.LoadNextMsgMulti(sl, seq, &smv)
+			if err != nil {
+				break
+			}
+			_ = sm
+			perMsgCount++
+			seq = nseq + 1
+		}
+		perMsg := time.Since(start)
+
+		// New path: batched LoadNextMsgsMulti + a fresh LoadMsg per delivered message.
+		var batchedCount int
+		seqs := make([]uint64, 0, multiFilterPrefetch)
+		start = time.Now()
+		for seq := uint64(1); ; {
+			seqs = seqs[:0]
+			n, _, err := fs.LoadNextMsgsMulti(sl, seq, multiFilterPrefetch, &seqs)
+			if n == 0 {
+				require_Error(t, err, ErrStoreEOF)
+				break
+			}
+			for _, s := range seqs {
+				if _, err := fs.LoadMsg(s, &smv); err == nil {
+					batchedCount++
+				}
+			}
+			seq = seqs[len(seqs)-1] + 1
+		}
+		batched := time.Since(start)
+
+		require_Equal(t, perMsgCount, batchedCount)
+		t.Logf("filters=%-3d matches=%-7d  per-message=%-12v  batched=%-12v  speedup=%.1fx",
+			fc, perMsgCount, perMsg, batched, float64(perMsg)/float64(batched))
+		// Batched (even including a per-message LoadMsg) should never be slower.
+		require_LessThan(t, batched, perMsg)
+	}
+}
+
 func TestNoRaceWQAndMultiSubjectFilters(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()

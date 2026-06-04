@@ -2956,6 +2956,77 @@ func (mb *msgBlock) firstMatchingMulti(sl *gsl.SimpleSublist, start uint64, sm *
 	return nil, didLoad, ErrStoreMsgNotFound
 }
 
+// collectMatchingMulti appends up to max matching sequences (ascending) at or
+// after start to *seqs in a single pass over the block. This is the batched
+// counterpart to firstMatchingMulti: it amortizes the per-block setup (cache
+// load, fss load) and the subject matching across many messages so a caller
+// does not have to re-enter the block once per delivered message.
+// Returns the highest sequence scanned in this block and an error. When no
+// matches are found ErrStoreMsgNotFound is returned (mirroring firstMatchingMulti).
+// fs lock should be held.
+func (mb *msgBlock) collectMatchingMulti(sl *gsl.SimpleSublist, start uint64, max int, seqs *[]uint64) (uint64, error) {
+	mb.mu.Lock()
+	var updateLLTS bool
+	defer func() {
+		if updateLLTS {
+			mb.llts = ats.AccessTime()
+		}
+		mb.finishedWithCache()
+		mb.mu.Unlock()
+	}()
+
+	if mb.fssNotLoaded() {
+		// Make sure we have fss loaded.
+		if err := mb.loadMsgsWithLock(); err != nil {
+			return 0, err
+		}
+	}
+	// Mark fss activity.
+	mb.lsts = ats.AccessTime()
+
+	// Make sure to start at mb.first.seq if start < mb.first.seq.
+	if seq := atomic.LoadUint64(&mb.first.seq); seq > start {
+		start = seq
+	}
+	lseq := atomic.LoadUint64(&mb.last.seq)
+	if start > lseq {
+		return lseq, ErrStoreMsgNotFound
+	}
+
+	// Need messages loaded from here on out.
+	if mb.cacheNotLoaded() {
+		if err := mb.loadMsgsWithLock(); err != nil {
+			return 0, err
+		}
+	}
+
+	smv := new(StoreMsg)
+	added := 0
+	for seq := start; seq <= lseq; seq++ {
+		if mb.dmap.Exists(seq) {
+			// Optimisation to avoid calling cacheLookup which hits time.Now().
+			// Instead we will update it only once in a defer.
+			updateLLTS = true
+			continue
+		}
+		fsm, err := mb.cacheLookup(seq, smv)
+		if err != nil {
+			continue
+		}
+		updateLLTS = false // cacheLookup already updated it.
+		if sl.HasInterest(fsm.subj) {
+			*seqs = append(*seqs, seq)
+			if added++; added >= max {
+				return seq, nil
+			}
+		}
+	}
+	if added > 0 {
+		return lseq, nil
+	}
+	return lseq, ErrStoreMsgNotFound
+}
+
 // Find the first matching message.
 // fs lock should be held.
 func (mb *msgBlock) firstMatching(filter string, wc bool, start uint64, sm *StoreMsg) (*StoreMsg, bool, error) {
@@ -9142,6 +9213,92 @@ func (fs *fileStore) LoadNextMsgMulti(sl *gsl.SimpleSublist, start uint64, smp *
 
 	return nil, fs.state.LastSeq, ErrStoreEOF
 
+}
+
+// LoadNextMsgsMulti finds up to maxSeqs sequences (in ascending order) at or
+// after start matching any entry in the sublist, appending them to *seqs.
+// Returns the number appended, the last sequence considered (so the caller can
+// account for skips/EOF), and ErrStoreEOF if no further matches exist.
+//
+// This is the batched counterpart to LoadNextMsgMulti. It performs the
+// (potentially expensive) multi-subject search once per batch rather than once
+// per delivered message, while leaving message body loads to the caller so they
+// always observe fresh state.
+func (fs *fileStore) LoadNextMsgsMulti(sl *gsl.SimpleSublist, start uint64, maxSeqs int, seqs *[]uint64) (int, uint64, error) {
+	if fs.isClosed() {
+		return 0, 0, ErrStoreClosed
+	}
+	if maxSeqs <= 0 {
+		maxSeqs = 1
+	}
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	if fs.state.Msgs == 0 || start > fs.state.LastSeq {
+		return 0, fs.state.LastSeq, ErrStoreEOF
+	}
+	if start < fs.state.FirstSeq {
+		start = fs.state.FirstSeq
+	}
+
+	// If start is at or before the beginning of our stream, meaning our first
+	// call, check the psim to see if we can skip ahead.
+	if start <= fs.state.FirstSeq {
+		var total uint64
+		blkStart := uint32(math.MaxUint32)
+		stree.IntersectGSL(fs.psim, sl, func(subj []byte, psi *psi) bool {
+			total += psi.total
+			if psi.fblk < blkStart {
+				blkStart = psi.fblk
+			}
+			return true
+		})
+		// Nothing available.
+		if total == 0 {
+			return 0, fs.state.LastSeq, ErrStoreEOF
+		}
+		// We can skip ahead.
+		if mb := fs.bim[blkStart]; mb != nil {
+			fseq := atomic.LoadUint64(&mb.first.seq)
+			if fseq > start {
+				start = fseq
+			}
+		}
+	}
+
+	n := 0
+	if bi, _ := fs.selectMsgBlockWithIndex(start); bi >= 0 {
+		for i := bi; i < len(fs.blks) && n < maxSeqs; i++ {
+			mb := fs.blks[i]
+			before := len(*seqs)
+			_, err := mb.collectMatchingMulti(sl, start, maxSeqs-n, seqs)
+			n += len(*seqs) - before
+			if err != nil && err != ErrStoreMsgNotFound {
+				return n, 0, err
+			}
+			// Nothing found in this block. If this was the first block we probed,
+			// consult the psim to see if we can skip empty blocks ahead.
+			if len(*seqs) == before && i == bi && i < len(fs.blks)-1 {
+				nbi, err := fs.checkSkipFirstBlockMulti(sl, bi)
+				if err == ErrStoreEOF {
+					if n == 0 {
+						return 0, fs.state.LastSeq, ErrStoreEOF
+					}
+					break
+				}
+				if nbi > i {
+					i = nbi - 1 // For the iterator condition i++
+				}
+			}
+			// For all subsequent blocks we clamp to the block's first sequence.
+			start = 0
+		}
+	}
+
+	if n == 0 {
+		return 0, fs.state.LastSeq, ErrStoreEOF
+	}
+	return n, (*seqs)[len(*seqs)-1], nil
 }
 
 func (fs *fileStore) LoadNextMsg(filter string, wc bool, start uint64, sm *StoreMsg) (*StoreMsg, uint64, error) {
