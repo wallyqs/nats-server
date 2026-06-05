@@ -345,6 +345,13 @@ sm, sseq, err = o.mset.store.<span class="f">LoadNextMsgMulti</span>(filters, fs
 
 <span class="c">// this branch — search amortized across a prefetch batch (once / 256), then by‑seq reads</span>
 sm, sseq, err = o.<span class="f">getNextMultiFiltered</span>(&amp;pmsg.StoreMsg)</pre>
+<p class="sub" style="font-size:13.5px"><b>Verified against <code>release/v2.12.10</code></b>
+(<code>VERSION = "2.12.10"</code>): that tag carries the per‑message line above verbatim and has
+no <code>LoadNextMsgsMulti</code> in its <code>StreamStore</code> interface — the batched API is
+new on this branch. The <code>DeliverLastPerSubject</code> skip‑list (§3) is byte‑identical in
+v2.12.10; the startup methods of §5/§8 (<code>FilteredState</code>, <code>MultiLastSeqs</code>,
+<code>GetSeqFromTime</code>) keep the same data‑structure and I/O behavior, differing only in that
+this branch propagates block‑read errors instead of swallowing them.</p>
 
 <figure>
 <div class="svgwrap">
