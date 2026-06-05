@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Source Consumers &amp; the Linear Scan — NATS Server Investigation</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --border:#2d333b;
+    --text:#e6edf3; --muted:#9aa6b2; --accent:#27aae1; --accent2:#7ee787;
+    --warn:#f0a020; --danger:#f85149; --purple:#bc8cff; --code:#0b0f14;
+    --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+    line-height:1.6;font-size:16px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 22px 80px}
+  header.hero{
+    background:radial-gradient(1200px 400px at 20% -10%,#16384d 0%,transparent 60%),
+               linear-gradient(135deg,#101a2b 0%,#0d1117 70%);
+    border-bottom:1px solid var(--border);padding:56px 0 40px;margin-bottom:8px}
+  .hero .wrap{padding-bottom:0}
+  .eyebrow{letter-spacing:.18em;text-transform:uppercase;font-size:12px;color:var(--accent);font-weight:700}
+  h1{font-size:40px;line-height:1.15;margin:10px 0 8px;font-weight:800;
+     background:linear-gradient(90deg,#fff,#9fd8ef);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--muted);font-size:18px;max-width:760px}
+  .meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
+  .chip{background:var(--panel);border:1px solid var(--border);border-radius:999px;
+    padding:6px 14px;font-size:13px;color:var(--muted)}
+  .chip b{color:var(--text)}
+  h2{font-size:26px;margin:48px 0 6px;font-weight:750;scroll-margin-top:20px}
+  h2 .num{color:var(--accent);font-variant-numeric:tabular-nums;margin-right:10px}
+  h3{font-size:19px;margin:28px 0 4px}
+  p{color:#cdd6e0}
+  .lead{font-size:17px;color:#d7dee7}
+  code{font-family:var(--mono);background:#1f2630;padding:2px 6px;border-radius:5px;font-size:.88em;color:#cbe9ff}
+  .grid{display:grid;gap:16px}
+  .cols-3{grid-template-columns:repeat(3,1fr)}
+  .cols-2{grid-template-columns:repeat(2,1fr)}
+  @media(max-width:760px){.cols-3,.cols-2{grid-template-columns:1fr}h1{font-size:30px}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 20px}
+  .card h4{margin:0 0 6px;font-size:15px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+  .stat{font-size:30px;font-weight:800;color:var(--accent2);font-variant-numeric:tabular-nums}
+  .stat.bad{color:var(--danger)} .stat.warn{color:var(--warn)}
+  .callout{border-left:4px solid var(--accent);background:var(--panel2);
+    border-radius:0 10px 10px 0;padding:14px 18px;margin:18px 0}
+  .callout.warn{border-color:var(--warn)} .callout.danger{border-color:var(--danger)}
+  .callout.good{border-color:var(--accent2)}
+  .callout .t{font-weight:700;margin-bottom:2px}
+  .callout.warn .t{color:var(--warn)} .callout.danger .t{color:var(--danger)} .callout.good .t{color:var(--accent2)}
+  pre{background:var(--code);border:1px solid var(--border);border-radius:10px;
+    padding:16px 18px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.55;margin:14px 0}
+  pre .c{color:#6b7681}      /* comment */
+  pre .k{color:#ff7b72}      /* keyword */
+  pre .f{color:#d2a8ff}      /* func */
+  pre .s{color:#a5d6ff}      /* string */
+  pre .t{color:#7ee787}      /* type */
+  pre .hl{background:rgba(248,81,73,.14);display:block;margin:0 -18px;padding:0 18px;border-left:3px solid var(--danger)}
+  pre .ok{background:rgba(126,231,135,.12);display:block;margin:0 -18px;padding:0 18px;border-left:3px solid var(--accent2)}
+  .loc{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:14.5px}
+  th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:.04em}
+  td code{white-space:nowrap}
+  .big-o{font-family:var(--mono);font-weight:700}
+  .o1{color:var(--accent2)} .on{color:var(--warn)} .on2{color:var(--danger)}
+  .flow{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:22px;margin:18px 0;
+    font-family:var(--mono);font-size:13px;line-height:1.9;overflow-x:auto;white-space:pre;color:#cdd6e0}
+  .flow .hot{color:var(--danger);font-weight:700}
+  .flow .cold{color:var(--accent2)}
+  .flow .arrow{color:var(--muted)}
+  .toc{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 22px;margin:26px 0}
+  .toc ol{margin:6px 0 0;padding-left:20px;columns:2;column-gap:30px}
+  @media(max-width:600px){.toc ol{columns:1}}
+  .toc li{margin:4px 0;break-inside:avoid}
+  .tag{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;vertical-align:middle;margin-left:6px}
+  .tag.hot{background:rgba(248,81,73,.16);color:#ff8b82}
+  .tag.cold{background:rgba(126,231,135,.14);color:#86e29a}
+  .tag.ctrl{background:rgba(188,140,255,.16);color:#cda9ff}
+  footer{margin-top:60px;padding-top:24px;border-top:1px solid var(--border);color:var(--muted);font-size:13px}
+  hr{border:none;border-top:1px solid var(--border);margin:40px 0}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin:10px 0 0;font-size:13px;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">NATS Server · JetStream · Code Investigation</div>
+    <h1>Why source consumers trigger a linear scan</h1>
+    <p class="sub">A walk through the stream-sourcing setup paths in <code>server/stream.go</code>, the
+       O(S²) behaviour they hide, the data-structure root cause, and what to change.</p>
+    <div class="meta">
+      <span class="chip">Repo · <b>nats-server</b></span>
+      <span class="chip">Area · <b>JetStream sourcing</b></span>
+      <span class="chip">Primary file · <b>server/stream.go</b></span>
+      <span class="chip">Date · <b>2026-06-05</b></span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="callout good">
+    <div class="t">TL;DR</div>
+    The per-message data path is <b>O(1)</b> — it is <i>not</i> the problem. The linear scans live in the
+    <b>control plane</b>: consumer setup, leader election, restart and config update. The culprit is
+    <code>stream.streamSource(iname)</code> (<span class="loc">stream.go:3793</span>), an O(S) walk over the
+    <code>cfg.Sources</code> slice. Because it is invoked once per source <i>inside</i> loops that already iterate
+    over every source, common operations become <b>O(S²)</b>. With the 1,000-source scaling scenario that is
+    ~1,000,000 slice steps under the stream lock on every leader change. The root cause is that source
+    <i>config</i> lives in a slice with no <code>iname</code> index, while runtime state lives in a map.
+  </div>
+
+  <div class="grid cols-3" style="margin-top:22px">
+    <div class="card"><h4>Hot path cost</h4><div class="stat o1" style="color:var(--accent2)">O(1)</div>
+      <p style="margin:4px 0 0;font-size:13.5px;color:var(--muted)">per inbound sourced message — routed via per-source subscription closure</p></div>
+    <div class="card"><h4>Setup / election</h4><div class="stat bad">O(S²)</div>
+      <p style="margin:4px 0 0;font-size:13.5px;color:var(--muted)"><code>setupSourceConsumers</code> × <code>streamSource</code></p></div>
+    <div class="card"><h4>At S = 1000</h4><div class="stat warn">~10⁶</div>
+      <p style="margin:4px 0 0;font-size:13.5px;color:var(--muted)">slice comparisons per leader election, holding <code>mset.mu</code></p></div>
+  </div>
+
+  <div class="toc">
+    <b>Contents</b>
+    <ol>
+      <li><a href="#what">What &ldquo;source consumers&rdquo; are</a></li>
+      <li><a href="#root">The root cause: slice vs. map</a></li>
+      <li><a href="#scan">The scan itself: <code>streamSource()</code></a></li>
+      <li><a href="#callers">Where it is invoked (and why)</a></li>
+      <li><a href="#hot">The hot path is clean</a></li>
+      <li><a href="#complexity">Complexity table</a></li>
+      <li><a href="#scale">Why it matters at scale</a></li>
+      <li><a href="#fix">The fix</a></li>
+    </ol>
+  </div>
+
+  <h2 id="what"><span class="num">1</span>What &ldquo;source consumers&rdquo; are</h2>
+  <p class="lead">A JetStream stream can <b>source</b> from other streams. For each entry in its
+  <code>Sources</code> list, the sourcing stream creates an internal ephemeral consumer
+  (<code>JS_SRC_&hellip;</code>) on the origin stream and pulls its messages in.</p>
+  <p>Each configured source is a <code>*StreamSource</code>; each running source has a matching
+  <code>*sourceInfo</code> with the live subscription, sequence tracking and health timer. The two are linked by an
+  <b>index name</b> (<code>iname</code>) — a composite of stream name, filter and transform
+  (<span class="loc">stream.go:1079 <code>composeIName()</code></span>):</p>
+<pre><span class="c">// stream.go:1079 — the iname uniquely identifies a source within a stream</span>
+<span class="k">func</span> (ssi *<span class="t">StreamSource</span>) <span class="f">composeIName</span>() <span class="t">string</span> {
+    <span class="c">// "&lt;name&gt;[:&lt;extHash&gt;][:C=&lt;consumerHash&gt;] &lt;filter/srcs&gt; &lt;dest/transforms&gt;"</span>
+    <span class="k">return</span> strings.<span class="f">Join</span>([]<span class="t">string</span>{iName, source, destination}, <span class="s">" "</span>)
+}</pre>
+
+  <h2 id="root"><span class="num">2</span>The root cause: a slice on one side, a map on the other</h2>
+  <p>The <code>stream</code> struct keeps the two halves in different shapes
+  (<span class="loc">stream.go:515</span> and the config slice):</p>
+<pre><span class="c">// stream.go:515 — runtime state: keyed by iname, O(1) lookup ✔</span>
+sources              <span class="k">map</span>[<span class="t">string</span>]*<span class="t">sourceInfo</span>
+sourceSetupSchedules <span class="k">map</span>[<span class="t">string</span>]*time.<span class="t">Timer</span>
+
+<span class="c">// cfg.Sources — the CONFIG side: a flat slice, no iname index ✘</span>
+Sources []*<span class="t">StreamSource</span></pre>
+  <div class="callout danger">
+    <div class="t">The mismatch</div>
+    Runtime <code>sourceInfo</code> is reachable in O(1) via <code>mset.sources[iname]</code>. But the matching
+    <code>*StreamSource</code> <b>config</b> only lives in the <code>cfg.Sources</code> slice — there is no
+    <code>map[iname]*StreamSource</code>. Any time code holds an <code>iname</code> and needs the config
+    (external API prefix, filter, transforms, start policy), it must walk the slice.
+  </div>
+
+  <h2 id="scan"><span class="num">3</span>The scan itself</h2>
+  <p>That walk is one tiny, innocuous-looking function:</p>
+<pre><span class="c">// stream.go:3793</span>
+<span class="k">func</span> (mset *<span class="t">stream</span>) <span class="f">streamSource</span>(iname <span class="t">string</span>) *<span class="t">StreamSource</span> {
+<span class="hl">    <span class="k">for</span> _, ssi := <span class="k">range</span> mset.cfg.Sources {   <span class="c">// O(S) linear walk</span></span>
+<span class="hl">        <span class="k">if</span> ssi.iname == iname {</span>
+            <span class="k">return</span> ssi
+        }
+    }
+    <span class="k">return</span> <span class="k">nil</span>
+}</pre>
+  <p>On its own this is cheap. The cost comes entirely from <i>where</i> it is called — almost always from inside
+  another loop that is itself iterating over every source.</p>
+
+  <h2 id="callers"><span class="num">4</span>Where it is invoked, and why</h2>
+  <p>None of these are on the message data path; all are control-plane operations that fire on
+  <b>startup, leader election, restart, health-driven re-setup, config update</b> and <code>STREAM.INFO</code>.</p>
+
+  <h3>4a · <code>setupSourceConsumers</code> → O(S²) <span class="tag ctrl">control</span></h3>
+  <p>Runs on every leader election / R1 startup. It loops over all sources; each iteration ends up calling
+  <code>streamSource(iname)</code> deep inside <code>trySetupSourceConsumer</code>:</p>
+<pre><span class="c">// stream.go:4805</span>
+<span class="k">func</span> (mset *<span class="t">stream</span>) <span class="f">setupSourceConsumers</span>() <span class="t">error</span> {
+    ...
+    mset.<span class="f">startingSequenceForSources</span>()                  <span class="c">// reverse store scan (4b)</span>
+<span class="hl">    <span class="k">for</span> _, ssi := <span class="k">range</span> mset.cfg.Sources {           <span class="c">// S iterations</span></span>
+        <span class="k">if</span> si := mset.sources[ssi.iname]; si != <span class="k">nil</span> {
+<span class="hl">            mset.<span class="f">setupSourceConsumer</span>(ssi.iname, si.sseq+<span class="t">1</span>, ...)  <span class="c">// → trySetupSourceConsumer</span></span>
+        }
+    }
+}
+
+<span class="c">// stream.go:3911 — inside trySetupSourceConsumer, per source:</span>
+ssi := mset.<span class="f">streamSource</span>(iname)   <span class="c">// O(S) walk × S sources = O(S²)</span></pre>
+
+  <h3>4b · <code>startingSequenceForSources</code> → reverse store scan + inner O(S) <span class="tag ctrl">control</span></h3>
+  <p>To resume each source at the right sequence, this reads the stream's own messages backwards looking for
+  <code>Nats-Stream-Source</code> headers. For legacy (pre-2.10) headers that carry only a stream name and no
+  <code>iname</code>, it must match by scanning every configured source:</p>
+<pre><span class="c">// stream.go:4787</span>
+streamName, iName, sseq := <span class="f">streamAndSeq</span>(bytesToString(ss))
+<span class="k">if</span> iName == _EMPTY_ {  <span class="c">// pre-2.10 header → must search all sources</span>
+<span class="hl">    <span class="k">for</span> _, ssi := <span class="k">range</span> mset.cfg.Sources {   <span class="c">// O(S) per scanned message</span></span>
+        <span class="k">if</span> streamName == ssi.Name || (ssi.External != <span class="k">nil</span> &amp;&amp; ...) {
+            <span class="f">update</span>(ssi.iname, sseq)
+        }
+    }
+}</pre>
+
+  <h3>4c · <code>setStartingSequenceForSources</code> → the explicitly-flagged O(S²) <span class="tag ctrl">config update</span></h3>
+  <p>The config-update sibling of 4b. Here the inner loop calls <code>streamSource()</code> <b>twice</b> per
+  iteration — the only place in the tree with a standing <code>TODO</code> about the walk:</p>
+<pre><span class="c">// stream.go:4638</span>
+} <span class="k">else</span> <span class="k">if</span> indexName == _EMPTY_ &amp;&amp; streamName != _EMPTY_ {
+    <span class="k">for</span> iName := <span class="k">range</span> iNames {
+<span class="hl">        <span class="c">// TODO streamSource is a linear walk, to optimize later</span></span>
+<span class="hl">        <span class="k">if</span> si := mset.sources[iName]; si != <span class="k">nil</span> &amp;&amp; streamName == si.name ||</span>
+<span class="hl">            (mset.<span class="f">streamSource</span>(iName).External != <span class="k">nil</span> &amp;&amp;       <span class="c">// walk #1</span></span>
+<span class="hl">             streamName == si.name+<span class="s">":"</span>+<span class="f">getHash</span>(mset.<span class="f">streamSource</span>(iName).External.ApiPrefix)) { <span class="c">// walk #2</span></span>
+            ...
+        }
+    }
+}</pre>
+  <div class="callout warn">
+    <div class="t">Bonus O(S²) in the same update path</div>
+    The update routine also derives a per-source consumer name via <code>getSourcingConsumerIName</code>
+    (<span class="loc">stream.go:2509</span>), which calls <code>createSourcingConsumerHash</code>
+    (<span class="loc">consumer.go:6354</span>) — and <i>that</i> loops over all sources to detect duplicate stream
+    names. Called once per source in two separate loops (<span class="loc">stream.go:2516, 2523</span>), it is
+    another independent O(S²) factor.
+  </div>
+
+  <h3>4d · <code>sourceInfo</code> → O(S) per source on <code>STREAM.INFO</code> <span class="tag ctrl">monitoring</span></h3>
+<pre><span class="c">// stream.go:2992 — building StreamSourceInfo for the API response</span>
+} <span class="k">else</span> <span class="k">if</span> ss := mset.<span class="f">streamSource</span>(si.iname); ss != <span class="k">nil</span> &amp;&amp; ss.External != <span class="k">nil</span> {</pre>
+  <p><code>sourcesInfo()</code> (<span class="loc">stream.go:2953</span>) calls this for every source, so a single
+  <code>$JS.API.STREAM.INFO</code> on a 1,000-source stream is itself O(S²).</p>
+
+  <h2 id="hot"><span class="num">5</span>The hot path is clean — by design</h2>
+  <p>It is worth stating clearly: <b>inbound message processing does not scan.</b> When a source consumer is set
+  up, the delivery subscription captures its own <code>si</code> in a closure, and queues messages already tagged
+  with it:</p>
+<pre><span class="c">// stream.go:4161 — each source's own sub closes over its own si</span>
+sub, _ := mset.<span class="f">subscribeInternal</span>(deliverSubject, <span class="k">func</span>(...) {
+    mset.<span class="f">queueInbound</span>(msgs, subject, reply, hdr, msg, <span class="ok">si</span>, <span class="k">nil</span>)  <span class="c">// si is bound, no lookup</span>
+})
+
+<span class="c">// stream.go:4314 — receives the si directly, O(1)</span>
+<span class="k">func</span> (mset *<span class="t">stream</span>) <span class="f">processInboundSourceMsg</span>(<span class="ok">si *sourceInfo</span>, m *<span class="t">inMsg</span>) <span class="t">bool</span> {</pre>
+  <p>All sources are also multiplexed onto a single goroutine
+  (<code>processAllSourceMsgs</code>, <span class="loc">stream.go:4187</span>) to avoid lock contention and thread
+  thrashing. So the scaling pain is strictly about <i>control-plane</i> events, not throughput.</p>
+
+  <h2 id="complexity"><span class="num">6</span>Complexity at a glance</h2>
+  <div class="legend">
+    <span><span class="dot" style="background:var(--accent2)"></span> O(1) / fine</span>
+    <span><span class="dot" style="background:var(--warn)"></span> O(S) linear</span>
+    <span><span class="dot" style="background:var(--danger)"></span> O(S²) quadratic</span>
+    <span>S = number of configured sources, M = messages scanned backwards</span>
+  </div>
+  <table>
+    <thead><tr><th>Operation</th><th>Trigger</th><th>Location</th><th>Cost</th></tr></thead>
+    <tbody>
+      <tr><td>Inbound sourced message</td><td>per message</td><td>stream.go:4314</td><td class="big-o o1">O(1)</td></tr>
+      <tr><td><code>streamSource(iname)</code></td><td>helper</td><td>stream.go:3793</td><td class="big-o on">O(S)</td></tr>
+      <tr><td><code>setupSourceConsumers</code></td><td>leader election / R1 start</td><td>stream.go:4805</td><td class="big-o on2">O(S²)</td></tr>
+      <tr><td><code>startingSequenceForSources</code></td><td>setup / restart</td><td>stream.go:4694</td><td class="big-o on2">O(M·S) → O(S²)*</td></tr>
+      <tr><td><code>setStartingSequenceForSources</code></td><td>config update</td><td>stream.go:4566</td><td class="big-o on2">O(M·S²)*</td></tr>
+      <tr><td>Config update (sources)</td><td><code>STREAM.UPDATE</code></td><td>stream.go:2504</td><td class="big-o on2">O(S²)</td></tr>
+      <tr><td><code>sourcesInfo</code> / <code>sourceInfo</code></td><td><code>STREAM.INFO</code></td><td>stream.go:2953 / 2992</td><td class="big-o on2">O(S²)</td></tr>
+      <tr><td>Health re-setup of stalled sources</td><td>periodic ticker</td><td>stream.go:4232</td><td class="big-o on">O(stalled·S)</td></tr>
+    </tbody>
+  </table>
+  <p style="font-size:13px;color:var(--muted)">* The O(S²) factors apply when origin messages carry legacy
+  (pre-2.10) source headers without an <code>iname</code>; modern headers short-circuit the inner walk via the
+  <code>iNames</code> map but the outer <code>streamSource</code>-driven O(S²) in setup still applies.</p>
+
+  <h2 id="scale"><span class="num">7</span>Why it matters at scale</h2>
+  <p>The repo ships a deliberately-skipped scaling test that frames the intended workload:</p>
+<pre><span class="c">// jetstream_sourcing_scaling_test.go:110</span>
+<span class="k">func</span> <span class="f">TestStreamSourcingScalingSourcingManyBenchmark</span>(t *testing.<span class="t">T</span>) {
+    t.<span class="f">Skip</span>()
+    <span class="k">var</span> numSourced     = <span class="t">1000</span>      <span class="c">// one sourcing stream pulling from 1000 streams</span>
+    <span class="k">var</span> numMsgPerSource = <span class="t">10_000</span></pre>
+  <div class="grid cols-2">
+    <div class="card">
+      <h4>Where the time goes</h4>
+      <p style="margin:0">Every leader election, server restart, or scale-up of the sourcing stream runs
+      <code>setupSourceConsumers</code>. At S=1000 that is ~10⁶ <code>iname</code> string comparisons walking the
+      slice — all while holding <code>mset.mu</code>, blocking publishes, info requests and other consumer setup.</p>
+    </div>
+    <div class="card">
+      <h4>It compounds</h4>
+      <p style="margin:0">Health checks re-setup stalled sources (each O(S)); a flurry of stalls after a network
+      blip multiplies the walks. Monitoring tools polling <code>STREAM.INFO</code> add their own O(S²) on top,
+      under the same lock.</p>
+    </div>
+  </div>
+
+  <div class="flow">Leader election / restart  <span class="arrow">──▶</span>  <span class="hot">setupSourceConsumers()</span>  <span class="arrow">[holds mset.mu]</span>
+        │
+        ├─ startingSequenceForSources()        <span class="arrow">reverse store scan,  inner walk per legacy msg</span>
+        │
+        └─ <span class="arrow">for each of S sources ──▶</span> trySetupSourceConsumer(iname)
+                                              │
+                                              └─ <span class="hot">streamSource(iname)</span>  <span class="arrow">── O(S) walk ──┐</span>
+                                                                                            │
+                                          <span class="hot">S sources × O(S) walk  =  O(S²)</span> <span class="arrow">◀────────────────┘</span>
+
+Inbound messages (separate goroutine):  sub-closure binds <span class="cold">si</span> <span class="arrow">──▶</span> <span class="cold">processInboundSourceMsg(si)</span>  <span class="cold">O(1)</span></div>
+
+  <h2 id="fix"><span class="num">8</span>The fix</h2>
+  <p class="lead">Give the config side the same O(1) index the runtime side already has.</p>
+  <div class="callout good">
+    <div class="t">Core change</div>
+    Maintain a <code>map[string]*StreamSource</code> keyed by <code>iname</code> next to <code>cfg.Sources</code>,
+    rebuilt wherever the sources list is (re)constructed — <code>resetSourceInfo</code>
+    (<span class="loc">stream.go:4659</span>) and the update path (<span class="loc">stream.go:2523</span>).
+    Then <code>streamSource()</code> becomes a single map read.
+  </div>
+<pre><span class="c">// streamSource() after: O(1)</span>
+<span class="k">func</span> (mset *<span class="t">stream</span>) <span class="f">streamSource</span>(iname <span class="t">string</span>) *<span class="t">StreamSource</span> {
+    <span class="ok">    <span class="k">return</span> mset.cfgSources[iname]   <span class="c">// map lookup, populated alongside cfg.Sources</span></span>
+}</pre>
+  <p>Knock-on simplifications once the index exists:</p>
+  <ul>
+    <li><b><code>setupSourceConsumers</code></b> drops from O(S²) to <b>O(S)</b> with no other change.</li>
+    <li>The two inner <code>streamSource()</code> calls in <code>setStartingSequenceForSources</code>
+        (<span class="loc">stream.go:4641-4642</span>) — the standing <code>TODO</code> — collapse to map reads.</li>
+    <li><code>sourceInfo</code>/<code>sourcesInfo</code> on <code>STREAM.INFO</code> drop from O(S²) to <b>O(S)</b>.</li>
+    <li>For the legacy-header matching (4b/4c) and the duplicate detection in
+        <code>createSourcingConsumerHash</code> (<span class="loc">consumer.go:6354</span>), a secondary
+        <code>map[streamName][]*StreamSource</code> removes the remaining by-name walks.</li>
+  </ul>
+  <div class="callout">
+    <div class="t">Why it's safe</div>
+    <code>iname</code> is already validated to be unique per stream
+    (<span class="loc">stream.go:1963-1974</span>, &ldquo;check sources for duplicates&rdquo;), so a map keyed by it
+    is well-defined. The map is pure derived state under <code>mset.mu</code>; it changes performance
+    characteristics only, not behaviour. The existing skipped scaling test is the natural acceptance gate.
+  </div>
+
+  <hr>
+  <h3>Key references</h3>
+  <table>
+    <thead><tr><th>Symbol</th><th>File:line</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>streamSource</code></td><td>stream.go:3793</td><td>the linear scan</td></tr>
+      <tr><td><code>sources</code> map / <code>cfg.Sources</code> slice</td><td>stream.go:515</td><td>the asymmetry</td></tr>
+      <tr><td><code>composeIName</code></td><td>stream.go:1079</td><td>iname construction</td></tr>
+      <tr><td><code>setupSourceConsumers</code></td><td>stream.go:4805</td><td>O(S²) setup loop</td></tr>
+      <tr><td><code>startingSequenceForSources</code></td><td>stream.go:4694</td><td>reverse-scan resume</td></tr>
+      <tr><td><code>setStartingSequenceForSources</code></td><td>stream.go:4566</td><td>TODO-flagged O(S²)</td></tr>
+      <tr><td><code>createSourcingConsumerHash</code></td><td>consumer.go:6354</td><td>by-name dedup walk</td></tr>
+      <tr><td><code>processInboundSourceMsg</code></td><td>stream.go:4314</td><td>O(1) hot path</td></tr>
+      <tr><td><code>TestStreamSourcingScaling…</code></td><td>jetstream_sourcing_scaling_test.go:110</td><td>1000-source workload</td></tr>
+    </tbody>
+  </table>
+
+  <footer>
+    Generated for the <code>claude/source-consumers-linear-scan</code> investigation · NATS Server JetStream.
+    All line numbers refer to the working tree at the time of writing. This report describes existing behaviour
+    and a proposed direction; no source files were modified.
+  </footer>
+</div>
+</body>
+</html>
