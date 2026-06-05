@@ -331,17 +331,132 @@ sub‑paths:</p>
   </g>
 
   <text x="490" y="370" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="12.5" text-anchor="middle" font-style="italic">
-    The multi‑filter branch is the one that used to call LoadNextMsgMulti once per message (O(M·F)); it now batches.</text>
+    In release/v2.12.10 this branch called LoadNextMsgMulti once per message (O(M·F)); on this branch it batches.</text>
 </svg>
 </div>
 <figcaption>Steady‑state dispatch is filter‑shaped, not policy‑shaped. Redelivery and the last‑per‑subject seed both reduce to cheap by‑sequence <code>LoadMsg</code>.</figcaption>
 </figure>
+
+<h3>Before / after — the multi‑filter branch vs <code>release/v2.12.10</code></h3>
+<p>The only line that changed on this hot path is the multi‑filter dispatch in
+<code>getNextMsg</code>:</p>
+<pre><span class="c">// release/v2.12.10 — one full multi‑subject search per delivered message</span>
+sm, sseq, err = o.mset.store.<span class="f">LoadNextMsgMulti</span>(filters, fseq, &amp;pmsg.StoreMsg)
+
+<span class="c">// this branch — search amortized across a prefetch batch (once / 256), then by‑seq reads</span>
+sm, sseq, err = o.<span class="f">getNextMultiFiltered</span>(&amp;pmsg.StoreMsg)</pre>
+
+<figure>
+<div class="svgwrap">
+<svg viewBox="0 0 980 260" role="img" aria-label="Searches per delivery and time, v2.12.10 vs this branch">
+  <text x="20" y="26" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11.5" font-weight="700">multi‑subject SEARCHES over one delivery of 200k scattered msgs (filestore)</text>
+  <!-- grid: 4 filter counts, two bars each -->
+  <g font-family="SF Mono,monospace" font-size="11.5">
+    <!-- 10 filters -->
+    <text x="20" y="58" fill="#cdd9e5">10 filters</text>
+    <rect x="120" y="46" width="430" height="16" rx="4" fill="#f85149"/><text x="558" y="59" fill="#ff9d96">2,001 searches · 347 ms</text>
+    <rect x="120" y="66" width="3"   height="16" rx="2" fill="#3fb950"/><text x="130" y="79" fill="#7ee787">9 searches · 20 ms</text>
+    <!-- 30 -->
+    <text x="20" y="108" fill="#cdd9e5">30 filters</text>
+    <rect x="120" y="96" width="600" height="16" rx="4" fill="#f85149" opacity="0.92"/><text x="728" y="109" fill="#ff9d96">6,001 · 1.02 s</text>
+    <rect x="120" y="116" width="5" height="16" rx="2" fill="#3fb950"/><text x="132" y="129" fill="#7ee787">25 · 21 ms</text>
+    <!-- 50 -->
+    <text x="20" y="158" fill="#cdd9e5">50 filters</text>
+    <rect x="120" y="146" width="760" height="16" rx="4" fill="#f85149" opacity="0.85"/><text x="120" y="138" fill="#ff9d96">10,001 · 2.11 s</text>
+    <rect x="120" y="166" width="7" height="16" rx="2" fill="#3fb950"/><text x="134" y="179" fill="#7ee787">41 · 24 ms</text>
+    <!-- 90 -->
+    <text x="20" y="208" fill="#cdd9e5">90 filters</text>
+    <rect x="120" y="196" width="840" height="16" rx="4" fill="#f85149" opacity="0.78"/><text x="120" y="188" fill="#ff9d96">18,001 · 3.50 s</text>
+    <rect x="120" y="216" width="9" height="16" rx="2" fill="#3fb950"/><text x="136" y="229" fill="#7ee787">72 · 24 ms</text>
+  </g>
+  <text x="120" y="250" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="11">red = release/v2.12.10 (per‑message) · green = this branch (batched). Green bars are searches, not time, drawn to scale; time stays flat ~20–24 ms.</text>
+</svg>
+</div>
+<figcaption>Per‑message searches scale as messages × filters in v2.12.10; the branch runs ≈ ⌈matches/256⌉ searches total — 17×→144× fewer as filters grow, with delivery time flat instead of climbing to 3.5 s. (<code>TestNoRaceFileStoreLoadNextMsgsMultiScaling</code>.)</figcaption>
+</figure>
+
+<div class="grid2">
+  <div class="callout bad"><b>release/v2.12.10</b> · multi‑filter delivery cost was
+  <code>O(M·F)</code>: every delivered message re‑ran the full multi‑subject search (re‑lock,
+  re‑select block, re‑walk the <code>fss</code>×sublist intersection). At 90 filters over 200k
+  messages that was <b>~3.5 s</b> and <b>~18,001</b> searches; allocations climbed into the
+  millions. On a sparse/clustered stream it could not skip the gap, scaling with the gap size.</div>
+  <div class="callout good"><b>this branch</b> · <code>getNextMultiFiltered</code> prefetches up to
+  256 matching sequences per search and serves them with by‑seq <code>LoadMsg</code>, so per‑message
+  cost is independent of <code>F</code>. Same 90‑filter delivery: <b>~24 ms</b>, <b>72</b> searches.
+  Position‑aware interior skipping (§6) keeps sparse/clustered streams flat too —
+  ~13 KB/op vs ~2.3 MB/op at a 100k‑message gap.</div>
+</div>
 
 <div class="callout"><b>Key separation.</b> A <code>DeliverLastPerSubject</code> consumer pays its cost
 <i>at startup</i> in <code>MultiLastSeqs</code> and then serves the seeded sequences with cheap
 <code>LoadMsg</code> calls (the skip‑list). Its steady‑state tail — anything published after it
 started — falls into the normal multi/single/none branch above. So the recent interior‑skip
 work helps that <i>tail</i>, not the initial last‑per‑subject burst.</div>
+
+<h3>What the <code>LastPerSubject</code> skip‑list actually is</h3>
+<p>The skip‑list (<code>o.lss</code>, type <code>lastSeqSkipList</code>) is a tiny precomputed
+<b>delivery plan</b> built once at startup. <code>DeliverLastPerSubject</code> means "for every
+subject the consumer matches, deliver only that subject's <i>last</i> message, then tail
+normally." Rather than scan the stream looking for those messages, the consumer asks the store for
+all of them up front and replays them by sequence:</p>
+<pre><span class="k">type</span> <span class="t">lastSeqSkipList</span> <span class="k">struct</span> {
+    resume <span class="t">uint64</span>   <span class="c">// stream LastSeq captured at creation — where normal tailing resumes</span>
+    seqs   []<span class="t">uint64</span> <span class="c">// last seq of each matching subject, ascending (from MultiLastSeqs)</span>
+}
+
+<span class="c">// startup (selectStartingSeqNo):</span>
+lss := &amp;lastSeqSkipList{resume: state.LastSeq}
+lss.seqs, _ = o.mset.store.<span class="f">MultiLastSeqs</span>(filters, <span class="m">0</span>, <span class="m">0</span>) <span class="c">// one search, N results</span>
+o.lss = lss</pre>
+<p>From then on, <code>getNextMsg</code> checks <code>hasSkipListPending()</code> <i>before</i> the
+filter dispatch and drains the plan one entry at a time — popping <code>seqs[0]</code>, pointing
+<code>o.sseq</code> at it, and doing a plain by‑sequence <code>LoadMsg</code> (no search, no
+filtering — the membership was already decided when the list was built):</p>
+
+<figure>
+<div class="svgwrap">
+<svg viewBox="0 0 980 210" role="img" aria-label="LastPerSubject skip-list drain then resume">
+  <defs>
+    <marker id="sl1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5b6675"/></marker>
+    <marker id="sl2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#3fb950"/></marker>
+  </defs>
+  <text x="20" y="26" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11.5" font-weight="700">o.lss.seqs  (drain ascending via LoadMsg)</text>
+  <!-- skip list cells -->
+  <g font-family="SF Mono,monospace" font-size="12">
+    <rect x="20"  y="40" width="120" height="46" rx="8" fill="#0e1b12" stroke="#1f3a26"/><text x="80"  y="60" fill="#7ee787" text-anchor="middle">last(foo.a)</text><text x="80"  y="77" fill="#9aa7b4" text-anchor="middle" font-size="10.5">seq 5</text>
+    <rect x="150" y="40" width="120" height="46" rx="8" fill="#0e1b12" stroke="#1f3a26"/><text x="210" y="60" fill="#7ee787" text-anchor="middle">last(foo.b)</text><text x="210" y="77" fill="#9aa7b4" text-anchor="middle" font-size="10.5">seq 12</text>
+    <rect x="280" y="40" width="120" height="46" rx="8" fill="#0e1b12" stroke="#1f3a26"/><text x="340" y="60" fill="#7ee787" text-anchor="middle">last(foo.c)</text><text x="340" y="77" fill="#9aa7b4" text-anchor="middle" font-size="10.5">seq 27</text>
+    <rect x="410" y="40" width="120" height="46" rx="8" fill="#0e1b12" stroke="#1f3a26"/><text x="470" y="60" fill="#7ee787" text-anchor="middle">last(foo.d)</text><text x="470" y="77" fill="#9aa7b4" text-anchor="middle" font-size="10.5">seq 41</text>
+  </g>
+  <g stroke="#5b6675" stroke-width="1.5" fill="none">
+    <path d="M140 63 L150 63" marker-end="url(#sl1)"/>
+    <path d="M270 63 L280 63" marker-end="url(#sl1)"/>
+    <path d="M400 63 L410 63" marker-end="url(#sl1)"/>
+  </g>
+  <!-- resume handoff -->
+  <path d="M530 63 C 620 63, 640 63, 700 63" stroke="#3fb950" stroke-width="1.8" fill="none" marker-end="url(#sl2)"/>
+  <rect x="700" y="40" width="260" height="46" rx="8" fill="#1c2330" stroke="#1f3a26"/>
+  <text x="830" y="60" fill="#e6edf3" font-family="var(--sans),sans-serif" font-size="12.5" font-weight="700" text-anchor="middle">o.sseq = resume</text>
+  <text x="830" y="77" fill="#7ee787" font-family="SF Mono,monospace" font-size="10.5" text-anchor="middle">o.lss = nil · normal tailing</text>
+
+  <text x="265" y="120" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="12" text-anchor="middle">each entry: o.sseq = seq → LoadMsg(seq) → deliver → o.sseq++</text>
+
+  <!-- note -->
+  <rect x="20" y="140" width="940" height="52" rx="9" fill="#0f1a2b" stroke="#1d3350"/>
+  <text x="36" y="162" fill="#cddcea" font-family="var(--sans),sans-serif" font-size="12">When the <tspan font-family="SF Mono,monospace" fill="#9fd0ff">last</tspan> entry is popped, the consumer jumps <tspan font-family="SF Mono,monospace" fill="#9fd0ff">o.sseq</tspan> to <tspan font-family="SF Mono,monospace" fill="#9fd0ff">resume</tspan> (the stream's LastSeq when the list was built), clears the list,</text>
+  <text x="36" y="181" fill="#cddcea" font-family="var(--sans),sans-serif" font-size="12">and calls <tspan font-family="SF Mono,monospace" fill="#9fd0ff">updateSkipped</tspan> so replicas stay aligned. Everything published after creation is then served by the normal filter dispatch.</text>
+</svg>
+</div>
+<figcaption>The skip‑list turns "last per subject" into N cheap by‑sequence reads plus a single handoff — the expensive part is the one <code>MultiLastSeqs</code> search that built it (§5).</figcaption>
+</figure>
+
+<p>Two consequences worth noting: the list is <b>materialised eagerly</b>, so a consumer matching
+a very large number of subjects holds an <code>O(N)</code> sequence slice and pays the full
+<code>MultiLastSeqs</code> cost before its first delivery; and because it is rebuilt whenever
+<code>selectStartingSeqNo</code> re‑runs, a <b>leader failover</b> re‑pays that build. The
+<code>resume</code> watermark guarantees no message published after creation is missed and none of
+the last‑per‑subject seeds are served twice.</p>
 
 <h2 id="s4"><span class="n">04</span>The method catalogue & where each is reached</h2>
 <table>
@@ -540,6 +655,156 @@ is paid per delivered message forever. So a heavy <code>MultiLastSeqs</code> hur
 creation latency and failover</i>, whereas a heavy multi‑filter search hurt <i>throughput</i> —
 which is why the delivery path was the one batched first.</div>
 
+<h2 id="s8"><span class="n">08</span>Under the hood — data structures &amp; I/O</h2>
+<p>The three startup‑heavy methods (<code>FilteredState</code>, <code>MultiLastSeqs</code>,
+<code>GetSeqFromTime</code>) all work the same way at the bottom: they consult <b>in‑memory
+indices</b> first and only touch the disk when they must <i>materialise a block</i> to read
+subjects or message timestamps. Understanding which index each one walks — and what triggers a
+block read — is the whole performance story. On the <b>memory store</b> none of this involves
+syscalls: every structure below is a Go map or an in‑memory subject tree.</p>
+
+<figure>
+<div class="svgwrap">
+<svg viewBox="0 0 980 430" role="img" aria-label="File store data structures and the block load I/O path">
+  <defs>
+    <marker id="b1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5b6675"/></marker>
+    <marker id="b2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#d29922"/></marker>
+  </defs>
+
+  <!-- IN MEMORY panel -->
+  <rect x="16" y="40" width="600" height="372" rx="14" fill="#0e1320" stroke="#1d3350"/>
+  <text x="34" y="66" fill="#9fd0ff" font-family="SF Mono,monospace" font-size="12" font-weight="700">IN MEMORY · per fileStore (no syscalls to read)</text>
+
+  <!-- psim -->
+  <rect x="34" y="80" width="270" height="120" rx="10" fill="#161b22" stroke="#283041"/>
+  <text x="48" y="102" fill="#e6edf3" font-family="SF Mono,monospace" font-size="12.5" font-weight="700">fs.psim</text>
+  <text x="48" y="120" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="11.5">stream subject index — subject tree</text>
+  <text x="48" y="137" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11">SubjectTree[psi]</text>
+  <text x="48" y="160" fill="#7ee787" font-family="SF Mono,monospace" font-size="11">psi{ total, fblk, lblk }</text>
+  <text x="48" y="178" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10.5">count + first/last BLOCK index per subject</text>
+  <text x="48" y="193" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10.5">Find() exact · Match() wildcard · IntersectGSL()</text>
+
+  <!-- blks / bim -->
+  <rect x="320" y="80" width="280" height="120" rx="10" fill="#161b22" stroke="#283041"/>
+  <text x="334" y="102" fill="#e6edf3" font-family="SF Mono,monospace" font-size="12.5" font-weight="700">fs.blks[]  ·  fs.bim{}</text>
+  <text x="334" y="120" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="11.5">ordered []*msgBlock + index→block map</text>
+  <text x="334" y="142" fill="#7ee787" font-family="SF Mono,monospace" font-size="11">mb.first/last {seq, ts}  ·  atomics</text>
+  <text x="334" y="160" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10.5">per‑block seq + timestamp bounds (always in RAM)</text>
+  <text x="334" y="182" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10.5">binary‑searchable by seq and by last.ts</text>
+
+  <!-- per block lazy structures -->
+  <rect x="34" y="214" width="566" height="180" rx="10" fill="#11151c" stroke="#283041"/>
+  <text x="48" y="236" fill="#cdd9e5" font-family="SF Mono,monospace" font-size="12" font-weight="700">per msgBlock — LAZILY loaded (drives the disk read)</text>
+
+  <rect x="48" y="248" width="172" height="130" rx="9" fill="#1d1808" stroke="#4d3a12"/>
+  <text x="60" y="270" fill="#f0c069" font-family="SF Mono,monospace" font-size="12" font-weight="700">mb.fss</text>
+  <text x="60" y="288" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="11">per‑block subject index</text>
+  <text x="60" y="304" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="10.5">SubjectTree[SimpleState]</text>
+  <text x="60" y="322" fill="#7ee787" font-family="SF Mono,monospace" font-size="10.5">{Msgs,First,Last}</text>
+  <text x="60" y="340" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">+ first/lastNeedsUpdate</text>
+  <text x="60" y="358" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">built by reading the block</text>
+
+  <rect x="232" y="248" width="172" height="130" rx="9" fill="#1d1808" stroke="#4d3a12"/>
+  <text x="244" y="270" fill="#f0c069" font-family="SF Mono,monospace" font-size="12" font-weight="700">mb.cache</text>
+  <text x="244" y="288" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="11">decoded block bytes</text>
+  <text x="244" y="304" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="10.5">buf []byte · idx []uint32</text>
+  <text x="244" y="322" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">by‑seq lookup → message subject/body</text>
+  <text x="244" y="344" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">expires after CacheExpire;</text>
+  <text x="244" y="358" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">reload = a fresh block read</text>
+
+  <rect x="416" y="248" width="172" height="130" rx="9" fill="#161b22" stroke="#283041"/>
+  <text x="428" y="270" fill="#e6edf3" font-family="SF Mono,monospace" font-size="12" font-weight="700">mb.dmap</text>
+  <text x="428" y="288" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="11">interior deletes</text>
+  <text x="428" y="304" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="10.5">avl.SequenceSet</text>
+  <text x="428" y="326" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">tombstones consulted during the</text>
+  <text x="428" y="340" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">binary‑search / backward scans</text>
+
+  <!-- ON DISK panel -->
+  <rect x="636" y="40" width="328" height="372" rx="14" fill="#160d10" stroke="#4d2226"/>
+  <text x="654" y="66" fill="#ff9d96" font-family="SF Mono,monospace" font-size="12" font-weight="700">ON DISK · the only I/O</text>
+
+  <rect x="654" y="82" width="292" height="58" rx="9" fill="#11151c" stroke="#283041"/>
+  <text x="668" y="104" fill="#e6edf3" font-family="SF Mono,monospace" font-size="12">{n}.blk  message block files</text>
+  <text x="668" y="124" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10.5">raw, optionally encrypted + S2‑compressed</text>
+
+  <!-- the load pipeline -->
+  <rect x="654" y="160" width="292" height="232" rx="10" fill="#11151c" stroke="#4d2226"/>
+  <text x="668" y="182" fill="#ff9d96" font-family="SF Mono,monospace" font-size="11.5" font-weight="700">loadMsgsWithLock → loadBlock</text>
+
+  <rect x="668" y="196" width="264" height="36" rx="7" fill="#161b22" stroke="#283041"/>
+  <text x="680" y="219" fill="#d6e2ee" font-family="SF Mono,monospace" font-size="11">&lt;-dios   gate (bounded concurrent IO)</text>
+  <rect x="668" y="238" width="264" height="36" rx="7" fill="#161b22" stroke="#283041"/>
+  <text x="680" y="261" fill="#d6e2ee" font-family="SF Mono,monospace" font-size="11">open() · fstat() · ReadFull()</text>
+  <rect x="668" y="280" width="264" height="36" rx="7" fill="#161b22" stroke="#283041"/>
+  <text x="680" y="303" fill="#d6e2ee" font-family="SF Mono,monospace" font-size="11">decrypt (AES‑GCM / ChaCha20)</text>
+  <rect x="668" y="322" width="264" height="36" rx="7" fill="#161b22" stroke="#283041"/>
+  <text x="680" y="345" fill="#d6e2ee" font-family="SF Mono,monospace" font-size="11">decompress (S2)</text>
+  <text x="668" y="380" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10.5">⇒ populates mb.cache, then mb.fss</text>
+
+  <!-- arrow: lazy structures trigger disk read -->
+  <path d="M404 300 C 560 300, 560 250, 654 250" fill="none" stroke="#d29922" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#b2)"/>
+  <text x="548" y="238" fill="#f0c069" font-family="var(--sans),sans-serif" font-size="10.5" text-anchor="middle">cold fss/cache</text>
+  <text x="548" y="251" fill="#f0c069" font-family="var(--sans),sans-serif" font-size="10.5" text-anchor="middle">⇒ block read</text>
+</svg>
+</div>
+<figcaption>The amber per‑block structures (<code>fss</code>, <code>cache</code>) are lazy: a miss runs the disk pipeline on the right, gated by the global <code>dios</code> semaphore and followed by in‑process decrypt/decompress. The blue/green structures are always resident, so a method that stays in <code>psim</code> + <code>first/last</code> bounds does <b>zero</b> I/O.</figcaption>
+</figure>
+
+<h3><code>FilteredState(sseq, subj)</code> — first/last/count for one subject</h3>
+<p><b>File store.</b> Two regimes. When <code>sseq == FirstSeq</code> (the common "from the start"
+call), it takes the <code>numFilteredPending</code> shortcut: read totals and block bounds
+straight from the resident <code>psim</code> (a <code>Find</code> for a literal, a <code>Match</code>
+walk for a wildcard) and then touch just the <b>first candidate block's <code>fss</code></b> to
+pin the exact <code>First</code> sequence — usually <b>one</b> lazy block load at most. For an
+arbitrary <code>sseq</code>, it instead <b>loops every block with <code>last.seq ≥ sseq</code></b>,
+calling <code>filteredPending → ensurePerSubjectInfoLoaded</code> on each — so a cold scan is
+<i>one block read + decode per non‑skipped block</i>, plus a possible
+<code>recalculateForSubj</code> (a bounded in‑block re‑scan) when a subject's First/Last is marked
+stale. <b>Mem store.</b> Pure in‑memory: walks the <code>ms.fss</code> subject tree and the
+<code>ms.msgs</code> map; <i>no syscalls</i>. (It takes the write lock because it may refresh the
+shared <code>SimpleState</code> in place.)</p>
+
+<h3><code>MultiLastSeqs(filters, maxSeq, maxAllowed)</code> — last seq per matching subject</h3>
+<p><b>File store.</b> Fast lane: if the filter set is "all" with no caps, <code>allLastSeqs</code>
+reads the answer from resident state with no block walk. Otherwise it <code>Match</code>es each
+filter against <code>psim</code> to collect the candidate subject set (and their <code>lblk</code>),
+then walks <b>blocks backward from the last</b>, calling <code>ensurePerSubjectInfoLoaded</code>
+(lazy <code>fss</code> ⇒ possible block read) and ticking subjects off as their last sequence is
+found, stopping once the set is empty. Two things make it expensive: (1) a matched subject whose
+last lives far back forces the backward walk to load many blocks' <code>fss</code>; (2) when a
+subject's recorded last exceeds <code>maxSeq</code>, it falls to a <b>per‑subject backward
+<code>cacheLookup</code> scan</b> inside the block, which requires the full <code>cache</code>
+(a block read + decode). <b>Mem store.</b> <code>Match</code> over <code>ms.fss</code> per filter;
+the <code>ss.Last &gt; maxSeq</code> branch degrades to a linear <code>for seq:=maxSeq; seq&gt;0; seq--</code>
+walk over the <code>ms.msgs</code> map — quadratic, but <i>no syscalls</i>.</p>
+
+<h3><code>GetSeqFromTime(t)</code> — first seq at/after a timestamp</h3>
+<p><b>File store.</b> Cheapest of the three. <code>selectMsgBlockForStart</code> does a
+<b>binary search over <code>fs.blks</code></b> comparing each block's resident
+<code>last.ts</code> (no I/O), narrowing to a single block; then a <b>binary search by sequence
+within that one block</b> via <code>fetchMsgNoCopyLocked</code>, which pulls the block's
+<code>cache</code> — at most <b>one</b> lazy block read + decode. Interior deletes (<code>dmap</code>)
+force a small <code>off++</code> linear probe around each binary‑search midpoint. <b>Mem store.</b>
+Same binary‑search shape directly over the <code>ms.msgs</code> map on each message's
+<code>.ts</code>; <i>no syscalls</i>.</p>
+
+<table>
+  <thead><tr><th class="mono">Method</th><th>Resident structures read</th><th>Triggers block read when…</th><th>Mem store I/O</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">FilteredState</td><td>psim (Find/Match), first/last bounds</td><td>pinning exact First in the candidate block(s); arbitrary <code>sseq</code> ⇒ one read per scanned block</td><td><span class="pill green">none</span></td></tr>
+    <tr><td class="mono">MultiLastSeqs</td><td>psim (Match), lblk, fss per block (backward)</td><td>each block's fss on the backward walk; full cache when last &gt; <code>maxSeq</code></td><td><span class="pill green">none</span></td></tr>
+    <tr><td class="mono">GetSeqFromTime</td><td>blks (last.ts), per‑block first/last</td><td>the single target block's cache for the in‑block binary search</td><td><span class="pill green">none</span></td></tr>
+  </tbody>
+</table>
+
+<div class="callout"><b>The one I/O primitive.</b> Every "block read" above is the same pipeline:
+acquire the global <code>dios</code> semaphore (bounding concurrent disk ops server‑wide),
+<code>open</code> + <code>fstat</code> + <code>ReadFull</code> the <code>.blk</code> file, then
+in‑process <b>decrypt</b> (if encrypted) and <b>decompress</b> (if S2). Once resident, the block's
+<code>fss</code>/<code>cache</code> serve subsequent calls for free until <code>CacheExpire</code>
+evicts them — so the <i>second</i> consumer over the same hot data pays no I/O. The memory store
+has none of this layer: its worst cases are CPU/lock‑bound map walks, never syscalls.</div>
+
 <footer>
   <p>Generated from <span class="filechip">server/consumer.go</span>
   <span class="filechip">server/filestore.go</span>
@@ -560,6 +825,7 @@ which is why the delivery path was the one batched first.</div>
     <li><a href="#s5">Worst: MultiLastSeqs</a></li>
     <li><a href="#s6">Worst: LoadNextMsgsMulti</a></li>
     <li><a href="#s7">Inputs that hurt</a></li>
+    <li><a href="#s8">Data structures &amp; I/O</a></li>
   </ol>
 </aside>
 
