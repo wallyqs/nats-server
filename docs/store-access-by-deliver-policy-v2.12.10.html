@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Store access paths by DeliverPolicy — NATS Server v2.12.10</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --ink:#e6edf3; --muted:#9aa7b4;
+    --line:#283041; --accent:#3fb950; --accent2:#58a6ff; --warn:#d29922; --bad:#f85149;
+    --code:#0b0f15; --chip:#21304a;
+    --mono:'SF Mono',ui-monospace,'JetBrains Mono',Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:linear-gradient(180deg,#0a0d12,#0d1117 240px);color:var(--ink);
+       font-family:var(--sans);line-height:1.62;font-size:16px}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 22px 120px}
+  header.hero{padding:64px 0 40px;border-bottom:1px solid var(--line);margin-bottom:8px}
+  .eyebrow{font:600 12px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--warn);
+           display:inline-block;padding:7px 12px;border:1px solid #4d3a12;border-radius:999px;background:#1d1808}
+  h1{font-size:40px;line-height:1.12;margin:20px 0 14px;letter-spacing:-.02em}
+  h1 .grad{background:linear-gradient(90deg,#58a6ff,#d29922);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .lede{font-size:18px;color:var(--muted);max-width:78ch;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:26px}
+  .meta .tag{font:500 12.5px/1 var(--mono);color:var(--muted);background:var(--chip);border:1px solid var(--line);
+             padding:8px 11px;border-radius:8px}
+  h2{font-size:25px;margin:54px 0 8px;letter-spacing:-.01em;scroll-margin-top:20px}
+  h2 .n{font:700 13px/1 var(--mono);color:var(--accent2);margin-right:10px;vertical-align:middle}
+  h3{font-size:18px;margin:30px 0 6px;color:#cdd9e5}
+  p{margin:12px 0}
+  a{color:var(--accent2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .sub{color:var(--muted)}
+  code{font-family:var(--mono);font-size:13.5px;background:#1b2330;border:1px solid var(--line);
+       padding:1.5px 6px;border-radius:6px;color:#d6e2ee}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:16px 18px;overflow:auto;
+      font-family:var(--mono);font-size:13px;line-height:1.65;margin:16px 0}
+  pre .c{color:#6b7785}
+  pre .k{color:#ff7b72}
+  pre .f{color:#d2a8ff}
+  pre .s{color:#a5d6ff}
+  pre .t{color:#7ee787}
+  pre .m{color:#79c0ff}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin:18px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:820px){.grid2{grid-template-columns:1fr}.toc{position:static!important}.layout{grid-template-columns:1fr!important}}
+  .callout{border-left:3px solid var(--accent2);background:#0f1a2b;border-radius:0 10px 10px 0;
+           padding:14px 18px;margin:18px 0;color:#cddcea}
+  .callout.bad{border-left-color:var(--bad);background:#1d1113}
+  .callout.good{border-left-color:var(--accent);background:#0e1b12}
+  .callout.warn{border-left-color:var(--warn);background:#1d1808}
+  .callout b{color:#fff}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px}
+  th,td{text-align:left;padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font:600 12px/1 var(--mono);letter-spacing:.05em;text-transform:uppercase}
+  td.mono,th.mono{font-family:var(--mono)}
+  tbody tr:hover td{background:#131a24}
+  .pill{display:inline-block;font:600 11.5px/1 var(--mono);padding:4px 8px;border-radius:6px}
+  .pill.green{color:#7ee787;background:#0e2114;border:1px solid #1f3a26}
+  .pill.red{color:#ff9d96;background:#2a1416;border:1px solid #4d2226}
+  .pill.amber{color:#f0c069;background:#241b07;border:1px solid #4d3a12}
+  .pill.blue{color:#9fd0ff;background:#0e1a2b;border:1px solid #1d3350}
+  .toc{position:sticky;top:18px}
+  .toc ol{list-style:none;margin:0;padding:0;counter-reset:s}
+  .toc li{counter-increment:s;margin:0}
+  .toc a{display:block;padding:7px 10px;border-radius:8px;color:var(--muted);font-size:14px;border:1px solid transparent}
+  .toc a:hover{background:var(--panel);color:var(--ink);text-decoration:none;border-color:var(--line)}
+  .toc a::before{content:counter(s);font:700 11px/1 var(--mono);color:var(--accent2);margin-right:9px}
+  .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:24px 0}
+  @media(max-width:680px){.kpis{grid-template-columns:1fr}}
+  .kpi{background:linear-gradient(180deg,#15202e,#121822);border:1px solid var(--line);border-radius:14px;padding:18px}
+  .kpi .v{font:800 26px/1.05 var(--sans);letter-spacing:-.02em;background:linear-gradient(90deg,#58a6ff,#d29922);
+          -webkit-background-clip:text;background-clip:text;color:transparent}
+  .kpi .l{color:var(--muted);font-size:13px;margin-top:8px}
+  footer{margin-top:60px;padding-top:24px;border-top:1px solid var(--line);color:var(--muted);font-size:13.5px}
+  hr.soft{border:0;border-top:1px solid var(--line);margin:40px 0}
+  .filechip{font-family:var(--mono);font-size:12.5px;color:#9fd0ff;background:#0e1a2b;border:1px solid #1d3350;
+            padding:3px 8px;border-radius:6px;display:inline-block;margin:2px 4px 2px 0}
+  figure{margin:22px 0}
+  figure svg{width:100%;height:auto;display:block;background:#0b0f15;border:1px solid var(--line);border-radius:14px}
+  figcaption{color:var(--muted);font-size:13px;margin-top:9px;text-align:center}
+  .svgwrap{overflow-x:auto}
+  .legendrow{display:flex;flex-wrap:wrap;gap:16px;margin:14px 0 0;font:600 12.5px/1 var(--mono);color:var(--muted)}
+  .legendrow .sw{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:7px;vertical-align:-1px}
+  .layout{display:grid;grid-template-columns:1fr 240px;align-items:start;gap:34px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <span class="eyebrow">NATS Server · v2.12.10 · Store internals</span>
+  <h1>Store access paths by <span class="grad">DeliverPolicy</span><br/>in v2.12.10</h1>
+  <p class="lede">Which store method a JetStream consumer calls — and when — as shipped in the
+  <code>release/v2.12.10</code> tag. This separates the one‑time <b>startup</b> seek from the
+  per‑message <b>steady‑state</b> loop, names the method each path takes on the file and memory
+  stores, and pins the input shapes that make each one slow. This is the <i>as‑released</i> picture:
+  multi‑filter delivery still runs one full multi‑subject search per message.</p>
+  <div class="meta">
+    <span class="tag">VERSION = "2.12.10"</span>
+    <span class="tag">server/consumer.go · filestore.go · memstore.go</span>
+    <span class="tag">selectStartingSeqNo · getNextMsg</span>
+  </div>
+</header>
+
+<div class="layout">
+<div>
+
+<div class="kpis">
+  <div class="kpi"><div class="v">2 phases</div><div class="l">A one‑time <b>startup</b> seek, then a per‑message <b>steady‑state</b> loop — different methods, different cost models.</div></div>
+  <div class="kpi"><div class="v">6 methods</div><div class="l">The store entry points a consumer reaches in 2.12.10: <code>LoadMsg</code>, <code>LoadNextMsg</code>, <code>LoadNextMsgMulti</code>, <code>MultiLastSeqs</code>, <code>FilteredState</code>, <code>GetSeqFromTime</code>.</div></div>
+  <div class="kpi"><div class="v">O(M·F)</div><div class="l">Multi‑filter delivery cost in 2.12.10: every message re‑runs the multi‑subject search, so cost grows with messages × filters.</div></div>
+</div>
+
+<h2 id="s1"><span class="n">01</span>Two phases of a consumer's life</h2>
+<p>Every consumer interacts with the store in two distinct ways. First, exactly once when it starts
+(or fails over to a new leader), <code>selectStartingSeqNo()</code> decides the <i>starting</i>
+stream sequence <code>o.sseq</code>. Depending on the policy this is either free (read cached
+<code>StreamState</code>) or an actual search. Then, for the rest of its life, the delivery loop
+<code>loopAndGatherMsgs → getNextMsg()</code> pulls one message at a time from <code>o.sseq</code>
+forward.</p>
+
+<figure>
+<div class="svgwrap">
+<svg viewBox="0 0 980 250" role="img" aria-label="Two phases: startup seek then steady-state loop">
+  <defs>
+    <marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 Z" fill="#9aa7b4"/></marker>
+    <marker id="ahg" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 Z" fill="#3fb950"/></marker>
+  </defs>
+  <text x="20" y="36" fill="#58a6ff" font-family="SF Mono,monospace" font-size="12" font-weight="700">PHASE 1 — ONCE</text>
+  <text x="20" y="150" fill="#3fb950" font-family="SF Mono,monospace" font-size="12" font-weight="700">PHASE 2 — PER MESSAGE, FOREVER</text>
+
+  <rect x="20" y="48" width="250" height="64" rx="11" fill="#1c2330" stroke="#1d3350"/>
+  <text x="145" y="74" fill="#e6edf3" font-family="var(--sans),sans-serif" font-size="14" font-weight="700" text-anchor="middle">selectStartingSeqNo()</text>
+  <text x="145" y="95" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11" text-anchor="middle">decide o.sseq</text>
+
+  <line x1="270" y1="80" x2="360" y2="80" stroke="#9aa7b4" stroke-width="1.6" marker-end="url(#ah)"/>
+  <rect x="360" y="48" width="270" height="64" rx="11" fill="#161b22" stroke="#283041"/>
+  <text x="495" y="72" fill="#e6edf3" font-family="var(--sans),sans-serif" font-size="13.5" font-weight="700" text-anchor="middle">startup seek (policy‑dependent)</text>
+  <text x="495" y="93" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11" text-anchor="middle">free · FilteredState · MultiLastSeqs · GetSeqFromTime</text>
+
+  <line x1="630" y1="80" x2="720" y2="80" stroke="#9aa7b4" stroke-width="1.6" marker-end="url(#ah)"/>
+  <rect x="720" y="48" width="240" height="64" rx="11" fill="#0e1b12" stroke="#1f3a26"/>
+  <text x="840" y="74" fill="#e6edf3" font-family="var(--sans),sans-serif" font-size="14" font-weight="700" text-anchor="middle">o.sseq set</text>
+  <text x="840" y="95" fill="#7ee787" font-family="SF Mono,monospace" font-size="11" text-anchor="middle">ready to deliver</text>
+
+  <line x1="840" y1="112" x2="840" y2="150" stroke="#3fb950" stroke-width="1.6" marker-end="url(#ahg)"/>
+
+  <rect x="20" y="160" width="250" height="64" rx="11" fill="#1c2330" stroke="#1f3a26"/>
+  <text x="145" y="186" fill="#e6edf3" font-family="var(--sans),sans-serif" font-size="14" font-weight="700" text-anchor="middle">getNextMsg()</text>
+  <text x="145" y="207" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11" text-anchor="middle">from o.sseq forward</text>
+
+  <line x1="270" y1="192" x2="360" y2="192" stroke="#3fb950" stroke-width="1.6" marker-end="url(#ahg)"/>
+  <rect x="360" y="160" width="270" height="64" rx="11" fill="#161b22" stroke="#283041"/>
+  <text x="495" y="184" fill="#e6edf3" font-family="var(--sans),sans-serif" font-size="13.5" font-weight="700" text-anchor="middle">next‑message lookup (filter‑dependent)</text>
+  <text x="495" y="205" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11" text-anchor="middle">LoadNextMsg · LoadNextMsgMulti · LoadMsg</text>
+
+  <line x1="630" y1="192" x2="720" y2="192" stroke="#3fb950" stroke-width="1.6" marker-end="url(#ahg)"/>
+  <rect x="720" y="160" width="240" height="64" rx="11" fill="#0e1b12" stroke="#1f3a26"/>
+  <text x="840" y="186" fill="#e6edf3" font-family="var(--sans),sans-serif" font-size="14" font-weight="700" text-anchor="middle">deliver · advance o.sseq</text>
+  <text x="840" y="207" fill="#7ee787" font-family="SF Mono,monospace" font-size="11" text-anchor="middle">loop ↺</text>
+
+  <path d="M840 224 q0 18 -347 18 L490 242 q-470 0 -470 -18" fill="none" stroke="#283041" stroke-width="1.4" stroke-dasharray="4 4"/>
+</svg>
+</div>
+<figcaption>Phase 1 runs once and sets <code>o.sseq</code>; Phase 2 is the hot loop. In 2.12.10 the Phase‑2 multi‑filter lookup is the costly one.</figcaption>
+</figure>
+
+<h2 id="s2"><span class="n">02</span>Phase 1 — startup seek, routed by policy</h2>
+<p>This is the <i>only</i> place <code>DeliverPolicy</code> changes which store method is called.
+Several policies do no search at all — they read the already‑maintained <code>StreamState</code>.
+The expensive ones are <span class="pill amber">DeliverLastPerSubject</span> (calls
+<code>MultiLastSeqs</code>), filtered <span class="pill amber">DeliverLast</span> (calls
+<code>FilteredState</code> once per filter), and <span class="pill amber">DeliverByStartTime</span>
+(calls <code>GetSeqFromTime</code>, plus a <code>FilteredState</code> per filter to close the gap).</p>
+
+<figure>
+<div class="svgwrap">
+<svg viewBox="0 0 980 470" role="img" aria-label="DeliverPolicy routing to startup store calls">
+  <defs><marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 Z" fill="#5b6675"/></marker></defs>
+  <text x="20" y="26" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11.5" font-weight="700">DeliverPolicy / start option</text>
+  <text x="600" y="26" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11.5" font-weight="700">startup store call</text>
+
+  <g font-family="var(--sans),sans-serif" font-size="13" font-weight="600">
+    <rect x="20" y="40"  width="300" height="40" rx="9" fill="#1c2330" stroke="#283041"/><text x="36" y="65" fill="#e6edf3">OptStartSeq &gt; 0  ·  DeliverByStartSequence</text>
+    <rect x="20" y="90"  width="300" height="40" rx="9" fill="#1c2330" stroke="#283041"/><text x="36" y="115" fill="#e6edf3">DeliverAll</text>
+    <rect x="20" y="140" width="300" height="40" rx="9" fill="#1c2330" stroke="#283041"/><text x="36" y="165" fill="#e6edf3">DeliverNew</text>
+    <rect x="20" y="190" width="300" height="40" rx="9" fill="#1c2330" stroke="#283041"/><text x="36" y="215" fill="#e6edf3">DeliverLast  ·  no / single filter</text>
+    <rect x="20" y="240" width="300" height="40" rx="9" fill="#241b07" stroke="#4d3a12"/><text x="36" y="265" fill="#f0c069">DeliverLast  ·  multi‑filter</text>
+    <rect x="20" y="290" width="300" height="40" rx="9" fill="#0e1b12" stroke="#1f3a26"/><text x="36" y="315" fill="#7ee787">DeliverLastPerSubject  ·  MaxMsgsPer=1</text>
+    <rect x="20" y="340" width="300" height="40" rx="9" fill="#241b07" stroke="#4d3a12"/><text x="36" y="365" fill="#f0c069">DeliverLastPerSubject  ·  general</text>
+    <rect x="20" y="390" width="300" height="40" rx="9" fill="#241b07" stroke="#4d3a12"/><text x="36" y="415" fill="#f0c069">DeliverByStartTime</text>
+  </g>
+
+  <g font-family="SF Mono,monospace" font-size="12.5" font-weight="700">
+    <rect x="600" y="60"  width="360" height="44" rx="9" fill="#0e1b12" stroke="#1f3a26"/>
+    <text x="620" y="80" fill="#7ee787">no search</text><text x="620" y="97" fill="#9aa7b4" font-size="11">read cached StreamState (FirstSeq / LastSeq / OptStartSeq)</text>
+    <rect x="600" y="200" width="360" height="44" rx="9" fill="#241b07" stroke="#4d3a12"/>
+    <text x="620" y="220" fill="#f0c069">FilteredState(1, filter)  ·  per filter</text><text x="620" y="237" fill="#9aa7b4" font-size="11">one subject‑state derive per filter subject</text>
+    <rect x="600" y="320" width="360" height="44" rx="9" fill="#2a1416" stroke="#4d2226"/>
+    <text x="620" y="340" fill="#ff9d96">MultiLastSeqs(filters, 0, 0)</text><text x="620" y="357" fill="#9aa7b4" font-size="11">last seq per matching subject (skip‑list seed)</text>
+    <rect x="600" y="392" width="360" height="44" rx="9" fill="#241b07" stroke="#4d3a12"/>
+    <text x="620" y="412" fill="#f0c069">GetSeqFromTime(t)  +  FilteredState/filter</text><text x="620" y="429" fill="#9aa7b4" font-size="11">block select by time → binary search</text>
+  </g>
+
+  <g stroke="#5b6675" stroke-width="1.5" fill="none">
+    <path d="M320 60  C 470 64, 470 78, 600 80" marker-end="url(#a2)"/>
+    <path d="M320 110 C 470 100, 470 84, 600 82" marker-end="url(#a2)"/>
+    <path d="M320 160 C 470 150, 470 90, 600 84" marker-end="url(#a2)"/>
+    <path d="M320 210 C 470 205, 470 92, 600 86" marker-end="url(#a2)"/>
+    <path d="M320 310 C 470 300, 470 100, 600 92" marker-end="url(#a2)"/>
+  </g>
+  <g stroke="#a06b1e" stroke-width="1.6" fill="none">
+    <path d="M320 260 C 470 262, 470 222, 600 222" marker-end="url(#a2)"/>
+    <path d="M320 410 C 470 414, 470 414, 600 414" marker-end="url(#a2)"/>
+  </g>
+  <g stroke="#8a3b40" stroke-width="1.8" fill="none">
+    <path d="M320 360 C 470 360, 470 342, 600 342" marker-end="url(#a2)"/>
+  </g>
+</svg>
+</div>
+<figcaption>Green targets are free (no store walk); amber are bounded per‑filter derives; red is the heavyweight per‑subject last‑sequence scan. Identical routing to later releases.</figcaption>
+</figure>
+
+<table>
+  <thead><tr><th>Policy</th><th>Condition</th><th class="mono">Startup call</th><th>Cost</th></tr></thead>
+  <tbody>
+    <tr><td>any</td><td><code>OptStartSeq &gt; 0</code></td><td class="mono">— (assign)</td><td><span class="pill green">O(1)</span></td></tr>
+    <tr><td>DeliverAll</td><td>—</td><td class="mono">FastState → FirstSeq</td><td><span class="pill green">O(1)</span></td></tr>
+    <tr><td>DeliverNew</td><td>—</td><td class="mono">FastState → LastSeq+1</td><td><span class="pill green">O(1)</span></td></tr>
+    <tr><td>DeliverLast</td><td><code>subjf == nil</code></td><td class="mono">FastState → LastSeq</td><td><span class="pill green">O(1)</span></td></tr>
+    <tr><td>DeliverLast</td><td>filtered</td><td class="mono">FilteredState(1, f) ×&nbsp;F</td><td><span class="pill amber">O(F · derive)</span></td></tr>
+    <tr><td>DeliverLastPerSubject</td><td><code>MaxMsgsPer == 1</code></td><td class="mono">FastState → FirstSeq</td><td><span class="pill green">O(1)</span></td></tr>
+    <tr><td>DeliverLastPerSubject</td><td>general</td><td class="mono">MultiLastSeqs(filters,0,0)</td><td><span class="pill red">heavy — see §5</span></td></tr>
+    <tr><td>DeliverByStartTime</td><td>—</td><td class="mono">GetSeqFromTime(t) + FilteredState×F</td><td><span class="pill amber">O(log&nbsp;N + F)</span></td></tr>
+  </tbody>
+</table>
+
+<h2 id="s3"><span class="n">03</span>Phase 2 — steady‑state, routed by filter shape</h2>
+<p>Once running, the policy no longer matters — <code>getNextMsg()</code> dispatches purely on
+<i>filter shape</i> and on whether the message is a fresh delivery or a redelivery. In 2.12.10 the
+multi‑filter branch calls <code>LoadNextMsgMulti</code> <b>once per delivered message</b>:</p>
+
+<pre><span class="c">// server/consumer.go — getNextMsg() in v2.12.10</span>
+filters, subjf, fseq := o.filters, o.subjf, o.sseq
+<span class="k">if</span> filters != <span class="k">nil</span> {
+    sm, sseq, err = o.mset.store.<span class="f">LoadNextMsgMulti</span>(filters, fseq, &amp;pmsg.StoreMsg) <span class="c">// ← per message</span>
+} <span class="k">else if</span> len(subjf) &gt; <span class="m">0</span> {
+    sm, sseq, err = o.mset.store.<span class="f">LoadNextMsg</span>(filter, wc, fseq, &amp;pmsg.StoreMsg)
+} <span class="k">else</span> {
+    sm, sseq, err = o.mset.store.<span class="f">LoadNextMsg</span>(_EMPTY_, <span class="k">false</span>, fseq, &amp;pmsg.StoreMsg)
+}</pre>
+
+<figure>
+<div class="svgwrap">
+<svg viewBox="0 0 980 430" role="img" aria-label="getNextMsg dispatch by filter shape in v2.12.10">
+  <defs><marker id="a3" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 Z" fill="#5b6675"/></marker></defs>
+  <rect x="370" y="20" width="240" height="56" rx="11" fill="#1c2330" stroke="#1f3a26"/>
+  <text x="490" y="44" fill="#e6edf3" font-family="var(--sans),sans-serif" font-size="14" font-weight="700" text-anchor="middle">getNextMsg()</text>
+  <text x="490" y="63" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11" text-anchor="middle">dispatch</text>
+
+  <g font-family="var(--sans),sans-serif" font-size="12.5" font-weight="600">
+    <rect x="20"  y="150" width="210" height="58" rx="10" fill="#161b22" stroke="#283041"/>
+    <text x="125" y="174" fill="#e6edf3" text-anchor="middle">redelivery (o.pending)</text>
+    <text x="125" y="193" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11" text-anchor="middle">+ LastPerSubject burst</text>
+    <rect x="255" y="150" width="210" height="58" rx="10" fill="#161b22" stroke="#283041"/>
+    <text x="360" y="174" fill="#e6edf3" text-anchor="middle">no filter</text>
+    <text x="360" y="193" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11" text-anchor="middle">len(subjf)==0</text>
+    <rect x="490" y="150" width="210" height="58" rx="10" fill="#161b22" stroke="#283041"/>
+    <text x="595" y="174" fill="#e6edf3" text-anchor="middle">single filter</text>
+    <text x="595" y="193" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11" text-anchor="middle">len(subjf)==1</text>
+    <rect x="725" y="150" width="235" height="58" rx="10" fill="#1d1113" stroke="#4d2226"/>
+    <text x="842" y="174" fill="#ff9d96" text-anchor="middle">multi‑filter (≥2)</text>
+    <text x="842" y="193" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11" text-anchor="middle">o.filters != nil</text>
+  </g>
+
+  <g stroke="#5b6675" stroke-width="1.5" fill="none">
+    <path d="M430 76 C 300 110, 180 120, 125 150" marker-end="url(#a3)"/>
+    <path d="M460 76 C 420 110, 380 124, 360 150" marker-end="url(#a3)"/>
+    <path d="M520 76 C 560 110, 590 124, 595 150" marker-end="url(#a3)"/>
+    <path d="M560 76 C 700 110, 800 120, 842 150" marker-end="url(#a3)"/>
+  </g>
+
+  <g font-family="SF Mono,monospace" font-size="12" font-weight="700">
+    <rect x="20"  y="270" width="210" height="58" rx="10" fill="#0e1b12" stroke="#1f3a26"/>
+    <text x="125" y="294" fill="#7ee787" text-anchor="middle">LoadMsg(seq)</text>
+    <text x="125" y="313" fill="#9aa7b4" font-size="10.5" text-anchor="middle">by sequence · cache hit</text>
+    <rect x="255" y="270" width="210" height="58" rx="10" fill="#161b22" stroke="#283041"/>
+    <text x="360" y="294" fill="#9fd0ff" text-anchor="middle">LoadNextMsg(_EMPTY_)</text>
+    <text x="360" y="313" fill="#9aa7b4" font-size="10.5" text-anchor="middle">contiguous scan</text>
+    <rect x="490" y="270" width="210" height="58" rx="10" fill="#161b22" stroke="#283041"/>
+    <text x="595" y="294" fill="#9fd0ff" text-anchor="middle">LoadNextMsg(filter,wc)</text>
+    <text x="595" y="313" fill="#9aa7b4" font-size="10.5" text-anchor="middle">fss intersect / scan</text>
+    <rect x="725" y="262" width="235" height="74" rx="10" fill="#1d1113" stroke="#4d2226"/>
+    <text x="842" y="286" fill="#ff9d96" text-anchor="middle">LoadNextMsgMulti</text>
+    <text x="842" y="304" fill="#9aa7b4" font-size="10.5" text-anchor="middle">full multi‑subject search</text>
+    <text x="842" y="320" fill="#ff9d96" font-size="10.5" text-anchor="middle">EVERY message — O(F) each</text>
+  </g>
+
+  <g stroke="#5b6675" stroke-width="1.5" fill="none">
+    <path d="M125 208 L125 270" marker-end="url(#a3)"/>
+    <path d="M360 208 L360 270" marker-end="url(#a3)"/>
+    <path d="M595 208 L595 270" marker-end="url(#a3)"/>
+  </g>
+  <g stroke="#8a3b40" stroke-width="1.8" fill="none"><path d="M842 208 L842 262" marker-end="url(#a3)"/></g>
+
+  <text x="490" y="372" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="12.5" text-anchor="middle" font-style="italic">
+    The multi‑filter branch (red) pays the full search per message — O(M·F) over a delivery. See §5.</text>
+</svg>
+</div>
+<figcaption>Steady‑state dispatch is filter‑shaped, not policy‑shaped. Redelivery and the last‑per‑subject seed reduce to cheap by‑sequence <code>LoadMsg</code>; the multi‑filter branch is the cliff.</figcaption>
+</figure>
+
+<div class="callout"><b>Key separation.</b> A <code>DeliverLastPerSubject</code> consumer pays its cost
+<i>at startup</i> in <code>MultiLastSeqs</code> and then serves the seeded sequences with cheap
+<code>LoadMsg</code> calls (the skip‑list). Its steady‑state tail — anything published after it
+started — falls into the normal multi/single/none branch above.</div>
+
+<h3>What the <code>LastPerSubject</code> skip‑list actually is</h3>
+<p>The "skip‑list" (<code>o.lss</code>, type <code>lastSeqSkipList</code>) is <b>not</b> the classic
+probabilistic skip‑list data structure — it is a tiny precomputed <b>delivery plan</b>: a flat
+sorted slice of sequences plus a resume watermark. <code>DeliverLastPerSubject</code> means "for
+every matching subject, deliver only that subject's <i>last</i> message, then tail normally."
+Instead of scanning for those, the consumer asks the store for all of them up front and replays
+them by sequence:</p>
+<pre><span class="k">type</span> <span class="t">lastSeqSkipList</span> <span class="k">struct</span> {
+    resume <span class="t">uint64</span>   <span class="c">// stream LastSeq captured at creation — where normal tailing resumes</span>
+    seqs   []<span class="t">uint64</span> <span class="c">// last seq of each matching subject, ascending (from MultiLastSeqs)</span>
+}
+
+lss := &amp;lastSeqSkipList{resume: state.LastSeq}
+lss.seqs, _ = o.mset.store.<span class="f">MultiLastSeqs</span>(filters, <span class="m">0</span>, <span class="m">0</span>) <span class="c">// one search, N results</span>
+o.lss = lss</pre>
+<p>From then on, <code>getNextMsg</code> checks <code>hasSkipListPending()</code> before the filter
+dispatch and drains the plan one entry at a time — popping <code>seqs[0]</code>, pointing
+<code>o.sseq</code> at it, and doing a plain by‑sequence <code>LoadMsg</code> (no search, no filtering
+— membership was decided when the list was built). When the last entry is popped it jumps
+<code>o.sseq</code> to <code>resume</code>, clears the list, and calls <code>updateSkipped</code>. The
+expensive part is the single <code>MultiLastSeqs</code> search that built it (§5); the list itself
+holds an <code>O(N)</code> slice and is rebuilt on every leader failover.</p>
+
+<h2 id="s4"><span class="n">04</span>The method catalogue &amp; where each is reached</h2>
+<table>
+  <thead><tr><th class="mono">Method</th><th>Reached from</th><th>Cost (typical)</th><th>Worst case</th></tr></thead>
+  <tbody>
+    <tr>
+      <td class="mono">LoadMsg(seq)</td>
+      <td>redelivery; LastPerSubject skip‑list</td>
+      <td><span class="pill green">O(1)*</span> block select + cache lookup</td>
+      <td>Cold block forces a disk read + decrypt/decompress; otherwise a cache hit.</td>
+    </tr>
+    <tr>
+      <td class="mono">LoadNextMsg(filter,wc)</td>
+      <td>single‑filter &amp; no‑filter steady state; <code>checkStateForInterestStream</code></td>
+      <td><span class="pill green">~O(1)</span> via <code>fss</code> block skip</td>
+      <td>Sparse selective filter over many blocks, or a high‑cardinality wildcard that defeats <code>fss</code> → degrades toward a linear block walk.</td>
+    </tr>
+    <tr>
+      <td class="mono">LoadNextMsgMulti</td>
+      <td><b>multi‑filter steady state</b> (per message); interest‑stream reconciliation</td>
+      <td><span class="pill amber">O(F·search)</span> per call</td>
+      <td><span class="pill red">O(M·F)</span> over a delivery — full multi‑subject search <i>every</i> message. <b>memstore: naive O(N) linear walk per call.</b> See §5.</td>
+    </tr>
+    <tr>
+      <td class="mono">MultiLastSeqs</td>
+      <td>DeliverLastPerSubject startup (skip‑list seed)</td>
+      <td><span class="pill amber">O(S·log + blocks)</span></td>
+      <td><span class="pill red">heavy</span> — see §6. Backward per‑subject body scan when <code>maxSeq</code> &lt; a subject's last; many matching subjects scattered across many blocks.</td>
+    </tr>
+    <tr>
+      <td class="mono">FilteredState</td>
+      <td>filtered DeliverLast; DeliverByStartTime gap‑close</td>
+      <td><span class="pill amber">O(blocks / fss)</span> per filter</td>
+      <td>Called once <i>per filter subject</i>; F filters × per‑subject derive at startup.</td>
+    </tr>
+    <tr>
+      <td class="mono">GetSeqFromTime</td>
+      <td>DeliverByStartTime startup; <code>$JS.API…NEXT</code> by time</td>
+      <td><span class="pill green">O(log&nbsp;N)</span> block select + binary search</td>
+      <td>Heavy interior‑delete runs inside the target block force a linear offset walk around the binary‑search midpoint.</td>
+    </tr>
+  </tbody>
+</table>
+<p class="sub">Note: v2.12.10's <code>StreamStore</code> interface has <b>no</b> batched
+<code>LoadNextMsgsMulti</code> — that method (and the consumer's <code>getNextMultiFiltered</code>
+prefetch buffer) were added in a later branch. In 2.12.10 the multi‑filter delivery path is purely
+the per‑message <code>LoadNextMsgMulti</code> above.</p>
+
+<h2 id="s5"><span class="n">05</span>Worst case — multi‑filter delivery (<code>LoadNextMsgMulti</code> per message)</h2>
+<p>This is the dominant <i>throughput</i> cost in 2.12.10. Every delivered message re‑enters the
+store and re‑runs the whole multi‑subject search: re‑acquire the store lock, re‑select the starting
+block, and re‑walk the per‑block <code>fss</code> subject‑tree intersected against the filter
+sublist (<code>IntersectGSL</code> / <code>firstMatchingMulti</code>) to find the single next match.
+Cost rises with the number of filter subjects, so a delivery scales like <b>messages × filters</b>.</p>
+
+<figure>
+<div class="svgwrap">
+<svg viewBox="0 0 980 250" role="img" aria-label="Multi-filter delivery cost growth with filter count in v2.12.10">
+  <text x="20" y="26" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11.5" font-weight="700">one delivery of 200k scattered msgs — searches &amp; wall time grow with filter count (filestore)</text>
+  <g font-family="SF Mono,monospace" font-size="11.5">
+    <text x="20" y="62" fill="#cdd9e5">10 filters</text>
+    <rect x="120" y="50" width="120" height="18" rx="4" fill="#f85149"/><text x="250" y="64" fill="#ff9d96">2,001 searches · 347 ms</text>
+    <text x="20" y="102" fill="#cdd9e5">30 filters</text>
+    <rect x="120" y="90" width="320" height="18" rx="4" fill="#f85149" opacity="0.94"/><text x="450" y="104" fill="#ff9d96">6,001 searches · 1.02 s</text>
+    <text x="20" y="142" fill="#cdd9e5">50 filters</text>
+    <rect x="120" y="130" width="540" height="18" rx="4" fill="#f85149" opacity="0.88"/><text x="670" y="144" fill="#ff9d96">10,001 searches · 2.11 s</text>
+    <text x="20" y="182" fill="#cdd9e5">90 filters</text>
+    <rect x="120" y="170" width="820" height="18" rx="4" fill="#f85149" opacity="0.82"/><text x="120" y="162" fill="#ff9d96">18,001 searches · 3.50 s</text>
+  </g>
+  <text x="120" y="222" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="11">Searches = one per delivered message (+ EOF). Wall time climbs with the per‑search filter cost. Measured on the equivalent per‑message path.</text>
+</svg>
+</div>
+<figcaption>Past a certain filter count, shipping everything unfiltered and filtering client‑side could genuinely win — the motivation for the later batched rework.</figcaption>
+</figure>
+
+<div class="callout warn"><b>memstore is worse.</b> In 2.12.10 the memory store's
+<code>LoadNextMsgMulti</code> is an explicit <i>"simple linear walk to get started"</i>
+(<code>TODO(dlc)</code>): it scans <b>every sequence</b> from the cursor to <code>LastSeq</code>
+running <code>HasInterest</code> per message, with no <code>fss</code> subject‑index narrowing. For a
+sparse multi‑filter delivery that approaches <code>O(M²)</code> across the whole delivery — each of
+the M deliveries can rescan a large suffix of the stream.</div>
+
+<pre><span class="c">// server/memstore.go — v2.12.10</span>
+<span class="k">func</span> (ms *memStore) <span class="f">LoadNextMsgMulti</span>(sl *gsl.SimpleSublist, start <span class="t">uint64</span>, smp *StoreMsg) (...) {
+    <span class="c">// TODO(dlc) - for now simple linear walk to get started.</span>
+    ...
+    <span class="k">for</span> nseq := fseq; nseq &lt;= lseq; nseq++ {   <span class="c">// scans to LastSeq every call</span>
+        sm, ok := ms.msgs[nseq]
+        <span class="k">if</span> ok &amp;&amp; sl.<span class="f">HasInterest</span>(sm.subj) { <span class="k">return</span> ... }
+    }
+}</pre>
+
+<h2 id="s6"><span class="n">06</span>Worst case — <code>MultiLastSeqs</code> (DeliverLastPerSubject startup)</h2>
+<p>This is the heaviest <i>startup</i> path. The fast lane is taken only when the filter set is
+"all" (<code>filterIsAll</code>) with no caps — then <code>allLastSeqs</code> reads the answer from
+resident state. Otherwise it walks blocks <b>backwards</b> from the last block, loading each
+block's <code>fss</code>, ticking matched subjects off as it finds their last sequence, and stops
+only when every matched subject is accounted for.</p>
+
+<figure>
+<div class="svgwrap">
+<svg viewBox="0 0 980 300" role="img" aria-label="MultiLastSeqs backward block walk worst case">
+  <text x="20" y="28" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11.5" font-weight="700">backward walk until all matched subjects resolved →</text>
+  <g font-family="SF Mono,monospace" font-size="11">
+    <rect x="20"  y="50" width="92" height="70" rx="7" fill="#161b22" stroke="#283041"/>
+    <rect x="118" y="50" width="92" height="70" rx="7" fill="#161b22" stroke="#283041"/>
+    <rect x="216" y="50" width="92" height="70" rx="7" fill="#161b22" stroke="#283041"/>
+    <rect x="314" y="50" width="92" height="70" rx="7" fill="#161b22" stroke="#283041"/>
+    <rect x="412" y="50" width="92" height="70" rx="7" fill="#161b22" stroke="#283041"/>
+    <rect x="510" y="50" width="92" height="70" rx="7" fill="#1d1808" stroke="#4d3a12"/>
+    <rect x="608" y="50" width="92" height="70" rx="7" fill="#1d1808" stroke="#4d3a12"/>
+    <rect x="706" y="50" width="92" height="70" rx="7" fill="#1d1808" stroke="#4d3a12"/>
+    <rect x="804" y="50" width="92" height="70" rx="7" fill="#1d1808" stroke="#4d3a12"/>
+    <text x="66"  y="90" fill="#7ee787" text-anchor="middle">last(A)</text>
+    <text x="164" y="90" fill="#6b7785" text-anchor="middle">—</text>
+    <text x="262" y="90" fill="#6b7785" text-anchor="middle">—</text>
+    <text x="360" y="90" fill="#7ee787" text-anchor="middle">last(B)</text>
+    <text x="458" y="90" fill="#6b7785" text-anchor="middle">—</text>
+    <text x="556" y="90" fill="#6b7785" text-anchor="middle">—</text>
+    <text x="654" y="90" fill="#6b7785" text-anchor="middle">—</text>
+    <text x="752" y="90" fill="#6b7785" text-anchor="middle">—</text>
+    <text x="850" y="90" fill="#7ee787" text-anchor="middle">last(C)</text>
+    <text x="850" y="138" fill="#9aa7b4" text-anchor="middle">last block</text>
+    <text x="66"  y="138" fill="#9aa7b4" text-anchor="middle">block 0</text>
+  </g>
+  <g stroke="#d29922" stroke-width="2" fill="none">
+    <path d="M850 165 L66 165" stroke-dasharray="6 5"/>
+    <path d="M70 165 l10 -5 l0 10 z" fill="#d29922" stroke="none"/>
+  </g>
+  <text x="490" y="158" fill="#f0c069" font-family="var(--sans),sans-serif" font-size="12" text-anchor="middle">loads fss of every block from the last down to block 0 — because subject A's last lives way back</text>
+
+  <rect x="20" y="195" width="455" height="86" rx="10" fill="#1d1113" stroke="#4d2226"/>
+  <text x="36" y="218" fill="#ff9d96" font-family="SF Mono,monospace" font-size="12" font-weight="700">Worst case A — scattered olds</text>
+  <text x="36" y="240" fill="#cddcea" font-family="var(--sans),sans-serif" font-size="12">A matched subject's last message sits near the</text>
+  <text x="36" y="258" fill="#cddcea" font-family="var(--sans),sans-serif" font-size="12">front ⇒ the backward walk can't stop until it</text>
+  <text x="36" y="276" fill="#cddcea" font-family="var(--sans),sans-serif" font-size="12">reaches block 0, touching every block's fss.</text>
+
+  <rect x="505" y="195" width="455" height="86" rx="10" fill="#1d1113" stroke="#4d2226"/>
+  <text x="521" y="218" fill="#ff9d96" font-family="SF Mono,monospace" font-size="12" font-weight="700">Worst case B — maxSeq below last</text>
+  <text x="521" y="240" fill="#cddcea" font-family="var(--sans),sans-serif" font-size="12">When a subject's recorded last &gt; maxSeq, it does</text>
+  <text x="521" y="258" fill="#cddcea" font-family="var(--sans),sans-serif" font-size="12">a per‑subject <tspan font-family="SF Mono,monospace" fill="#9fd0ff">cacheLookup</tspan> backward scan. memstore is</text>
+  <text x="521" y="276" fill="#cddcea" font-family="var(--sans),sans-serif" font-size="12">worse: <tspan font-family="SF Mono,monospace" fill="#9fd0ff">for seq:=maxSeq; seq&gt;0; seq--</tspan> → O(maxSeq·S).</text>
+</svg>
+</div>
+<figcaption>Cost grows with (number of matched subjects) × (how far back their last sequences are scattered). Many high‑cardinality subjects whose tails are old is the pathological seed.</figcaption>
+</figure>
+
+<div class="callout warn"><b>memstore footgun.</b> In <code>memStore.MultiLastSeqs</code>, the
+"<code>ss.Last &gt; maxSeq</code>" branch runs <code>for seq := maxSeq; seq &gt; 0; seq--</code>, a
+linear walk to sequence 1 for <i>each</i> such subject. The common consumer call uses
+<code>maxSeq = 0</code> (implied = LastSeq), which avoids it.</div>
+
+<h2 id="s7"><span class="n">07</span>Under the hood — data structures &amp; I/O</h2>
+<p>The startup‑heavy methods all work the same way at the bottom: they consult <b>in‑memory
+indices</b> first and only touch the disk when they must <i>materialise a block</i> to read
+subjects or message timestamps. On the <b>memory store</b> none of this involves syscalls — every
+structure below is a Go map or an in‑memory subject tree.</p>
+
+<figure>
+<div class="svgwrap">
+<svg viewBox="0 0 980 430" role="img" aria-label="File store data structures and the block load I/O path">
+  <defs><marker id="b2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#d29922"/></marker></defs>
+  <rect x="16" y="40" width="600" height="372" rx="14" fill="#0e1320" stroke="#1d3350"/>
+  <text x="34" y="66" fill="#9fd0ff" font-family="SF Mono,monospace" font-size="12" font-weight="700">IN MEMORY · per fileStore (no syscalls to read)</text>
+
+  <rect x="34" y="80" width="270" height="120" rx="10" fill="#161b22" stroke="#283041"/>
+  <text x="48" y="102" fill="#e6edf3" font-family="SF Mono,monospace" font-size="12.5" font-weight="700">fs.psim</text>
+  <text x="48" y="120" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="11.5">stream subject index — subject tree</text>
+  <text x="48" y="137" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="11">SubjectTree[psi]</text>
+  <text x="48" y="160" fill="#7ee787" font-family="SF Mono,monospace" font-size="11">psi{ total, fblk, lblk }</text>
+  <text x="48" y="178" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10.5">count + first/last BLOCK index per subject</text>
+  <text x="48" y="193" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10.5">Find() exact · Match() wildcard · IntersectGSL()</text>
+
+  <rect x="320" y="80" width="280" height="120" rx="10" fill="#161b22" stroke="#283041"/>
+  <text x="334" y="102" fill="#e6edf3" font-family="SF Mono,monospace" font-size="12.5" font-weight="700">fs.blks[]  ·  fs.bim{}</text>
+  <text x="334" y="120" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="11.5">ordered []*msgBlock + index→block map</text>
+  <text x="334" y="142" fill="#7ee787" font-family="SF Mono,monospace" font-size="11">mb.first/last {seq, ts}  ·  atomics</text>
+  <text x="334" y="160" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10.5">per‑block seq + timestamp bounds (always in RAM)</text>
+  <text x="334" y="182" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10.5">binary‑searchable by seq and by last.ts</text>
+
+  <rect x="34" y="214" width="566" height="180" rx="10" fill="#11151c" stroke="#283041"/>
+  <text x="48" y="236" fill="#cdd9e5" font-family="SF Mono,monospace" font-size="12" font-weight="700">per msgBlock — LAZILY loaded (drives the disk read)</text>
+
+  <rect x="48" y="248" width="172" height="130" rx="9" fill="#1d1808" stroke="#4d3a12"/>
+  <text x="60" y="270" fill="#f0c069" font-family="SF Mono,monospace" font-size="12" font-weight="700">mb.fss</text>
+  <text x="60" y="288" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="11">per‑block subject index</text>
+  <text x="60" y="304" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="10.5">SubjectTree[SimpleState]</text>
+  <text x="60" y="322" fill="#7ee787" font-family="SF Mono,monospace" font-size="10.5">{Msgs,First,Last}</text>
+  <text x="60" y="340" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">+ first/lastNeedsUpdate</text>
+  <text x="60" y="358" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">built by reading the block</text>
+
+  <rect x="232" y="248" width="172" height="130" rx="9" fill="#1d1808" stroke="#4d3a12"/>
+  <text x="244" y="270" fill="#f0c069" font-family="SF Mono,monospace" font-size="12" font-weight="700">mb.cache</text>
+  <text x="244" y="288" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="11">decoded block bytes</text>
+  <text x="244" y="304" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="10.5">buf []byte · idx []uint32</text>
+  <text x="244" y="322" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">by‑seq lookup → message subject/body</text>
+  <text x="244" y="344" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">expires after CacheExpire;</text>
+  <text x="244" y="358" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">reload = a fresh block read</text>
+
+  <rect x="416" y="248" width="172" height="130" rx="9" fill="#161b22" stroke="#283041"/>
+  <text x="428" y="270" fill="#e6edf3" font-family="SF Mono,monospace" font-size="12" font-weight="700">mb.dmap</text>
+  <text x="428" y="288" fill="#9aa7b4" font-family="var(--sans),sans-serif" font-size="11">interior deletes</text>
+  <text x="428" y="304" fill="#9aa7b4" font-family="SF Mono,monospace" font-size="10.5">avl.SequenceSet</text>
+  <text x="428" y="326" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">tombstones consulted during the</text>
+  <text x="428" y="340" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10">binary‑search / backward scans</text>
+
+  <rect x="636" y="40" width="328" height="372" rx="14" fill="#160d10" stroke="#4d2226"/>
+  <text x="654" y="66" fill="#ff9d96" font-family="SF Mono,monospace" font-size="12" font-weight="700">ON DISK · the only I/O</text>
+
+  <rect x="654" y="82" width="292" height="58" rx="9" fill="#11151c" stroke="#283041"/>
+  <text x="668" y="104" fill="#e6edf3" font-family="SF Mono,monospace" font-size="12">{n}.blk  message block files</text>
+  <text x="668" y="124" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10.5">raw, optionally encrypted + S2‑compressed</text>
+
+  <rect x="654" y="160" width="292" height="232" rx="10" fill="#11151c" stroke="#4d2226"/>
+  <text x="668" y="182" fill="#ff9d96" font-family="SF Mono,monospace" font-size="11.5" font-weight="700">loadMsgsWithLock → loadBlock</text>
+  <rect x="668" y="196" width="264" height="36" rx="7" fill="#161b22" stroke="#283041"/>
+  <text x="680" y="219" fill="#d6e2ee" font-family="SF Mono,monospace" font-size="11">&lt;-dios   gate (bounded concurrent IO)</text>
+  <rect x="668" y="238" width="264" height="36" rx="7" fill="#161b22" stroke="#283041"/>
+  <text x="680" y="261" fill="#d6e2ee" font-family="SF Mono,monospace" font-size="11">open() · fstat() · ReadFull()</text>
+  <rect x="668" y="280" width="264" height="36" rx="7" fill="#161b22" stroke="#283041"/>
+  <text x="680" y="303" fill="#d6e2ee" font-family="SF Mono,monospace" font-size="11">decrypt (AES‑GCM / ChaCha20)</text>
+  <rect x="668" y="322" width="264" height="36" rx="7" fill="#161b22" stroke="#283041"/>
+  <text x="680" y="345" fill="#d6e2ee" font-family="SF Mono,monospace" font-size="11">decompress (S2)</text>
+  <text x="668" y="380" fill="#6b7785" font-family="var(--sans),sans-serif" font-size="10.5">⇒ populates mb.cache, then mb.fss</text>
+
+  <path d="M404 300 C 560 300, 560 250, 654 250" fill="none" stroke="#d29922" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#b2)"/>
+  <text x="548" y="238" fill="#f0c069" font-family="var(--sans),sans-serif" font-size="10.5" text-anchor="middle">cold fss/cache</text>
+  <text x="548" y="251" fill="#f0c069" font-family="var(--sans),sans-serif" font-size="10.5" text-anchor="middle">⇒ block read</text>
+</svg>
+</div>
+<figcaption>The amber per‑block structures (<code>fss</code>, <code>cache</code>) are lazy: a miss runs the disk pipeline on the right, gated by the global <code>dios</code> semaphore and followed by in‑process decrypt/decompress. A method that stays in <code>psim</code> + <code>first/last</code> bounds does <b>zero</b> I/O.</figcaption>
+</figure>
+
+<table>
+  <thead><tr><th class="mono">Method</th><th>Resident structures read</th><th>Triggers block read when…</th><th>Mem store I/O</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">LoadNextMsgMulti</td><td>psim (first‑block skip), per‑block fss (firstMatchingMulti)</td><td>each probed block's fss/cache, every delivered message</td><td><span class="pill green">none</span> (naive map walk)</td></tr>
+    <tr><td class="mono">MultiLastSeqs</td><td>psim (Match), lblk, fss per block (backward)</td><td>each block's fss on the backward walk; full cache when last &gt; <code>maxSeq</code></td><td><span class="pill green">none</span></td></tr>
+    <tr><td class="mono">FilteredState</td><td>psim (Find/Match), first/last bounds</td><td>pinning exact First in the candidate block(s); arbitrary <code>sseq</code> ⇒ one read per scanned block</td><td><span class="pill green">none</span></td></tr>
+    <tr><td class="mono">GetSeqFromTime</td><td>blks (last.ts), per‑block first/last</td><td>the single target block's cache for the in‑block binary search</td><td><span class="pill green">none</span></td></tr>
+  </tbody>
+</table>
+
+<div class="callout"><b>The one I/O primitive.</b> Every "block read" above is the same pipeline:
+acquire the global <code>dios</code> semaphore (bounding concurrent disk ops server‑wide),
+<code>open</code> + <code>fstat</code> + <code>ReadFull</code> the <code>.blk</code> file, then
+in‑process <b>decrypt</b> (if encrypted) and <b>decompress</b> (if S2). Once resident, the block's
+<code>fss</code>/<code>cache</code> serve subsequent calls for free until <code>CacheExpire</code>
+evicts them. The memory store has none of this layer — its worst cases are CPU/lock‑bound map
+walks, never syscalls.</div>
+
+<footer>
+  <p>Generated from <span class="filechip">server/consumer.go</span>
+  <span class="filechip">server/filestore.go</span>
+  <span class="filechip">server/memstore.go</span> at tag
+  <code>release/v2.12.10</code> (<code>VERSION = "2.12.10"</code>). Describes the store access paths
+  as shipped — before the batched multi‑filter rework.</p>
+</footer>
+
+</div>
+
+<aside class="toc">
+  <ol>
+    <li><a href="#s1">Two phases</a></li>
+    <li><a href="#s2">Startup by policy</a></li>
+    <li><a href="#s3">Steady‑state by filter</a></li>
+    <li><a href="#s4">Method catalogue</a></li>
+    <li><a href="#s5">Worst: multi‑filter delivery</a></li>
+    <li><a href="#s6">Worst: MultiLastSeqs</a></li>
+    <li><a href="#s7">Data structures &amp; I/O</a></li>
+  </ol>
+</aside>
+
+</div>
+</div>
+</body>
+</html>
