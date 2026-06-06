@@ -42,7 +42,99 @@ needs (the **origin** sequence) is right there in the message that `LoadLastMsg`
 > sequence taken from the `Nats-Stream-Source` header, not the hub's storage sequence. So we use the
 > index to *find* the source's last stored message in O(1), then read the origin seq from its header.
 
-## 3. Proposed algorithm
+## 3. Background: the subject index (`psim` + `fss`) and the source header
+
+The filestore keeps a **two-level subject index**. Phase 1 stands entirely on it, so it's worth being
+precise about what each level is.
+
+![psim + fss + the source header](diagrams/15-psim-and-header.svg)
+
+### 3.1 `psim` — the store-wide "which blocks hold this subject" map
+
+`fs.psim` (`filestore.go:195`) is a `stree.SubjectTree[psi]` — a subject-token tree keyed by the full
+message subject — whose value is a tiny per-subject record (`filestore.go:168`):
+
+```go
+type psi struct {
+    total uint64  // how many messages exist for this subject across the whole stream
+    fblk  uint32  // index of the FIRST block that still contains this subject
+    lblk  uint32  // index of the LAST  block that still contains this subject
+}
+```
+
+It is maintained incrementally on every write (`filestore.go:4933-4943`): on store, the subject's entry
+is created (`total:1, fblk=lblk=current block`) or its `total` is bumped and `lblk` advanced to the
+current block; on removal/expiry the counts and `fblk`/`lblk` are walked forward as blocks empty out.
+Because `psim` is a *subject tree*, it supports both exact `Find(subject)` and wildcard `Match(filter)`
+in time proportional to the subject token structure — **not** to the number of messages.
+
+The single field that makes Phase 1 cheap is `lblk`: given a source's subject, `psim.Find` returns the
+**exact last block** that contains it. There is no need to scan newer blocks — most of which don't
+contain that subject at all. (`MultiLastSeqs`, `filestore.go:3806`, uses the same `psim` to answer a
+*batch* of filters in one index pass.)
+
+### 3.2 `fss` — the per-block "first/last seq of this subject in this block" map
+
+`psim` gets us to a block; `mb.fss` (`filestore.go:239`) finishes the job *inside* that block. Each
+`msgBlock` carries its own `stree.SubjectTree[SimpleState]` mapping subject → (`store.go:180`):
+
+```go
+type SimpleState struct {
+    Msgs  uint64 // messages for this subject in THIS block
+    First uint64 // first sequence for this subject in this block
+    Last  uint64 // last  sequence for this subject in this block
+    // (firstNeedsUpdate / lastNeedsUpdate: lazily recomputed when interior deletes invalidate them)
+}
+```
+
+So the two levels compose into an O(1)-ish lookup, which is exactly what `loadLast`
+(`filestore.go:8980-9034`) does:
+
+```
+psim.Find(subject) ─► info.lblk ─► block ─► block.fss.Find(subject) ─► ss.Last ─► load that one message
+```
+
+`fss` is what gives us the precise sequence within the block (and it correctly skips interior-deleted
+messages via `lastNeedsUpdate`/`recalculateForSubj`). On a cold block, `ensurePerSubjectInfoLoaded`
+loads/derives `fss` for that **one** block — the cost we pay once per resolved source, versus the
+current scan paying it for every block back to the oldest source.
+
+### 3.3 Why each message carries a `Nats-Stream-Source` header
+
+`psim`/`fss` index by **subject**. They know nothing about *which source* produced a stored message or
+*where in the origin stream* it came from — and those are precisely the two facts resume needs. That
+information is carried only in the per-message header `Nats-Stream-Source` (`JSStreamSource`,
+`stream.go:635`), written by `genSourceHeader` (`stream.go:4470`) as:
+
+```
+Nats-Stream-Source:  <idName>  <originSeq>  <filter>  <destination>  <origSubject>
+                       │          │
+                       │          └─ the ORIGIN stream's sequence — what we must resume from
+                       └─ origin stream name (+ domain/consumer hash); with filter+dest it
+                          reconstructs the source's full iname  (parsed by streamAndSeq, stream.go:4545)
+```
+
+This header is needed for three independent reasons:
+
+1. **Source attribution.** A hub message is stored under its *destination* subject; the storage layer
+   records nothing about its origin. When two sources can land on the same/overlapping subject, only the
+   header's `iname` says which source a given message belongs to — hence Phase 1's
+   `iname == si.iname` check.
+2. **Origin-sequence tracking.** The sourcing consumer is (re)created on the **origin** with
+   `DeliverByStartSequence`, which lives in the *origin's* sequence space. The hub's own storage
+   sequence (e.g. 5123) is unrelated to the origin sequence (e.g. 482). Only the header preserves the
+   origin sequence, so it is the *only* place a resume point can be recovered from without contacting
+   the origin.
+3. **Loop / daisy-chain handling & dedup.** When re-sourcing (A→B→C), `processInboundSourceMsg`
+   strips the inbound `JSStreamSource` and stamps its own (`stream.go:4398`, `4405`), so each hop's
+   provenance is well-defined and re-sourced duplicates can be recognised.
+
+This is the crux of the whole proposal: **the index tells us *which block* in O(1); the header (read
+from that one message) tells us *which source* and *which origin seq*.** Today's scan reads the header
+off *every* message on the way back because it never consults `psim`/`fss` to jump directly to the right
+one.
+
+## 4. Proposed algorithm
 
 Two phases. Phase 1 resolves the common case with index lookups; Phase 2 keeps today's scan only for
 sources that genuinely can't be attributed by subject.
@@ -72,7 +164,7 @@ The header check makes Phase 1 **self-correcting**: if a subject is shared betwe
 a direct publish on the hub, or the last message has no source header, the lookup simply doesn't match
 and that source drops to Phase 2 — never producing a wrong answer.
 
-## 4. Before → after (code)
+## 5. Before → after (code)
 
 ### Before (`startingSequenceForSources`, condensed — `stream.go:4694`)
 
@@ -133,7 +225,7 @@ if len(unresolved) > 0 {
 > Multi-destination transform sources: call `LoadLastMsg` for each destination and keep the highest
 > origin `sseq`, or defer them to Phase 2. Either is fine; deferring is simplest to start.
 
-## 5. Before → after (complexity)
+## 6. Before → after (complexity)
 
 | | Before | After |
 |---|---|---|
@@ -147,7 +239,7 @@ if len(unresolved) > 0 {
 The edge→hub topology (each edge mapped to a distinct subject/domain) lands entirely in Phase 1 → the
 backward scan disappears for that case.
 
-## 6. Correctness & edge cases
+## 7. Correctness & edge cases
 
 * **Same semantics.** Today's scan records, per source, the **most recent** stored message's origin seq
   (first hit scanning backward). `LoadLastMsg` returns exactly that message. Deleted/interior messages
@@ -165,7 +257,7 @@ backward scan disappears for that case.
 * **`setStartingSequenceForSources`** (the `STREAM.UPDATE` path, `stream.go:4566`) gets the same Phase 1
   treatment for the subset of sources it processes.
 
-## 7. Risks
+## 8. Risks
 
 * **Index freshness.** `psim`/`fss` may lazily need a recalculation (`lastNeedsUpdate`,
   `recalculateForSubj`); `loadLast`/`MultiLastSeqs` already handle that, so we inherit correct behaviour.
@@ -174,7 +266,7 @@ backward scan disappears for that case.
 * **Encryption/compression.** Phase 1 still loads the one block holding a source's last message
   (decrypt/decompress), but only that block — no change in correctness, large reduction in volume.
 
-## 8. Testing & validation
+## 9. Testing & validation
 
 * **Equivalence test:** build a stream sourcing from K origins with distinct subjects, varying activity
   (some quiet); assert the new resolver yields the *same* `si.sseq` per source as the old scan.
@@ -185,7 +277,7 @@ backward scan disappears for that case.
   "quiet source" case to drop from "scan to the bottom of the store" to a single targeted load.
 * Run with `-race`.
 
-## 9. Relationship to the durable-consumer proposal
+## 10. Relationship to the durable-consumer proposal
 
 This change is **orthogonal and complementary** to the durable-consumer/`si.sseq`-persistence ideas in
 `sourcing-durable-resume.md`:
@@ -207,6 +299,9 @@ every retention type today), then layer the persistence/durable improvements on 
 | sublist build (stored subjects) | `stream.go:4742-4757` | defines a source's stored subject(s) |
 | `LoadLastMsg` / `loadLast` | `filestore.go:9048` / `8939` | index-based last-msg-for-subject (returns header) |
 | `MultiLastSeqs` | `filestore.go:3806` | batched last-seq-per-filter via index |
-| `fs.psim` (last block per subject) | `filestore.go:8980` | the index Phase 1 exploits |
+| `psi` / `fs.psim` | `filestore.go:168` / `195` | per-subject `{total, fblk, lblk}`; store-wide subject→blocks index |
+| `mb.fss` / `SimpleState` | `filestore.go:239` / `store.go:180` | per-block subject→`{Msgs, First, Last}` index |
+| `psim` maintenance on write | `filestore.go:4933-4943` | how `total`/`lblk` are kept current |
 | `LoadPrevMsgMulti` | `filestore.go:9403` / `memstore.go:1991` | the backward walk used by Phase 2 |
-| `streamAndSeq` | parses `Nats-Stream-Source` | origin stream/iname/seq from header |
+| `Nats-Stream-Source` header | `stream.go:635` | constant; the per-message source provenance |
+| `genSourceHeader` / `streamAndSeq` | `stream.go:4470` / `4545` | writes / parses origin stream, iname, origin seq |

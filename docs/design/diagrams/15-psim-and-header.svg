@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 480" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .ttl{font-size:16px;font-weight:700;fill:#1f2328}
+    .idx{fill:#ddf4ff;stroke:#0969da;stroke-width:1.6}
+    .node{fill:#ffffff;stroke:#0969da;stroke-width:1.3}
+    .blk{fill:#ffffff;stroke:#8c959f;stroke-width:1.3}
+    .hl{fill:#dafbe1;stroke:#1a7f37;stroke-width:1.6}
+    .msg{fill:#fff8c5;stroke:#9a6700;stroke-width:1.5}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}
+    .smono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px}
+    .muted{font-size:10.5px;fill:#656d76}
+    .lbl{font-size:12px;fill:#1f2328}
+    .blue{font-size:12px;font-weight:700;fill:#0969da}
+    .amber{font-size:12px;font-weight:700;fill:#9a6700}
+  </style>
+  <rect x="0" y="0" width="900" height="480" fill="#f6f8fa"/>
+  <text x="24" y="30" class="ttl">psim answers &#8220;which block?&#8221; by subject; the stored header answers &#8220;which source?&#8221; and &#8220;which origin seq?&#8221;</text>
+
+  <!-- psim box -->
+  <text x="24" y="62" class="blue">fs.psim &#8212; stree.SubjectTree[psi]   (per-subject index, updated on every write)</text>
+  <rect x="24" y="72" width="430" height="190" rx="10" class="idx" fill-opacity="0.35"/>
+
+  <!-- tree-ish rows -->
+  <g>
+    <rect x="44" y="90" width="180" height="40" rx="6" class="node"/>
+    <text x="56" y="106" class="mono" fill="#0a3069">"orders.us"</text>
+    <text x="56" y="122" class="smono" fill="#57606a">psi{ total, fblk:2, lblk:8 }</text>
+
+    <rect x="44" y="138" width="180" height="40" rx="6" class="node"/>
+    <text x="56" y="154" class="mono" fill="#0a3069">"orders.eu"</text>
+    <text x="56" y="170" class="smono" fill="#57606a">psi{ total, fblk:1, lblk:7 }</text>
+
+    <rect x="44" y="186" width="180" height="40" rx="6" class="hl"/>
+    <text x="56" y="202" class="mono" fill="#0a3069">"orders.jp"  (quiet)</text>
+    <text x="56" y="218" class="smono" fill="#1a7f37">psi{ total, fblk:2, lblk:2 }</text>
+  </g>
+  <text x="240" y="112" class="muted">total = # msgs on subject</text>
+  <text x="240" y="160" class="muted">fblk  = first block index</text>
+  <text x="240" y="208" class="amber">lblk  = LAST block index &#8594;</text>
+  <text x="240" y="224" class="muted">jump straight here, no scan</text>
+
+  <!-- blocks -->
+  <text x="500" y="62" class="muted">message blocks (newest on the right)</text>
+  <g>
+    <rect x="500" y="72" width="44" height="44" rx="5" class="blk"/><text x="522" y="130" text-anchor="middle" class="muted">B1</text>
+    <rect x="548" y="72" width="44" height="44" rx="5" class="hl"/><text x="570" y="130" text-anchor="middle" class="muted">B2</text>
+    <rect x="596" y="72" width="44" height="44" rx="5" class="blk"/><text x="618" y="130" text-anchor="middle" class="muted">B3</text>
+    <rect x="644" y="72" width="44" height="44" rx="5" class="blk"/><text x="666" y="130" text-anchor="middle" class="muted">..</text>
+    <rect x="692" y="72" width="44" height="44" rx="5" class="blk"/><text x="714" y="130" text-anchor="middle" class="muted">B7</text>
+    <rect x="740" y="72" width="44" height="44" rx="5" class="blk"/><text x="762" y="130" text-anchor="middle" class="muted">B8</text>
+  </g>
+  <!-- jump arrow from quiet psi.lblk:2 to B2 -->
+  <path d="M 224 206 C 380 200, 470 120, 560 118" stroke="#1a7f37" stroke-width="1.8" fill="none" marker-end="url(#g)"/>
+  <text x="430" y="168" class="lbl" fill="#1a7f37">lblk:2 &#8594; B2 (one targeted load)</text>
+
+  <!-- message zoom from B2 -->
+  <path d="M 570 116 L 470 300" stroke="#9a6700" stroke-width="1.4" stroke-dasharray="4 3"/>
+  <rect x="120" y="300" width="700" height="120" rx="10" class="msg" fill-opacity="0.5"/>
+  <text x="140" y="324" class="amber">the message that psim led us to (inside B2)</text>
+  <text x="140" y="346" class="muted">stored subject: orders.jp        hub storage seq: 5123  (NOT what we need)</text>
+  <rect x="140" y="356" width="660" height="34" rx="6" class="msg"/>
+  <text x="150" y="378" class="smono" fill="#633c01">Nats-Stream-Source:  ORDERS:7f3a9k2p&#160; 482&#160; orders.jp&#160; &gt;&#160; orders.jp</text>
+  <g class="smono">
+    <text x="150" y="406" fill="#bf3989">&#9650; idName(iname)</text>
+    <text x="330" y="406" fill="#0969da">&#9650; ORIGIN seq = 482</text>
+    <text x="520" y="406" fill="#57606a">&#9650; filter / dest / orig subject</text>
+  </g>
+
+  <text x="24" y="450" class="muted">Phase 1 = psim.Find(subject) &#8594; lblk &#8594; load that one block &#8594; read header &#8594; verify iname matches the source &#8594; take origin seq 482.</text>
+  <text x="24" y="468" class="muted">psim indexes by SUBJECT only; it knows nothing about source identity or origin sequence &#8212; those live exclusively in the header.</text>
+
+  <defs>
+    <marker id="g" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#1a7f37"/></marker>
+  </defs>
+</svg>
