@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 430" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .card{fill:#ffffff;stroke:#d0d7de;stroke-width:1.5;rx:10}
+    .ttl{font-size:15px;font-weight:700;fill:#1f2328}
+    .lbl{font-size:12.5px;fill:#1f2328}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;fill:#0550ae}
+    .muted{font-size:12px;fill:#656d76}
+    .key{fill:#ddf4ff;stroke:#54aeff;stroke-width:1}
+    .val{fill:#dafbe1;stroke:#4ac26b;stroke-width:1}
+    .slot{fill:#fff8c5;stroke:#d4a72c;stroke-width:1}
+    .good{font-size:13px;font-weight:700;fill:#1a7f37}
+    .bad{font-size:13px;font-weight:700;fill:#cf222e}
+  </style>
+  <rect x="0" y="0" width="900" height="430" fill="#f6f8fa"/>
+  <text x="24" y="34" class="ttl" font-size="17">The asymmetry: runtime state is a map, config is a slice</text>
+
+  <!-- LEFT: map -->
+  <rect x="24" y="58" width="380" height="330" rx="10" class="card"/>
+  <text x="44" y="86" class="ttl">mset.sources</text>
+  <text x="44" y="106" class="mono">map[string]*sourceInfo</text>
+  <text x="44" y="126" class="muted">keyed by iname &#8212; direct hashed lookup</text>
+
+  <!-- map rows -->
+  <g>
+    <rect x="44" y="146" width="150" height="34" rx="6" class="key"/>
+    <text x="54" y="168" class="mono" fill="#0a3069">"A &gt; &gt;"</text>
+    <rect x="226" y="146" width="138" height="34" rx="6" class="val"/>
+    <text x="236" y="168" class="mono" fill="#0a3069">sourceInfo{sub,seq}</text>
+    <line x1="194" y1="163" x2="226" y2="163" stroke="#57606a" stroke-width="1.4" marker-end="url(#ar)"/>
+  </g>
+  <g>
+    <rect x="44" y="190" width="150" height="34" rx="6" class="key"/>
+    <text x="54" y="212" class="mono" fill="#0a3069">"B &gt; &gt;"</text>
+    <rect x="226" y="190" width="138" height="34" rx="6" class="val"/>
+    <text x="236" y="212" class="mono" fill="#0a3069">sourceInfo{...}</text>
+    <line x1="194" y1="207" x2="226" y2="207" stroke="#57606a" stroke-width="1.4" marker-end="url(#ar)"/>
+  </g>
+  <g>
+    <rect x="44" y="234" width="150" height="34" rx="6" class="key"/>
+    <text x="54" y="256" class="mono" fill="#0a3069">"C:hash f &gt;"</text>
+    <rect x="226" y="234" width="138" height="34" rx="6" class="val"/>
+    <text x="236" y="256" class="mono" fill="#0a3069">sourceInfo{...}</text>
+    <line x1="194" y1="251" x2="226" y2="251" stroke="#57606a" stroke-width="1.4" marker-end="url(#ar)"/>
+  </g>
+  <text x="204" y="312" text-anchor="middle" class="good">mset.sources[iname]  &#8594;  O(1)</text>
+  <text x="204" y="356" text-anchor="middle" class="muted" font-size="11.5">lookup cost independent of source count</text>
+
+  <!-- RIGHT: slice -->
+  <rect x="496" y="58" width="380" height="330" rx="10" class="card"/>
+  <text x="516" y="86" class="ttl">mset.cfg.Sources</text>
+  <text x="516" y="106" class="mono">[]*StreamSource</text>
+  <text x="516" y="126" class="muted">positional only &#8212; no iname index</text>
+
+  <!-- slice slots -->
+  <g>
+    <rect x="516" y="150" width="62" height="40" rx="5" class="slot"/><text x="547" y="175" text-anchor="middle" class="mono" fill="#633c01">[0]</text>
+    <rect x="582" y="150" width="62" height="40" rx="5" class="slot"/><text x="613" y="175" text-anchor="middle" class="mono" fill="#633c01">[1]</text>
+    <rect x="648" y="150" width="62" height="40" rx="5" class="slot"/><text x="679" y="175" text-anchor="middle" class="mono" fill="#633c01">[2]</text>
+    <rect x="714" y="150" width="62" height="40" rx="5" class="slot"/><text x="745" y="175" text-anchor="middle" class="mono" fill="#633c01">[3]</text>
+    <rect x="780" y="150" width="62" height="40" rx="5" class="slot"/><text x="811" y="175" text-anchor="middle" class="mono" fill="#633c01">[..]</text>
+  </g>
+  <!-- scan arrow -->
+  <path d="M 516 214 H 842" stroke="#cf222e" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arr)"/>
+  <text x="516" y="236" class="mono" fill="#cf222e">for _, ssi := range cfg.Sources { if ssi.iname == want {...} }</text>
+  <text x="686" y="300" text-anchor="middle" class="bad">streamSource(iname)  &#8594;  O(S)</text>
+  <text x="686" y="338" text-anchor="middle" class="muted" font-size="11.5">must walk every entry to map iname &#8594; config</text>
+  <text x="686" y="362" text-anchor="middle" class="muted" font-size="11.5">stream.go:3793</text>
+
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#57606a"/></marker>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#cf222e"/></marker>
+  </defs>
+</svg>

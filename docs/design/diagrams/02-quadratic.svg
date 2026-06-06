@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 470" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .ttl{font-size:17px;font-weight:700;fill:#1f2328}
+    .box{fill:#ffffff;stroke:#d0d7de;stroke-width:1.5}
+    .loopO{fill:#fff1e5;stroke:#bc4c00;stroke-width:1.5}
+    .loopI{fill:#ffebe9;stroke:#cf222e;stroke-width:1.5}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px}
+    .lbl{font-size:13px;fill:#1f2328}
+    .bad{font-size:14px;font-weight:700;fill:#cf222e}
+    .warn{font-size:13px;font-weight:700;fill:#bc4c00}
+    .muted{font-size:11.5px;fill:#656d76}
+  </style>
+  <rect x="0" y="0" width="900" height="470" fill="#f6f8fa"/>
+  <text x="24" y="34" class="ttl">How one walk becomes O(S&#178;): a loop inside a loop</text>
+
+  <!-- entry -->
+  <rect x="40" y="64" width="300" height="48" rx="8" class="box"/>
+  <text x="56" y="84" class="mono" fill="#0550ae">setupSourceConsumers()</text>
+  <text x="56" y="102" class="muted">runs on leader election / restart / R1 start &#183; stream.go:4805</text>
+
+  <!-- outer loop -->
+  <rect x="40" y="140" width="820" height="280" rx="10" class="loopO"/>
+  <text x="60" y="166" class="warn">for each of S sources  &#8594;  setupSourceConsumer(iname)</text>
+  <text x="60" y="184" class="muted">outer loop &#183; S iterations</text>
+
+  <!-- inner: trySetup -->
+  <rect x="80" y="200" width="740" height="56" rx="8" class="box"/>
+  <text x="96" y="222" class="mono" fill="#0550ae">trySetupSourceConsumer(iname)</text>
+  <text x="96" y="240" class="muted">stream.go:3897 &#8212; needs the *StreamSource config for ext prefix, filters, start policy</text>
+
+  <!-- inner loop -->
+  <rect x="80" y="276" width="740" height="120" rx="10" class="loopI"/>
+  <text x="100" y="302" class="bad">streamSource(iname)  &#8212;  for _, ssi := range cfg.Sources { ... }</text>
+  <text x="100" y="322" class="muted">inner walk &#183; up to S comparisons &#183; stream.go:3793</text>
+
+  <!-- multiply visual -->
+  <g class="mono" font-size="13" fill="#cf222e">
+    <text x="118" y="356">[0][1][2][3] ... [S]</text>
+    <text x="118" y="376">[0][1][2][3] ... [S]</text>
+  </g>
+  <text x="470" y="356" class="mono" font-size="13" fill="#cf222e">&#215; repeated for every</text>
+  <text x="470" y="376" class="mono" font-size="13" fill="#cf222e">  one of the S sources</text>
+
+  <!-- result -->
+  <rect x="560" y="64" width="300" height="48" rx="8" fill="#ffebe9" stroke="#cf222e" stroke-width="1.5"/>
+  <text x="710" y="84" text-anchor="middle" class="bad" font-size="18">S &#215; O(S) = O(S&#178;)</text>
+  <text x="710" y="103" text-anchor="middle" class="muted">S=1000  &#8594;  ~1,000,000 string compares</text>
+  <text x="710" y="103" text-anchor="middle" class="muted"></text>
+
+  <line x1="340" y1="88" x2="556" y2="88" stroke="#57606a" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="600" y="448" class="muted">All of this happens while holding mset.mu, blocking publishes, INFO requests, and other consumer setup.</text>
+  <defs><marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#57606a"/></marker></defs>
+</svg>

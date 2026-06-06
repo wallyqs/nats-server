@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 440" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .ttl{font-size:17px;font-weight:700;fill:#1f2328}
+    .axis{stroke:#8c959f;stroke-width:1.5}
+    .grid{stroke:#e1e4e8;stroke-width:1}
+    .lbl{font-size:12.5px;fill:#1f2328}
+    .muted{font-size:11.5px;fill:#656d76}
+    .bad{fill:none;stroke:#cf222e;stroke-width:3}
+    .good{fill:none;stroke:#1a7f37;stroke-width:3}
+  </style>
+  <rect x="0" y="0" width="900" height="440" fill="#f6f8fa"/>
+  <text x="24" y="34" class="ttl">Work per control-plane event vs. number of sources (S)</text>
+
+  <!-- plot area: x 90..830 (=740w), y 80..360 (=280h) -->
+  <!-- grid -->
+  <g class="grid">
+    <line x1="90" y1="360" x2="830" y2="360"/>
+    <line x1="90" y1="290" x2="830" y2="290"/>
+    <line x1="90" y1="220" x2="830" y2="220"/>
+    <line x1="90" y1="150" x2="830" y2="150"/>
+    <line x1="90" y1="80"  x2="830" y2="80"/>
+  </g>
+  <!-- axes -->
+  <line x1="90" y1="80" x2="90" y2="360" class="axis"/>
+  <line x1="90" y1="360" x2="830" y2="360" class="axis"/>
+  <text x="64" y="86" text-anchor="end" class="muted">work</text>
+  <text x="830" y="382" text-anchor="end" class="muted">S (sources) &#8594;</text>
+  <g class="muted" text-anchor="end">
+    <text x="82" y="364">0</text>
+    <text x="82" y="224">~250k</text>
+    <text x="82" y="84">~1M</text>
+  </g>
+  <g class="muted" text-anchor="middle">
+    <text x="90" y="378">0</text>
+    <text x="275" y="378">250</text>
+    <text x="460" y="378">500</text>
+    <text x="645" y="378">750</text>
+    <text x="830" y="378">1000</text>
+  </g>
+
+  <!-- O(S^2) curve: y = 360 - (S/1000)^2 * 280 ; sample -->
+  <path class="bad" d="M 90 360
+    L 164 358 L 238 352 L 312 343 L 386 329
+    L 460 290 L 534 256 L 608 215 L 682 168 L 756 126 L 830 80"/>
+  <circle cx="830" cy="80" r="4.5" fill="#cf222e"/>
+  <text x="700" y="118" class="lbl" fill="#cf222e" font-weight="700">today &#8212; O(S&#178;)</text>
+  <text x="700" y="136" class="muted">setup / update / INFO</text>
+
+  <!-- O(S) line: y = 360 - (S/1000)*40 (gentle) -->
+  <path class="good" d="M 90 360 L 830 332"/>
+  <circle cx="830" cy="332" r="4.5" fill="#1a7f37"/>
+  <text x="600" y="350" class="lbl" fill="#1a7f37" font-weight="700">proposed &#8212; O(S)  (map index)</text>
+
+  <!-- gap annotation -->
+  <line x1="830" y1="80" x2="830" y2="332" stroke="#8250df" stroke-width="1.4" stroke-dasharray="4 3"/>
+  <text x="846" y="210" class="lbl" fill="#8250df" transform="rotate(90 846 210)" text-anchor="middle">~25&#215; less work at S=1000</text>
+</svg>

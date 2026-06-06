@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 440" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .ttl{font-size:17px;font-weight:700;fill:#1f2328}
+    .card{fill:#ffffff;stroke:#d0d7de;stroke-width:1.5}
+    .new{fill:#ddf4ff;stroke:#0969da;stroke-width:1.8}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+    .lbl{font-size:13px;fill:#1f2328}
+    .muted{font-size:11.5px;fill:#656d76}
+    .good{font-size:13px;font-weight:700;fill:#1a7f37}
+    .blue{font-size:13px;font-weight:700;fill:#0969da}
+  </style>
+  <rect x="0" y="0" width="900" height="440" fill="#f6f8fa"/>
+  <text x="24" y="34" class="ttl">Proposal: derive two indexes when cfg.Sources changes</text>
+
+  <!-- source of truth -->
+  <rect x="40" y="64" width="300" height="70" rx="9" class="card"/>
+  <text x="56" y="88" class="mono" fill="#0550ae">mset.cfg.Sources  []*StreamSource</text>
+  <text x="56" y="108" class="muted">source of truth (unchanged)</text>
+  <text x="56" y="124" class="muted">mutated at: load, resetSourceInfo, update</text>
+
+  <!-- rebuild fn -->
+  <rect x="380" y="64" width="200" height="70" rx="9" class="new"/>
+  <text x="396" y="90" class="mono" fill="#0a3069">rebuildSourcesIndex()</text>
+  <text x="396" y="110" class="muted">one helper, lock held,</text>
+  <text x="396" y="126" class="muted">pure derived state</text>
+  <path d="M 340 99 H 376" stroke="#57606a" stroke-width="1.6" marker-end="url(#a)"/>
+
+  <!-- two derived maps -->
+  <rect x="620" y="50" width="250" height="78" rx="9" class="new"/>
+  <text x="636" y="74" class="blue">NEW &#8226; cfgSources</text>
+  <text x="636" y="94" class="mono" fill="#0a3069">map[iname]*StreamSource</text>
+  <text x="636" y="116" class="muted">streamSource() &#8594; map read &#183; O(1)</text>
+
+  <rect x="620" y="140" width="250" height="78" rx="9" class="new"/>
+  <text x="636" y="164" class="blue">NEW &#8226; cfgSourceNameCount</text>
+  <text x="636" y="184" class="mono" fill="#0a3069">map[streamName]int</text>
+  <text x="636" y="206" class="muted">kills by-name dedup walk &#183; O(1)</text>
+
+  <path d="M 580 99 C 600 99, 600 89, 618 89" stroke="#0969da" stroke-width="1.8" fill="none" marker-end="url(#b)"/>
+  <path d="M 580 110 C 600 150, 600 179, 618 179" stroke="#0969da" stroke-width="1.8" fill="none" marker-end="url(#b)"/>
+
+  <!-- effects -->
+  <text x="24" y="262" class="ttl" font-size="15">Effect on the control-plane callers</text>
+  <g>
+    <rect x="40" y="278" width="400" height="40" rx="7" class="card"/>
+    <text x="56" y="303" class="mono" fill="#0550ae">setupSourceConsumers</text>
+    <text x="430" y="303" text-anchor="end" class="good">O(S&#178;) &#8594; O(S)</text>
+
+    <rect x="40" y="324" width="400" height="40" rx="7" class="card"/>
+    <text x="56" y="349" class="mono" fill="#0550ae">sourceInfo / sourcesInfo (INFO)</text>
+    <text x="430" y="349" text-anchor="end" class="good">O(S&#178;) &#8594; O(S)</text>
+
+    <rect x="40" y="370" width="400" height="40" rx="7" class="card"/>
+    <text x="56" y="395" class="mono" fill="#0550ae">setStartingSequenceForSources</text>
+    <text x="430" y="395" text-anchor="end" class="good">drops the TODO walk</text>
+  </g>
+  <g>
+    <rect x="460" y="278" width="400" height="40" rx="7" class="card"/>
+    <text x="476" y="303" class="mono" fill="#0550ae">STREAM.UPDATE (sources)</text>
+    <text x="850" y="303" text-anchor="end" class="good">O(S&#178;) &#8594; O(S)</text>
+
+    <rect x="460" y="324" width="400" height="40" rx="7" class="card"/>
+    <text x="476" y="349" class="mono" fill="#0550ae">createSourcingConsumerHash</text>
+    <text x="850" y="349" text-anchor="end" class="good">O(S) &#8594; O(1) dedup</text>
+
+    <rect x="460" y="370" width="400" height="40" rx="7" class="card"/>
+    <text x="476" y="395" class="mono" fill="#0550ae">legacy header matching</text>
+    <text x="850" y="395" text-anchor="end" class="good">map[name] lookup</text>
+  </g>
+
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#57606a"/></marker>
+    <marker id="b" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#0969da"/></marker>
+  </defs>
+</svg>
