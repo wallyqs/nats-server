@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 500" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .ttl{font-size:16px;font-weight:700;fill:#1f2328}
+    .blk{fill:#ffffff;stroke:#8c959f;stroke-width:1.3}
+    .load{fill:#ffe3df;stroke:#cf222e;stroke-width:1.5}
+    .jump{fill:#dafbe1;stroke:#1a7f37;stroke-width:1.5}
+    .idx{fill:#ddf4ff;stroke:#0969da;stroke-width:1.6}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10.5px}
+    .muted{font-size:10.5px;fill:#656d76}
+    .bad{font-size:12px;font-weight:700;fill:#cf222e}
+    .good{font-size:12px;font-weight:700;fill:#1a7f37}
+    .s1{fill:#0969da}.s2{fill:#9a6700}.s3{fill:#bf3989}
+  </style>
+  <rect x="0" y="0" width="900" height="500" fill="#f6f8fa"/>
+
+  <!-- ===== BEFORE ===== -->
+  <text x="24" y="34" class="bad">BEFORE &#8212; backward header scan (startingSequenceForSources)</text>
+  <g>
+    <rect x="24" y="50" width="100" height="58" rx="5" class="blk"/><text x="74" y="122" text-anchor="middle" class="muted">B1</text>
+    <rect x="128" y="50" width="100" height="58" rx="5" class="load"/><text x="178" y="122" text-anchor="middle" class="muted">B2</text>
+    <rect x="232" y="50" width="100" height="58" rx="5" class="load"/><text x="282" y="122" text-anchor="middle" class="muted">B3</text>
+    <rect x="336" y="50" width="100" height="58" rx="5" class="load"/><text x="386" y="122" text-anchor="middle" class="muted">B4</text>
+    <rect x="440" y="50" width="100" height="58" rx="5" class="load"/><text x="490" y="122" text-anchor="middle" class="muted">B5</text>
+    <rect x="544" y="50" width="100" height="58" rx="5" class="load"/><text x="594" y="122" text-anchor="middle" class="muted">B6</text>
+    <rect x="648" y="50" width="100" height="58" rx="5" class="load"/><text x="698" y="122" text-anchor="middle" class="muted">B7</text>
+    <rect x="752" y="50" width="100" height="58" rx="5" class="load"/><text x="802" y="122" text-anchor="middle" class="muted">B8</text>
+    <!-- source dots -->
+    <circle cx="810" cy="68" r="5" class="s1"/><circle cx="700" cy="68" r="5" class="s2"/><circle cx="178" cy="72" r="6" class="s3"/>
+  </g>
+  <path d="M 852 92 H 150" stroke="#cf222e" stroke-width="2.2" marker-end="url(#r)"/>
+  <text x="500" y="150" text-anchor="middle" class="bad">load + decrypt + decompress EVERY block from LastSeq back to the quiet source S3 (B2)</text>
+  <text x="500" y="170" text-anchor="middle" class="muted">cost = O(#blocks back to the least-recently-active source) &#8212; worst case the whole store</text>
+
+  <!-- ===== AFTER ===== -->
+  <text x="24" y="232" class="good">AFTER &#8212; index lookup per source (LoadLastMsg / psim), header verifies the source</text>
+
+  <!-- index box -->
+  <rect x="24" y="250" width="180" height="78" rx="8" class="idx"/>
+  <text x="114" y="274" text-anchor="middle" class="mono" fill="#0a3069">subject index</text>
+  <text x="114" y="290" text-anchor="middle" class="mono" fill="#0a3069">fs.psim / mb.fss</text>
+  <text x="114" y="312" text-anchor="middle" class="muted">last block per subject</text>
+
+  <g>
+    <rect x="24" y="360" width="100" height="58" rx="5" class="blk"/><text x="74" y="432" text-anchor="middle" class="muted">B1</text>
+    <rect x="128" y="360" width="100" height="58" rx="5" class="jump"/><text x="178" y="432" text-anchor="middle" class="muted">B2</text>
+    <rect x="232" y="360" width="100" height="58" rx="5" class="blk"/><text x="282" y="432" text-anchor="middle" class="muted">B3</text>
+    <rect x="336" y="360" width="100" height="58" rx="5" class="blk"/><text x="386" y="432" text-anchor="middle" class="muted">B4</text>
+    <rect x="440" y="360" width="100" height="58" rx="5" class="blk"/><text x="490" y="432" text-anchor="middle" class="muted">B5</text>
+    <rect x="544" y="360" width="100" height="58" rx="5" class="blk"/><text x="594" y="432" text-anchor="middle" class="muted">B6</text>
+    <rect x="648" y="360" width="100" height="58" rx="5" class="jump"/><text x="698" y="432" text-anchor="middle" class="muted">B7</text>
+    <rect x="752" y="360" width="100" height="58" rx="5" class="jump"/><text x="802" y="432" text-anchor="middle" class="muted">B8</text>
+    <circle cx="810" cy="378" r="5" class="s1"/><circle cx="700" cy="378" r="5" class="s2"/><circle cx="178" cy="382" r="6" class="s3"/>
+  </g>
+  <!-- targeted jumps -->
+  <path d="M 150 328 C 300 344, 760 350, 805 358" stroke="#0969da" stroke-width="1.8" fill="none" marker-end="url(#g)"/>
+  <path d="M 160 328 C 350 350, 660 352, 700 358" stroke="#9a6700" stroke-width="1.8" fill="none" marker-end="url(#g)"/>
+  <path d="M 130 328 C 150 344, 170 350, 178 358" stroke="#bf3989" stroke-width="1.8" fill="none" marker-end="url(#g)"/>
+  <text x="450" y="468" text-anchor="middle" class="good">one targeted block per source (S1&#8594;B8, S2&#8594;B7, S3&#8594;B2) &#8212; cost = O(S), independent of store size or sparsity</text>
+  <text x="450" y="488" text-anchor="middle" class="muted">B3&#8211;B6 never touched. Verify header iname == source; ambiguous/wildcard/pre-2.10 sources fall back to a tiny scan.</text>
+
+  <defs>
+    <marker id="r" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#cf222e"/></marker>
+    <marker id="g" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#1a7f37"/></marker>
+  </defs>
+</svg>
