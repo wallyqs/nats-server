@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 460" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .ttl{font-size:17px;font-weight:700;fill:#1f2328}
+    .box{fill:#ffffff;stroke:#d0d7de;stroke-width:1.5}
+    .cold{fill:#dafbe1;stroke:#1a7f37;stroke-width:1.6}
+    .hot{fill:#ffebe9;stroke:#cf222e;stroke-width:1.6}
+    .dia{fill:#ddf4ff;stroke:#0969da;stroke-width:1.8}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px}
+    .lbl{font-size:12.5px;fill:#1f2328}
+    .muted{font-size:11px;fill:#656d76}
+    .good{font-size:12.5px;font-weight:700;fill:#1a7f37}
+    .bad{font-size:12.5px;font-weight:700;fill:#cf222e}
+  </style>
+  <rect x="0" y="0" width="900" height="460" fill="#f6f8fa"/>
+  <text x="24" y="30" class="ttl">Origin-side decision (jetstream_api.go:4595&#8211;4610): durable vs ephemeral sourcing consumer</text>
+
+  <!-- request -->
+  <rect x="300" y="50" width="300" height="62" rx="9" class="box"/>
+  <text x="450" y="72" text-anchor="middle" class="mono" fill="#0550ae">CONSUMER.CREATE</text>
+  <text x="450" y="92" text-anchor="middle" class="muted">Direct:true, Sourcing:true, Name:"JS_SRC_&lt;hash&gt;"</text>
+
+  <!-- diamond -->
+  <polygon points="450,140 640,210 450,280 260,210" class="dia"/>
+  <text x="450" y="200" text-anchor="middle" class="lbl" font-weight="700">origin stream is</text>
+  <text x="450" y="218" text-anchor="middle" class="lbl" font-weight="700">Interest/WQ retention</text>
+  <text x="450" y="236" text-anchor="middle" class="muted">AND not clustered ?</text>
+  <path d="M 450 112 V 138" stroke="#57606a" stroke-width="1.6" marker-end="url(#a)"/>
+
+  <!-- YES branch -->
+  <text x="150" y="206" text-anchor="middle" class="good">YES</text>
+  <rect x="40" y="250" width="300" height="150" rx="10" class="cold"/>
+  <text x="60" y="276" class="good">DURABLE (reliable)</text>
+  <text x="60" y="298" class="mono" fill="#0a3069">Direct = false</text>
+  <text x="60" y="316" class="mono" fill="#0a3069">Durable = Name        (stable)</text>
+  <text x="60" y="334" class="mono" fill="#0a3069">AckPolicy = AckFlowControl</text>
+  <text x="60" y="352" class="mono" fill="#0a3069">InactiveThreshold = 0  (no expiry)</text>
+  <text x="60" y="378" class="muted">Position persists &amp; replicates on origin.</text>
+  <text x="60" y="394" class="muted">Survives disconnect &#8594; HUB resumes from it.</text>
+  <path d="M 260 210 C 180 210, 160 230, 150 248" stroke="#1a7f37" stroke-width="1.8" fill="none" marker-end="url(#g)"/>
+
+  <!-- NO branch -->
+  <text x="760" y="206" text-anchor="middle" class="bad">NO (Limits, or clustered)</text>
+  <rect x="560" y="250" width="300" height="150" rx="10" class="hot"/>
+  <text x="580" y="276" class="bad">EPHEMERAL (today)</text>
+  <text x="580" y="298" class="mono" fill="#0a3069">Name += "-" + random      (unstable)</text>
+  <text x="580" y="316" class="mono" fill="#0a3069">Direct = true</text>
+  <text x="580" y="334" class="mono" fill="#0a3069">AckPolicy = AckNone</text>
+  <text x="580" y="352" class="mono" fill="#0a3069">InactiveThreshold = 10s  (auto-delete)</text>
+  <text x="580" y="378" class="muted">No persisted position; a new consumer each</text>
+  <text x="580" y="394" class="muted">recreate &#8594; HUB must block-scan to resume.</text>
+  <path d="M 640 210 C 720 210, 740 230, 760 248" stroke="#cf222e" stroke-width="1.8" fill="none" marker-end="url(#r)"/>
+
+  <text x="24" y="432" class="muted">isInterestRetention() = (Retention != LimitsPolicy), stream.go:8536. So a limits-based origin always lands on the ephemeral path today.</text>
+
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#57606a"/></marker>
+    <marker id="g" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#1a7f37"/></marker>
+    <marker id="r" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#cf222e"/></marker>
+  </defs>
+</svg>
