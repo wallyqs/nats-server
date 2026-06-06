@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .ttl{font-size:17px;font-weight:700;fill:#1f2328}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+    .muted{font-size:12px;fill:#656d76}
+    .lbl{font-size:12.5px;fill:#1f2328}
+    .pName{fill:#dafbe1;stroke:#1a7f37;stroke-width:1.5}
+    .pExt{fill:#ddf4ff;stroke:#0969da;stroke-width:1.5}
+    .pSrc{fill:#fff8c5;stroke:#9a6700;stroke-width:1.5}
+    .pDst{fill:#ffeff7;stroke:#bf3989;stroke-width:1.5}
+  </style>
+  <rect x="0" y="0" width="900" height="360" fill="#f6f8fa"/>
+  <text x="24" y="32" class="ttl">Anatomy of an iname (source index name)</text>
+  <text x="24" y="56" class="muted">A stable, unique string ID for one source inside a sourcing stream. Format: &#8220;idName  source  destination&#8221; (space-separated).</text>
+
+  <!-- the example string, big -->
+  <text x="24" y="104" class="mono" font-size="22" fill="#1f2328">"ORDERS:7f3a9k2p<tspan fill="#8c959f"> </tspan>orders.us<tspan fill="#8c959f"> </tspan>&gt;"</text>
+
+  <!-- brackets/boxes under parts -->
+  <!-- ORDERS -->
+  <rect x="33" y="120" width="92" height="26" rx="5" class="pName"/>
+  <text x="79" y="138" text-anchor="middle" class="mono" font-size="12" fill="#0a3069">origin name</text>
+  <!-- :7f3a9k2p -->
+  <rect x="125" y="120" width="118" height="26" rx="5" class="pExt"/>
+  <text x="184" y="138" text-anchor="middle" class="mono" font-size="12" fill="#0a3069">: hash(ApiPrefix)</text>
+  <!-- orders.us -->
+  <rect x="270" y="120" width="118" height="26" rx="5" class="pSrc"/>
+  <text x="329" y="138" text-anchor="middle" class="mono" font-size="12" fill="#0a3069">source filter</text>
+  <!-- > -->
+  <rect x="404" y="120" width="60" height="26" rx="5" class="pDst"/>
+  <text x="434" y="138" text-anchor="middle" class="mono" font-size="12" fill="#0a3069">dest</text>
+
+  <!-- explanation rows -->
+  <g class="lbl">
+    <rect x="24" y="176" width="14" height="14" rx="3" class="pName"/><text x="46" y="188">origin stream name (here <tspan class="mono">ORDERS</tspan>)</text>
+    <rect x="24" y="202" width="14" height="14" rx="3" class="pExt"/><text x="46" y="214">present only for <tspan class="mono">External</tspan> sources &#8212; 8-char <tspan class="mono">getHash(ApiPrefix)</tspan>, e.g. JS domain <tspan class="mono">$JS.edge1.API</tspan></text>
+    <rect x="24" y="228" width="14" height="14" rx="3" fill="#ddf4ff" stroke="#0969da"/><text x="46" y="240">(a durable consumer adds <tspan class="mono">:C=hash(consumerName)</tspan> too)</text>
+    <rect x="24" y="254" width="14" height="14" rx="3" class="pSrc"/><text x="46" y="266">filter subject, or <tspan class="mono">&gt;</tspan> if none (transforms are joined with \f)</text>
+    <rect x="24" y="280" width="14" height="14" rx="3" class="pDst"/><text x="46" y="292">destination transform, or <tspan class="mono">&gt;</tspan> if none</text>
+  </g>
+
+  <text x="24" y="330" class="muted">Why it exists: one stream may source the same origin many times with different filters/domains, so <tspan class="mono" font-size="11">Name</tspan> alone is not unique &#8212; the iname is.</text>
+</svg>
