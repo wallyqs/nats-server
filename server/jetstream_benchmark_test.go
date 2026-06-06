@@ -2383,7 +2383,7 @@ func BenchmarkJetStreamScanForSourcesMulti(b *testing.B) {
 // straight to each edge's last message, so its cost grows only with the number
 // of edges.
 func BenchmarkJetStreamSourceResumeLeafnodeFanIn(b *testing.B) {
-	for _, numLeaf := range []int{8, 32, 128} {
+	for _, numLeaf := range []int{8, 32, 128, 512} {
 		// Depth of the chatty edge's sourced tail that buries the quiet edges'
 		// last sourced messages. All of it is on an in-sublist subject, so the
 		// old reverse scan cannot skip any of it.

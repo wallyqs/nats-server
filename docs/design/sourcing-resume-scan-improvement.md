@@ -363,8 +363,9 @@ A working prototype of the two-phase resolver is implemented in `startingSequenc
 * Tests (all pass, incl. `-race`): `…IndexFastPath`, `…Ambiguity` (catch-all + shared concrete
   destination), `…TemplatedTransform` (wildcard transform), `…SharedWildcardTransform` (two templated
   transforms sharing a `gout.*` space), and `TestJetStreamSetStartingSequenceForSourcesIndex` (twin).
-* `BenchmarkJetStreamScanForSources` (existing, single source) and a new
-  `BenchmarkJetStreamScanForSourcesMulti` (16 sources spread across the store).
+* `BenchmarkJetStreamScanForSources` (existing, single source), `BenchmarkJetStreamScanForSourcesMulti`
+  (16 sources spread across the store), and `BenchmarkJetStreamSourceResumeLeafnodeFanIn` (8–512 edges
+  feeding a hub, quiet edges buried under an all-sourced tail — see the fan-in table below).
 * Existing sourcing suite
   (`SourceBasics`, `SourceRemovalAndReAdd`, `WorkQueueSourceRestart`, `SourceWorkingQueueWithLimit`,
   `StreamSourceWithoutDuplicateWindow`, `MirrorAndSourcesFilteredConsumers`) still passes.
@@ -379,6 +380,40 @@ A working prototype of the two-phase resolver is implemented in `startingSequenc
 The single-source gap is modest because `LoadPrevMsgMulti` already skips non-matching messages
 per block; the win scales with the number of sources (each avoids a re-walk via a direct `psim` jump),
 which is exactly the edge→hub fan-in case.
+
+#### Leafnode fan-in resume (the leader-election case)
+
+`BenchmarkJetStreamSourceResumeLeafnodeFanIn` models the scenario directly: a hub sources from *N*
+edge/leafnode streams, then one chatty edge sources a deep 100k tail that buries the other edges' last
+messages. Crucially the hub store is **entirely sourced edge subjects** — as a real fan-in is — so every
+block matches the recovery sublist and *none* can be skipped. This is the work a freshly elected leader
+runs (`startingSequenceForSources`) before it can resume sourcing. One op == one full recovery.
+
+| edges | Before (reverse scan) | After (phase 1) | Speedup | allocs/op before → after |
+|------:|----------------------:|----------------:|--------:|-------------------------:|
+| 8     | 10.1 ms | 0.27 ms | **37×** | 324 → 46 |
+| 32    | 10.8 ms | 0.38 ms | **28×** | 3,325 → 173 |
+| 128   | 15.8 ms | 0.73 ms | **22×** | 44,358 → 657 |
+| 512   | 101.2 ms | 2.00 ms | **51×** | 674,344 → 2,572 |
+
+*(filestore, single-server, `-benchtime=50x`, both columns on the same 2.8 GHz host; "before" measured by
+splicing in the pre-optimization function from the parent commit.)*
+
+Two effects compound, and the table separates them:
+
+* **Store-bound vs source-bound.** "Before" carries a ~10 ms floor *independent of edge count* — it must
+  reverse-scan the whole 100k tail to reach the buried quiet edges. "After" is flat in tail depth and
+  scales only with edge count (one `LoadLastMsg` index jump each).
+* **The O(sources²) sublist rebuild.** The old Phase 2 rebuilt the whole sublist on *every* source it
+  resolved (`refreshSublist` per `update`). At 512 sources that is ~260k inserts per recovery — the
+  "before" jumps to 101 ms and **49.8 MB / 674k allocs**. Phase 1 resolves these without ever building a
+  sublist, so allocations drop by ~260× at 512 edges.
+
+> Caveat: this is a micro-benchmark of the recovery function, not a full Raft election — an actual
+> election adds a fixed quorum/round-trip cost on top of *both* columns equally. An earlier draft buried
+> the edges under *direct* (non-sourced) hub traffic; there the old per-block `fss` skipping rescued the
+> scan (only ~5×), which is not representative of a pure fan-in. The committed benchmark uses an
+> all-sourced tail so nothing is skippable.
 
 ### What still forces a full `>` scan in Phase 2 (by design)
 
