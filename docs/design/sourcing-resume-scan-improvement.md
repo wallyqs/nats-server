@@ -257,7 +257,54 @@ if len(unresolved) > 0 {
 The edge→hub topology (each edge mapped to a distinct subject/domain) lands entirely in Phase 1 → the
 backward scan disappears for that case.
 
-## 7. Correctness & edge cases
+## 7. Phase 2: keeping the fallback scan narrow
+
+Phase 1 removes most sources from the picture, but whatever remains still runs the reverse
+`LoadPrevMsgMulti` scan. That scan's whole speed advantage depends on the **sublist being narrow** —
+`prevMatchingMulti` uses each block's `fss` to skip blocks that contain none of the sublist's subjects.
+A single `>` (full wildcard) in the sublist defeats that: it matches every subject, so no block can be
+skipped and the scan visits every block back to the match.
+
+![Phase 2 sublist narrowing](diagrams/17-phase2-narrowing.svg)
+
+### What used to inject `>`
+
+1. **Every transform source.** A transform source has an empty `FilterSubject` (mutually exclusive with
+   `SubjectTransforms`, `stream.go:1976`), so the old `refreshSublist` did `sl.Insert(fwcs)`. One
+   transform source in the unresolved set widened the whole sublist to `>` → full backward scan.
+2. **Templated transforms were deferred to Phase 2 at all.** Their *rendered* destination is a narrow
+   wildcard (e.g. `tout.{{wildcard(1)}}` always lands on `tout.*`), so they don't need a full scan.
+3. **Dead entries.** Phase 2 also inserted `si.sfs` — the transform *source* filters (e.g. `tin.*`) —
+   which never match stored subjects (messages are stored under the *destination*).
+
+### The two changes
+
+* **Resolve wildcard transforms in Phase 1.** `transformUntokenize(dest)` collapses `wildcard()`/`$N`
+  mapping tokens to a subject wildcard (`tout.{{wildcard(1)}}` → `tout.*`); `LoadLastMsg` accepts that
+  wildcard and the header-`iname` check still guards attribution. So the common templated transforms
+  resolve in Phase 1 and never reach the scan.
+* **Build the Phase 2 sublist from destinations.** For any transform source that *does* reach Phase 2
+  (e.g. its wildcard space is shared with another source, so Phase 1 saw a header for the other one),
+  insert the destination's wildcard form instead of `>`, and drop the dead `si.sfs` inserts.
+
+### What still forces `>` (by design)
+
+Only a source that *genuinely* needs a broad match:
+
+* a **catch-all source** — empty `FilterSubject`, no transform — sourcing every subject of its origin; and
+* an **exotic transform** (`partition`/`split`/`slice`/…) whose rendered destination isn't a subject
+  wildcard, so `transformUntokenize` can't reduce it (it leaves the `{{…}}` token in place, which we
+  detect and fall back to `>`).
+
+Both are uncommon for the edge→hub fan-in. Distinct subjects, wildcard filters, and `wildcard()`/`$N`
+transforms all either resolve in Phase 1 or keep the Phase 2 sublist narrow enough to skip blocks.
+
+> Correctness note: this is purely about *narrowing*, never about *missing* a source. If a narrowed
+> subject is wrong (shared space), the header check fails and the source stays in the unresolved set; an
+> exotic/empty case falls back to `>`. So Phase 2 still finds every source it did before — it just
+> loads far fewer blocks getting there.
+
+## 8. Correctness & edge cases
 
 * **Same semantics.** Today's scan records, per source, the **most recent** stored message's origin seq
   (first hit scanning backward). `LoadLastMsg` returns exactly that message. Deleted/interior messages
@@ -275,7 +322,7 @@ backward scan disappears for that case.
 * **`setStartingSequenceForSources`** (the `STREAM.UPDATE` path, `stream.go:4566`) gets the same Phase 1
   treatment for the subset of sources it processes.
 
-## 8. Risks
+## 9. Risks
 
 * **Index freshness.** `psim`/`fss` may lazily need a recalculation (`lastNeedsUpdate`,
   `recalculateForSubj`); `loadLast`/`MultiLastSeqs` already handle that, so we inherit correct behaviour.
@@ -284,7 +331,7 @@ backward scan disappears for that case.
 * **Encryption/compression.** Phase 1 still loads the one block holding a source's last message
   (decrypt/decompress), but only that block — no change in correctness, large reduction in volume.
 
-## 9. Testing & validation
+## 10. Testing & validation
 
 ### Prototype status — implemented ✅
 
@@ -363,7 +410,7 @@ old sublist inserted a `>` catch-all that matched the destination anyway (verifi
 the `>` defeated block skipping — now fixed by building the Phase 2 sublist from the destination
 wildcard form and dropping the dead `si.sfs` inserts.
 
-## 10. Relationship to the durable-consumer proposal
+## 11. Relationship to the durable-consumer proposal
 
 This change is **orthogonal and complementary** to the durable-consumer/`si.sseq`-persistence ideas in
 `sourcing-durable-resume.md`:

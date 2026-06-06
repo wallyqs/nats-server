@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 500" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .ttl{font-size:16px;font-weight:700;fill:#1f2328}
+    .sub{fill:#ffffff;stroke:#d0d7de;stroke-width:1.5}
+    .tok{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+    .load{fill:#ffe3df;stroke:#cf222e;stroke-width:1.4}
+    .skip{fill:#eef1f4;stroke:#c2c8cf;stroke-width:1.2;stroke-dasharray:3 3}
+    .hit{fill:#dafbe1;stroke:#1a7f37;stroke-width:1.6}
+    .muted{font-size:11px;fill:#656d76}
+    .bad{font-size:12.5px;font-weight:700;fill:#cf222e}
+    .good{font-size:12.5px;font-weight:700;fill:#1a7f37}
+    .pill{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px}
+  </style>
+  <rect x="0" y="0" width="900" height="500" fill="#f6f8fa"/>
+  <text x="24" y="30" class="ttl">Phase 2 sublist narrowing: one transform source no longer poisons the whole scan</text>
+
+  <!-- ===== BEFORE ===== -->
+  <text x="24" y="62" class="bad">BEFORE — transform/catch-all source injects ">" (empty FilterSubject)</text>
+  <rect x="24" y="74" width="300" height="96" rx="9" class="sub"/>
+  <text x="40" y="94" class="muted">sublist for unresolved sources</text>
+  <rect x="40" y="104" width="44" height="26" rx="13" fill="#ffd1cc" stroke="#cf222e"/><text x="62" y="122" text-anchor="middle" class="pill" fill="#cf222e">&gt;</text>
+  <rect x="92" y="104" width="86" height="26" rx="13" fill="#eef1f4" stroke="#c2c8cf"/><text x="135" y="122" text-anchor="middle" class="pill" fill="#57606a">tin.* (dead)</text>
+  <rect x="186" y="104" width="48" height="26" rx="13" fill="#eef1f4" stroke="#c2c8cf"/><text x="210" y="122" text-anchor="middle" class="pill" fill="#57606a">s1</text>
+  <text x="40" y="156" class="bad">"&gt;" matches every subject → no block skipping</text>
+
+  <!-- blocks all loaded -->
+  <g>
+    <rect x="360" y="92" width="58" height="50" rx="5" class="load"/><text x="389" y="158" text-anchor="middle" class="muted">B1</text>
+    <rect x="422" y="92" width="58" height="50" rx="5" class="load"/><text x="451" y="158" text-anchor="middle" class="muted">B2</text>
+    <rect x="484" y="92" width="58" height="50" rx="5" class="load"/><text x="513" y="158" text-anchor="middle" class="muted">B3</text>
+    <rect x="546" y="92" width="58" height="50" rx="5" class="load"/><text x="575" y="158" text-anchor="middle" class="muted">B4</text>
+    <rect x="608" y="92" width="58" height="50" rx="5" class="load"/><text x="637" y="158" text-anchor="middle" class="muted">B5</text>
+    <rect x="670" y="92" width="58" height="50" rx="5" class="load"/><text x="699" y="158" text-anchor="middle" class="muted">B6</text>
+    <rect x="732" y="92" width="58" height="50" rx="5" class="load"/><text x="761" y="158" text-anchor="middle" class="muted">B7</text>
+    <rect x="794" y="92" width="58" height="50" rx="5" class="load"/><text x="823" y="158" text-anchor="middle" class="muted">B8</text>
+  </g>
+  <text x="606" y="184" text-anchor="middle" class="bad">every block visited (loaded/decompressed)</text>
+
+  <!-- ===== AFTER ===== -->
+  <text x="24" y="246" class="good">AFTER — phase 1 resolves wildcard transforms; phase 2 sublist uses destinations</text>
+
+  <text x="24" y="276" class="muted">step 1: phase 1 collapses wildcard()/$N tokens and resolves via the index</text>
+  <rect x="24" y="284" width="380" height="40" rx="8" class="hit"/>
+  <text x="38" y="309" class="pill" fill="#0a3069">tout.{{wildcard(1)}}  →  tout.*  →  LoadLastMsg("tout.*")  ✓</text>
+
+  <text x="24" y="352" class="muted">step 2: only genuinely-unresolved sources remain; sublist stays narrow</text>
+  <rect x="24" y="360" width="300" height="74" rx="9" class="sub"/>
+  <rect x="40" y="376" width="78" height="26" rx="13" fill="#dafbe1" stroke="#1a7f37"/><text x="79" y="394" text-anchor="middle" class="pill" fill="#0a3069">tout.*</text>
+  <rect x="126" y="376" width="48" height="26" rx="13" fill="#dafbe1" stroke="#1a7f37"/><text x="150" y="394" text-anchor="middle" class="pill" fill="#0a3069">s1</text>
+  <text x="40" y="423" class="good">specific subjects → blocks without them are skipped</text>
+
+  <!-- blocks mostly skipped -->
+  <g>
+    <rect x="360" y="360" width="58" height="50" rx="5" class="skip"/><text x="389" y="426" text-anchor="middle" class="muted">B1</text>
+    <rect x="422" y="360" width="58" height="50" rx="5" class="hit"/><text x="451" y="426" text-anchor="middle" class="muted">B2</text>
+    <rect x="484" y="360" width="58" height="50" rx="5" class="skip"/><text x="513" y="426" text-anchor="middle" class="muted">B3</text>
+    <rect x="546" y="360" width="58" height="50" rx="5" class="skip"/><text x="575" y="426" text-anchor="middle" class="muted">B4</text>
+    <rect x="608" y="360" width="58" height="50" rx="5" class="skip"/><text x="637" y="426" text-anchor="middle" class="muted">B5</text>
+    <rect x="670" y="360" width="58" height="50" rx="5" class="hit"/><text x="699" y="426" text-anchor="middle" class="muted">B6</text>
+    <rect x="732" y="360" width="58" height="50" rx="5" class="skip"/><text x="761" y="426" text-anchor="middle" class="muted">B7</text>
+    <rect x="794" y="360" width="58" height="50" rx="5" class="skip"/><text x="823" y="426" text-anchor="middle" class="muted">B8</text>
+  </g>
+  <text x="606" y="452" text-anchor="middle" class="good">only blocks containing tout.* / s1 are loaded</text>
+
+  <text x="24" y="484" class="muted">Remaining "&gt;" cases (by design): a genuine catch-all source (empty filter, no transform) or an exotic transform (partition/split).</text>
+</svg>
