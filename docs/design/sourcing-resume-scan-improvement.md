@@ -301,16 +301,26 @@ A working prototype of the two-phase resolver is implemented in `startingSequenc
 * `TestJetStreamSetStartingSequenceForSourcesIndex` — the same fast path applied to the
   `STREAM.UPDATE` twin `setStartingSequenceForSources` (distinct subject + catch-all + a
   **concrete-destination transform** source), clearing and recovering `sseq`. **Passes.**
-* **Transform fast path:** a source with a single concrete-destination transform is now resolved in
-  Phase 1 (via `LoadLastMsg(destination)`) in both functions; multi/templated transforms still defer
-  to Phase 2.
+* **Transform fast path:** a source with a single subject transform is resolved in Phase 1 by
+  collapsing `wildcard()`/`$N` mapping tokens to a wildcard form (`transformUntokenize`, e.g.
+  `tout.{{wildcard(1)}}` → `tout.*`) and doing `LoadLastMsg(wildcardForm)`, verified by the header.
+  Only multi-transform and **exotic** transforms (`partition`/`split`/… that don't reduce to a subject
+  wildcard) still defer to Phase 2.
+* **Phase 2 no longer degrades to `>` for transform sources.** Previously a transform source (empty
+  `FilterSubject`) inserted a `>` catch-all into the sublist, defeating per-block skipping for the whole
+  scan. The Phase 2 sublist is now built from the transform **destinations** (wildcard form), with the
+  dead `si.sfs` source-filter inserts removed; only a genuine catch-all source or an exotic transform
+  still forces `>`.
 * The change was also applied to `setStartingSequenceForSources` itself (`stream.go:4566`), so both the
-  leader-election and the config-update resume paths use the index fast path.
+  leader-election and the config-update resume paths use the index fast path and the narrowed sublist.
+* Tests (all pass, incl. `-race`): `…IndexFastPath`, `…Ambiguity` (catch-all + shared concrete
+  destination), `…TemplatedTransform` (wildcard transform), `…SharedWildcardTransform` (two templated
+  transforms sharing a `gout.*` space), and `TestJetStreamSetStartingSequenceForSourcesIndex` (twin).
 * `BenchmarkJetStreamScanForSources` (existing, single source) and a new
   `BenchmarkJetStreamScanForSourcesMulti` (16 sources spread across the store).
-* New tests pass under `-race`; existing sourcing suite
+* Existing sourcing suite
   (`SourceBasics`, `SourceRemovalAndReAdd`, `WorkQueueSourceRestart`, `SourceWorkingQueueWithLimit`,
-  `StreamSourceWithoutDuplicateWindow`) still passes.
+  `StreamSourceWithoutDuplicateWindow`, `MirrorAndSourcesFilteredConsumers`) still passes.
 
 ### Measured (filestore, single-server)
 
@@ -323,23 +333,35 @@ The single-source gap is modest because `LoadPrevMsgMulti` already skips non-mat
 per block; the win scales with the number of sources (each avoids a re-walk via a direct `psim` jump),
 which is exactly the edge→hub fan-in case.
 
+### What still forces a full `>` scan in Phase 2 (by design)
+
+After the above, Phase 2 only widens to `>` (no block skipping) when a source *genuinely* needs it:
+
+* a **catch-all source** — empty `FilterSubject`, no transform — that sources every subject of its
+  origin (it really can land anywhere, so a broad match is correct); and
+* an **exotic transform** (`partition`/`split`/`slice`/…) whose rendered destination is not a subject
+  wildcard, so `transformUntokenize` can't reduce it to a matchable pattern.
+
+Both are uncommon for the edge→hub fan-in. Everything else — distinct subjects, wildcard filters,
+`wildcard()`/`$N` transforms — either resolves in Phase 1 or narrows the Phase 2 sublist to a concrete
+or wildcard subject.
+
 ### Still to do
 
-* **Pre-2.10 / direct-publish-overlap coverage:** add explicit cases (the prototype handles these via
-  the header check and the phase 2 fallback; tests would lock the behaviour in). Hard to construct
-  through the JS client because streams can't declare overlapping subjects; would need low-level store
-  seeding.
-* Run the full sourcing suite under `-race` (the new tests already pass under `-race`).
+* **Pre-2.10 / direct-publish-overlap coverage:** add explicit cases (handled today via the header
+  check and the Phase 2 fallback; tests would lock the behaviour in). Hard to construct through the JS
+  client because streams can't declare overlapping subjects; would need low-level store seeding.
+* A `partition`/`split` transform benchmark to confirm the (rare) `>` path is acceptable.
 
-### Observed (separate, pre-existing)
+### Resolved finding (was suspected pre-existing bug)
 
-`setStartingSequenceForSources`'s **phase 2** sublist is built from `si.sfs` (the transform **source**
-filters), whereas sourced messages are stored under the transform **destination**. So a *newly added
-transform source* that falls through to phase 2 (multi/templated transforms) looks for the wrong
-subject and won't find prior messages (leaves `sseq` at 0 — usually harmless for a fresh source, but
-incorrect if the same destination was previously populated). The new phase 1 fast path sidesteps this
-for the common single-concrete-destination case; `startingSequenceForSources` uses the destination
-correctly throughout. Fixing the phase 2 sublist for multi/templated transforms is a separate change.
+An earlier note suspected `setStartingSequenceForSources` mishandled transform sources because its
+Phase 2 sublist used `si.sfs` (transform **source** filters) rather than the **destination**. On
+inspection this was **not** a correctness bug: transform sources have an empty `FilterSubject`, so the
+old sublist inserted a `>` catch-all that matched the destination anyway (verified by
+`TestJetStreamStartingSequenceForSourcesTemplatedTransform`). It was purely an **efficiency** problem —
+the `>` defeated block skipping — now fixed by building the Phase 2 sublist from the destination
+wildcard form and dropping the dead `si.sfs` inserts.
 
 ## 10. Relationship to the durable-consumer proposal
 

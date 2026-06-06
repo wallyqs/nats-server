@@ -326,3 +326,70 @@ func TestJetStreamStartingSequenceForSourcesTemplatedTransform(t *testing.T) {
 		t.Fatalf("setStartingSequenceForSources: expected %d, got %d", n, upd)
 	}
 }
+
+// Two sources with templated transforms onto the same wildcard destination
+// space (gout.*) with distinct rendered subjects. Exercises phase 1 resolving
+// a wildcard transform via transformUntokenize + LoadLastMsg, and the phase 2
+// fallback narrowing on the wildcard form (gout.*) rather than ">".
+func TestJetStreamStartingSequenceForSourcesSharedWildcardTransform(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	jsStreamCreate(t, nc, &StreamConfig{Name: "G", Subjects: []string{"gin.>"}, Storage: FileStorage})
+	jsStreamCreate(t, nc, &StreamConfig{Name: "H", Subjects: []string{"hin.>"}, Storage: FileStorage})
+
+	jsStreamCreate(t, nc, &StreamConfig{
+		Name:     "aggW",
+		Subjects: []string{"direct"},
+		Storage:  FileStorage,
+		Sources: []*StreamSource{
+			{Name: "G", SubjectTransforms: []SubjectTransformConfig{{Source: "gin.*", Destination: "gout.{{wildcard(1)}}"}}},
+			{Name: "H", SubjectTransforms: []SubjectTransformConfig{{Source: "hin.*", Destination: "gout.{{wildcard(1)}}"}}},
+		},
+	})
+
+	expect := map[string]int{"G": 4, "H": 6}
+	// G -> gout.a, H -> gout.b ; both match gout.* but are distinct subjects.
+	for i := 0; i < expect["G"]; i++ {
+		_, err := js.Publish("gin.a", nil)
+		require_NoError(t, err)
+	}
+	for i := 0; i < expect["H"]; i++ {
+		_, err := js.Publish("hin.b", nil)
+		require_NoError(t, err)
+	}
+	for i := 0; i < 3_000; i++ {
+		_, err := js.Publish("direct", nil)
+		require_NoError(t, err)
+	}
+
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("aggW")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(expect["G"]+expect["H"]+3_000) {
+			return fmt.Errorf("waiting for sourcing: have %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	mset, err := s.globalAccount().lookupStream("aggW")
+	require_NoError(t, err)
+
+	mset.mu.Lock()
+	mset.startingSequenceForSources()
+	got := make(map[string]uint64, len(mset.sources))
+	for _, si := range mset.sources {
+		got[si.name] = si.sseq
+	}
+	mset.mu.Unlock()
+
+	for name, n := range expect {
+		if got[name] != uint64(n) {
+			t.Fatalf("source %q: expected starting seq %d, got %d", name, n, got[name])
+		}
+	}
+}

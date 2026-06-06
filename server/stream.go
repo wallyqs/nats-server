@@ -4600,7 +4600,9 @@ func (mset *stream) setStartingSequenceForSources(iNames map[string]struct{}) {
 		case len(si.sfs) == 0:
 			subj = si.sf
 		case len(si.sfs) == 1 && si.trs[0] != nil:
-			subj = si.trs[0].dest
+			// Collapse wildcard()/$N mapping tokens to a wildcard form so the
+			// index lookup matches the stored (transformed) subjects.
+			subj, _ = transformUntokenize(si.trs[0].dest)
 		}
 		if subj == _EMPTY_ || subj == fwcs || strings.Contains(subj, "{{") {
 			continue
@@ -4642,16 +4644,26 @@ func (mset *stream) setStartingSequenceForSources(iNames map[string]struct{}) {
 			if si == nil {
 				continue
 			}
-			if si.sf == _EMPTY_ {
-				sl.Insert(fwcs, struct{}{})
-			} else {
-				sl.Insert(si.sf, struct{}{})
-			}
-			for _, sf := range si.sfs {
-				if sf == _EMPTY_ {
+			if len(si.trs) == 0 {
+				if si.sf == _EMPTY_ {
 					sl.Insert(fwcs, struct{}{})
 				} else {
-					sl.Insert(sf, struct{}{})
+					sl.Insert(si.sf, struct{}{})
+				}
+				continue
+			}
+			// Match the (transformed) destination subjects, narrowing wildcard()/$N
+			// transforms to a wildcard form; fall back to ">" only for empty or
+			// exotic destinations.
+			for _, tr := range si.trs {
+				if tr == nil {
+					sl.Insert(fwcs, struct{}{})
+					continue
+				}
+				if wc, _ := transformUntokenize(tr.dest); wc != _EMPTY_ && !strings.Contains(wc, "{{") {
+					sl.Insert(wc, struct{}{})
+				} else {
+					sl.Insert(fwcs, struct{}{})
 				}
 			}
 		}
@@ -4777,8 +4789,14 @@ func (mset *stream) startingSequenceForSources() {
 		case len(src.SubjectTransforms) == 0:
 			subj = src.FilterSubject
 		case len(src.SubjectTransforms) == 1:
-			subj = src.SubjectTransforms[0].Destination
+			// Use the destination; collapse wildcard()/$N mapping tokens to a
+			// wildcard form (e.g. "tout.{{wildcard(1)}}" -> "tout.*") so the index
+			// lookup can match the stored (transformed) subjects.
+			subj, _ = transformUntokenize(src.SubjectTransforms[0].Destination)
 		}
+		// Defer to the phase 2 scan if we don't have a single concrete-or-wildcard
+		// subject: empty/full-wildcard filter, multiple transforms, or exotic
+		// mapping tokens (partition/split) that don't reduce to a subject wildcard.
 		if subj == _EMPTY_ || subj == fwcs || strings.Contains(subj, "{{") {
 			sources[iname] = src
 			continue
@@ -4841,16 +4859,22 @@ func (mset *stream) startingSequenceForSources() {
 	refreshSublist := func() {
 		sl = gsl.NewSimpleSublist()
 		for _, src := range sources {
-			if src.FilterSubject == _EMPTY_ {
-				sl.Insert(fwcs, struct{}{})
-			} else {
-				sl.Insert(src.FilterSubject, struct{}{})
-			}
-			for _, tr := range src.SubjectTransforms {
-				if tr.Destination == _EMPTY_ {
+			if len(src.SubjectTransforms) == 0 {
+				if src.FilterSubject == _EMPTY_ {
 					sl.Insert(fwcs, struct{}{})
 				} else {
-					sl.Insert(tr.Destination, struct{}{})
+					sl.Insert(src.FilterSubject, struct{}{})
+				}
+				continue
+			}
+			// Match the (transformed) destination subjects. Collapse wildcard()/$N
+			// mapping tokens to a wildcard form so the sublist stays narrow; only
+			// fall back to the full wildcard for empty or exotic destinations.
+			for _, tr := range src.SubjectTransforms {
+				if wc, _ := transformUntokenize(tr.Destination); wc != _EMPTY_ && !strings.Contains(wc, "{{") {
+					sl.Insert(wc, struct{}{})
+				} else {
+					sl.Insert(fwcs, struct{}{})
 				}
 			}
 		}
