@@ -112,3 +112,137 @@ func TestJetStreamStartingSequenceForSourcesIndexFastPath(t *testing.T) {
 		}
 	}
 }
+
+// Exercises the phase 2 fallback cases of startingSequenceForSources: a
+// catch-all (empty filter) source and two sources transformed onto the SAME
+// destination subject (shared stored subject), mixed with a distinct-subject
+// source that takes the phase 1 index fast path.
+func TestJetStreamStartingSequenceForSourcesAmbiguity(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	for _, o := range []struct{ name, subj string }{{"A", "a"}, {"C", "c"}, {"D", "d"}, {"E", "e"}} {
+		jsStreamCreate(t, nc, &StreamConfig{Name: o.name, Subjects: []string{o.subj}, Storage: FileStorage})
+	}
+
+	jsStreamCreate(t, nc, &StreamConfig{
+		Name:     "agg",
+		Subjects: []string{"direct"},
+		Storage:  FileStorage,
+		Sources: []*StreamSource{
+			{Name: "A", FilterSubject: "a"}, // distinct subject -> phase 1
+			{Name: "C"},                     // empty (catch-all) filter -> phase 2
+			{Name: "D", SubjectTransforms: []SubjectTransformConfig{{Source: "d", Destination: "m"}}}, // shared dest -> phase 2
+			{Name: "E", SubjectTransforms: []SubjectTransformConfig{{Source: "e", Destination: "m"}}}, // shared dest -> phase 2
+		},
+	})
+
+	counts := map[string]string{"a": "A", "c": "C", "d": "D", "e": "E"}
+	expect := map[string]int{"A": 4, "C": 3, "D": 5, "E": 8}
+	total := 0
+	for subj, name := range counts {
+		for i := 0; i < expect[name]; i++ {
+			_, err := js.Publish(subj, nil)
+			require_NoError(t, err)
+		}
+		total += expect[name]
+	}
+
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("agg")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(total) {
+			return fmt.Errorf("waiting for sourcing: have %d want %d", si.State.Msgs, total)
+		}
+		return nil
+	})
+
+	mset, err := s.globalAccount().lookupStream("agg")
+	require_NoError(t, err)
+
+	mset.mu.Lock()
+	mset.startingSequenceForSources()
+	got := make(map[string]uint64, len(mset.sources))
+	for _, si := range mset.sources {
+		got[si.name] = si.sseq
+	}
+	mset.mu.Unlock()
+
+	for name, n := range expect {
+		if got[name] != uint64(n) {
+			t.Fatalf("source %q: expected starting seq %d, got %d", name, n, got[name])
+		}
+	}
+}
+
+// Validates the index fast path in setStartingSequenceForSources (the
+// STREAM.UPDATE twin), with a distinct-subject source (phase 1) and a
+// catch-all source (phase 2). We clear the in-memory sseq and confirm it is
+// recovered correctly.
+func TestJetStreamSetStartingSequenceForSourcesIndex(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	jsStreamCreate(t, nc, &StreamConfig{Name: "P", Subjects: []string{"p"}, Storage: FileStorage})
+	jsStreamCreate(t, nc, &StreamConfig{Name: "Q", Subjects: []string{"q"}, Storage: FileStorage})
+
+	jsStreamCreate(t, nc, &StreamConfig{
+		Name:     "agg3",
+		Subjects: []string{"direct"},
+		Storage:  FileStorage,
+		Sources: []*StreamSource{
+			{Name: "P", FilterSubject: "p"}, // distinct subject -> phase 1
+			{Name: "Q"},                     // empty (catch-all) filter -> phase 2
+		},
+	})
+
+	expect := map[string]int{"P": 6, "Q": 9}
+	total := 0
+	for subj, name := range map[string]string{"p": "P", "q": "Q"} {
+		for i := 0; i < expect[name]; i++ {
+			_, err := js.Publish(subj, nil)
+			require_NoError(t, err)
+		}
+		total += expect[name]
+	}
+
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("agg3")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(total) {
+			return fmt.Errorf("waiting for sourcing: have %d want %d", si.State.Msgs, total)
+		}
+		return nil
+	})
+
+	mset, err := s.globalAccount().lookupStream("agg3")
+	require_NoError(t, err)
+
+	mset.mu.Lock()
+	iNames := make(map[string]struct{}, len(mset.sources))
+	for iname, si := range mset.sources {
+		iNames[iname] = struct{}{}
+		// Clear so we verify the function actually recovers the sequence.
+		si.sseq, si.dseq = 0, 0
+	}
+	mset.setStartingSequenceForSources(iNames)
+	got := make(map[string]uint64, len(mset.sources))
+	for _, si := range mset.sources {
+		got[si.name] = si.sseq
+	}
+	mset.mu.Unlock()
+
+	for name, n := range expect {
+		if got[name] != uint64(n) {
+			t.Fatalf("source %q: expected starting seq %d, got %d", name, n, got[name])
+		}
+	}
+}

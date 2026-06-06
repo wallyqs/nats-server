@@ -285,8 +285,18 @@ A working prototype of the two-phase resolver is implemented in `startingSequenc
   three distinct-subject sources (index fast path) plus one **subject-transform** source (phase 2
   fallback), each with a different origin depth and buried under 20k direct publishes. Asserts every
   recovered `si.sseq` equals the expected last origin sequence. **Passes.**
+* `TestJetStreamStartingSequenceForSourcesAmbiguity` — a catch-all (empty filter) source and **two
+  sources transformed onto the same destination subject** (shared stored subject), mixed with a
+  distinct-subject source. Asserts the phase 2 fallback disambiguates all of them. **Passes.**
+* `TestJetStreamSetStartingSequenceForSourcesIndex` — the same fast path applied to the
+  `STREAM.UPDATE` twin `setStartingSequenceForSources` (distinct subject + catch-all). **Passes.**
+* The change was also applied to `setStartingSequenceForSources` itself (`stream.go:4566`), so both the
+  leader-election and the config-update resume paths use the index fast path.
 * `BenchmarkJetStreamScanForSources` (existing, single source) and a new
   `BenchmarkJetStreamScanForSourcesMulti` (16 sources spread across the store).
+* New tests pass under `-race`; existing sourcing suite
+  (`SourceBasics`, `SourceRemovalAndReAdd`, `WorkQueueSourceRestart`, `SourceWorkingQueueWithLimit`,
+  `StreamSourceWithoutDuplicateWindow`) still passes.
 
 ### Measured (filestore, single-server)
 
@@ -301,13 +311,23 @@ which is exactly the edge→hub fan-in case.
 
 ### Still to do
 
-* **Ambiguity coverage:** add cases for sources sharing a subject, a `>` source, a direct-publish
-  overlap, and a pre-2.10 header → assert correct fallback + sequences (the prototype handles these via
-  the header check; tests should lock the behaviour in).
-* **Apply to `setStartingSequenceForSources`** (the `STREAM.UPDATE` twin, `stream.go:4566`).
 * **Transform fast path (optional):** resolve single-concrete-destination transform sources in phase 1
   too (currently deferred to phase 2).
-* Run the full sourcing suite with `-race`.
+* **Pre-2.10 / direct-publish-overlap coverage:** add explicit cases (the prototype handles these via
+  the header check and the phase 2 fallback; tests would lock the behaviour in). Hard to construct
+  through the JS client because streams can't declare overlapping subjects; would need low-level store
+  seeding.
+* Run the full sourcing suite under `-race` (the new tests already pass under `-race`).
+
+### Observed (separate, pre-existing — not addressed here)
+
+`setStartingSequenceForSources`'s phase 2 sublist is built from `si.sfs` (the transform **source**
+filters), whereas sourced messages are stored under the transform **destination**. So for a *newly
+added transform source*, the fallback scan looks for the wrong subject and won't find prior messages
+(it leaves `sseq` at 0 — usually harmless, since a freshly added source has no prior contributions, but
+incorrect if the same destination was previously populated). `startingSequenceForSources` uses the
+destination correctly. Worth fixing separately; out of scope for this change, which preserves the
+existing phase 2 behaviour.
 
 ## 10. Relationship to the durable-consumer proposal
 

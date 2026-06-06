@@ -4580,7 +4580,43 @@ func (mset *stream) setStartingSequenceForSources(iNames map[string]struct{}) {
 		return
 	}
 
-	// From the provided list of sources, we build a sublist that contains
+	var smv StoreMsg
+
+	// Phase 1: resolve sources that map to a single concrete subject directly via
+	// the per-subject index (LoadLastMsg), verified by the JSStreamSource header.
+	// This avoids a backwards block scan in the common case. Anything we can't
+	// attribute this way (full-wildcard/empty filter, transforms, shared subject,
+	// pre-2.10 headers) is left in iNames for the phase 2 scan below.
+	for iName := range iNames {
+		si := mset.sources[iName]
+		if si == nil {
+			continue
+		}
+		// Only attempt the fast path for a single, concrete (non full-wildcard) subject.
+		if len(si.sfs) != 0 || si.sf == _EMPTY_ || si.sf == fwcs {
+			continue
+		}
+		sm, err := mset.store.LoadLastMsg(si.sf, &smv)
+		if err != nil || sm == nil || len(sm.hdr) == 0 {
+			continue
+		}
+		ss := sliceHeader(JSStreamSource, sm.hdr)
+		if len(ss) == 0 {
+			continue
+		}
+		if _, hiname, sseq := streamAndSeq(bytesToString(ss)); hiname == iName {
+			si.sseq = sseq
+			si.dseq = 0
+			delete(iNames, iName)
+		}
+	}
+
+	// If the index resolved everything, we are done without any block scan.
+	if len(iNames) == 0 {
+		return
+	}
+
+	// From the remaining sources, we build a sublist that contains
 	// the interested filters (including transforms). As we figure out the
 	// starting sequence for each source, we will eliminate the source from
 	// the map and then refresh the sublist, which in turn makes the sublist
@@ -4613,7 +4649,6 @@ func (mset *stream) setStartingSequenceForSources(iNames map[string]struct{}) {
 	}
 	refreshSublist()
 
-	var smv StoreMsg
 	for last := state.LastSeq; ; {
 		sm, seq, err := mset.store.LoadPrevMsgMulti(sl, last, &smv)
 		if err == ErrStoreEOF || err != nil {
