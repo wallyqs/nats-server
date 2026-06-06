@@ -248,3 +248,81 @@ func TestJetStreamSetStartingSequenceForSourcesIndex(t *testing.T) {
 		}
 	}
 }
+
+// A templated subject transform (destination contains a {{...}} mapping token)
+// cannot be resolved by the phase 1 index fast path, so it must be recovered by
+// the phase 2 reverse scan. This locks in that the scan handles templated
+// transform sources correctly via both startingSequenceForSources and
+// setStartingSequenceForSources.
+func TestJetStreamStartingSequenceForSourcesTemplatedTransform(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	jsStreamCreate(t, nc, &StreamConfig{Name: "T", Subjects: []string{"tin.>"}, Storage: FileStorage})
+
+	jsStreamCreate(t, nc, &StreamConfig{
+		Name:     "aggT",
+		Subjects: []string{"direct"},
+		Storage:  FileStorage,
+		Sources: []*StreamSource{
+			// Templated destination -> phase 1 defers, phase 2 must recover it.
+			{Name: "T", SubjectTransforms: []SubjectTransformConfig{{Source: "tin.*", Destination: "tout.{{wildcard(1)}}"}}},
+		},
+	})
+
+	const n = 7
+	for i := 0; i < n; i++ {
+		_, err := js.Publish("tin.1", nil)
+		require_NoError(t, err)
+	}
+	// Bury under direct publishes.
+	for i := 0; i < 5_000; i++ {
+		_, err := js.Publish("direct", nil)
+		require_NoError(t, err)
+	}
+
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("aggT")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(n+5_000) {
+			return fmt.Errorf("waiting for sourcing: have %d want %d", si.State.Msgs, n+5_000)
+		}
+		return nil
+	})
+
+	mset, err := s.globalAccount().lookupStream("aggT")
+	require_NoError(t, err)
+
+	// Full-rebuild path.
+	mset.mu.Lock()
+	mset.startingSequenceForSources()
+	var full uint64
+	for _, si := range mset.sources {
+		full = si.sseq
+	}
+	mset.mu.Unlock()
+	if full != uint64(n) {
+		t.Fatalf("startingSequenceForSources: expected %d, got %d", n, full)
+	}
+
+	// Update-twin path (clear then recover).
+	mset.mu.Lock()
+	iNames := make(map[string]struct{}, len(mset.sources))
+	for iname, si := range mset.sources {
+		iNames[iname] = struct{}{}
+		si.sseq, si.dseq = 0, 0
+	}
+	mset.setStartingSequenceForSources(iNames)
+	var upd uint64
+	for _, si := range mset.sources {
+		upd = si.sseq
+	}
+	mset.mu.Unlock()
+	if upd != uint64(n) {
+		t.Fatalf("setStartingSequenceForSources: expected %d, got %d", n, upd)
+	}
+}
