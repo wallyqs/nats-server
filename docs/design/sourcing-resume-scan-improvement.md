@@ -14,10 +14,16 @@
 
 On hub-stream **leader election / restart**, `setupSourceConsumers` calls
 `startingSequenceForSources` **unconditionally** (`stream.go:4821`). That function reconstructs each
-source's last sourced sequence by walking the stream's **own store backwards from `LastSeq`**, loading
-(decrypting, decompressing) one message block at a time, reading the `Nats-Stream-Source` header off
-each message, until **every** source has been located. A single quiet/sparse source forces the walk
-back across every newer block — worst case the **entire store**, under `mset.mu`.
+source's last sourced sequence by walking the stream's **own store backwards from `LastSeq`**, one
+block at a time (`LoadPrevMsgMulti`, `filestore.go:9425`), reading the `Nats-Stream-Source` header off
+matching messages, until **every** source has been located.
+
+> Note: the walk is not as naive as message-by-message — within each block the per-block index
+> (`fss`) skips non-matching messages, and the per-source sublist narrows as sources are found. But
+> `LoadPrevMsgMulti` still **visits every block** from `LastSeq` back to the match (loading/decompressing
+> cold ones), and the outer loop **re-walks** as the sublist narrows. So the cost grows with both the
+> number of blocks back to the least-recently-active source (worst case the **entire store**) and the
+> number of sources — all under `mset.mu`.
 
 ![Reverse block scan, today](diagrams/11-block-scan.svg)
 
@@ -98,6 +104,8 @@ psim.Find(subject) ─► info.lblk ─► block ─► block.fss.Find(subject) 
 messages via `lastNeedsUpdate`/`recalculateForSubj`). On a cold block, `ensurePerSubjectInfoLoaded`
 loads/derives `fss` for that **one** block — the cost we pay once per resolved source, versus the
 current scan paying it for every block back to the oldest source.
+
+![psim → block → fss → message traversal](diagrams/16-psim-fss-traversal.svg)
 
 ### 3.3 Why each message carries a `Nats-Stream-Source` header
 
@@ -268,14 +276,38 @@ backward scan disappears for that case.
 
 ## 9. Testing & validation
 
-* **Equivalence test:** build a stream sourcing from K origins with distinct subjects, varying activity
-  (some quiet); assert the new resolver yields the *same* `si.sseq` per source as the old scan.
-* **Ambiguity test:** sources sharing a subject, a `>` source, a direct-publish overlap, and a
-  pre-2.10 header → assert correct fallback and correct sequences.
-* **Benchmark:** `BenchmarkStartingSequenceForSources` on a large filestore (e.g. 5 GB, many blocks)
-  with one deliberately quiet source — compare blocks loaded / wall time before vs after. Expect the
-  "quiet source" case to drop from "scan to the bottom of the store" to a single targeted load.
-* Run with `-race`.
+### Prototype status — implemented ✅
+
+A working prototype of the two-phase resolver is implemented in `startingSequenceForSources`
+(`server/stream.go`), with:
+
+* `TestJetStreamStartingSequenceForSourcesIndexFastPath` (`server/jetstream_sourcing_resume_test.go`) —
+  three distinct-subject sources (index fast path) plus one **subject-transform** source (phase 2
+  fallback), each with a different origin depth and buried under 20k direct publishes. Asserts every
+  recovered `si.sseq` equals the expected last origin sequence. **Passes.**
+* `BenchmarkJetStreamScanForSources` (existing, single source) and a new
+  `BenchmarkJetStreamScanForSourcesMulti` (16 sources spread across the store).
+
+### Measured (filestore, single-server)
+
+| Benchmark | Before (reverse scan) | After (phase 1) | Speedup |
+|---|---|---|---|
+| `ScanForSources` — 1 source, ~100k buried msgs | ~8.5 µs/op | ~5.5 µs/op | ~1.5× |
+| `ScanForSourcesMulti` — 16 sources, spread | ~110.8 µs/op | ~14.0 µs/op | **~7.9×** |
+
+The single-source gap is modest because `LoadPrevMsgMulti` already skips non-matching messages
+per block; the win scales with the number of sources (each avoids a re-walk via a direct `psim` jump),
+which is exactly the edge→hub fan-in case.
+
+### Still to do
+
+* **Ambiguity coverage:** add cases for sources sharing a subject, a `>` source, a direct-publish
+  overlap, and a pre-2.10 header → assert correct fallback + sequences (the prototype handles these via
+  the header check; tests should lock the behaviour in).
+* **Apply to `setStartingSequenceForSources`** (the `STREAM.UPDATE` twin, `stream.go:4566`).
+* **Transform fast path (optional):** resolve single-concrete-destination transform sources in phase 1
+  too (currently deferred to phase 2).
+* Run the full sourcing suite with `-race`.
 
 ## 10. Relationship to the durable-consumer proposal
 

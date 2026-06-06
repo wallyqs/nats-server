@@ -2304,6 +2304,69 @@ func BenchmarkJetStreamScanForSources(b *testing.B) {
 	})
 }
 
+// Like BenchmarkJetStreamScanForSources but with many sources whose last sourced
+// messages are spread at different depths through the store. This is the case the
+// per-subject index (phase 1) targets: the reverse scan would otherwise have to
+// re-walk blocks for each source, while the index jumps straight to each.
+func BenchmarkJetStreamScanForSourcesMulti(b *testing.B) {
+	_, s, shutdown, nc, js := startJSClusterAndConnect(b, 1)
+	defer shutdown()
+
+	const numSources = 16
+
+	var sources []*StreamSource
+	for i := 0; i < numSources; i++ {
+		name := fmt.Sprintf("origin-%d", i)
+		subj := fmt.Sprintf("o.%d", i)
+		jsStreamCreate(b, nc, &StreamConfig{Name: name, Subjects: []string{subj}, Storage: FileStorage})
+		sources = append(sources, &StreamSource{Name: name, FilterSubject: subj})
+	}
+
+	jsStreamCreate(b, nc, &StreamConfig{
+		Name:     "stream",
+		Subjects: []string{"bar"},
+		Storage:  FileStorage,
+		Sources:  sources,
+	})
+
+	// Interleave: a chunk of direct (bar) publishes, then one message to each origin.
+	// This spreads each source's last sourced message at a different depth in the store.
+	const rounds = 40
+	const directPerRound = 2500
+	for r := 0; r < rounds; r++ {
+		for i := 0; i < directPerRound; i++ {
+			_, err := js.Publish("bar", nil)
+			require_NoError(b, err)
+		}
+		for i := 0; i < numSources; i++ {
+			_, err := js.Publish(fmt.Sprintf("o.%d", i), nil)
+			require_NoError(b, err)
+		}
+	}
+
+	// Wait for all sourcing to complete.
+	want := uint64(rounds*directPerRound + rounds*numSources)
+	checkFor(b, 30*time.Second, 200*time.Millisecond, func() error {
+		si, err := js.StreamInfo("stream")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != want {
+			return fmt.Errorf("waiting for sourcing: have %d want %d", si.State.Msgs, want)
+		}
+		return nil
+	})
+
+	mset, err := s.globalAccount().lookupStream("stream")
+	require_NoError(b, err)
+
+	b.Run("StartingSequenceForSources", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			mset.startingSequenceForSources()
+		}
+	})
+}
+
 // Helper function to stand up a JS-enabled single server or cluster
 func startJSClusterAndConnect(b *testing.B, clusterSize int) (c *cluster, s *Server, shutdown func(), nc *nats.Conn, js nats.JetStreamContext) {
 	b.Helper()

@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 540" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .ttl{font-size:16px;font-weight:700;fill:#1f2328}
+    .sec{font-size:12.5px;font-weight:700;fill:#0969da}
+    .node{fill:#ffffff;stroke:#8c959f;stroke-width:1.4}
+    .edge{stroke:#8c959f;stroke-width:1.4}
+    .pe{stroke:#1a7f37;stroke-width:2.2}            /* path edge highlight */
+    .leaf{fill:#ffffff;stroke:#8c959f;stroke-width:1.3}
+    .leafhl{fill:#dafbe1;stroke:#1a7f37;stroke-width:1.8}
+    .blk{fill:#ffffff;stroke:#8c959f;stroke-width:1.3}
+    .blkhl{fill:#dafbe1;stroke:#1a7f37;stroke-width:2}
+    .msg{fill:#fff8c5;stroke:#9a6700;stroke-width:1.6}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}
+    .smono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px}
+    .muted{font-size:10.5px;fill:#656d76}
+    .grn{font-size:10.5px;fill:#1a7f37}
+    .badge{fill:#1a7f37}
+    .bt{font-size:11px;font-weight:700;fill:#ffffff}
+  </style>
+  <rect x="0" y="0" width="900" height="540" fill="#f6f8fa"/>
+  <text x="24" y="28" class="ttl">Two-level traversal: psim subject tree &#8594; the block &#8594; that block's fss subject tree &#8594; the message</text>
+
+  <!-- ===================== (1) psim tree ===================== -->
+  <circle cx="22" cy="58" r="9" class="badge"/><text x="22" y="62" text-anchor="middle" class="bt">1</text>
+  <text x="40" y="62" class="sec">fs.psim &#8212; store-wide subject tree   (subject &#8594; psi{total, fblk, lblk})</text>
+
+  <!-- root + internal -->
+  <circle cx="180" cy="92" r="8" class="node"/><text x="196" y="96" class="muted">root</text>
+  <line x1="180" y1="100" x2="180" y2="138" class="edge"/>
+  <text x="190" y="124" class="smono" fill="#57606a">"orders"</text>
+  <circle cx="180" cy="146" r="8" class="node"/>
+
+  <!-- leaves -->
+  <line x1="180" y1="154" x2="90" y2="188" class="edge"/>
+  <line x1="180" y1="154" x2="230" y2="188" class="edge"/>
+  <line x1="180" y1="154" x2="370" y2="188" class="pe"/>
+  <text x="118" y="178" class="smono" fill="#57606a">"us"</text>
+  <text x="206" y="178" class="smono" fill="#57606a">"eu"</text>
+  <text x="290" y="178" class="smono" fill="#1a7f37">"jp"</text>
+
+  <rect x="44" y="190" width="92" height="48" rx="7" class="leaf"/>
+  <text x="54" y="210" class="mono" fill="#0a3069">orders.us</text>
+  <text x="54" y="228" class="smono" fill="#57606a">lblk: 8</text>
+
+  <rect x="184" y="190" width="92" height="48" rx="7" class="leaf"/>
+  <text x="194" y="210" class="mono" fill="#0a3069">orders.eu</text>
+  <text x="194" y="228" class="smono" fill="#57606a">lblk: 7</text>
+
+  <rect x="324" y="190" width="120" height="48" rx="7" class="leafhl"/>
+  <text x="334" y="210" class="mono" fill="#0a3069">orders.jp (quiet)</text>
+  <text x="334" y="228" class="smono" fill="#1a7f37">total:.. fblk:2 lblk:2</text>
+
+  <!-- ===================== (2) follow lblk to block ===================== -->
+  <circle cx="470" cy="58" r="9" class="badge"/><text x="470" y="62" text-anchor="middle" class="bt">2</text>
+  <text x="488" y="62" class="sec">follow lblk &#8594; the last block holding that subject</text>
+
+  <!-- blocks row -->
+  <g>
+    <rect x="470" y="110" width="50" height="46" rx="5" class="blk"/><text x="495" y="170" text-anchor="middle" class="muted">B1</text>
+    <rect x="524" y="110" width="50" height="46" rx="5" class="blkhl"/><text x="549" y="170" text-anchor="middle" class="grn">B2</text>
+    <rect x="578" y="110" width="50" height="46" rx="5" class="blk"/><text x="603" y="170" text-anchor="middle" class="muted">B3</text>
+    <rect x="632" y="110" width="50" height="46" rx="5" class="blk"/><text x="657" y="170" text-anchor="middle" class="muted">..</text>
+    <rect x="686" y="110" width="50" height="46" rx="5" class="blk"/><text x="711" y="170" text-anchor="middle" class="muted">B7</text>
+    <rect x="740" y="110" width="50" height="46" rx="5" class="blk"/><text x="765" y="170" text-anchor="middle" class="muted">B8</text>
+  </g>
+  <!-- arrow from jp leaf to B2 -->
+  <path d="M 444 206 C 490 198, 520 170, 540 158" class="pe" fill="none" marker-end="url(#g)"/>
+
+  <!-- ===================== (3) the block's fss tree ===================== -->
+  <circle cx="22" cy="300" r="9" class="badge"/><text x="22" y="304" text-anchor="middle" class="bt">3</text>
+  <text x="40" y="304" class="sec">B2.fss &#8212; per-block subject tree   (subject &#8594; SimpleState{Msgs, First, Last})</text>
+
+  <!-- arrow B2 down into fss -->
+  <path d="M 549 158 C 549 230, 200 250, 180 326" class="pe" fill="none" marker-end="url(#g)"/>
+  <text x="300" y="248" class="grn">expand block B2</text>
+
+  <circle cx="180" cy="336" r="8" class="node"/><text x="196" y="340" class="muted">root</text>
+  <line x1="180" y1="344" x2="180" y2="380" class="edge"/>
+  <text x="190" y="366" class="smono" fill="#57606a">"orders"</text>
+  <circle cx="180" cy="388" r="8" class="node"/>
+
+  <line x1="180" y1="396" x2="90" y2="430" class="edge"/>
+  <line x1="180" y1="396" x2="370" y2="430" class="pe"/>
+  <text x="118" y="420" class="smono" fill="#57606a">"us"</text>
+  <text x="290" y="420" class="smono" fill="#1a7f37">"jp"</text>
+
+  <rect x="44" y="432" width="92" height="48" rx="7" class="leaf"/>
+  <text x="54" y="452" class="mono" fill="#0a3069">orders.us</text>
+  <text x="54" y="470" class="smono" fill="#57606a">Last: ..</text>
+
+  <rect x="324" y="432" width="150" height="48" rx="7" class="leafhl"/>
+  <text x="334" y="452" class="mono" fill="#0a3069">orders.jp</text>
+  <text x="334" y="470" class="smono" fill="#1a7f37">Msgs:.. First:.. Last:5123</text>
+
+  <!-- ===================== (4) load message + header ===================== -->
+  <circle cx="500" cy="300" r="9" class="badge"/><text x="500" y="304" text-anchor="middle" class="bt">4</text>
+  <text x="518" y="304" class="sec">load msg at Last (hub seq 5123) &#8594; read its header</text>
+
+  <rect x="500" y="330" width="376" height="160" rx="10" class="msg" fill-opacity="0.5"/>
+  <text x="516" y="354" class="muted">message #5123 in block B2 &#8212; stored subject: orders.jp</text>
+  <text x="516" y="372" class="muted">(5123 is the HUB storage seq &#8212; not what resume needs)</text>
+  <rect x="516" y="384" width="344" height="34" rx="6" class="msg"/>
+  <text x="524" y="405" class="smono" fill="#633c01">Nats-Stream-Source: ORDERS:7f3a9k2p 482 orders.jp &gt; ..</text>
+  <g class="smono">
+    <text x="524" y="438" fill="#bf3989">&#9650; iname &#8594; verify == source</text>
+    <text x="524" y="458" fill="#0969da">&#9650; ORIGIN seq 482 &#8594; si.sseq</text>
+    <text x="524" y="478" class="grn">resume the consumer at origin seq 482+1 &#8212; no scan</text>
+  </g>
+  <!-- arrow fss.jp -> message -->
+  <path d="M 474 456 C 488 456, 492 430, 500 416" class="pe" fill="none" marker-end="url(#g)"/>
+
+  <defs>
+    <marker id="g" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#1a7f37"/></marker>
+  </defs>
+</svg>

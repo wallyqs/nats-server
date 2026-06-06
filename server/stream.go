@@ -4707,8 +4707,54 @@ func (mset *stream) startingSequenceForSources() {
 		return
 	}
 
+	var smv StoreMsg
+
+	// Phase 1: try to resolve each source's starting sequence directly via the
+	// per-subject index (LoadLastMsg). For a source that maps to a single concrete
+	// subject, the index can jump straight to the block holding that subject's last
+	// message, avoiding a backwards block scan in the common case (e.g. each source
+	// on its own distinct subject). We verify by the JSStreamSource header that the
+	// message actually belongs to this source. Sources we can't attribute this way
+	// (full-wildcard/empty filter, transforms, shared subject, or pre-2.10 headers)
+	// fall through to the reverse scan in phase 2.
+	sources := map[string]*StreamSource{}
+	for _, src := range mset.cfg.Sources {
+		iname := src.iname
+		// Only attempt the fast path for a single, concrete (non full-wildcard) subject.
+		if len(src.SubjectTransforms) != 0 || src.FilterSubject == _EMPTY_ || src.FilterSubject == fwcs {
+			sources[iname] = src
+			continue
+		}
+		sm, err := mset.store.LoadLastMsg(src.FilterSubject, &smv)
+		if err != nil || sm == nil || len(sm.hdr) == 0 {
+			sources[iname] = src
+			continue
+		}
+		ss := sliceHeader(JSStreamSource, sm.hdr)
+		if len(ss) == 0 {
+			sources[iname] = src
+			continue
+		}
+		_, hiname, sseq := streamAndSeq(bytesToString(ss))
+		if hiname != iname {
+			// Subject is shared with another source (or a direct publish); disambiguate via scan.
+			sources[iname] = src
+			continue
+		}
+		if si := mset.sources[iname]; si != nil {
+			si.sseq = sseq
+			si.dseq = 0
+		}
+	}
+
+	// If the index resolved everything, we are done without any block scan.
+	if len(sources) == 0 {
+		return
+	}
+
+	// Phase 2: reverse scan, but scoped to just the unresolved sources.
 	// For short circuiting return.
-	expected := len(mset.cfg.Sources)
+	expected := len(sources)
 	seqs := make(map[string]uint64)
 
 	// Stamp our si seq records on the way out.
@@ -4725,19 +4771,14 @@ func (mset *stream) startingSequenceForSources() {
 		}
 	}()
 
-	// Generate a list of sources and, from that, a sublist that contains
-	// the interested filters (including transforms). As we figure out the
-	// starting sequence for each source, we will eliminate the source from
-	// the map and then refresh the sublist, which in turn makes the sublist
-	// ideally more specific. This allows LoadPrevMsgsMulti to work most
-	// effectively.
+	// From the unresolved sources, build a sublist that contains the interested
+	// filters (including transforms). As we figure out the starting sequence for
+	// each source, we will eliminate the source from the map and then refresh the
+	// sublist, which in turn makes the sublist ideally more specific. This allows
+	// LoadPrevMsgsMulti to work most effectively.
 	// Because this is a SimpleSublist we can't just remove the entries per
 	// source so we have no other option but to rebuild it from scratch, but
 	// this is cheap enough to do so not the end of the world.
-	sources := map[string]*StreamSource{}
-	for _, src := range mset.cfg.Sources {
-		sources[src.composeIName()] = src
-	}
 	var sl *gsl.SimpleSublist
 	refreshSublist := func() {
 		sl = gsl.NewSimpleSublist()
@@ -4759,17 +4800,16 @@ func (mset *stream) startingSequenceForSources() {
 	refreshSublist()
 
 	update := func(iName string, seq uint64) {
-		// Only update active in case we have older ones in here that got configured out.
-		if si := mset.sources[iName]; si != nil {
-			if _, ok := seqs[iName]; !ok {
-				seqs[iName] = seq
-				delete(sources, iName)
-				refreshSublist()
-			}
+		// Only act on unresolved sources still in our map (skips ones resolved in
+		// phase 1 and any that got configured out).
+		if _, ok := sources[iName]; !ok {
+			return
 		}
+		seqs[iName] = seq
+		delete(sources, iName)
+		refreshSublist()
 	}
 
-	var smv StoreMsg
 	for last := state.LastSeq; ; {
 		sm, seq, err := mset.store.LoadPrevMsgMulti(sl, last, &smv)
 		if err == ErrStoreEOF || err != nil {
