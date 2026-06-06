@@ -191,6 +191,7 @@ func TestJetStreamSetStartingSequenceForSourcesIndex(t *testing.T) {
 
 	jsStreamCreate(t, nc, &StreamConfig{Name: "P", Subjects: []string{"p"}, Storage: FileStorage})
 	jsStreamCreate(t, nc, &StreamConfig{Name: "Q", Subjects: []string{"q"}, Storage: FileStorage})
+	jsStreamCreate(t, nc, &StreamConfig{Name: "R", Subjects: []string{"r"}, Storage: FileStorage})
 
 	jsStreamCreate(t, nc, &StreamConfig{
 		Name:     "agg3",
@@ -199,12 +200,13 @@ func TestJetStreamSetStartingSequenceForSourcesIndex(t *testing.T) {
 		Sources: []*StreamSource{
 			{Name: "P", FilterSubject: "p"}, // distinct subject -> phase 1
 			{Name: "Q"},                     // empty (catch-all) filter -> phase 2
+			{Name: "R", SubjectTransforms: []SubjectTransformConfig{{Source: "r", Destination: "tr"}}}, // concrete transform dest -> phase 1
 		},
 	})
 
-	expect := map[string]int{"P": 6, "Q": 9}
+	expect := map[string]int{"P": 6, "Q": 9, "R": 4}
 	total := 0
-	for subj, name := range map[string]string{"p": "P", "q": "Q"} {
+	for subj, name := range map[string]string{"p": "P", "q": "Q", "r": "R"} {
 		for i := 0; i < expect[name]; i++ {
 			_, err := js.Publish(subj, nil)
 			require_NoError(t, err)

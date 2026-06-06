@@ -149,19 +149,25 @@ sources that genuinely can't be attributed by subject.
 
 ![Before / after of the scan](diagrams/14-scan-before-after.svg)
 
-For each source, its **stored subject(s)** are: the `FilterSubject` for a plain source, or the
-transform **Destination(s)** for a transformed source (this mirrors how the current sublist is built at
-`stream.go:4742-4757`).
+For each source, its **stored subject** is the `FilterSubject` for a plain source, or — for a source
+with a **single, concrete (non-templated)** subject transform — the transform **Destination**.
+Templated transform destinations contain `{{...}}` mapping tokens (the rendered subject varies per
+message), and partial wildcards in a destination are rejected at config time, so a destination is
+concrete unless it is empty, `>`, or contains `{{`.
 
 ```
 Phase 1 — index lookup (per source, O(1) targeted load):
-  for each source si with concrete stored subject sf (not "" / not ">"):
-      sm := store.LoadLastMsg(sf)                  // jumps via psim, ~1 block
+  for each source si:
+      subj := si.FilterSubject                     // plain source
+      if si has exactly one transform: subj := transform.Destination
+      if subj == "" || subj == ">" || subj contains "{{":  defer to Phase 2; continue
+      sm := store.LoadLastMsg(subj)                // jumps via psim, ~1 block
       if sm has a JSStreamSource header:
           (_, iname, sseq) := streamAndSeq(header)
           if iname == si.iname:                    // self-verifying attribution
               si.sseq = sseq; mark resolved
-  // anything not resolved (no header / header for a different source / wildcard / pre-2.10) → Phase 2
+  // anything not resolved (no header / header for a different source / wildcard /
+  //  multi-or-templated transform / pre-2.10) → Phase 2
 
 Phase 2 — fallback reverse scan (only for the unresolved subset):
   run today's LoadPrevMsgMulti loop, but with the sublist built from ONLY the
@@ -203,9 +209,13 @@ unresolved := map[string]*sourceInfo{}
 for _, ssi := range mset.cfg.Sources {
     si := mset.sources[ssi.iname]
     if si == nil { continue }
-    subj := storedSubjectForSource(ssi)            // FilterSubject, or transform Destination
-    if subj == _EMPTY_ || subj == fwcs || subjectHasWildcard(subj) {
-        unresolved[ssi.iname] = si                 // can't attribute by a single literal subject
+    var subj string                                // FilterSubject, or single concrete transform Destination
+    switch {
+    case len(ssi.SubjectTransforms) == 0: subj = ssi.FilterSubject
+    case len(ssi.SubjectTransforms) == 1: subj = ssi.SubjectTransforms[0].Destination
+    }
+    if subj == _EMPTY_ || subj == fwcs || strings.Contains(subj, "{{") {
+        unresolved[ssi.iname] = si                 // can't attribute by a single concrete subject
         continue
     }
     sm, err := mset.store.LoadLastMsg(subj, &smv)  // O(1) via psim/fss, returns header
@@ -289,7 +299,11 @@ A working prototype of the two-phase resolver is implemented in `startingSequenc
   sources transformed onto the same destination subject** (shared stored subject), mixed with a
   distinct-subject source. Asserts the phase 2 fallback disambiguates all of them. **Passes.**
 * `TestJetStreamSetStartingSequenceForSourcesIndex` — the same fast path applied to the
-  `STREAM.UPDATE` twin `setStartingSequenceForSources` (distinct subject + catch-all). **Passes.**
+  `STREAM.UPDATE` twin `setStartingSequenceForSources` (distinct subject + catch-all + a
+  **concrete-destination transform** source), clearing and recovering `sseq`. **Passes.**
+* **Transform fast path:** a source with a single concrete-destination transform is now resolved in
+  Phase 1 (via `LoadLastMsg(destination)`) in both functions; multi/templated transforms still defer
+  to Phase 2.
 * The change was also applied to `setStartingSequenceForSources` itself (`stream.go:4566`), so both the
   leader-election and the config-update resume paths use the index fast path.
 * `BenchmarkJetStreamScanForSources` (existing, single source) and a new
@@ -311,23 +325,21 @@ which is exactly the edge→hub fan-in case.
 
 ### Still to do
 
-* **Transform fast path (optional):** resolve single-concrete-destination transform sources in phase 1
-  too (currently deferred to phase 2).
 * **Pre-2.10 / direct-publish-overlap coverage:** add explicit cases (the prototype handles these via
   the header check and the phase 2 fallback; tests would lock the behaviour in). Hard to construct
   through the JS client because streams can't declare overlapping subjects; would need low-level store
   seeding.
 * Run the full sourcing suite under `-race` (the new tests already pass under `-race`).
 
-### Observed (separate, pre-existing — not addressed here)
+### Observed (separate, pre-existing)
 
-`setStartingSequenceForSources`'s phase 2 sublist is built from `si.sfs` (the transform **source**
-filters), whereas sourced messages are stored under the transform **destination**. So for a *newly
-added transform source*, the fallback scan looks for the wrong subject and won't find prior messages
-(it leaves `sseq` at 0 — usually harmless, since a freshly added source has no prior contributions, but
-incorrect if the same destination was previously populated). `startingSequenceForSources` uses the
-destination correctly. Worth fixing separately; out of scope for this change, which preserves the
-existing phase 2 behaviour.
+`setStartingSequenceForSources`'s **phase 2** sublist is built from `si.sfs` (the transform **source**
+filters), whereas sourced messages are stored under the transform **destination**. So a *newly added
+transform source* that falls through to phase 2 (multi/templated transforms) looks for the wrong
+subject and won't find prior messages (leaves `sseq` at 0 — usually harmless for a fresh source, but
+incorrect if the same destination was previously populated). The new phase 1 fast path sidesteps this
+for the common single-concrete-destination case; `startingSequenceForSources` uses the destination
+correctly throughout. Fixing the phase 2 sublist for multi/templated transforms is a separate change.
 
 ## 10. Relationship to the durable-consumer proposal
 

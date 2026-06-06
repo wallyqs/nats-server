@@ -4592,11 +4592,20 @@ func (mset *stream) setStartingSequenceForSources(iNames map[string]struct{}) {
 		if si == nil {
 			continue
 		}
-		// Only attempt the fast path for a single, concrete (non full-wildcard) subject.
-		if len(si.sfs) != 0 || si.sf == _EMPTY_ || si.sf == fwcs {
+		// Determine the single stored subject this source maps to: the filter for
+		// a plain source, or the destination for a single concrete (non-templated)
+		// subject transform. Anything else is deferred to the phase 2 scan.
+		var subj string
+		switch {
+		case len(si.sfs) == 0:
+			subj = si.sf
+		case len(si.sfs) == 1 && si.trs[0] != nil:
+			subj = si.trs[0].dest
+		}
+		if subj == _EMPTY_ || subj == fwcs || strings.Contains(subj, "{{") {
 			continue
 		}
-		sm, err := mset.store.LoadLastMsg(si.sf, &smv)
+		sm, err := mset.store.LoadLastMsg(subj, &smv)
 		if err != nil || sm == nil || len(sm.hdr) == 0 {
 			continue
 		}
@@ -4755,12 +4764,26 @@ func (mset *stream) startingSequenceForSources() {
 	sources := map[string]*StreamSource{}
 	for _, src := range mset.cfg.Sources {
 		iname := src.iname
-		// Only attempt the fast path for a single, concrete (non full-wildcard) subject.
-		if len(src.SubjectTransforms) != 0 || src.FilterSubject == _EMPTY_ || src.FilterSubject == fwcs {
+		// Determine the single stored subject this source maps to, if any: the
+		// filter subject for a plain source, or the destination for a single
+		// concrete (non-templated) subject transform. Sources without a single
+		// concrete subject (empty/full-wildcard filter, or multi/templated
+		// transforms) are deferred to the phase 2 scan. Templated transform
+		// destinations contain "{{...}}" mapping tokens; partial wildcards in a
+		// destination are rejected at config time, so a destination is concrete
+		// unless it is empty, ">", or contains a mapping token.
+		var subj string
+		switch {
+		case len(src.SubjectTransforms) == 0:
+			subj = src.FilterSubject
+		case len(src.SubjectTransforms) == 1:
+			subj = src.SubjectTransforms[0].Destination
+		}
+		if subj == _EMPTY_ || subj == fwcs || strings.Contains(subj, "{{") {
 			sources[iname] = src
 			continue
 		}
-		sm, err := mset.store.LoadLastMsg(src.FilterSubject, &smv)
+		sm, err := mset.store.LoadLastMsg(subj, &smv)
 		if err != nil || sm == nil || len(sm.hdr) == 0 {
 			sources[iname] = src
 			continue
