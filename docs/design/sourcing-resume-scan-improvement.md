@@ -364,8 +364,10 @@ A working prototype of the two-phase resolver is implemented in `startingSequenc
   destination), `…TemplatedTransform` (wildcard transform), `…SharedWildcardTransform` (two templated
   transforms sharing a `gout.*` space), and `TestJetStreamSetStartingSequenceForSourcesIndex` (twin).
 * `BenchmarkJetStreamScanForSources` (existing, single source), `BenchmarkJetStreamScanForSourcesMulti`
-  (16 sources spread across the store), and `BenchmarkJetStreamSourceResumeLeafnodeFanIn` (8–512 edges
-  feeding a hub, quiet edges buried under an all-sourced tail — see the fan-in table below).
+  (16 sources spread across the store), `BenchmarkJetStreamSourceResumeLeafnodeFanIn` (8–512 edges
+  feeding a hub, quiet edges buried under an all-sourced tail), `…FanInTailDepth` (fixed edges, varying
+  tail depth — isolates the store-depth axis), and `…PartitionFallback` (the by-design `>` path). See the
+  tables below.
 * Existing sourcing suite
   (`SourceBasics`, `SourceRemovalAndReAdd`, `WorkQueueSourceRestart`, `SourceWorkingQueueWithLimit`,
   `StreamSourceWithoutDuplicateWindow`, `MirrorAndSourcesFilteredConsumers`) still passes.
@@ -422,6 +424,24 @@ Two effects compound, and the table separates them:
 > scan (only ~5×), which is not representative of a pure fan-in. The committed benchmark uses an
 > all-sourced tail so nothing is skippable.
 
+#### Isolating the store-depth axis
+
+`BenchmarkJetStreamSourceResumeFanInTailDepth` fixes the edge count (32) and varies only the buried tail
+depth. It makes the store-bound vs source-bound split explicit: the old scan grows linearly with depth
+while Phase 1 stays flat, so the speedup *grows* with how deep the store is.
+
+| tail depth | Before (reverse scan) | After (phase 1) | Speedup |
+|-----------:|----------------------:|----------------:|--------:|
+| 50k        | 0.89 ms  | 0.30 ms | 3.0× |
+| 100k       | 11.6 ms  | 0.97 ms | 11.8× |
+| 200k       | 23.1 ms  | 1.13 ms | 20.5× |
+| 400k       | 46.0 ms  | 1.11 ms | 41.6× |
+
+"Before" doubles with the tail (11.6 → 23.1 → 46.0 ms) — textbook O(depth). "After" is flat at ~1 ms and
+its allocations stay at **~223/op** regardless of depth, versus ~3,400/op for the old scan. (The 50k
+"before" is sub-linear because at that size the buried edges still sit within the first couple of blocks
+the scan reaches; from 100k on, the linear walk dominates.)
+
 ### What still forces a full `>` scan in Phase 2 (by design)
 
 After the above, Phase 2 only widens to `>` (no block skipping) when a source *genuinely* needs it:
@@ -435,12 +455,25 @@ Both are uncommon for the edge→hub fan-in. Everything else — distinct subjec
 `wildcard()`/`$N` transforms — either resolves in Phase 1 or narrows the Phase 2 sublist to a concrete
 or wildcard subject.
 
+`BenchmarkJetStreamSourceResumePartitionFallback` measures this residual path with a `partition()`
+transform source (stored subjects `p.<n>`, which can't be reduced to a wildcard) alongside several
+distinct edges (always resolved in Phase 1), over a deep 100k all-sourced store:
+
+| placement of the `>` source | recovery | note |
+|---|---:|---|
+| **active** (it's the chatty aggregator, last msg at LastSeq) | 0.65 ms | the common case — the `>` scan resolves in O(1) despite the fallback |
+| **buried** (quiet early, a distinct edge forms the tail)     | 56.2 ms | residual worst case — the `>` scan must walk the whole tail |
+
+The takeaway: the by-design `>` fallback is cheap whenever the catch-all/partition source is *active*
+(which is the normal state for an aggregator). It only degrades to a full scan when such a source is both
+present **and** has gone quiet under a deep tail — genuinely unavoidable, since a catch-all source has no
+single subject to index by. The distinct edges in the same stream are unaffected either way (Phase 1).
+
 ### Still to do
 
 * **Pre-2.10 / direct-publish-overlap coverage:** add explicit cases (handled today via the header
   check and the Phase 2 fallback; tests would lock the behaviour in). Hard to construct through the JS
   client because streams can't declare overlapping subjects; would need low-level store seeding.
-* A `partition`/`split` transform benchmark to confirm the (rare) `>` path is acceptable.
 
 ### Resolved finding (was suspected pre-existing bug)
 
