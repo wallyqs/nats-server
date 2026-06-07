@@ -389,15 +389,18 @@ messages. Crucially the hub store is **entirely sourced edge subjects** — as a
 block matches the recovery sublist and *none* can be skipped. This is the work a freshly elected leader
 runs (`startingSequenceForSources`) before it can resume sourcing. One op == one full recovery.
 
-| edges | Before (reverse scan) | After (phase 1) | Speedup | allocs/op before → after |
-|------:|----------------------:|----------------:|--------:|-------------------------:|
-| 8     | 10.1 ms | 0.27 ms | **37×** | 324 → 46 |
-| 32    | 10.8 ms | 0.38 ms | **28×** | 3,325 → 173 |
-| 128   | 15.8 ms | 0.73 ms | **22×** | 44,358 → 657 |
-| 512   | 101.2 ms | 2.00 ms | **51×** | 674,344 → 2,572 |
+| edges | Before (reverse scan) | After (phase 1) | Δ |
+|------:|----------------------:|----------------:|---|
+| 8     | 7.27 ms ±96% | 0.194 ms ±23% | **−97.3%** |
+| 32    | 7.96 ms ±6%  | 0.286 ms ±8%  | **−96.4%** |
+| 128   | 13.2 ms ±6%  | 0.609 ms ±19% | **−95.4%** |
+| 512   | 71.1 ms ±22% | 3.68 ms ±45%  | **−94.8%** |
+| **geomean** | **15.3 ms** | **0.594 ms** | **−96.1%** |
 
-*(filestore, single-server, `-benchtime=50x`, both columns on the same 2.8 GHz host; "before" measured by
-splicing in the pre-optimization function from the parent commit.)*
+*(filestore, single-server, `-benchtime=50x -count=6`, `benchstat`; all rows p=0.002 (n=6). Both columns
+on the same shared host; "before" measured by splicing in the pre-optimization function from the parent
+commit. The host is noisy — note the ±96% spread on the edges=8 "before" outlier — but the per-row deltas
+and the −96.1% geomean are stable across runs.)*
 
 Two effects compound, and the table separates them:
 
@@ -406,8 +409,9 @@ Two effects compound, and the table separates them:
   scales only with edge count (one `LoadLastMsg` index jump each).
 * **The O(sources²) sublist rebuild.** The old Phase 2 rebuilt the whole sublist on *every* source it
   resolved (`refreshSublist` per `update`). At 512 sources that is ~260k inserts per recovery — the
-  "before" jumps to 101 ms and **49.8 MB / 674k allocs**. Phase 1 resolves these without ever building a
-  sublist, so allocations drop by ~260× at 512 edges.
+  "before" jumps to ~70–100 ms and (in a separate `-benchmem` run) **49.8 MB / 674k allocs/op**. Phase 1
+  resolves these without ever building a sublist, so allocations drop to **2,572/op** — ~260× fewer at
+  512 edges.
 
 > Caveat: this is a micro-benchmark of the recovery function, not a full Raft election — an actual
 > election adds a fixed quorum/round-trip cost on top of *both* columns equally. An earlier draft buried
