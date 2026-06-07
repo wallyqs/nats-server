@@ -2367,29 +2367,131 @@ func BenchmarkJetStreamScanForSourcesMulti(b *testing.B) {
 	})
 }
 
-// BenchmarkJetStreamSourceResumeLeafnodeFanIn models a hub stream that sources
-// from many edge/leafnode streams. On leader election the new leader rebuilds
-// each source's resume point in startingSequenceForSources, which is what this
-// benchmark measures (one op == one full recovery, exactly the work a freshly
-// elected leader does before it can resume sourcing).
-//
-// The store layout is the realistic worst case for a leafnode fan-in: every
-// edge contributes a message up front, then one "chatty" edge keeps sourcing a
-// large tail. Because the hub's store is made up entirely of sourced edge
-// subjects (a pure fan-in has no unrelated direct traffic), every block matches
-// the recovery sublist and none can be skipped. The pre-2.12 recovery therefore
-// reverse-scanned the whole tail from LastSeq back to the buried quiet edges, so
-// its cost grew with the tail depth; the per-subject index (phase 1) jumps
-// straight to each edge's last message, so its cost grows only with the number
-// of edges.
+// benchSourceResumeFanIn stands up a hub that sources from numLeaf edge streams,
+// then has one "chatty" edge source a tail of tailDepth messages that buries the
+// other edges' last sourced messages near the front of the hub store. Because the
+// hub store is entirely sourced edge subjects (a pure fan-in has no unrelated
+// direct traffic), every block matches the recovery sublist and none can be
+// skipped. It then benchmarks startingSequenceForSources — the work a freshly
+// elected leader does before it can resume sourcing (one op == one full recovery).
+func benchSourceResumeFanIn(b *testing.B, numLeaf, tailDepth int) {
+	s := RunBasicJetStreamServer(b)
+	defer func() {
+		s.Shutdown()
+		s.WaitForShutdown()
+	}()
+
+	nc, js := jsClientConnect(b, s)
+	defer nc.Close()
+
+	// One origin stream per edge/leafnode, each on its own subject.
+	var sources []*StreamSource
+	for i := 0; i < numLeaf; i++ {
+		name := fmt.Sprintf("edge-%d", i)
+		subj := fmt.Sprintf("edge.%d", i)
+		jsStreamCreate(b, nc, &StreamConfig{Name: name, Subjects: []string{subj}, Storage: FileStorage})
+		sources = append(sources, &StreamSource{Name: name, FilterSubject: subj})
+	}
+
+	// Hub stream sources every edge; its store is entirely sourced traffic.
+	jsStreamCreate(b, nc, &StreamConfig{
+		Name:    "hub",
+		Storage: FileStorage,
+		Sources: sources,
+	})
+
+	// Each edge contributes one message up front; these get sourced into the
+	// hub with a JSStreamSource header keyed by the edge's iname.
+	for i := 0; i < numLeaf; i++ {
+		_, err := js.Publish(fmt.Sprintf("edge.%d", i), nil)
+		require_NoError(b, err)
+	}
+
+	// Then one "chatty" edge (edge-0) keeps publishing a deep tail. Once sourced,
+	// these bury the quiet edges (1..N-1) whose last sourced messages remain near
+	// the front of the hub store.
+	for i := 0; i < tailDepth; i++ {
+		_, err := js.PublishAsync("edge.0", nil)
+		require_NoError(b, err)
+	}
+	select {
+	case <-js.PublishAsyncComplete():
+	case <-time.After(120 * time.Second):
+		b.Fatalf("publish tail did not complete")
+	}
+
+	// Wait for the hub to source everything (all edges + the chatty tail).
+	want := uint64(numLeaf + tailDepth)
+	checkFor(b, 180*time.Second, 250*time.Millisecond, func() error {
+		si, err := js.StreamInfo("hub")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != want {
+			return fmt.Errorf("waiting for sourcing: have %d want %d", si.State.Msgs, want)
+		}
+		return nil
+	})
+
+	mset, err := s.globalAccount().lookupStream("hub")
+	require_NoError(b, err)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		mset.startingSequenceForSources()
+	}
+}
+
+// BenchmarkJetStreamSourceResumeLeafnodeFanIn varies the number of edges at a
+// fixed tail depth. The pre-2.12 recovery reverse-scanned the whole tail from
+// LastSeq back to the buried quiet edges (cost grows with the tail depth and,
+// via the per-source sublist rebuild, with the number of edges); the per-subject
+// index (phase 1) jumps straight to each edge's last message, so its cost grows
+// only with the number of edges.
 func BenchmarkJetStreamSourceResumeLeafnodeFanIn(b *testing.B) {
 	for _, numLeaf := range []int{8, 32, 128, 512} {
-		// Depth of the chatty edge's sourced tail that buries the quiet edges'
-		// last sourced messages. All of it is on an in-sublist subject, so the
-		// old reverse scan cannot skip any of it.
-		const tailDepth = 100_000
-
 		b.Run(fmt.Sprintf("edges=%d", numLeaf), func(b *testing.B) {
+			benchSourceResumeFanIn(b, numLeaf, 100_000)
+		})
+	}
+}
+
+// BenchmarkJetStreamSourceResumeFanInTailDepth varies the tail depth at a fixed
+// number of edges. This isolates the store-depth axis: the pre-2.12 reverse scan
+// is store-bound (its cost climbs with the tail depth), while the phase 1 index
+// is source-bound (flat in the tail depth).
+func BenchmarkJetStreamSourceResumeFanInTailDepth(b *testing.B) {
+	for _, tailDepth := range []int{50_000, 100_000, 200_000, 400_000} {
+		b.Run(fmt.Sprintf("tail=%d", tailDepth), func(b *testing.B) {
+			benchSourceResumeFanIn(b, 32, tailDepth)
+		})
+	}
+}
+
+// BenchmarkJetStreamSourceResumePartitionFallback measures the by-design phase 2
+// "full >" fallback: a partition() subject transform renders to a mapping token
+// (e.g. "p.{{partition(10,1)}}") that transformUntokenize cannot reduce to a
+// subject wildcard, so the source can only be matched by a full-wildcard scan.
+// It contrasts two placements of that source against a deep all-sourced store
+// (plus several distinct edges that always resolve in phase 1):
+//
+//   - "active": the partition source is the chatty aggregator forming the tail,
+//     so its last message sits at LastSeq and the "> " scan resolves it in O(1) —
+//     the common case, and cheap despite the fallback.
+//   - "buried": the partition source went quiet early and a distinct edge forms
+//     the tail, so the "> " scan must walk the whole tail to find it — the
+//     residual worst case (genuinely unavoidable: a catch-all/partition source
+//     has no single subject to index by).
+func BenchmarkJetStreamSourceResumePartitionFallback(b *testing.B) {
+	const numEdges = 8
+	const tailDepth = 100_000
+
+	for _, buried := range []bool{false, true} {
+		name := "active"
+		if buried {
+			name = "buried"
+		}
+		b.Run(name, func(b *testing.B) {
 			s := RunBasicJetStreamServer(b)
 			defer func() {
 				s.Shutdown()
@@ -2399,45 +2501,57 @@ func BenchmarkJetStreamSourceResumeLeafnodeFanIn(b *testing.B) {
 			nc, js := jsClientConnect(b, s)
 			defer nc.Close()
 
-			// One origin stream per edge/leafnode, each on its own subject.
+			// Distinct-subject edges (always resolved by the phase 1 index).
 			var sources []*StreamSource
-			for i := 0; i < numLeaf; i++ {
+			for i := 0; i < numEdges; i++ {
 				name := fmt.Sprintf("edge-%d", i)
 				subj := fmt.Sprintf("edge.%d", i)
 				jsStreamCreate(b, nc, &StreamConfig{Name: name, Subjects: []string{subj}, Storage: FileStorage})
 				sources = append(sources, &StreamSource{Name: name, FilterSubject: subj})
 			}
 
-			// Hub stream sources every edge; its store is entirely sourced traffic.
-			jsStreamCreate(b, nc, &StreamConfig{
-				Name:    "hub",
-				Storage: FileStorage,
-				Sources: sources,
+			// One aggregate origin sourced through a partition() transform; its
+			// stored subjects are "p.<n>", which cannot be reduced to a wildcard,
+			// forcing the phase 2 full-> fallback for this source.
+			_, err := jsStreamCreate(b, nc, &StreamConfig{Name: "agg", Subjects: []string{"evt.*"}, Storage: FileStorage})
+			require_NoError(b, err)
+			sources = append(sources, &StreamSource{
+				Name: "agg",
+				SubjectTransforms: []SubjectTransformConfig{
+					{Source: "evt.*", Destination: "p.{{partition(10,1)}}"},
+				},
 			})
 
-			// Each edge contributes one message up front; these get sourced into
-			// the hub with a JSStreamSource header keyed by the edge's iname.
-			for i := 0; i < numLeaf; i++ {
+			_, err = jsStreamCreate(b, nc, &StreamConfig{Name: "hub", Storage: FileStorage, Sources: sources})
+			require_NoError(b, err)
+
+			// Each edge and the aggregate contribute one message up front.
+			for i := 0; i < numEdges; i++ {
 				_, err := js.Publish(fmt.Sprintf("edge.%d", i), nil)
 				require_NoError(b, err)
 			}
+			_, err = js.Publish("evt.k", nil)
+			require_NoError(b, err)
 
-			// Then one "chatty" edge (edge-0) keeps publishing a deep tail. Once
-			// sourced, these bury the quiet edges (1..N-1) whose last sourced
-			// messages remain near the front of the hub store.
+			// The tail is sourced by the partition aggregate ("active") or by a
+			// distinct edge ("buried", which leaves the partition source's last
+			// message stranded near the front of the store).
+			tailSubj := "evt.k"
+			if buried {
+				tailSubj = "edge.0"
+			}
 			for i := 0; i < tailDepth; i++ {
-				_, err := js.PublishAsync("edge.0", nil)
+				_, err := js.PublishAsync(tailSubj, nil)
 				require_NoError(b, err)
 			}
 			select {
 			case <-js.PublishAsyncComplete():
-			case <-time.After(60 * time.Second):
+			case <-time.After(120 * time.Second):
 				b.Fatalf("publish tail did not complete")
 			}
 
-			// Wait for the hub to source everything (all edges + the chatty tail).
-			want := uint64(numLeaf + tailDepth)
-			checkFor(b, 120*time.Second, 250*time.Millisecond, func() error {
+			want := uint64(numEdges + 1 + tailDepth)
+			checkFor(b, 180*time.Second, 250*time.Millisecond, func() error {
 				si, err := js.StreamInfo("hub")
 				if err != nil {
 					return err
