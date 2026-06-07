@@ -2573,6 +2573,100 @@ func BenchmarkJetStreamSourceResumePartitionFallback(b *testing.B) {
 	}
 }
 
+// BenchmarkJetStreamSourceResumeDeepStore is the large-scale, apples-to-apples
+// version of the fan-in resume benchmark. End-to-end sourcing can't realistically
+// stand up a 10M-message store, so this seeds the hub store directly: one
+// JSStreamSource-headered "anchor" message per source near the front, then a deep
+// tail on source 0's subject that buries the rest. The header format matches what
+// genSourceHeader writes, so phase 1 (LoadLastMsg + header verification) resolves
+// each source exactly as it would for real sourced messages — verified once before
+// the timed loop.
+//
+// This lets the reverse-scan baseline be pushed to the same depths (up to 10M) used
+// for cross-checking against the persisted-state design's numbers.
+func BenchmarkJetStreamSourceResumeDeepStore(b *testing.B) {
+	type dim struct {
+		sources, tail int
+	}
+	for _, d := range []dim{
+		{16, 100_000},
+		{16, 1_000_000},
+		{16, 10_000_000},
+		{64, 10_000_000},
+		{256, 10_000_000},
+	} {
+		b.Run(fmt.Sprintf("sources=%d/tail=%d", d.sources, d.tail), func(b *testing.B) {
+			s := RunBasicJetStreamServer(b)
+			defer func() {
+				s.Shutdown()
+				s.WaitForShutdown()
+			}()
+
+			nc, _ := jsClientConnect(b, s)
+			defer nc.Close()
+
+			// Origins are created empty (no real sourcing happens); the source
+			// consumers stay idle while we seed the hub store directly.
+			var sources []*StreamSource
+			for i := 0; i < d.sources; i++ {
+				name := fmt.Sprintf("edge-%d", i)
+				subj := fmt.Sprintf("edge.%d", i)
+				_, err := jsStreamCreate(b, nc, &StreamConfig{Name: name, Subjects: []string{subj}, Storage: FileStorage})
+				require_NoError(b, err)
+				sources = append(sources, &StreamSource{Name: name, FilterSubject: subj})
+			}
+			_, err := jsStreamCreate(b, nc, &StreamConfig{Name: "hub", Storage: FileStorage, Sources: sources})
+			require_NoError(b, err)
+
+			mset, err := s.globalAccount().lookupStream("hub")
+			require_NoError(b, err)
+
+			// Seed directly: an anchor per source at the front (origin seq 1), then
+			// a deep tail on edge.0. srcHeader mirrors genSourceHeader's wire format:
+			// "<name> <originSeq> <filter> <dest> <origSubject>".
+			srcHeader := func(i int, originSeq uint64) []byte {
+				subj := fmt.Sprintf("edge.%d", i)
+				val := fmt.Sprintf("edge-%d %d %s %s %s", i, originSeq, subj, fwcs, subj)
+				return genHeader(nil, JSStreamSource, val)
+			}
+			for i := 0; i < d.sources; i++ {
+				subj := fmt.Sprintf("edge.%d", i)
+				_, _, err := mset.store.StoreMsg(subj, srcHeader(i, 1), nil, 0)
+				require_NoError(b, err)
+			}
+			for j := 0; j < d.tail; j++ {
+				_, _, err := mset.store.StoreMsg("edge.0", srcHeader(0, uint64(2+j)), nil, 0)
+				require_NoError(b, err)
+			}
+
+			// Correctness check: phase 1 must resolve every source to its anchor's
+			// origin sequence (edge.0 resolves to the tail's last origin seq). The
+			// server sets iname on its own copy of the config, so recompute it
+			// locally via composeIName to key into mset.sources.
+			mset.startingSequenceForSources()
+			for i := 0; i < d.sources; i++ {
+				want := uint64(1)
+				if i == 0 {
+					want = uint64(1 + d.tail)
+				}
+				si := mset.sources[sources[i].composeIName()]
+				if si == nil || si.sseq != want {
+					got := uint64(0)
+					if si != nil {
+						got = si.sseq
+					}
+					b.Fatalf("source %d: resolved sseq=%d, want %d (phase 1 attribution broken)", i, got, want)
+				}
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				mset.startingSequenceForSources()
+			}
+		})
+	}
+}
+
 // Helper function to stand up a JS-enabled single server or cluster
 func startJSClusterAndConnect(b *testing.B, clusterSize int) (c *cluster, s *Server, shutdown func(), nc *nats.Conn, js nats.JetStreamContext) {
 	b.Helper()
