@@ -389,6 +389,9 @@ messages. Crucially the hub store is **entirely sourced edge subjects** — as a
 block matches the recovery sublist and *none* can be skipped. This is the work a freshly elected leader
 runs (`startingSequenceForSources`) before it can resume sourcing. One op == one full recovery.
 
+![Leafnode fan-in resume benchmark](diagrams/18-leafnode-fanin-benchmark.svg)
+
+
 | edges | Before (reverse scan) | After (phase 1) | Δ |
 |------:|----------------------:|----------------:|---|
 | 8     | 7.27 ms ±96% | 0.194 ms ±23% | **−97.3%** |

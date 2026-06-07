@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .ttl{font-size:17px;font-weight:700;fill:#1f2328}
+    .h{font-size:13px;font-weight:700;fill:#1f2328}
+    .mut{font-size:11px;fill:#656d76}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}
+    .edge{fill:#eef1f4;stroke:#c2c8cf;stroke-width:1.2}
+    .hot{fill:#fff3d6;stroke:#bf8700;stroke-width:1.5}
+    .box{fill:#ffffff;stroke:#d0d7de;stroke-width:1.5}
+    .bad{font-size:12px;font-weight:700;fill:#cf222e}
+    .good{font-size:12px;font-weight:700;fill:#1a7f37}
+    .qmsg{fill:#cfe5ff;stroke:#0969da;stroke-width:1}
+    .tmsg{fill:#ffe9b3;stroke:#bf8700;stroke-width:1}
+  </style>
+  <rect x="0" y="0" width="960" height="640" fill="#f6f8fa"/>
+  <text x="24" y="30" class="ttl">BenchmarkJetStreamSourceResumeLeafnodeFanIn — recovery on leader election</text>
+  <text x="24" y="48" class="mut">N edge/leafnode streams source into one hub; one chatty edge buries the quiet edges. Measures startingSequenceForSources (one op = one full resume).</text>
+
+  <!-- ===== Top: fan-in setup ===== -->
+  <text x="24" y="80" class="h">1 · Setup — fan-in into the hub</text>
+
+  <!-- quiet edges -->
+  <rect x="24" y="92" width="120" height="22" rx="11" class="edge"/><text x="84" y="107" text-anchor="middle" class="mono">edge.1 (quiet)</text>
+  <rect x="24" y="120" width="120" height="22" rx="11" class="edge"/><text x="84" y="135" text-anchor="middle" class="mono">edge.2 (quiet)</text>
+  <text x="84" y="158" text-anchor="middle" class="mut">… up to edge.N-1</text>
+  <rect x="24" y="168" width="120" height="22" rx="11" class="edge"/><text x="84" y="183" text-anchor="middle" class="mono">edge.N-1 (quiet)</text>
+  <!-- chatty edge -->
+  <rect x="24" y="204" width="120" height="26" rx="13" class="hot"/><text x="84" y="221" text-anchor="middle" class="mono">edge.0 (chatty)</text>
+
+  <!-- arrows to hub -->
+  <g stroke="#9aa4ad" stroke-width="1.4" fill="none" marker-end="url(#ar)">
+    <path d="M144 103 C 220 103, 220 150, 296 150"/>
+    <path d="M144 131 C 220 131, 220 152, 296 152"/>
+    <path d="M144 179 C 220 179, 220 156, 296 156"/>
+    <path d="M144 217 C 220 217, 220 162, 296 162"/>
+  </g>
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#9aa4ad"/></marker>
+  </defs>
+
+  <rect x="296" y="118" width="120" height="74" rx="10" class="box"/>
+  <text x="356" y="142" text-anchor="middle" class="h">hub</text>
+  <text x="356" y="160" text-anchor="middle" class="mut">stream, sources all</text>
+  <text x="356" y="175" text-anchor="middle" class="mono">N edges</text>
+
+  <text x="470" y="110" class="mut">Each quiet edge sends 1 message up front.</text>
+  <text x="470" y="128" class="mut">The chatty edge then sources a deep tail</text>
+  <text x="470" y="146" class="mono">tailDepth = 100,000</text>
+  <text x="470" y="170" class="mut">The hub store is entirely sourced edge</text>
+  <text x="470" y="188" class="mut">subjects — a real fan-in — so no block in</text>
+  <text x="470" y="206" class="mut">the tail can be skipped by per-block fss.</text>
+
+  <!-- ===== Middle: store layout ===== -->
+  <text x="24" y="262" class="h">2 · Hub store after setup (oldest → newest)</text>
+  <text x="24" y="280" class="mut">seq 1 …………………………………………………………………… LastSeq</text>
+
+  <!-- quiet block -->
+  <g>
+    <rect x="24" y="290" width="14" height="26" class="qmsg"/>
+    <rect x="40" y="290" width="14" height="26" class="qmsg"/>
+    <rect x="56" y="290" width="14" height="26" class="qmsg"/>
+    <rect x="72" y="290" width="14" height="26" class="qmsg"/>
+  </g>
+  <text x="55" y="332" text-anchor="middle" class="mut">N quiet edges'</text>
+  <text x="55" y="345" text-anchor="middle" class="mut">last msgs (buried)</text>
+
+  <!-- chatty tail -->
+  <g>
+    <rect x="100" y="290" width="780" height="26" fill="#fff3d6" stroke="#bf8700" stroke-width="1.2"/>
+  </g>
+  <text x="490" y="307" text-anchor="middle" class="mono" fill="#7a5400">100,000 × edge.0 (chatty tail)  —  every block matches the sublist</text>
+  <text x="880" y="345" text-anchor="end" class="mut">edge.0 last msg →</text>
+
+  <!-- ===== Bottom: before vs after ===== -->
+  <text x="24" y="392" class="h">3 · What recovery does</text>
+
+  <!-- before -->
+  <rect x="24" y="404" width="430" height="92" rx="10" fill="#fff5f5" stroke="#ffc1bb" stroke-width="1.4"/>
+  <text x="40" y="426" class="bad">BEFORE — reverse block scan</text>
+  <text x="40" y="446" class="mut">LoadPrevMsgMulti walks back from LastSeq. The tail is all</text>
+  <text x="40" y="461" class="mut">in-sublist, so nothing is skipped → walks all 100k to reach</text>
+  <text x="40" y="476" class="mut">the buried edges; rebuilds the sublist per source found.</text>
+  <text x="40" y="491" class="mono" fill="#cf222e">cost ≈ tail depth  +  O(sources²) sublist rebuild</text>
+  <!-- arrow long -->
+  <g stroke="#cf222e" stroke-width="2" fill="none" marker-end="url(#arr)">
+    <path d="M430 300 L 102 300"/>
+  </g>
+  <defs><marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="#cf222e"/></marker></defs>
+
+  <!-- after -->
+  <rect x="470" y="404" width="466" height="92" rx="10" fill="#f3fcf5" stroke="#9be0ad" stroke-width="1.4"/>
+  <text x="486" y="426" class="good">AFTER — per-subject index (phase 1)</text>
+  <text x="486" y="446" class="mut">LoadLastMsg(edge.i) jumps straight to each edge's last</text>
+  <text x="486" y="461" class="mut">message via the psim/fss index; header verifies the source.</text>
+  <text x="486" y="476" class="mut">No reverse scan, no sublist built.</text>
+  <text x="486" y="491" class="mono" fill="#1a7f37">cost ≈ N index lookups  (flat in tail depth)</text>
+  <!-- jump arrows -->
+  <g stroke="#1a7f37" stroke-width="1.6" fill="none" marker-end="url(#arg)">
+    <path d="M703 404 C 500 360, 200 360, 60 318"/>
+    <path d="M760 404 C 840 360, 880 350, 870 320"/>
+  </g>
+  <defs><marker id="arg" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#1a7f37"/></marker></defs>
+
+  <!-- ===== Results ===== -->
+  <text x="24" y="528" class="h">4 · Measured (filestore, single-server, benchstat n=6, p=0.002 — geomean −96.1%)</text>
+
+  <!-- bars: log-ish manual widths -->
+  <g class="mono" font-size="10.5">
+    <!-- header -->
+    <text x="24" y="548" class="mut">edges</text>
+    <text x="86" y="548" class="mut">before</text>
+    <text x="300" y="548" class="mut">after</text>
+    <text x="470" y="548" class="mut">Δ</text>
+
+    <!-- row 8 -->
+    <text x="24" y="565">8</text>
+    <rect x="86" y="557" width="120" height="10" fill="#ffb3ab"/><text x="212" y="566" fill="#cf222e">7.27 ms</text>
+    <rect x="300" y="557" width="8" height="10" fill="#7ee2a0"/><text x="314" y="566" fill="#1a7f37">0.194 ms</text>
+    <text x="470" y="566" fill="#1a7f37">−97.3%</text>
+
+    <!-- row 32 -->
+    <text x="24" y="585">32</text>
+    <rect x="86" y="577" width="131" height="10" fill="#ffb3ab"/><text x="223" y="586" fill="#cf222e">7.96 ms</text>
+    <rect x="300" y="577" width="9" height="10" fill="#7ee2a0"/><text x="315" y="586" fill="#1a7f37">0.286 ms</text>
+    <text x="470" y="586" fill="#1a7f37">−96.4%</text>
+
+    <!-- row 128 -->
+    <text x="24" y="605">128</text>
+    <rect x="86" y="597" width="180" height="10" fill="#ffb3ab"/><text x="272" y="606" fill="#cf222e">13.2 ms</text>
+    <rect x="300" y="597" width="13" height="10" fill="#7ee2a0"/><text x="319" y="606" fill="#1a7f37">0.609 ms</text>
+    <text x="470" y="606" fill="#1a7f37">−95.4%</text>
+
+    <!-- row 512 -->
+    <text x="24" y="625">512</text>
+    <rect x="86" y="617" width="360" height="10" fill="#ff8c80"/><text x="452" y="626" fill="#cf222e">71.1 ms</text>
+    <rect x="300" y="617" width="22" height="10" fill="#5fd98c"/><text x="328" y="626" fill="#1a7f37">3.68 ms</text>
+    <text x="470" y="626" fill="#1a7f37">−94.8%</text>
+  </g>
+  <text x="560" y="600" class="mut">before = store-bound (walks the tail);</text>
+  <text x="560" y="616" class="mut">after = source-bound (N lookups).</text>
+  <text x="560" y="632" class="mut">512: O(sources²) rebuild dominates before.</text>
+</svg>
