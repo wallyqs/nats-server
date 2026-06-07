@@ -51,25 +51,39 @@
   <text x="470" y="206" class="mut">the tail can be skipped by per-block fss.</text>
 
   <!-- ===== Middle: store layout ===== -->
-  <text x="24" y="262" class="h">2 · Hub store after setup (oldest → newest)</text>
-  <text x="24" y="280" class="mut">seq 1 …………………………………………………………………… LastSeq</text>
+  <text x="24" y="258" class="h">2 · Hub store after setup, and how each strategy traverses it</text>
+  <text x="24" y="276" class="mut">seq 1 …………………………………………………………………………………………… LastSeq</text>
 
+  <!-- BEFORE: reverse scan above the store -->
+  <g stroke="#cf222e" stroke-width="2" fill="none" marker-end="url(#arr)">
+    <path d="M866 289 L 94 289"/>
+  </g>
+  <defs><marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="#cf222e"/></marker></defs>
+  <text x="862" y="284" text-anchor="end" class="bad" font-size="10.5">BEFORE: reverse scan — visits every block back to the buried edges</text>
+
+  <!-- store row -->
   <!-- quiet block -->
   <g>
-    <rect x="24" y="290" width="14" height="26" class="qmsg"/>
-    <rect x="40" y="290" width="14" height="26" class="qmsg"/>
-    <rect x="56" y="290" width="14" height="26" class="qmsg"/>
-    <rect x="72" y="290" width="14" height="26" class="qmsg"/>
+    <rect x="24" y="298" width="14" height="26" class="qmsg"/>
+    <rect x="40" y="298" width="14" height="26" class="qmsg"/>
+    <rect x="56" y="298" width="14" height="26" class="qmsg"/>
+    <rect x="72" y="298" width="14" height="26" class="qmsg"/>
   </g>
-  <text x="55" y="332" text-anchor="middle" class="mut">N quiet edges'</text>
-  <text x="55" y="345" text-anchor="middle" class="mut">last msgs (buried)</text>
-
   <!-- chatty tail -->
-  <g>
-    <rect x="100" y="290" width="780" height="26" fill="#fff3d6" stroke="#bf8700" stroke-width="1.2"/>
+  <rect x="100" y="298" width="751" height="26" fill="#fff3d6" stroke="#bf8700" stroke-width="1.2"/>
+  <text x="475" y="315" text-anchor="middle" class="mono" fill="#7a5400">100,000 × edge.0 (chatty tail)  —  every block matches the sublist</text>
+  <!-- edge.0 last message marker -->
+  <rect x="851" y="298" width="14" height="26" class="tmsg"/>
+
+  <!-- AFTER: index jumps fanning up to the two targets -->
+  <g stroke="#1a7f37" stroke-width="1.8" fill="none" marker-end="url(#arg)">
+    <path d="M444 352 C 300 352, 120 352, 55 328"/>
+    <path d="M470 352 C 760 352, 850 352, 858 328"/>
   </g>
-  <text x="490" y="307" text-anchor="middle" class="mono" fill="#7a5400">100,000 × edge.0 (chatty tail)  —  every block matches the sublist</text>
-  <text x="880" y="345" text-anchor="end" class="mut">edge.0 last msg →</text>
+  <defs><marker id="arg" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#1a7f37"/></marker></defs>
+  <text x="457" y="362" text-anchor="middle" class="good" font-size="10.5">AFTER: one direct index jump per edge (psim/fss) — flat in tail depth</text>
+  <text x="55" y="342" text-anchor="middle" class="mut" font-size="10">quiet edges'</text>
+  <text x="858" y="342" text-anchor="middle" class="mut" font-size="10">edge.0 last</text>
 
   <!-- ===== Bottom: before vs after ===== -->
   <text x="24" y="392" class="h">3 · What recovery does</text>
@@ -81,11 +95,6 @@
   <text x="40" y="461" class="mut">in-sublist, so nothing is skipped → walks all 100k to reach</text>
   <text x="40" y="476" class="mut">the buried edges; rebuilds the sublist per source found.</text>
   <text x="40" y="491" class="mono" fill="#cf222e">cost ≈ tail depth  +  O(sources²) sublist rebuild</text>
-  <!-- arrow long -->
-  <g stroke="#cf222e" stroke-width="2" fill="none" marker-end="url(#arr)">
-    <path d="M430 300 L 102 300"/>
-  </g>
-  <defs><marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="#cf222e"/></marker></defs>
 
   <!-- after -->
   <rect x="470" y="404" width="466" height="92" rx="10" fill="#f3fcf5" stroke="#9be0ad" stroke-width="1.4"/>
@@ -94,12 +103,6 @@
   <text x="486" y="461" class="mut">message via the psim/fss index; header verifies the source.</text>
   <text x="486" y="476" class="mut">No reverse scan, no sublist built.</text>
   <text x="486" y="491" class="mono" fill="#1a7f37">cost ≈ N index lookups  (flat in tail depth)</text>
-  <!-- jump arrows -->
-  <g stroke="#1a7f37" stroke-width="1.6" fill="none" marker-end="url(#arg)">
-    <path d="M703 404 C 500 360, 200 360, 60 318"/>
-    <path d="M760 404 C 840 360, 880 350, 870 320"/>
-  </g>
-  <defs><marker id="arg" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#1a7f37"/></marker></defs>
 
   <!-- ===== Results ===== -->
   <text x="24" y="528" class="h">4 · Measured (filestore, single-server, benchstat n=6, p=0.002 — geomean −96.1%)</text>
