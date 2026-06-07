@@ -366,8 +366,9 @@ A working prototype of the two-phase resolver is implemented in `startingSequenc
 * `BenchmarkJetStreamScanForSources` (existing, single source), `BenchmarkJetStreamScanForSourcesMulti`
   (16 sources spread across the store), `BenchmarkJetStreamSourceResumeLeafnodeFanIn` (8–512 edges
   feeding a hub, quiet edges buried under an all-sourced tail), `…FanInTailDepth` (fixed edges, varying
-  tail depth — isolates the store-depth axis), and `…PartitionFallback` (the by-design `>` path). See the
-  tables below.
+  tail depth — isolates the store-depth axis), `…PartitionFallback` (the by-design `>` path), and
+  `…DeepStore` (direct store seeding up to 16/64/256 sources × 10M, for at-scale and cross-design
+  comparison). See the tables below.
 * Existing sourcing suite
   (`SourceBasics`, `SourceRemovalAndReAdd`, `WorkQueueSourceRestart`, `SourceWorkingQueueWithLimit`,
   `StreamSourceWithoutDuplicateWindow`, `MirrorAndSourcesFilteredConsumers`) still passes.
@@ -442,6 +443,40 @@ its allocations stay at **~223/op** regardless of depth, versus ~3,400/op for th
 "before" is sub-linear because at that size the buried edges still sit within the first couple of blocks
 the scan reaches; from 100k on, the linear walk dominates.)
 
+#### At scale (10M), and vs. a persisted resume map
+
+A parallel design (see §11) persists a `map[source]→lastSeq` and *reads* it on recovery instead of
+recomputing from the store. To compare on the same axis, `BenchmarkJetStreamSourceResumeDeepStore` seeds
+the hub store directly — real end-to-end sourcing can't build a 10M-message store — with one
+`JSStreamSource`-headered anchor per source plus a deep tail, and a built-in check verifies phase 1
+resolves every source before timing. This pushes the reverse-scan baseline to 10M:
+
+| sources | tail | Before (reverse scan) | After (index recompute) | Speedup |
+|--------:|-----:|----------------------:|------------------------:|--------:|
+| 16  | 100k | 8.6 ms  | 0.265 ms | 33× |
+| 16  | 1M   | 96.9 ms | 0.249 ms | 389× |
+| 16  | 10M  | 972 ms  | 0.265 ms | 3,668× |
+| 64  | 10M  | 974 ms  | 1.05 ms  | 928× |
+| 256 | 10M  | 991 ms  | 3.08 ms  | 322× |
+
+Both axes confirm the model: the reverse scan is O(depth) (8.6 → 97 → 972 ms across 100k → 1M → 10M) and
+~flat in source count (it walks the whole tail regardless — 972/974/991 ms for 16/64/256 at 10M), while
+the index recompute is flat in depth (~0.27 ms at 16 sources from 100k to 10M) and scales with source
+count (~12 µs/source).
+
+Cross-checking the persisted-map design's published numbers (different host, larger messages):
+
+| sources / tail | their scan baseline | their persisted map | our scan baseline | our index recompute |
+|---|---:|---:|---:|---:|
+| 16 / 10M | 5.03 s | 2.08 µs | 0.972 s | 0.265 ms |
+
+The two scan baselines have the same O(depth) shape; the ~5× absolute gap is environment (message size /
+host). The persisted map is ~100× faster than our index recompute *in absolute terms* because it never
+touches the store — a pure in-memory read — whereas the index still loads one block per source. Those two
+factors compose to explain why their headline multiplier (~2.4M×) dwarfs ours (~3,700×):
+2.42M / 3,668 ≈ 660 ≈ 5.2 (baseline gap) × 127 (recompute vs map-read). The designs are **complementary,
+not competing** — see §11.
+
 ### What still forces a full `>` scan in Phase 2 (by design)
 
 After the above, Phase 2 only widens to `>` (no block skipping) when a source *genuinely* needs it:
@@ -494,8 +529,19 @@ This change is **orthogonal and complementary** to the durable-consumer/`si.sseq
 * This proposal makes the **fallback resume itself cheap** — which still runs on cold start, on
   snapshot restore, for limits/clustered streams, and any time persisted state is missing.
 
+The two were measured head-to-head at 16 sources / 10M tail (see "At scale" above): a persisted resume
+map reads in ~2 µs (pure in-memory, never touches the store), while the index recompute resolves in
+~0.27 ms (one block load per source). Both are flat in store depth — versus ~1 s for the old reverse
+scan. The persisted map is the faster steady-state path, but it buys that speed with a write-path cost
+and a **new crash-consistency invariant**: the map must never lead durably-stored messages across
+truncation, compaction, message deletion, snapshot restore, and follower replication, or recovery
+resumes at a wrong sequence (gaps/duplicates). The index recompute carries none of that — the log plus
+the existing subject index remain the only source of truth — so it is the natural path to run whenever
+the persisted map is absent (pre-feature streams, cold start, restore) or must be revalidated.
+
 Recommended order: land this index-based resume first (self-contained, no protocol/state change, helps
-every retention type today), then layer the persistence/durable improvements on top.
+every retention type today, and replaces the O(depth) scan in the fallback the persisted design will
+still need), then layer the persistence/durable improvements on top.
 
 ## Appendix — key references
 
