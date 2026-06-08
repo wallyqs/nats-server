@@ -362,8 +362,10 @@ A working prototype of the two-phase resolver is implemented in `startingSequenc
   leader-election and the config-update resume paths use the index fast path and the narrowed sublist.
 * Tests (all pass, incl. `-race`): `…IndexFastPath`, `…Ambiguity` (catch-all + shared concrete
   destination), `…TemplatedTransform` (wildcard transform), `…SharedWildcardTransform` (two templated
-  transforms sharing a `gout.*` space), `TestJetStreamSetStartingSequenceForSourcesIndex` (twin), and
-  `TestJetStreamSourcingResumeAfterRolloutRestart` (end-to-end hard-restart, exactly-once resume).
+  transforms sharing a `gout.*` space), `TestJetStreamSetStartingSequenceForSourcesIndex` (twin),
+  `TestJetStreamSourcingResumeAfterRolloutRestart` (end-to-end hard-restart, exactly-once resume),
+  `TestJetStreamClusterSourcingResumeAfterLeaderStepDown` (R3 leader-election resume), and
+  `TestJetStreamStartingSequenceForSourcesDifferential` (randomized layouts vs. a brute-force reference).
 * `BenchmarkJetStreamScanForSources` (existing, single source), `BenchmarkJetStreamScanForSourcesMulti`
   (16 sources spread across the store), `BenchmarkJetStreamSourceResumeLeafnodeFanIn` (8–512 edges
   feeding a hub, quiet edges buried under an all-sourced tail), `…FanInTailDepth` (fixed edges, varying
@@ -515,17 +517,24 @@ exactly-once). Below is the current coverage and the prioritized gaps.
 `…IndexFastPath` (phase 1 + transform phase 2), `…Ambiguity` (catch-all + shared concrete destination),
 `…SetStartingSequenceForSourcesIndex` (update-path twin), `…TemplatedTransform`, `…SharedWildcardTransform`.
 
-**Layer 2 — end-to-end recovery.** Newly added: `TestJetStreamSourcingResumeAfterRolloutRestart` — sources
+**Layer 2 — end-to-end recovery.** Added: `TestJetStreamSourcingResumeAfterRolloutRestart` — sources
 across both phases, hard-restarts the server (rolling-upgrade style), publishes a second batch, and asserts
 each origin's sourced sequences are exactly `1..N` (no gap = no missed resume; no duplicate = no re-sourced
-run). Passes under `-race`.
+run). `TestJetStreamClusterSourcingResumeAfterLeaderStepDown` — the R3 equivalent: steps down the agg
+leader so a new node runs the resolver, then asserts the same exactly-once property on the new leader.
+Both pass under `-race`.
+
+**Layer 1.5 — differential / property.** Added: `TestJetStreamStartingSequenceForSourcesDifferential` —
+randomized layouts (mixed source kinds, random counts incl. zero, randomly interleaved depths) asserting
+the resolver's per-source `sseq` equals an independent brute-force scan of the same store, over a set of
+fixed reported seeds.
 
 Prioritized gaps:
 
 | Pri | Area | Proposed test(s) | Guards against |
 |---|---|---|---|
-| **P0** | Clustered resume (R3) | `…ResumeAfterLeaderStepDown` — `mset.raftNode().StepDown()`, wait for new leader, publish more, assert exactly-once | resolver runs per-node on every election; the common production trigger, untested today |
-| **P0** | Property / differential | fuzz random source layouts (subjects, transforms, counts, interleaving, deletes) and assert the index resolver's `si.sseq` == a brute-force reference linear scan | cheap broad coverage; catches resolver regressions the hand-written cases miss |
+| ~~P0~~ ✅ | Clustered resume (R3) | `…ResumeAfterLeaderStepDown` (added) | resolver runs per-node on every election |
+| ~~P0~~ ✅ | Property / differential | `…Differential` (added) | resolver regressions the hand-written cases miss |
 | **P1** | Store-state edges (seeded) | seed the store directly (as `…DeepStore` does) to build: pre-2.10 headers (empty `iname`, stream-name match), direct-publish/source **subject overlap**, and interior **deletes/purge** before a source's last message | the header-`iname` disambiguation and `loadLast`'s `dmap`/prev-block walk — hard to build via the JS client |
 | **P1** | `memstore` path | run the resolver matrix on a `MemStore`-backed stream | the linear `LoadPrevMsgMulti` / index-light `LoadLastMsg` path is untested for sources |
 | **P1** | Exotic transforms | `partition()` / `split()` source resume correctness (the by-design `>` fallback) | the residual Tier 2 path; perf already benched (`…PartitionFallback`), correctness not asserted |
@@ -540,8 +549,9 @@ durability and map flush → stale → Tier 1; clean `Stop` → Tier 0 hit; and 
 
 ### Still to do
 
-* The **P0/P1** items above — `…ResumeAfterLeaderStepDown` and the property/differential test are the
-  highest-leverage next additions; the seeded store-state edges close the remaining hand-coverage gaps.
+* The **P1** items are the next additions — the seeded store-state edges (pre-2.10 headers, subject
+  overlap, interior deletes) and the `memstore` path close the remaining hand-coverage gaps; exotic
+  `partition()`/`split()` resume correctness completes the Tier 2 picture.
 
 ### Resolved finding (was suspected pre-existing bug)
 
