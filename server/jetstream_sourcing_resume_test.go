@@ -949,3 +949,195 @@ func TestJetStreamStartingSequenceForSourcesSeededEdges(t *testing.T) {
 		}
 	})
 }
+
+// Config-update scoping: STREAM.UPDATE adding/removing sources must recompute
+// only the affected sources and preserve the resume sequence of the rest. This
+// covers the needsStartingSeqNum path and setStartingSequenceForSources's
+// promise to touch only the inames it is given.
+func TestJetStreamSourcingResumeConfigUpdateScoping(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	for _, o := range []struct{ name, subj string }{{"U1", "ua"}, {"U2", "ub"}, {"U3", "uc"}} {
+		_, err := jsStreamCreate(t, nc, &StreamConfig{Name: o.name, Subjects: []string{o.subj}, Storage: FileStorage})
+		require_NoError(t, err)
+	}
+	src := func(name, subj string) *StreamSource { return &StreamSource{Name: name, FilterSubject: subj} }
+	all := []*StreamSource{src("U1", "ua"), src("U2", "ub"), src("U3", "uc")}
+
+	_, err := jsStreamCreate(t, nc, &StreamConfig{Name: "aggU", Subjects: []string{"direct"}, Storage: FileStorage, Sources: all})
+	require_NoError(t, err)
+
+	expect := map[string]uint64{"U1": 4, "U2": 6, "U3": 3}
+	total := 0
+	for subj, name := range map[string]string{"ua": "U1", "ub": "U2", "uc": "U3"} {
+		for i := 0; i < int(expect[name]); i++ {
+			_, err := js.Publish(subj, nil)
+			require_NoError(t, err)
+		}
+		total += int(expect[name])
+	}
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("aggU")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(total) {
+			return fmt.Errorf("waiting for sourcing: have %d want %d", si.State.Msgs, total)
+		}
+		return nil
+	})
+
+	mset, err := s.globalAccount().lookupStream("aggU")
+	require_NoError(t, err)
+	in := func(name, subj string) string { return (&StreamSource{Name: name, FilterSubject: subj}).composeIName() }
+	i1, i2, i3 := in("U1", "ua"), in("U2", "ub"), in("U3", "uc")
+
+	// Strong scoping check on the function itself: poison U1/U3 and clear U2, then
+	// recompute only {U2}. U2 must be recovered; U1/U3 must be left untouched.
+	mset.mu.Lock()
+	mset.sources[i1].sseq, mset.sources[i3].sseq = 999, 777
+	mset.sources[i2].sseq = 0
+	mset.setStartingSequenceForSources(map[string]struct{}{i2: {}})
+	g1, g2, g3 := mset.sources[i1].sseq, mset.sources[i2].sseq, mset.sources[i3].sseq
+	// Restore correct state for the rest of the test.
+	mset.startingSequenceForSources()
+	mset.mu.Unlock()
+	if g2 != 6 {
+		t.Fatalf("scoped recompute: U2 sseq=%d, want 6", g2)
+	}
+	if g1 != 999 || g3 != 777 {
+		t.Fatalf("scoped recompute touched non-target sources: U1=%d (want 999) U3=%d (want 777)", g1, g3)
+	}
+
+	sseqOf := func(iname string) uint64 {
+		mset.mu.RLock()
+		defer mset.mu.RUnlock()
+		if si := mset.sources[iname]; si != nil {
+			return si.sseq
+		}
+		return 0
+	}
+	has := func(iname string) bool {
+		mset.mu.RLock()
+		defer mset.mu.RUnlock()
+		_, ok := mset.sources[iname]
+		return ok
+	}
+
+	// End-to-end: remove U2 via STREAM.UPDATE. U1/U3 must be preserved, U2 gone.
+	_, err = jsStreamUpdate(t, nc, &StreamConfig{Name: "aggU", Subjects: []string{"direct"}, Storage: FileStorage,
+		Sources: []*StreamSource{src("U1", "ua"), src("U3", "uc")}})
+	require_NoError(t, err)
+	if has(i2) {
+		t.Fatalf("U2 still present after removal")
+	}
+	if sseqOf(i1) != 4 || sseqOf(i3) != 3 {
+		t.Fatalf("removal recomputed survivors: U1=%d (want 4) U3=%d (want 3)", sseqOf(i1), sseqOf(i3))
+	}
+
+	// Re-add U2. It must be recovered from the store (=6); U1/U3 preserved.
+	_, err = jsStreamUpdate(t, nc, &StreamConfig{Name: "aggU", Subjects: []string{"direct"}, Storage: FileStorage,
+		Sources: []*StreamSource{src("U1", "ua"), src("U2", "ub"), src("U3", "uc")}})
+	require_NoError(t, err)
+	if got := sseqOf(i2); got != 6 {
+		t.Fatalf("re-added U2 sseq=%d, want 6 (recovered from store)", got)
+	}
+	if sseqOf(i1) != 4 || sseqOf(i3) != 3 {
+		t.Fatalf("re-add recomputed survivors: U1=%d (want 4) U3=%d (want 3)", sseqOf(i1), sseqOf(i3))
+	}
+}
+
+// FirstSeq > 1: after limits/age expiry advances the stream's first sequence,
+// the resolver must still resume correctly — the phase 1 index lookup and the
+// phase 2 reverse scan must terminate at FirstSeq, not seq 1. A phase 1 source
+// (distinct subject) and a phase 2 source (catch-all) are both exercised with
+// their last messages retained near the end of a windowed store.
+func TestJetStreamSourcingResumeFirstSeqAdvanced(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := jsStreamCreate(t, nc, &StreamConfig{Name: "F1", Subjects: []string{"fa"}, Storage: FileStorage})
+	require_NoError(t, err)
+	_, err = jsStreamCreate(t, nc, &StreamConfig{Name: "F2", Subjects: []string{"fb"}, Storage: FileStorage})
+	require_NoError(t, err)
+
+	_, err = jsStreamCreate(t, nc, &StreamConfig{
+		Name:     "aggF",
+		Subjects: []string{"direct"},
+		Storage:  FileStorage,
+		Sources: []*StreamSource{
+			{Name: "F1", FilterSubject: "fa"}, // distinct subject -> phase 1
+			{Name: "F2"},                      // catch-all -> phase 2 reverse scan
+		},
+	})
+	require_NoError(t, err)
+
+	// Fill the front of the store with direct traffic first...
+	const direct = 200
+	for i := 0; i < direct; i++ {
+		_, err := js.Publish("direct", nil)
+		require_NoError(t, err)
+	}
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("aggF")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != direct {
+			return fmt.Errorf("waiting for direct: have %d want %d", si.State.Msgs, direct)
+		}
+		return nil
+	})
+
+	// ...then source a few messages that land after it and stay retained.
+	const f1n, f2n = 4, 3
+	for i := 0; i < f1n; i++ {
+		_, err := js.Publish("fa", nil)
+		require_NoError(t, err)
+	}
+	for i := 0; i < f2n; i++ {
+		_, err := js.Publish("fb", nil)
+		require_NoError(t, err)
+	}
+	want := uint64(direct + f1n + f2n)
+	checkFor(t, 15*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("aggF")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != want {
+			return fmt.Errorf("waiting for sourcing: have %d want %d", si.State.Msgs, want)
+		}
+		return nil
+	})
+
+	// Advance FirstSeq past the direct prefix (models age/limits expiry), keeping
+	// only the sourced tail (seqs direct+1 .. want).
+	require_NoError(t, js.PurgeStream("aggF", &nats.StreamPurgeRequest{Sequence: uint64(direct + 1)}))
+
+	mset, err := s.globalAccount().lookupStream("aggF")
+	require_NoError(t, err)
+
+	var state StreamState
+	mset.store.FastState(&state)
+	if state.FirstSeq <= 1 {
+		t.Fatalf("expected FirstSeq to have advanced past 1, got %d", state.FirstSeq)
+	}
+
+	mset.mu.Lock()
+	mset.startingSequenceForSources()
+	got := map[string]uint64{}
+	for _, si := range mset.sources {
+		got[si.name] = si.sseq
+	}
+	mset.mu.Unlock()
+
+	if got["F1"] != f1n || got["F2"] != f2n {
+		t.Fatalf("resume with FirstSeq=%d: F1=%d (want %d) F2=%d (want %d)", state.FirstSeq, got["F1"], f1n, got["F2"], f2n)
+	}
+}
