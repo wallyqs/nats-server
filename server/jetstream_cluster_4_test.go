@@ -8659,3 +8659,88 @@ func TestJetStreamClusterSourcingResumeAfterRolloutRestart(t *testing.T) {
 		}
 	}
 }
+
+// Upgrade safety (option E): the sources-snapshot envelope must only be emitted
+// when every peer is known to support it. A peer that predates the capability
+// (as during a rolling upgrade) must force a plain snapshot that the old decode
+// path accepts, so it can never be handed an envelope it can't parse.
+func TestJetStreamClusterSourcesSnapshotUpgradeGate(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := jsStreamCreate(t, nc, &StreamConfig{Name: "GO", Subjects: []string{"go"}, Storage: FileStorage, Replicas: 3})
+	require_NoError(t, err)
+	c.waitOnStreamLeader(globalAccountName, "GO")
+	_, err = jsStreamCreate(t, nc, &StreamConfig{Name: "ghub", Storage: FileStorage, Replicas: 3,
+		Sources: []*StreamSource{{Name: "GO", FilterSubject: "go"}}})
+	require_NoError(t, err)
+	c.waitOnStreamLeader(globalAccountName, "ghub")
+
+	for i := 0; i < 5; i++ {
+		_, err := js.Publish("go", nil)
+		require_NoError(t, err)
+	}
+	checkFor(t, 20*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("ghub")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != 5 {
+			return fmt.Errorf("have %d want 5", si.State.Msgs)
+		}
+		return nil
+	})
+
+	sl := c.streamLeader(globalAccountName, "ghub")
+	require_NotNil(t, sl)
+	mset, err := sl.globalAccount().lookupStream("ghub")
+	require_NoError(t, err)
+	n := mset.raftNode()
+	id, peers := n.ID(), n.Peers()
+
+	setPeers := func(supports bool) {
+		for _, p := range peers {
+			if p.ID == id {
+				continue
+			}
+			sl.nodeToInfo.Store(p.ID, nodeInfo{js: true, binarySnapshots: true, sourcesSnapshots: supports})
+		}
+	}
+
+	// An old peer (no sources capability) -> gate denies -> plain snapshot that the
+	// pre-existing decode path accepts.
+	setPeers(false)
+	mset.mu.RLock()
+	gateOld := mset.supportsSourcesSnapshotLocked()
+	snapOld := mset.stateSnapshotLocked()
+	mset.mu.RUnlock()
+	if gateOld {
+		t.Fatalf("gate allowed envelope despite an unsupporting peer")
+	}
+	if isSourcesSnapshot(snapOld) {
+		t.Fatalf("emitted an envelope to a cluster with an unsupporting peer")
+	}
+	if !IsEncodedStreamState(snapOld) {
+		t.Fatalf("plain snapshot is not a valid stream state for the old decode path")
+	}
+
+	// All peers support -> gate allows -> envelope carrying the resume map.
+	setPeers(true)
+	mset.mu.RLock()
+	gateNew := mset.supportsSourcesSnapshotLocked()
+	snapNew := mset.stateSnapshotLocked()
+	mset.mu.RUnlock()
+	if !gateNew {
+		t.Fatalf("gate denied envelope despite all peers supporting it")
+	}
+	if !isSourcesSnapshot(snapNew) {
+		t.Fatalf("did not emit an envelope when all peers support it")
+	}
+	st, seqs, ok := unwrapSourcesSnapshot(snapNew)
+	if !ok || !IsEncodedStreamState(st) || len(seqs) < 1 {
+		t.Fatalf("envelope did not unwrap to a valid state + non-empty map: ok=%v map=%d", ok, len(seqs))
+	}
+}
