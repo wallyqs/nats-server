@@ -8526,3 +8526,136 @@ func TestJetStreamClusterSourcingResumeAfterLeaderStepDown(t *testing.T) {
 		t.Fatalf("Tier 0 not used: resolved CO1 sseq=%d, want sentinel %d from the replicated map", got, sentinel)
 	}
 }
+
+// Clustered rollout/restart: an R3 sourcing stream over R3 origins, with an
+// envelope snapshot forced onto the hub leader (so restart recovery decodes the
+// replicated resume map), is fully restarted (all nodes, as in a rolling
+// upgrade) and then more is published. Resume must be exactly-once, exercising
+// the snapshot wrap (capture) and unwrap (recovery) paths of option E.
+func TestJetStreamClusterSourcingResumeAfterRolloutRestart(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+
+	type origin struct {
+		name, subj, pub string
+		transform       bool
+		dest            string
+		catchall        bool
+	}
+	origins := []origin{
+		{name: "RO1", subj: "rs1", pub: "rs1"},
+		{name: "RO2", subj: "rs2", pub: "rs2"},
+		{name: "RO3", subj: "rs3.*", pub: "rs3.a", transform: true, dest: "rtout.{{wildcard(1)}}"},
+		{name: "RO4", subj: "rs4", pub: "rs4", catchall: true},
+	}
+	var sources []*StreamSource
+	for _, o := range origins {
+		_, err := jsStreamCreate(t, nc, &StreamConfig{Name: o.name, Subjects: []string{o.subj}, Storage: FileStorage, Replicas: 3})
+		require_NoError(t, err)
+		c.waitOnStreamLeader(globalAccountName, o.name)
+		ss := &StreamSource{Name: o.name}
+		switch {
+		case o.transform:
+			ss.SubjectTransforms = []SubjectTransformConfig{{Source: o.subj, Destination: o.dest}}
+		case o.catchall:
+		default:
+			ss.FilterSubject = o.subj
+		}
+		sources = append(sources, ss)
+	}
+	_, err := jsStreamCreate(t, nc, &StreamConfig{Name: "rhub", Storage: FileStorage, Replicas: 3, Sources: sources})
+	require_NoError(t, err)
+	c.waitOnStreamLeader(globalAccountName, "rhub")
+
+	publishBatch := func(counts map[string]int) {
+		for _, o := range origins {
+			for i := 0; i < counts[o.name]; i++ {
+				_, err := js.Publish(o.pub, nil)
+				require_NoError(t, err)
+			}
+		}
+	}
+	waitForHub := func(want uint64) {
+		t.Helper()
+		checkFor(t, 60*time.Second, 200*time.Millisecond, func() error {
+			si, err := js.StreamInfo("rhub")
+			if err != nil {
+				return err
+			}
+			if si.State.Msgs != want {
+				return fmt.Errorf("waiting for sourcing: have %d want %d", si.State.Msgs, want)
+			}
+			return nil
+		})
+	}
+
+	batch1 := map[string]int{"RO1": 3, "RO2": 5, "RO3": 4, "RO4": 6}
+	want1 := 3 + 5 + 4 + 6
+	publishBatch(batch1)
+	waitForHub(uint64(want1))
+
+	// Force an envelope snapshot onto the hub leader and compact the log, so the
+	// restart recovers from a snapshot that carries the resume map.
+	sl := c.streamLeader(globalAccountName, "rhub")
+	require_NotNil(t, sl)
+	mset, err := sl.globalAccount().lookupStream("rhub")
+	require_NoError(t, err)
+	require_NoError(t, mset.raftNode().InstallSnapshot(mset.stateSnapshot(), false))
+
+	nc.Close()
+	c.stopAll()
+	c.restartAllSamePorts()
+	c.waitOnStreamLeader(globalAccountName, "rhub")
+
+	nc, js = jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	batch2 := map[string]int{"RO1": 7, "RO2": 2, "RO3": 9, "RO4": 3}
+	total := map[string]int{}
+	want2 := want1
+	for _, o := range origins {
+		total[o.name] = batch1[o.name] + batch2[o.name]
+		want2 += batch2[o.name]
+	}
+	publishBatch(batch2)
+	waitForHub(uint64(want2))
+
+	sl = c.streamLeader(globalAccountName, "rhub")
+	require_NotNil(t, sl)
+	mset, err = sl.globalAccount().lookupStream("rhub")
+	require_NoError(t, err)
+
+	state := mset.state()
+	seen := map[string]map[uint64]bool{}
+	maxSeq := map[string]uint64{}
+	var smv StoreMsg
+	for seq := state.FirstSeq; seq <= state.LastSeq; seq++ {
+		sm, err := mset.store.LoadMsg(seq, &smv)
+		if err != nil {
+			continue
+		}
+		ss := getHeader(JSStreamSource, sm.hdr)
+		if len(ss) == 0 {
+			continue
+		}
+		sname, _, osseq := streamAndSeq(string(ss))
+		if seen[sname] == nil {
+			seen[sname] = map[uint64]bool{}
+		}
+		if seen[sname][osseq] {
+			t.Fatalf("source %q: origin seq %d stored more than once (duplicate after rollout restart)", sname, osseq)
+		}
+		seen[sname][osseq] = true
+		if osseq > maxSeq[sname] {
+			maxSeq[sname] = osseq
+		}
+	}
+	for _, o := range origins {
+		if len(seen[o.name]) != total[o.name] || maxSeq[o.name] != uint64(total[o.name]) {
+			t.Fatalf("source %q: %d unique origin seqs, max %d; want contiguous 1..%d (gap/duplicate after rollout restart)",
+				o.name, len(seen[o.name]), maxSeq[o.name], total[o.name])
+		}
+	}
+}
