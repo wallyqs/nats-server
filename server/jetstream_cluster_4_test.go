@@ -8505,4 +8505,24 @@ func TestJetStreamClusterSourcingResumeAfterLeaderStepDown(t *testing.T) {
 				o.name, len(seen[o.name]), maxSeq[o.name], total[o.name])
 		}
 	}
+
+	// The new leader must have a populated, current replicated resume map (Tier 0),
+	// i.e. it resumed from the map rather than recomputing. Prove the Tier 0 read
+	// path is actually wired by poisoning one entry with a sentinel and confirming
+	// startingSequenceForSources adopts it (a store recompute would override it).
+	var st StreamState
+	mset.store.FastState(&st)
+	mset.mu.Lock()
+	require_NotNil(t, mset.srcSnap)
+	require_Equal(t, mset.srcSnapSeq, st.LastSeq)
+	in := (&StreamSource{Name: "CO1", FilterSubject: "cs1"}).composeIName()
+	const sentinel = uint64(987654)
+	mset.srcSnap[in] = sentinel
+	mset.srcSnapSeq = st.LastSeq
+	mset.startingSequenceForSources()
+	got := mset.sources[in].sseq
+	mset.mu.Unlock()
+	if got != sentinel {
+		t.Fatalf("Tier 0 not used: resolved CO1 sseq=%d, want sentinel %d from the replicated map", got, sentinel)
+	}
 }
