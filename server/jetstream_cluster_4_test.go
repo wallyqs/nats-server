@@ -8372,3 +8372,137 @@ func TestJetStreamClusterWorkQueueConsumerCreateRejectionNoOrphan(t *testing.T) 
 		}
 	}
 }
+
+// Clustered end-to-end resume test: an R3 sourcing stream pulls from R3 origins
+// spanning both recovery phases, the agg stream leader is stepped down (forcing
+// a new leader to run setupSourceConsumers -> startingSequenceForSources), and
+// then more is published. After the election, sourcing must resume exactly once
+// — every origin message present exactly once on the new leader, no gap (missed
+// resume) and no duplicate (re-sourced run).
+func TestJetStreamClusterSourcingResumeAfterLeaderStepDown(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// Origins spanning both phases: distinct subjects -> phase 1; templated
+	// transform + catch-all -> phase 2.
+	type origin struct {
+		name, subj, pub string
+		transform       bool
+		dest            string
+		catchall        bool
+	}
+	origins := []origin{
+		{name: "CO1", subj: "cs1", pub: "cs1"},
+		{name: "CO2", subj: "cs2", pub: "cs2"},
+		{name: "CO3", subj: "cs3.*", pub: "cs3.a", transform: true, dest: "ctout.{{wildcard(1)}}"},
+		{name: "CO4", subj: "cs4", pub: "cs4", catchall: true},
+	}
+	var sources []*StreamSource
+	for _, o := range origins {
+		_, err := jsStreamCreate(t, nc, &StreamConfig{Name: o.name, Subjects: []string{o.subj}, Storage: FileStorage, Replicas: 3})
+		require_NoError(t, err)
+		c.waitOnStreamLeader(globalAccountName, o.name)
+		ss := &StreamSource{Name: o.name}
+		switch {
+		case o.transform:
+			ss.SubjectTransforms = []SubjectTransformConfig{{Source: o.subj, Destination: o.dest}}
+		case o.catchall:
+			// empty filter -> catch-all
+		default:
+			ss.FilterSubject = o.subj
+		}
+		sources = append(sources, ss)
+	}
+	_, err := jsStreamCreate(t, nc, &StreamConfig{Name: "cagg", Storage: FileStorage, Replicas: 3, Sources: sources})
+	require_NoError(t, err)
+	c.waitOnStreamLeader(globalAccountName, "cagg")
+
+	publishBatch := func(counts map[string]int) {
+		for _, o := range origins {
+			for i := 0; i < counts[o.name]; i++ {
+				_, err := js.Publish(o.pub, nil)
+				require_NoError(t, err)
+			}
+		}
+	}
+	waitForAgg := func(want uint64) {
+		t.Helper()
+		checkFor(t, 30*time.Second, 150*time.Millisecond, func() error {
+			si, err := js.StreamInfo("cagg")
+			if err != nil {
+				return err
+			}
+			if si.State.Msgs != want {
+				return fmt.Errorf("waiting for sourcing: have %d want %d", si.State.Msgs, want)
+			}
+			return nil
+		})
+	}
+
+	batch1 := map[string]int{"CO1": 3, "CO2": 5, "CO3": 4, "CO4": 6}
+	want1 := 3 + 5 + 4 + 6
+	publishBatch(batch1)
+	waitForAgg(uint64(want1))
+
+	// Step down the agg leader; a new leader must recover the resume state.
+	sl := c.streamLeader(globalAccountName, "cagg")
+	require_NotNil(t, sl)
+	mset, err := sl.globalAccount().lookupStream("cagg")
+	require_NoError(t, err)
+	require_NoError(t, mset.raftNode().StepDown())
+	c.waitOnStreamLeader(globalAccountName, "cagg")
+
+	// Batch 2 after the election — sourcing must resume and pull exactly these.
+	batch2 := map[string]int{"CO1": 7, "CO2": 2, "CO3": 9, "CO4": 3}
+	total := map[string]int{}
+	want2 := want1
+	for _, o := range origins {
+		total[o.name] = batch1[o.name] + batch2[o.name]
+		want2 += batch2[o.name]
+	}
+	publishBatch(batch2)
+	waitForAgg(uint64(want2))
+
+	// Verify exactly-once on the new leader: each origin's sequences must be the
+	// full set 1..total with no duplicate and no gap.
+	sl = c.streamLeader(globalAccountName, "cagg")
+	require_NotNil(t, sl)
+	mset, err = sl.globalAccount().lookupStream("cagg")
+	require_NoError(t, err)
+
+	state := mset.state()
+	seen := map[string]map[uint64]bool{}
+	maxSeq := map[string]uint64{}
+	var smv StoreMsg
+	for seq := state.FirstSeq; seq <= state.LastSeq; seq++ {
+		sm, err := mset.store.LoadMsg(seq, &smv)
+		if err != nil {
+			continue
+		}
+		ss := getHeader(JSStreamSource, sm.hdr)
+		if len(ss) == 0 {
+			continue
+		}
+		sname, _, osseq := streamAndSeq(string(ss))
+		if seen[sname] == nil {
+			seen[sname] = map[uint64]bool{}
+		}
+		if seen[sname][osseq] {
+			t.Fatalf("source %q: origin seq %d stored more than once (duplicate after stepdown)", sname, osseq)
+		}
+		seen[sname][osseq] = true
+		if osseq > maxSeq[sname] {
+			maxSeq[sname] = osseq
+		}
+	}
+	for _, o := range origins {
+		// len == total and max == total with all-unique ⟹ exactly {1..total}.
+		if len(seen[o.name]) != total[o.name] || maxSeq[o.name] != uint64(total[o.name]) {
+			t.Fatalf("source %q: %d unique origin seqs, max %d; want a contiguous 1..%d (gap/duplicate after stepdown)",
+				o.name, len(seen[o.name]), maxSeq[o.name], total[o.name])
+		}
+	}
+}
