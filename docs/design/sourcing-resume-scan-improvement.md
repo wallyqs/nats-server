@@ -760,6 +760,93 @@ Steps 1–4 give Tier 0 on a clean leader hand-off; step 5 is what extends it to
 catchup. Throughout, Tier 1 remains the fallback, so a missing, stale, or version-mismatched map only ever
 costs a ~0.27 ms recompute — never a wrong resume.
 
+#### E2 envelope — concrete sketch
+
+The E2 strategy keeps the store's stream-state codec (`EncodedStreamState`/`DecodeStreamState`) untouched
+and wraps it. The wrinkle is backward compatibility: `DecodeStreamState` consumes its buffer to the end
+(the trailing delete-blocks have no length), so a `SourcesState` block can't simply be appended after a
+plain stream state — an old decoder would misread it as delete-blocks. The envelope therefore uses its own
+magic and a length prefix, and is **only emitted when every peer understands it** (gated exactly like the
+existing `supportsBinarySnapshotLocked`, `jetstream_cluster.go:9865`). Old peers keep receiving plain
+stream state and fall to Tier 1.
+
+Byte layout (`snapshotEnvelopeMagic` is distinct from `streamStateMagic = 42` so the two are
+self-distinguishing on read):
+
+| Offset | Field | Type | Notes |
+|---|---|---|---|
+| `0` | `envMagic` | `u8` | `snapshotEnvelopeMagic` (≠ 42) — marks an enveloped snapshot |
+| `1` | `envVersion` | `u8` | `= 1` |
+| `2…` | `stateLen` | `uvarint` | byte length of the embedded stream state |
+| `…` | `streamState` | `stateLen` bytes | verbatim `EncodedStreamState()` output (its own magic/version inside) |
+| `…` | `sourcesBlock` | bytes | the §12.9 `SourcesState` encoding (its own header + highwayhash); `upToSeq` set to the embedded state's `LastSeq` |
+
+Wrap on capture (in `stateSnapshotLocked`, `jetstream_cluster.go:9905`):
+
+```go
+func (mset *stream) stateSnapshotLocked() []byte {
+	storeState, err := mset.store.EncodedStreamState(mset.getCLFS())
+	if err != nil {
+		return nil
+	}
+	// Only emit the envelope if the whole group understands it; else legacy bytes.
+	if !mset.supportsSourcesSnapshotLocked() {
+		return storeState
+	}
+	var st StreamState
+	mset.store.FastState(&st) // LastSeq is the watermark for the map below
+	seqs := make(map[string]uint64, len(mset.sources))
+	for iname, si := range mset.sources {
+		if si.sseq > 0 {
+			seqs[iname] = si.sseq
+		}
+	}
+	src := encodeSourcesState(st.LastSeq, seqs, mset.store.hh()) // §12.9 encoder, upToSeq = LastSeq
+
+	buf := make([]byte, 0, hdrLen+binary.MaxVarintLen64+len(storeState)+len(src))
+	buf = append(buf, snapshotEnvelopeMagic, snapshotEnvelopeVersion)
+	buf = binary.AppendUvarint(buf, uint64(len(storeState)))
+	buf = append(buf, storeState...)
+	buf = append(buf, src...)
+	return buf
+}
+```
+
+Unwrap on apply (one helper the install/apply path calls instead of `DecodeStreamState` directly):
+
+```go
+func decodeStreamSnapshot(buf []byte, hh hash.Hash64) (*StreamReplicatedState, map[string]uint64, error) {
+	// Legacy / non-enveloped: a plain stream state, no sources map.
+	if len(buf) < hdrLen || buf[0] != snapshotEnvelopeMagic || buf[1] != snapshotEnvelopeVersion {
+		st, err := DecodeStreamState(buf)
+		return st, nil, err
+	}
+	n := hdrLen
+	stateLen, c := binary.Uvarint(buf[n:])
+	n += c
+	if c <= 0 || n+int(stateLen) > len(buf) {
+		return nil, nil, ErrBadStreamStateEncoding
+	}
+	st, err := DecodeStreamState(buf[n : n+int(stateLen)])
+	if err != nil {
+		return nil, nil, err
+	}
+	upTo, seqs, err := decodeSourcesState(buf[n+int(stateLen):], hh) // §12.9 decoder
+	if err != nil || upTo != st.LastSeq {
+		// Tolerate a bad/skewed map: the snapshot still applies; resume falls to Tier 1.
+		return st, nil, nil
+	}
+	return st, seqs, nil
+}
+```
+
+The apply path stashes the returned `seqs` on the stream (e.g. `mset.snapSources`) for Tier 0 to consult,
+and `DecodeStreamState` itself never changes — so a node that doesn't know the envelope (it shipped before
+the gate would let the leader emit one) is never handed these bytes in the first place. Two cheap
+invariants make it safe by construction: the distinct `envMagic` makes old vs new self-distinguishing, and
+`upTo != st.LastSeq` (or any decode error) drops the map and defers to the index recompute rather than
+trusting a skewed one.
+
 ### 12.7 Expected performance
 
 From the measured numbers (§10, "At scale"), with 16 sources over a 10M-message store:
