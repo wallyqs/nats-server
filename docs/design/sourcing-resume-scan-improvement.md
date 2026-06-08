@@ -366,8 +366,9 @@ A working prototype of the two-phase resolver is implemented in `startingSequenc
   `TestJetStreamSourcingResumeAfterRolloutRestart` (end-to-end hard-restart, exactly-once resume),
   `TestJetStreamClusterSourcingResumeAfterLeaderStepDown` (R3 leader-election resume),
   `TestJetStreamStartingSequenceForSourcesDifferential` (randomized layouts vs. a brute-force reference),
-  `…MemStore` (memory storage), `…PartitionTransform` (exotic `>` fallback), and `…SeededEdges` (pre-2.10
-  headers, subject overlap, interior delete).
+  `…MemStore` (memory storage), `…PartitionTransform` (exotic `>` fallback), `…SeededEdges` (pre-2.10
+  headers, subject overlap, interior delete), `…ConfigUpdateScoping` (update add/remove scoping), and
+  `…FirstSeqAdvanced` (resume after `FirstSeq` advances).
 * `BenchmarkJetStreamScanForSources` (existing, single source), `BenchmarkJetStreamScanForSourcesMulti`
   (16 sources spread across the store), `BenchmarkJetStreamSourceResumeLeafnodeFanIn` (8–512 edges
   feeding a hub, quiet edges buried under an all-sourced tail), `…FanInTailDepth` (fixed edges, varying
@@ -540,9 +541,9 @@ Prioritized gaps:
 | ~~P1~~ ✅ | Store-state edges (seeded) | `…SeededEdges` (added): pre-2.10 headers, subject overlap, interior delete of a source's last message | the header-`iname` disambiguation, pre-2.10 name-match, and `loadLast`'s deleted-skip |
 | ~~P1~~ ✅ | `memstore` path | `…MemStore` (added) | the linear `LoadPrevMsgMulti` / index-light `LoadLastMsg` path for sources |
 | ~~P1~~ ✅ | Exotic transforms | `…PartitionTransform` (added) | the residual Tier 2 `>` path resolves to the right seq |
-| **P2** | Config-update path | `STREAM.UPDATE` adding/removing sources, then assert only affected sources are recomputed and the rest preserved | `setStartingSequenceForSources` scoping |
-| **P2** | Snapshot restore | restore a stream from snapshot/backup and assert resume | the cold-restore branch of recovery |
-| **P2** | First-seq > 1 | resume after age/limits expiry has advanced `FirstSeq` | off-by-one in the reverse-scan termination |
+| ~~P2~~ ✅ | Config-update path | `…ConfigUpdateScoping` (added): add/remove sources, plus a direct assertion that only the given inames are recomputed | `setStartingSequenceForSources` scoping (the `needsStartingSeqNum` path) |
+| ~~P2~~ ✅ | First-seq > 1 | `…FirstSeqAdvanced` (added): purge-by-sequence advances `FirstSeq`, both phases still resume | off-by-one in the reverse-scan / `loadLast` termination |
+| P2 (covered) | Snapshot restore | shares the on-disk recovery path with `…ResumeAfterRolloutRestart`; a dedicated backup/restore round-trip remains optional | the cold-restore branch of recovery |
 
 **Tier 0 (gated on implementation).** When the persisted map lands, add a watermark matrix:
 `upToSeq == LastSeq` → trust; `upToSeq < LastSeq` → recompute (Tier 1); `upToSeq > LastSeq` → distrust;
@@ -551,9 +552,9 @@ durability and map flush → stale → Tier 1; clean `Stop` → Tier 0 hit; and 
 
 ### Still to do
 
-* Only the **P2** items remain — config-update scoping, snapshot-restore resume, and `FirstSeq > 1` after
-  expiry — plus the Tier 0 watermark matrix once that lands. The P0/P1 coverage above is in place and
-  green under `-race`.
+* All P0–P2 recovery-test gaps are covered and green under `-race`. The only remaining additions are the
+  **Tier 0 watermark matrix** (gated on that feature landing) and, optionally, a dedicated stream
+  backup/restore round-trip (the resolver path itself is already exercised by the restart test).
 
 ### Resolved finding (was suspected pre-existing bug)
 
