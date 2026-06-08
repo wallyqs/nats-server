@@ -17,8 +17,11 @@ package server
 
 import (
 	"fmt"
+	"sort"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 // Validates the index fast path (phase 1) plus the reverse-scan fallback
@@ -392,6 +395,142 @@ func TestJetStreamStartingSequenceForSourcesSharedWildcardTransform(t *testing.T
 	for name, n := range expect {
 		if got[name] != uint64(n) {
 			t.Fatalf("source %q: expected starting seq %d, got %d", name, n, got[name])
+		}
+	}
+}
+
+// End-to-end rollout/restart test: a sourcing stream pulls from several origins
+// (across both recovery phases), the server is hard-restarted (as in a rolling
+// upgrade), and then more is published to the origins. After recovery, sourcing
+// must resume exactly where it left off — every origin message sourced exactly
+// once, with no gap and no duplicate. This exercises the real recovery path
+// (setLeader -> setupSourceConsumers -> startingSequenceForSources) rather than
+// calling the resolver directly.
+func TestJetStreamSourcingResumeAfterRolloutRestart(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Origins chosen to span both recovery phases:
+	//   O1,O2 distinct concrete subjects  -> phase 1 (index fast path)
+	//   O3    templated subject transform -> phase 2 (reverse scan)
+	//   O4    catch-all (empty filter)     -> phase 2 (reverse scan)
+	type origin struct {
+		name, subj, pub string
+		transform       bool
+		dest            string
+		catchall        bool
+	}
+	origins := []origin{
+		{name: "O1", subj: "s1", pub: "s1"},
+		{name: "O2", subj: "s2", pub: "s2"},
+		{name: "O3", subj: "s3.*", pub: "s3.a", transform: true, dest: "tout.{{wildcard(1)}}"},
+		{name: "O4", subj: "s4", pub: "s4", catchall: true},
+	}
+
+	var sources []*StreamSource
+	for _, o := range origins {
+		_, err := jsStreamCreate(t, nc, &StreamConfig{Name: o.name, Subjects: []string{o.subj}, Storage: FileStorage})
+		require_NoError(t, err)
+		ss := &StreamSource{Name: o.name}
+		switch {
+		case o.transform:
+			ss.SubjectTransforms = []SubjectTransformConfig{{Source: o.subj, Destination: o.dest}}
+		case o.catchall:
+			// leave FilterSubject empty -> catch-all
+		default:
+			ss.FilterSubject = o.subj
+		}
+		sources = append(sources, ss)
+	}
+
+	// Sources-only hub, so every stored message carries a JSStreamSource header.
+	_, err := jsStreamCreate(t, nc, &StreamConfig{Name: "agg", Storage: FileStorage, Sources: sources})
+	require_NoError(t, err)
+
+	// publishBatch publishes per-origin counts to their origin streams.
+	publishBatch := func(js nats.JetStreamContext, counts map[string]int) {
+		for _, o := range origins {
+			for i := 0; i < counts[o.name]; i++ {
+				_, err := js.Publish(o.pub, nil)
+				require_NoError(t, err)
+			}
+		}
+	}
+	waitForAgg := func(js nats.JetStreamContext, want uint64) {
+		t.Helper()
+		checkFor(t, 20*time.Second, 100*time.Millisecond, func() error {
+			si, err := js.StreamInfo("agg")
+			if err != nil {
+				return err
+			}
+			if si.State.Msgs != want {
+				return fmt.Errorf("waiting for sourcing: have %d want %d", si.State.Msgs, want)
+			}
+			return nil
+		})
+	}
+
+	// Batch 1, before the restart.
+	batch1 := map[string]int{"O1": 3, "O2": 5, "O3": 4, "O4": 6}
+	want1 := 3 + 5 + 4 + 6
+	publishBatch(js, batch1)
+	waitForAgg(js, uint64(want1))
+
+	// Hard restart the server (rolling-upgrade style), preserving the store dir.
+	port := s.opts.Port
+	sd := s.StoreDir()
+	nc.Close()
+	s.Shutdown()
+	s.WaitForShutdown()
+	s = RunJetStreamServerOnPort(port, sd)
+	defer s.Shutdown()
+
+	nc, js = jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Batch 2, after the restart — sourcing must resume and pull exactly these.
+	batch2 := map[string]int{"O1": 7, "O2": 2, "O3": 9, "O4": 3}
+	total := map[string]int{}
+	want2 := want1
+	for _, o := range origins {
+		total[o.name] = batch1[o.name] + batch2[o.name]
+		want2 += batch2[o.name]
+	}
+	publishBatch(js, batch2)
+	waitForAgg(js, uint64(want2))
+
+	// Verify exactly-once: scan every stored message, group the origin sequences
+	// by source stream, and require each to be precisely 1..total with no gap and
+	// no duplicate. A missed resume would leave a gap; a re-sourced run would add
+	// duplicates (sourced messages have no Nats-Msg-Id dedupe).
+	mset, err := s.globalAccount().lookupStream("agg")
+	require_NoError(t, err)
+
+	var state StreamState
+	mset.store.FastState(&state)
+	seen := map[string][]uint64{}
+	for seq := state.FirstSeq; seq <= state.LastSeq; seq++ {
+		sm, err := mset.getMsg(seq)
+		require_NoError(t, err)
+		ss := getHeader(JSStreamSource, sm.Header)
+		require_True(t, len(ss) > 0)
+		sname, _, osseq := streamAndSeq(string(ss))
+		seen[sname] = append(seen[sname], osseq)
+	}
+
+	for _, o := range origins {
+		got := seen[o.name]
+		sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+		if len(got) != total[o.name] {
+			t.Fatalf("source %q: sourced %d messages, want %d (seqs=%v)", o.name, len(got), total[o.name], got)
+		}
+		for i, sseq := range got {
+			if sseq != uint64(i+1) {
+				t.Fatalf("source %q: non-contiguous origin seqs (gap/duplicate) at index %d: got %d, want %d (all=%v)",
+					o.name, i, sseq, i+1, got)
+			}
 		}
 	}
 }
