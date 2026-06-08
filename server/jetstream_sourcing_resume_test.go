@@ -17,6 +17,7 @@ package server
 
 import (
 	"fmt"
+	"math/rand"
 	"sort"
 	"testing"
 	"time"
@@ -532,5 +533,144 @@ func TestJetStreamSourcingResumeAfterRolloutRestart(t *testing.T) {
 					o.name, i, sseq, i+1, got)
 			}
 		}
+	}
+}
+
+// Differential / property test: for randomized source layouts (mixed source
+// kinds, random counts, randomly interleaved so each source's last message
+// lands at a random store depth), the index-based resolver must produce the
+// exact same per-source starting sequence as an independent brute-force
+// reference computed from the same store (the most recent origin sequence per
+// source). This exercises phase 1 and phase 2 across many shapes the
+// hand-written cases don't enumerate.
+func TestJetStreamStartingSequenceForSourcesDifferential(t *testing.T) {
+	// Source kinds, each mapping to a single origin stream.
+	const (
+		kindDistinct  = iota // distinct concrete subject       -> phase 1
+		kindCatchall         // empty filter (catch-all)        -> phase 2
+		kindConcrete         // concrete subject transform      -> phase 1
+		kindTemplated        // templated (wildcard) transform  -> phase 2
+		numKinds
+	)
+
+	// A handful of fixed seeds keeps the test reproducible while still covering
+	// many layouts; the failing seed is reported for replay.
+	for _, seed := range []int64{1, 2, 3, 5, 8, 13, 21, 34} {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			rng := rand.New(rand.NewSource(seed))
+
+			s := RunBasicJetStreamServer(t)
+			defer s.Shutdown()
+			nc, js := jsClientConnect(t, s)
+			defer nc.Close()
+
+			type src struct {
+				name, originSubj, pubSubj string
+				count                     int
+			}
+
+			n := 2 + rng.Intn(5) // 2..6 sources
+			var srcs []src
+			var sources []*StreamSource
+			for i := 0; i < n; i++ {
+				name := fmt.Sprintf("O%d", i)
+				kind := rng.Intn(numKinds)
+				sp := src{name: name, count: rng.Intn(8)} // 0..7 (0 exercises the never-sourced case)
+				ss := &StreamSource{Name: name}
+				switch kind {
+				case kindDistinct:
+					sp.originSubj, sp.pubSubj = fmt.Sprintf("d%d", i), fmt.Sprintf("d%d", i)
+					ss.FilterSubject = sp.pubSubj
+				case kindCatchall:
+					sp.originSubj, sp.pubSubj = fmt.Sprintf("c%d", i), fmt.Sprintf("c%d", i)
+					// empty filter -> catch-all
+				case kindConcrete:
+					sp.originSubj, sp.pubSubj = fmt.Sprintf("x%d", i), fmt.Sprintf("x%d", i)
+					ss.SubjectTransforms = []SubjectTransformConfig{{Source: sp.pubSubj, Destination: fmt.Sprintf("tx%d", i)}}
+				case kindTemplated:
+					sp.originSubj, sp.pubSubj = fmt.Sprintf("w%d.*", i), fmt.Sprintf("w%d.a", i)
+					ss.SubjectTransforms = []SubjectTransformConfig{{Source: sp.originSubj, Destination: fmt.Sprintf("tw%d.{{wildcard(1)}}", i)}}
+				}
+				_, err := jsStreamCreate(t, nc, &StreamConfig{Name: name, Subjects: []string{sp.originSubj}, Storage: FileStorage})
+				require_NoError(t, err)
+				srcs = append(srcs, sp)
+				sources = append(sources, ss)
+			}
+
+			_, err := jsStreamCreate(t, nc, &StreamConfig{Name: "agg", Storage: FileStorage, Sources: sources})
+			require_NoError(t, err)
+
+			// Build an interleaved publish plan and shuffle it, so each source's
+			// last message ends up at a random depth in the hub store.
+			var plan []string
+			total := 0
+			for _, sp := range srcs {
+				for i := 0; i < sp.count; i++ {
+					plan = append(plan, sp.pubSubj)
+				}
+				total += sp.count
+			}
+			rng.Shuffle(len(plan), func(i, j int) { plan[i], plan[j] = plan[j], plan[i] })
+			for _, subj := range plan {
+				_, err := js.Publish(subj, nil)
+				require_NoError(t, err)
+			}
+
+			checkFor(t, 20*time.Second, 100*time.Millisecond, func() error {
+				si, err := js.StreamInfo("agg")
+				if err != nil {
+					return err
+				}
+				if si.State.Msgs != uint64(total) {
+					return fmt.Errorf("waiting for sourcing: have %d want %d", si.State.Msgs, total)
+				}
+				return nil
+			})
+
+			mset, err := s.globalAccount().lookupStream("agg")
+			require_NoError(t, err)
+
+			// Brute-force reference: most recent origin sequence per source stream,
+			// computed by scanning the whole store independently of the resolver.
+			ref := map[string]uint64{}
+			var state StreamState
+			mset.store.FastState(&state)
+			var smv StoreMsg
+			for seq := state.FirstSeq; seq <= state.LastSeq; seq++ {
+				sm, err := mset.store.LoadMsg(seq, &smv)
+				if err != nil {
+					continue
+				}
+				ss := getHeader(JSStreamSource, sm.hdr)
+				if len(ss) == 0 {
+					continue
+				}
+				sname, _, osseq := streamAndSeq(string(ss))
+				if osseq > ref[sname] {
+					ref[sname] = osseq
+				}
+			}
+
+			// Resolver under test.
+			mset.mu.Lock()
+			mset.startingSequenceForSources()
+			got := make(map[string]uint64, len(mset.sources))
+			for _, si := range mset.sources {
+				got[si.name] = si.sseq
+			}
+			mset.mu.Unlock()
+
+			for _, sp := range srcs {
+				if got[sp.name] != ref[sp.name] {
+					t.Fatalf("seed %d: source %q resolved sseq=%d, reference (brute-force scan)=%d (count=%d)",
+						seed, sp.name, got[sp.name], ref[sp.name], sp.count)
+				}
+				// Sanity: the reference must also equal the number we published
+				// (origin seq == count), confirming sourcing actually completed.
+				if ref[sp.name] != uint64(sp.count) {
+					t.Fatalf("seed %d: source %q reference sseq=%d but published %d", seed, sp.name, ref[sp.name], sp.count)
+				}
+			}
+		})
 	}
 }
