@@ -451,11 +451,12 @@ the scan reaches; from 100k on, the linear walk dominates.)
 
 #### At scale (10M), and vs. a persisted resume map
 
-A parallel design (see §11) persists a `map[source]→lastSeq` and *reads* it on recovery instead of
-recomputing from the store. To compare on the same axis, `BenchmarkJetStreamSourceResumeDeepStore` seeds
-the hub store directly — real end-to-end sourcing can't build a 10M-message store — with one
-`JSStreamSource`-headered anchor per source plus a deep tail, and a built-in check verifies phase 1
-resolves every source before timing. This pushes the reverse-scan baseline to 10M:
+The **persisted-resume-map approach** (a separate effort; see §11) persists a `map[source]→lastSeq` and
+*reads* it on recovery instead of recomputing from the store. To compare on the same axis,
+`BenchmarkJetStreamSourceResumeDeepStore` seeds the hub store directly — real end-to-end sourcing can't
+build a 10M-message store — with one `JSStreamSource`-headered anchor per source plus a deep tail, and a
+built-in check verifies phase 1 resolves every source before timing. This pushes the reverse-scan
+baseline to 10M:
 
 | sources | tail | Before (reverse scan) | After (index recompute) | Speedup |
 |--------:|-----:|----------------------:|------------------------:|--------:|
@@ -470,18 +471,24 @@ Both axes confirm the model: the reverse scan is O(depth) (8.6 → 97 → 972 ms
 the index recompute is flat in depth (~0.27 ms at 16 sources from 100k to 10M) and scales with source
 count (~12 µs/source).
 
-Cross-checking the persisted-map design's published numbers (different host, larger messages):
+Cross-checking against the persisted-resume-map approach's published numbers (measured on a different
+host with larger messages), at 16 sources / 10M tail — each row is one recovery strategy and the
+benchmark it was measured in:
 
-| sources / tail | their scan baseline | their persisted map | our scan baseline | our index recompute |
-|---|---:|---:|---:|---:|
-| 16 / 10M | 5.03 s | 2.08 µs | 0.972 s | 0.265 ms |
+| recovery strategy | benchmark | recovery time |
+|---|---|---:|
+| reverse scan (pre-change baseline) | persisted-resume-map benchmark | 5.03 s |
+| reverse scan (pre-change baseline) | `…DeepStore` (this proposal) | 0.972 s |
+| index recompute (this proposal) | `…DeepStore` (this proposal) | 0.265 ms |
+| persisted resume map | persisted-resume-map benchmark | 2.08 µs |
 
-The two scan baselines have the same O(depth) shape; the ~5× absolute gap is environment (message size /
-host). The persisted map is ~100× faster than our index recompute *in absolute terms* because it never
-touches the store — a pure in-memory read — whereas the index still loads one block per source. Those two
-factors compose to explain why their headline multiplier (~2.4M×) dwarfs ours (~3,700×):
-2.42M / 3,668 ≈ 660 ≈ 5.2 (baseline gap) × 127 (recompute vs map-read). The designs are **complementary,
-not competing** — see §11.
+Both reverse-scan figures have the same O(depth) shape; the ~5× absolute gap between the two benchmarks is
+environment (message size / host). The persisted resume map is ~100× faster than the index recompute *in
+absolute terms* because it never touches the store — a pure in-memory read — whereas the index recompute
+still loads one block per source. Those two factors compose to explain why the persisted-map benchmark's
+headline multiplier (~2.4M×) dwarfs the index-recompute multiplier (~3,700×):
+2.42M / 3,668 ≈ 660 ≈ 5.2 (baseline gap) × 127 (map-read vs one-block-load). The two approaches are
+**complementary, not competing** — see §11.
 
 ### What still forces a full `>` scan in Phase 2 (by design)
 
