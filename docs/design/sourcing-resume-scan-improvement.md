@@ -362,7 +362,8 @@ A working prototype of the two-phase resolver is implemented in `startingSequenc
   leader-election and the config-update resume paths use the index fast path and the narrowed sublist.
 * Tests (all pass, incl. `-race`): `…IndexFastPath`, `…Ambiguity` (catch-all + shared concrete
   destination), `…TemplatedTransform` (wildcard transform), `…SharedWildcardTransform` (two templated
-  transforms sharing a `gout.*` space), and `TestJetStreamSetStartingSequenceForSourcesIndex` (twin).
+  transforms sharing a `gout.*` space), `TestJetStreamSetStartingSequenceForSourcesIndex` (twin), and
+  `TestJetStreamSourcingResumeAfterRolloutRestart` (end-to-end hard-restart, exactly-once resume).
 * `BenchmarkJetStreamScanForSources` (existing, single source), `BenchmarkJetStreamScanForSourcesMulti`
   (16 sources spread across the store), `BenchmarkJetStreamSourceResumeLeafnodeFanIn` (8–512 edges
   feeding a hub, quiet edges buried under an all-sourced tail), `…FanInTailDepth` (fixed edges, varying
@@ -504,11 +505,43 @@ The takeaway: the by-design `>` fallback is cheap whenever the catch-all/partiti
 present **and** has gone quiet under a deep tail — genuinely unavoidable, since a catch-all source has no
 single subject to index by. The distinct edges in the same stream are unaffected either way (Phase 1).
 
+### Testing plan & coverage
+
+The recovery path has two layers worth testing separately: the **resolver** (`startingSequenceForSources`
+producing the right `si.sseq`) and the **end-to-end behaviour** (a real restart/election resumes sourcing
+exactly-once). Below is the current coverage and the prioritized gaps.
+
+**Layer 1 — resolver correctness (unit, calls the resolver directly).** ✅ in place:
+`…IndexFastPath` (phase 1 + transform phase 2), `…Ambiguity` (catch-all + shared concrete destination),
+`…SetStartingSequenceForSourcesIndex` (update-path twin), `…TemplatedTransform`, `…SharedWildcardTransform`.
+
+**Layer 2 — end-to-end recovery.** Newly added: `TestJetStreamSourcingResumeAfterRolloutRestart` — sources
+across both phases, hard-restarts the server (rolling-upgrade style), publishes a second batch, and asserts
+each origin's sourced sequences are exactly `1..N` (no gap = no missed resume; no duplicate = no re-sourced
+run). Passes under `-race`.
+
+Prioritized gaps:
+
+| Pri | Area | Proposed test(s) | Guards against |
+|---|---|---|---|
+| **P0** | Clustered resume (R3) | `…ResumeAfterLeaderStepDown` — `mset.raftNode().StepDown()`, wait for new leader, publish more, assert exactly-once | resolver runs per-node on every election; the common production trigger, untested today |
+| **P0** | Property / differential | fuzz random source layouts (subjects, transforms, counts, interleaving, deletes) and assert the index resolver's `si.sseq` == a brute-force reference linear scan | cheap broad coverage; catches resolver regressions the hand-written cases miss |
+| **P1** | Store-state edges (seeded) | seed the store directly (as `…DeepStore` does) to build: pre-2.10 headers (empty `iname`, stream-name match), direct-publish/source **subject overlap**, and interior **deletes/purge** before a source's last message | the header-`iname` disambiguation and `loadLast`'s `dmap`/prev-block walk — hard to build via the JS client |
+| **P1** | `memstore` path | run the resolver matrix on a `MemStore`-backed stream | the linear `LoadPrevMsgMulti` / index-light `LoadLastMsg` path is untested for sources |
+| **P1** | Exotic transforms | `partition()` / `split()` source resume correctness (the by-design `>` fallback) | the residual Tier 2 path; perf already benched (`…PartitionFallback`), correctness not asserted |
+| **P2** | Config-update path | `STREAM.UPDATE` adding/removing sources, then assert only affected sources are recomputed and the rest preserved | `setStartingSequenceForSources` scoping |
+| **P2** | Snapshot restore | restore a stream from snapshot/backup and assert resume | the cold-restore branch of recovery |
+| **P2** | First-seq > 1 | resume after age/limits expiry has advanced `FirstSeq` | off-by-one in the reverse-scan termination |
+
+**Tier 0 (gated on implementation).** When the persisted map lands, add a watermark matrix:
+`upToSeq == LastSeq` → trust; `upToSeq < LastSeq` → recompute (Tier 1); `upToSeq > LastSeq` → distrust;
+plus checksum-corruption and version-mismatch → fall through (degrade, not error); a crash between message
+durability and map flush → stale → Tier 1; clean `Stop` → Tier 0 hit; and a cluster snapshot round-trip.
+
 ### Still to do
 
-* **Pre-2.10 / direct-publish-overlap coverage:** add explicit cases (handled today via the header
-  check and the Phase 2 fallback; tests would lock the behaviour in). Hard to construct through the JS
-  client because streams can't declare overlapping subjects; would need low-level store seeding.
+* The **P0/P1** items above — `…ResumeAfterLeaderStepDown` and the property/differential test are the
+  highest-leverage next additions; the seeded store-state edges close the remaining hand-coverage gaps.
 
 ### Resolved finding (was suspected pre-existing bug)
 
