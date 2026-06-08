@@ -364,8 +364,10 @@ A working prototype of the two-phase resolver is implemented in `startingSequenc
   destination), `…TemplatedTransform` (wildcard transform), `…SharedWildcardTransform` (two templated
   transforms sharing a `gout.*` space), `TestJetStreamSetStartingSequenceForSourcesIndex` (twin),
   `TestJetStreamSourcingResumeAfterRolloutRestart` (end-to-end hard-restart, exactly-once resume),
-  `TestJetStreamClusterSourcingResumeAfterLeaderStepDown` (R3 leader-election resume), and
-  `TestJetStreamStartingSequenceForSourcesDifferential` (randomized layouts vs. a brute-force reference).
+  `TestJetStreamClusterSourcingResumeAfterLeaderStepDown` (R3 leader-election resume),
+  `TestJetStreamStartingSequenceForSourcesDifferential` (randomized layouts vs. a brute-force reference),
+  `…MemStore` (memory storage), `…PartitionTransform` (exotic `>` fallback), and `…SeededEdges` (pre-2.10
+  headers, subject overlap, interior delete).
 * `BenchmarkJetStreamScanForSources` (existing, single source), `BenchmarkJetStreamScanForSourcesMulti`
   (16 sources spread across the store), `BenchmarkJetStreamSourceResumeLeafnodeFanIn` (8–512 edges
   feeding a hub, quiet edges buried under an all-sourced tail), `…FanInTailDepth` (fixed edges, varying
@@ -535,9 +537,9 @@ Prioritized gaps:
 |---|---|---|---|
 | ~~P0~~ ✅ | Clustered resume (R3) | `…ResumeAfterLeaderStepDown` (added) | resolver runs per-node on every election |
 | ~~P0~~ ✅ | Property / differential | `…Differential` (added) | resolver regressions the hand-written cases miss |
-| **P1** | Store-state edges (seeded) | seed the store directly (as `…DeepStore` does) to build: pre-2.10 headers (empty `iname`, stream-name match), direct-publish/source **subject overlap**, and interior **deletes/purge** before a source's last message | the header-`iname` disambiguation and `loadLast`'s `dmap`/prev-block walk — hard to build via the JS client |
-| **P1** | `memstore` path | run the resolver matrix on a `MemStore`-backed stream | the linear `LoadPrevMsgMulti` / index-light `LoadLastMsg` path is untested for sources |
-| **P1** | Exotic transforms | `partition()` / `split()` source resume correctness (the by-design `>` fallback) | the residual Tier 2 path; perf already benched (`…PartitionFallback`), correctness not asserted |
+| ~~P1~~ ✅ | Store-state edges (seeded) | `…SeededEdges` (added): pre-2.10 headers, subject overlap, interior delete of a source's last message | the header-`iname` disambiguation, pre-2.10 name-match, and `loadLast`'s deleted-skip |
+| ~~P1~~ ✅ | `memstore` path | `…MemStore` (added) | the linear `LoadPrevMsgMulti` / index-light `LoadLastMsg` path for sources |
+| ~~P1~~ ✅ | Exotic transforms | `…PartitionTransform` (added) | the residual Tier 2 `>` path resolves to the right seq |
 | **P2** | Config-update path | `STREAM.UPDATE` adding/removing sources, then assert only affected sources are recomputed and the rest preserved | `setStartingSequenceForSources` scoping |
 | **P2** | Snapshot restore | restore a stream from snapshot/backup and assert resume | the cold-restore branch of recovery |
 | **P2** | First-seq > 1 | resume after age/limits expiry has advanced `FirstSeq` | off-by-one in the reverse-scan termination |
@@ -549,9 +551,9 @@ durability and map flush → stale → Tier 1; clean `Stop` → Tier 0 hit; and 
 
 ### Still to do
 
-* The **P1** items are the next additions — the seeded store-state edges (pre-2.10 headers, subject
-  overlap, interior deletes) and the `memstore` path close the remaining hand-coverage gaps; exotic
-  `partition()`/`split()` resume correctness completes the Tier 2 picture.
+* Only the **P2** items remain — config-update scoping, snapshot-restore resume, and `FirstSeq > 1` after
+  expiry — plus the Tier 0 watermark matrix once that lands. The P0/P1 coverage above is in place and
+  green under `-race`.
 
 ### Resolved finding (was suspected pre-existing bug)
 
