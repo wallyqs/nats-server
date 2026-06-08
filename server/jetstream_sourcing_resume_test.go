@@ -816,3 +816,136 @@ func TestJetStreamStartingSequenceForSourcesPartitionTransform(t *testing.T) {
 		}
 	}
 }
+
+// Seeded store-state edge cases that can't be built through the JS client.
+// We create the sourcing stream (and empty origins, so the source consumers
+// stay idle), then write crafted messages directly into its store and run the
+// resolver. Covers: pre-2.10 source headers (stream-name-only, no iname),
+// subject overlap (a source's stored subject also carries other sources' /
+// header-less messages), and interior deletes before a source's last message.
+func TestJetStreamStartingSequenceForSourcesSeededEdges(t *testing.T) {
+	// New-format header: "<name> <originSeq> <filter> <dest> <orig>".
+	newHdr := func(name string, originSeq uint64, filter, dest, orig string) []byte {
+		return genHeader(nil, JSStreamSource, fmt.Sprintf("%s %d %s %s %s", name, originSeq, filter, dest, orig))
+	}
+	// Pre-2.10 header: "<name> <originSeq>" (no iname); matched by stream name.
+	oldHdr := func(name string, originSeq uint64) []byte {
+		return genHeader(nil, JSStreamSource, fmt.Sprintf("%s %d", name, originSeq))
+	}
+
+	// setup creates empty origins + a sources-only hub and returns its mset.
+	setup := func(t *testing.T, s *Server, nc *nats.Conn, sources []*StreamSource, originSubjs map[string]string) *stream {
+		for name, subj := range originSubjs {
+			_, err := jsStreamCreate(t, nc, &StreamConfig{Name: name, Subjects: []string{subj}, Storage: FileStorage})
+			require_NoError(t, err)
+		}
+		_, err := jsStreamCreate(t, nc, &StreamConfig{Name: "aggS", Storage: FileStorage, Sources: sources})
+		require_NoError(t, err)
+		mset, err := s.globalAccount().lookupStream("aggS")
+		require_NoError(t, err)
+		return mset
+	}
+
+	resolve := func(mset *stream) map[string]uint64 {
+		mset.mu.Lock()
+		defer mset.mu.Unlock()
+		mset.startingSequenceForSources()
+		got := make(map[string]uint64, len(mset.sources))
+		for _, si := range mset.sources {
+			got[si.name] = si.sseq
+		}
+		return got
+	}
+
+	t.Run("pre-2.10 header", func(t *testing.T) {
+		s := RunBasicJetStreamServer(t)
+		defer s.Shutdown()
+		nc, _ := jsClientConnect(t, s)
+		defer nc.Close()
+
+		mset := setup(t, s, nc,
+			[]*StreamSource{{Name: "OLD", FilterSubject: "old"}},
+			map[string]string{"OLD": "old"})
+
+		// Three pre-2.10 "old" messages (origin seqs 1..3), then header-less noise.
+		for i := uint64(1); i <= 3; i++ {
+			_, _, err := mset.store.StoreMsg("old", oldHdr("OLD", i), nil, 0)
+			require_NoError(t, err)
+		}
+		for i := 0; i < 50; i++ {
+			_, _, err := mset.store.StoreMsg("noise", nil, nil, 0)
+			require_NoError(t, err)
+		}
+
+		if got := resolve(mset)["OLD"]; got != 3 {
+			t.Fatalf("pre-2.10: OLD resolved sseq=%d, want 3", got)
+		}
+	})
+
+	t.Run("subject overlap", func(t *testing.T) {
+		s := RunBasicJetStreamServer(t)
+		defer s.Shutdown()
+		nc, _ := jsClientConnect(t, s)
+		defer nc.Close()
+
+		// Two sources filtering the SAME stored subject, plus header-less direct
+		// publishes on it. The index points at the last "shared" message (which is
+		// header-less), so phase 1 defers both and phase 2 disambiguates by iname.
+		mset := setup(t, s, nc,
+			[]*StreamSource{{Name: "A", FilterSubject: "shared"}, {Name: "B", FilterSubject: "shared"}},
+			map[string]string{"A": "ina", "B": "inb"})
+
+		// Interleave A (origin 1..4) and B (origin 1..6) onto "shared".
+		_, _, err := mset.store.StoreMsg("shared", newHdr("A", 1, "shared", fwcs, "shared"), nil, 0)
+		require_NoError(t, err)
+		_, _, err = mset.store.StoreMsg("shared", newHdr("B", 1, "shared", fwcs, "shared"), nil, 0)
+		require_NoError(t, err)
+		_, _, err = mset.store.StoreMsg("shared", newHdr("A", 4, "shared", fwcs, "shared"), nil, 0)
+		require_NoError(t, err)
+		_, _, err = mset.store.StoreMsg("shared", newHdr("B", 6, "shared", fwcs, "shared"), nil, 0)
+		require_NoError(t, err)
+		// Header-less direct publishes on the same subject, AFTER both sources'
+		// last messages, so the index lands on a non-source message.
+		for i := 0; i < 10; i++ {
+			_, _, err := mset.store.StoreMsg("shared", nil, nil, 0)
+			require_NoError(t, err)
+		}
+
+		got := resolve(mset)
+		if got["A"] != 4 || got["B"] != 6 {
+			t.Fatalf("subject overlap: A=%d (want 4) B=%d (want 6)", got["A"], got["B"])
+		}
+	})
+
+	t.Run("interior delete of last subject msg", func(t *testing.T) {
+		s := RunBasicJetStreamServer(t)
+		defer s.Shutdown()
+		nc, _ := jsClientConnect(t, s)
+		defer nc.Close()
+
+		mset := setup(t, s, nc,
+			[]*StreamSource{{Name: "D", FilterSubject: "del"}},
+			map[string]string{"D": "del"})
+
+		// Five "del" messages (origin 1..5) at hub seqs 1..5, then noise.
+		var delSeqs []uint64
+		for i := uint64(1); i <= 5; i++ {
+			seq, _, err := mset.store.StoreMsg("del", newHdr("D", i, "del", fwcs, "del"), nil, 0)
+			require_NoError(t, err)
+			delSeqs = append(delSeqs, seq)
+		}
+		for i := 0; i < 30; i++ {
+			_, _, err := mset.store.StoreMsg("noise", nil, nil, 0)
+			require_NoError(t, err)
+		}
+		// Delete the LAST "del" message (origin seq 5). loadLast must now skip it
+		// and return origin seq 4.
+		ok, err := mset.store.RemoveMsg(delSeqs[len(delSeqs)-1])
+		require_NoError(t, err)
+		require_True(t, ok)
+
+		if got := resolve(mset)["D"]; got != 4 {
+			t.Fatalf("interior delete: D resolved sseq=%d, want 4 (last msg deleted)", got)
+		}
+	})
+}
