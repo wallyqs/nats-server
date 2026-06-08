@@ -306,7 +306,83 @@ func DecodeStreamState(buf []byte) (*StreamReplicatedState, error) {
 	return ss, nil
 }
 
-// DeleteRange is a run length encoded delete range.
+// Sources snapshot envelope (option E): a clustered stream snapshot may be wrapped
+// to additionally carry a replicated per-source resume map (iname -> last sourced
+// origin sequence). The watermark is the embedded stream state's LastSeq, so no
+// separate field is needed. The envelope magic is distinct from streamStateMagic
+// (42) and the legacy JSON snapshot ('{' == 123) so the three are self-identifying
+// on read. Emission is version-gated (see supportsSourcesSnapshotLocked) so a peer
+// that predates this never receives an envelope.
+const (
+	sourcesSnapshotMagic   = uint8(43)
+	sourcesSnapshotVersion = uint8(1)
+)
+
+// isSourcesSnapshot reports whether buf is a sources-wrapped stream snapshot.
+func isSourcesSnapshot(buf []byte) bool {
+	return len(buf) >= hdrLen && buf[0] == sourcesSnapshotMagic && buf[1] == sourcesSnapshotVersion
+}
+
+// wrapSourcesSnapshot wraps an encoded stream state with a per-source resume map:
+//
+//	[magic][ver][stateLen uvarint][state][count uvarint]( [ilen uvarint][iname][sseq uvarint] )*
+func wrapSourcesSnapshot(state []byte, seqs map[string]uint64) []byte {
+	buf := make([]byte, 0, hdrLen+binary.MaxVarintLen64+len(state)+binary.MaxVarintLen64+len(seqs)*24)
+	buf = append(buf, sourcesSnapshotMagic, sourcesSnapshotVersion)
+	buf = binary.AppendUvarint(buf, uint64(len(state)))
+	buf = append(buf, state...)
+	buf = binary.AppendUvarint(buf, uint64(len(seqs)))
+	for iname, sseq := range seqs {
+		buf = binary.AppendUvarint(buf, uint64(len(iname)))
+		buf = append(buf, iname...)
+		buf = binary.AppendUvarint(buf, sseq)
+	}
+	return buf
+}
+
+// unwrapSourcesSnapshot splits a wrapped snapshot into the embedded stream state
+// and the per-source map. ok is false if buf is not a wrapped snapshot (the caller
+// then treats buf as a plain stream state). A parse error returns ok=false too, so
+// a malformed map degrades to "no map" (Tier 1) rather than an error.
+func unwrapSourcesSnapshot(buf []byte) (state []byte, seqs map[string]uint64, ok bool) {
+	if !isSourcesSnapshot(buf) {
+		return nil, nil, false
+	}
+	n := hdrLen
+	stateLen, c := binary.Uvarint(buf[n:])
+	if c <= 0 {
+		return nil, nil, false
+	}
+	n += c
+	if n+int(stateLen) > len(buf) {
+		return nil, nil, false
+	}
+	state = buf[n : n+int(stateLen)]
+	n += int(stateLen)
+	count, c := binary.Uvarint(buf[n:])
+	if c <= 0 {
+		return nil, nil, false
+	}
+	n += c
+	seqs = make(map[string]uint64, count)
+	for i := uint64(0); i < count; i++ {
+		ilen, c := binary.Uvarint(buf[n:])
+		if c <= 0 || n+c+int(ilen) > len(buf) {
+			return nil, nil, false
+		}
+		n += c
+		iname := string(buf[n : n+int(ilen)])
+		n += int(ilen)
+		sseq, c := binary.Uvarint(buf[n:])
+		if c <= 0 {
+			return nil, nil, false
+		}
+		n += c
+		seqs[iname] = sseq
+	}
+	return state, seqs, true
+}
+
 type DeleteRange struct {
 	First uint64
 	Num   uint64

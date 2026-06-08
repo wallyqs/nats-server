@@ -517,6 +517,14 @@ type stream struct {
 	sourcesConsumerSetup *time.Timer
 	smsgs                *ipQueue[*inMsg] // Intra-process queue for all incoming sourced messages.
 
+	// Replicated per-source resume map (Tier 0, clustered streams only). srcSnap is
+	// the iname->last-sourced-origin-seq map; srcSnapSeq is the watermark — the
+	// highest stream sequence the map is known complete through. srcSnap == nil means
+	// "unknown/incomplete" (e.g. recovered without a map-carrying snapshot), in which
+	// case recovery falls back to the index recompute. Guarded by mset.mu.
+	srcSnap    map[string]uint64
+	srcSnapSeq uint64
+
 	// Indicates we have direct/sourcing consumers.
 	sourcingConsumers int
 
@@ -4758,6 +4766,25 @@ func (mset *stream) startingSequenceForSources() {
 	var state StreamState
 	mset.store.FastState(&state)
 
+	// Tier 0 (clustered streams only): if we hold a replicated per-source resume
+	// map that provably matches the durable log (its watermark == LastSeq), trust
+	// it directly instead of recomputing from the store. The map is a cache — any
+	// mismatch or absence falls through to the index recompute (Tier 1) below, so
+	// it can never resume incorrectly. On the way out we refresh the map from the
+	// authoritative resolved state so this (possibly newly-elected) leader's future
+	// snapshots carry a complete map.
+	if mset.node != nil {
+		defer mset.refreshSourcesSnapLocked(state.LastSeq)
+		if mset.srcSnap != nil && mset.srcSnapSeq == state.LastSeq {
+			for iname, sseq := range mset.srcSnap {
+				if si := mset.sources[iname]; si != nil {
+					si.sseq, si.dseq = sseq, 0
+				}
+			}
+			return
+		}
+	}
+
 	// Bail if no messages, meaning no context.
 	if state.Msgs == 0 {
 		return
@@ -4918,6 +4945,48 @@ func (mset *stream) startingSequenceForSources() {
 		}
 		if len(seqs) == expected {
 			return
+		}
+	}
+}
+
+// refreshSourcesSnapLocked rebuilds the replicated per-source resume map (Tier 0)
+// from the authoritative resolved si.sseq values and stamps the watermark to the
+// given last sequence. Called on a clustered stream after resolving the resume
+// point, so the leader and its snapshots carry a complete, current map. Lock held.
+func (mset *stream) refreshSourcesSnapLocked(lastSeq uint64) {
+	snap := make(map[string]uint64, len(mset.sources))
+	for iname, si := range mset.sources {
+		if si.sseq > 0 {
+			snap[iname] = si.sseq
+		}
+	}
+	mset.srcSnap = snap
+	mset.srcSnapSeq = lastSeq
+}
+
+// trackSourcesSnapLocked maintains the replicated per-source resume map (Tier 0)
+// as a clustered sourcing stream applies messages, so a follower that later
+// becomes leader can resume from the map rather than recompute. It advances the
+// watermark to the stream's last sequence and, when the applied message carries a
+// JSStreamSource header, records that source's latest origin sequence. The map is
+// only maintained once it has a known-complete base: either an initial message on
+// a fresh stream (lseq == 1) or a map delivered by a snapshot; otherwise it stays
+// nil and recovery falls back to the index recompute. Lock held.
+func (mset *stream) trackSourcesSnapLocked(hdr []byte) {
+	if mset.srcSnap == nil {
+		if mset.lseq != 1 {
+			// Unknown base (recovered mid-stream without a map); stay on Tier 1
+			// until a snapshot or a leader election refreshes the map.
+			return
+		}
+		mset.srcSnap = make(map[string]uint64)
+	}
+	mset.srcSnapSeq = mset.lseq
+	if len(hdr) > 0 {
+		if ss := getHeader(JSStreamSource, hdr); len(ss) > 0 {
+			if _, iname, sseq := streamAndSeq(bytesToString(ss)); iname != _EMPTY_ && sseq > mset.srcSnap[iname] {
+				mset.srcSnap[iname] = sseq
+			}
 		}
 	}
 }

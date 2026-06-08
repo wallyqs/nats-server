@@ -269,6 +269,7 @@ const (
 	JetStreamEnabled     ServerCapability = 1 << iota // Server had JetStream enabled.
 	BinaryStreamSnapshot                              // New stream snapshot capability.
 	AccountNRG                                        // Move NRG traffic out of system account.
+	SourcesSnapshot                                   // Stream snapshots may carry a replicated per-source resume map.
 )
 
 // Set JetStream capability.
@@ -303,6 +304,17 @@ func (si *ServerInfo) SetAccountNRG() {
 // system account and into the asset account.
 func (si *ServerInfo) AccountNRG() bool {
 	return si.Flags&AccountNRG != 0
+}
+
+// Set sources snapshot capability.
+func (si *ServerInfo) SetSourcesSnapshot() {
+	si.Flags |= SourcesSnapshot
+}
+
+// SourcesSnapshot indicates whether stream snapshots from this server may carry a
+// replicated per-source resume map.
+func (si *ServerInfo) SourcesSnapshot() bool {
+	return si.Flags&SourcesSnapshot != 0
 }
 
 // ClientInfo is detailed information about the client forming a connection.
@@ -546,6 +558,7 @@ RESET:
 						// New capability based flags.
 						si.SetJetStreamEnabled()
 						si.SetBinaryStreamSnapshot()
+						si.SetSourcesSnapshot()
 						if s.accountNRGAllowed.Load() {
 							si.SetAccountNRG()
 						}
@@ -1766,18 +1779,19 @@ func (s *Server) remoteServerUpdate(sub *subscription, c *client, _ *Account, su
 	node := getHash(si.Name)
 	accountNRG := si.AccountNRG()
 	oldInfo, _ := s.nodeToInfo.Swap(node, nodeInfo{
-		name:            si.Name,
-		version:         si.Version,
-		cluster:         si.Cluster,
-		domain:          si.Domain,
-		id:              si.ID,
-		tags:            si.Tags,
-		cfg:             cfg,
-		stats:           stats,
-		offline:         false,
-		js:              si.JetStreamEnabled(),
-		binarySnapshots: si.BinaryStreamSnapshot(),
-		accountNRG:      accountNRG,
+		name:             si.Name,
+		version:          si.Version,
+		cluster:          si.Cluster,
+		domain:           si.Domain,
+		id:               si.ID,
+		tags:             si.Tags,
+		cfg:              cfg,
+		stats:            stats,
+		offline:          false,
+		js:               si.JetStreamEnabled(),
+		binarySnapshots:  si.BinaryStreamSnapshot(),
+		sourcesSnapshots: si.SourcesSnapshot(),
+		accountNRG:       accountNRG,
 	})
 	if oldInfo == nil || accountNRG != oldInfo.(nodeInfo).accountNRG {
 		// One of the servers we received statsz from changed its mind about
@@ -1820,18 +1834,19 @@ func (s *Server) processNewServer(si *ServerInfo) {
 		// Only update if non-existent
 		if _, ok := s.nodeToInfo.Load(node); !ok {
 			s.nodeToInfo.Store(node, nodeInfo{
-				name:            si.Name,
-				version:         si.Version,
-				cluster:         si.Cluster,
-				domain:          si.Domain,
-				id:              si.ID,
-				tags:            si.Tags,
-				cfg:             nil,
-				stats:           nil,
-				offline:         false,
-				js:              si.JetStreamEnabled(),
-				binarySnapshots: si.BinaryStreamSnapshot(),
-				accountNRG:      si.AccountNRG(),
+				name:             si.Name,
+				version:          si.Version,
+				cluster:          si.Cluster,
+				domain:           si.Domain,
+				id:               si.ID,
+				tags:             si.Tags,
+				cfg:              nil,
+				stats:            nil,
+				offline:          false,
+				js:               si.JetStreamEnabled(),
+				binarySnapshots:  si.BinaryStreamSnapshot(),
+				sourcesSnapshots: si.SourcesSnapshot(),
+				accountNRG:       si.AccountNRG(),
 			})
 		}
 	}

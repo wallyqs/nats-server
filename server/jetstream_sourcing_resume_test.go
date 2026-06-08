@@ -1141,3 +1141,46 @@ func TestJetStreamSourcingResumeFirstSeqAdvanced(t *testing.T) {
 		t.Fatalf("resume with FirstSeq=%d: F1=%d (want %d) F2=%d (want %d)", state.FirstSeq, got["F1"], f1n, got["F2"], f2n)
 	}
 }
+
+// Round-trips the sources-snapshot envelope codec (option E) and confirms the
+// three snapshot encodings are self-identifying.
+func TestSourcesSnapshotEnvelopeRoundTrip(t *testing.T) {
+	state := []byte{streamStateMagic, streamStateVersion, 7, 8, 9} // stand-in stream state
+	seqs := map[string]uint64{"A a >": 4, "B b >": 99, "C c >": 1}
+
+	wrapped := wrapSourcesSnapshot(state, seqs)
+	if !isSourcesSnapshot(wrapped) {
+		t.Fatalf("wrapped snapshot not detected as an envelope")
+	}
+	if isSourcesSnapshot(state) {
+		t.Fatalf("plain stream state misdetected as an envelope")
+	}
+
+	gotState, gotSeqs, ok := unwrapSourcesSnapshot(wrapped)
+	if !ok {
+		t.Fatalf("failed to unwrap envelope")
+	}
+	if string(gotState) != string(state) {
+		t.Fatalf("embedded state mismatch: got %v want %v", gotState, state)
+	}
+	if len(gotSeqs) != len(seqs) {
+		t.Fatalf("map size mismatch: got %d want %d", len(gotSeqs), len(seqs))
+	}
+	for k, v := range seqs {
+		if gotSeqs[k] != v {
+			t.Fatalf("map[%q]=%d want %d", k, gotSeqs[k], v)
+		}
+	}
+
+	// A plain (non-enveloped) state must report ok=false so the caller treats it verbatim.
+	if _, _, ok := unwrapSourcesSnapshot(state); ok {
+		t.Fatalf("plain state unexpectedly unwrapped as an envelope")
+	}
+
+	// Empty map round-trips.
+	w2 := wrapSourcesSnapshot(state, nil)
+	gs2, gm2, ok2 := unwrapSourcesSnapshot(w2)
+	if !ok2 || string(gs2) != string(state) || len(gm2) != 0 {
+		t.Fatalf("empty-map round-trip failed: ok=%v state=%v len=%d", ok2, gs2, len(gm2))
+	}
+}

@@ -386,18 +386,19 @@ type Server struct {
 
 // For tracking JS nodes.
 type nodeInfo struct {
-	name            string
-	version         string
-	cluster         string
-	domain          string
-	id              string
-	tags            jwt.TagList
-	cfg             *JetStreamConfig
-	stats           *JetStreamStats
-	offline         bool
-	js              bool
-	binarySnapshots bool
-	accountNRG      bool
+	name             string
+	version          string
+	cluster          string
+	domain           string
+	id               string
+	tags             jwt.TagList
+	cfg              *JetStreamConfig
+	stats            *JetStreamStats
+	offline          bool
+	js               bool
+	binarySnapshots  bool
+	sourcesSnapshots bool
+	accountNRG       bool
 }
 
 type stats struct {
@@ -822,18 +823,19 @@ func NewServer(opts *Options) (*Server, error) {
 	if opts.JetStream {
 		ourNode := getHash(serverName)
 		s.nodeToInfo.Store(ourNode, nodeInfo{
-			name:            serverName,
-			version:         VERSION,
-			cluster:         opts.Cluster.Name,
-			domain:          opts.JetStreamDomain,
-			id:              info.ID,
-			tags:            opts.Tags,
-			cfg:             &JetStreamConfig{MaxMemory: opts.JetStreamMaxMemory, MaxStore: opts.JetStreamMaxStore, CompressOK: true},
-			stats:           nil,
-			offline:         false,
-			js:              true,
-			binarySnapshots: true,
-			accountNRG:      true,
+			name:             serverName,
+			version:          VERSION,
+			cluster:          opts.Cluster.Name,
+			domain:           opts.JetStreamDomain,
+			id:               info.ID,
+			tags:             opts.Tags,
+			cfg:              &JetStreamConfig{MaxMemory: opts.JetStreamMaxMemory, MaxStore: opts.JetStreamMaxStore, CompressOK: true},
+			stats:            nil,
+			offline:          false,
+			js:               true,
+			binarySnapshots:  true,
+			sourcesSnapshots: true,
+			accountNRG:       true,
 		})
 	}
 

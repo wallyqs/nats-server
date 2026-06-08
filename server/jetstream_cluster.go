@@ -4229,13 +4229,31 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 				}
 			}
 
+			// Option E: a snapshot may be wrapped to additionally carry a replicated
+			// per-source resume map (Tier 0). Unwrap it first; the embedded stream
+			// state is then decoded exactly as before. A node that predates the
+			// capability is never sent an envelope (emission is version-gated).
+			data := e.Data
+			if state, seqs, ok := unwrapSourcesSnapshot(data); ok {
+				data = state
+				mset.mu.Lock()
+				mset.srcSnap = seqs
+				// Watermark is the embedded state's LastSeq, set just below once decoded.
+				mset.mu.Unlock()
+			}
+
 			// Check if we are the new binary encoding.
-			if IsEncodedStreamState(e.Data) {
+			if IsEncodedStreamState(data) {
 				var err error
-				ss, err = DecodeStreamState(e.Data)
+				ss, err = DecodeStreamState(data)
 				if err != nil {
 					onBadState(err)
 					return 0, err
+				}
+				if isSourcesSnapshot(e.Data) {
+					mset.mu.Lock()
+					mset.srcSnapSeq = ss.LastSeq
+					mset.mu.Unlock()
 				}
 			} else {
 				var snap streamSnapshot
@@ -4525,6 +4543,20 @@ func (js *jetStream) applyStreamMsgOp(mset *stream, op entryOp, mbuf []byte, isR
 		// There are some errors that we can't recover from.
 		if err != ErrMaxMsgs && err != ErrMaxBytes && err != ErrMaxMsgsPerSubject && err != ErrMsgTooLarge && err != ErrStoreClosed {
 			return err
+		}
+	}
+
+	// Option E: maintain the replicated per-source resume map (Tier 0) for clustered
+	// sourcing streams, but only on a clean apply (err == nil) — the message is now
+	// durably in the store. cfg.Sources is only mutated on this same apply goroutine,
+	// so the guard read is safe without the stream lock.
+	if err == nil && len(mset.cfg.Sources) > 0 {
+		if needLock {
+			mset.mu.Lock()
+		}
+		mset.trackSourcesSnapLocked(hdr)
+		if needLock {
+			mset.mu.Unlock()
 		}
 	}
 	return nil
@@ -9882,6 +9914,31 @@ func (mset *stream) supportsBinarySnapshotLocked() bool {
 	return true
 }
 
+// supportsSourcesSnapshotLocked reports whether every peer is known to understand a
+// stream snapshot wrapped with a replicated per-source resume map. Because this is a
+// brand-new capability with no prior released version, it is conservative: a peer is
+// only counted as supporting it once we have positive confirmation (via statsz). An
+// unknown peer denies emission, so an envelope is never sent to a node that might not
+// understand it. Lock should be held.
+func (mset *stream) supportsSourcesSnapshotLocked() bool {
+	s, n := mset.srv, mset.node
+	if s == nil || n == nil {
+		return false
+	}
+	id, peers := n.ID(), n.Peers()
+	for _, p := range peers {
+		if p.ID == id {
+			// We know we support ourselves.
+			continue
+		}
+		sir, ok := s.nodeToInfo.Load(p.ID)
+		if !ok || sir == nil || !sir.(nodeInfo).sourcesSnapshots {
+			return false
+		}
+	}
+	return true
+}
+
 // StreamSnapshot is used for snapshotting and out of band catch up in clustered mode.
 // Legacy, replace with binary stream snapshots.
 type streamSnapshot struct {
@@ -9908,6 +9965,18 @@ func (mset *stream) stateSnapshotLocked() []byte {
 		snap, err := mset.store.EncodedStreamState(mset.getCLFS())
 		if err != nil {
 			return nil
+		}
+		// Option E: wrap with the replicated per-source resume map (Tier 0) when the
+		// whole group understands the envelope and our map is current for this exact
+		// snapshot point (watermark == LastSeq). A peer that predates the capability
+		// is never sent an envelope, and a stale/absent map simply isn't attached, so
+		// the receiver falls back to the index recompute.
+		if len(mset.cfg.Sources) > 0 && mset.srcSnap != nil && mset.supportsSourcesSnapshotLocked() {
+			var st StreamState
+			mset.store.FastState(&st)
+			if mset.srcSnapSeq == st.LastSeq {
+				snap = wrapSourcesSnapshot(snap, mset.srcSnap)
+			}
 		}
 		return snap
 	}
