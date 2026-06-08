@@ -6,7 +6,7 @@
     .load{fill:#ffe3df;stroke:#cf222e;stroke-width:1.4}
     .skip{fill:#eef1f4;stroke:#c2c8cf;stroke-width:1.2;stroke-dasharray:3 3}
     .hit{fill:#dafbe1;stroke:#1a7f37;stroke-width:1.6}
-    .muted{font-size:11px;fill:#656d76}
+    .muted{font-size:11px;fill:#3d444d}
     .bad{font-size:12.5px;font-weight:700;fill:#cf222e}
     .good{font-size:12.5px;font-weight:700;fill:#1a7f37}
     .pill{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px}
