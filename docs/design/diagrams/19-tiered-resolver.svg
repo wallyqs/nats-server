@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 600" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .ttl{font-size:17px;font-weight:700;fill:#1f2328}
+    .sub{font-size:11px;fill:#656d76}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}
+    .tier{font-size:13.5px;font-weight:700}
+    .lab{font-size:11.5px;fill:#1f2328}
+    .cost{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;font-weight:700}
+    .branch{font-size:10.5px;font-weight:700}
+  </style>
+  <rect x="0" y="0" width="940" height="600" fill="#f6f8fa"/>
+  <text x="24" y="30" class="ttl">The tiered resolver — startingSequenceForSources() on leader election / restart</text>
+  <text x="24" y="48" class="sub">Each tier resolves what it cheaply can and passes the rest down. Correctness is identical to today; only the cost changes.</text>
+
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="#57606a"/></marker>
+    <marker id="ag" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="#1a7f37"/></marker>
+  </defs>
+
+  <!-- entry -->
+  <rect x="300" y="64" width="340" height="34" rx="8" fill="#eaeef2" stroke="#c2c8cf"/>
+  <text x="470" y="86" text-anchor="middle" class="mono">resetSourceInfo(); store.FastState(&amp;state)</text>
+  <line x1="470" y1="98" x2="470" y2="120" stroke="#57606a" stroke-width="1.6" marker-end="url(#a)"/>
+
+  <!-- TIER 0 -->
+  <rect x="120" y="122" width="700" height="92" rx="10" fill="#eef6ff" stroke="#6cb1ff" stroke-width="1.6"/>
+  <text x="138" y="144" class="tier" fill="#0a4a8f">TIER 0 · persisted resume map (SourcesState)  — future work</text>
+  <text x="138" y="164" class="lab">Read a maintained <tspan class="mono">{ upToSeq, map[iname]→sseq }</tspan> persisted with the stream.</text>
+  <text x="138" y="183" class="lab">Self-validating watermark — trust only when it provably matches the log:</text>
+  <text x="152" y="201" class="mono" fill="#0a4a8f">if upToSeq == state.LastSeq → set every si.sseq from the map → DONE</text>
+  <!-- tier0 cost -->
+  <rect x="700" y="156" width="104" height="44" rx="6" fill="#dbeeff" stroke="#6cb1ff"/>
+  <text x="752" y="174" text-anchor="middle" class="cost" fill="#0a4a8f">~2 µs</text>
+  <text x="752" y="190" text-anchor="middle" class="sub">in-memory read</text>
+
+  <!-- tier0 hit arrow to DONE -->
+  <line x1="820" y1="168" x2="888" y2="168" stroke="#1a7f37" stroke-width="1.6" marker-end="url(#ag)"/>
+  <text x="864" y="160" text-anchor="middle" class="branch" fill="#1a7f37">hit</text>
+  <!-- fall through -->
+  <line x1="470" y1="214" x2="470" y2="238" stroke="#57606a" stroke-width="1.6" marker-end="url(#a)"/>
+  <text x="486" y="231" class="branch" fill="#cf222e">stale / missing / leads-log → fall through</text>
+
+  <!-- TIER 1 -->
+  <rect x="120" y="240" width="700" height="86" rx="10" fill="#f3fcf5" stroke="#9be0ad" stroke-width="1.6"/>
+  <text x="138" y="262" class="tier" fill="#1a7f37">TIER 1 · per-subject index  — implemented (this branch)</text>
+  <text x="138" y="282" class="lab">For each source with a single concrete/wildcard subject:</text>
+  <text x="152" y="300" class="mono" fill="#136a2c">LoadLastMsg(subj) → jump to its last block → verify JSStreamSource header</text>
+  <text x="138" y="318" class="lab">Resolves the common edge→hub fan-in. Unattributable sources pass down.</text>
+  <rect x="700" y="266" width="104" height="44" rx="6" fill="#dafbe1" stroke="#9be0ad"/>
+  <text x="752" y="284" text-anchor="middle" class="cost" fill="#136a2c">~0.27 ms</text>
+  <text x="752" y="300" text-anchor="middle" class="sub">1 block / source</text>
+  <line x1="470" y1="326" x2="470" y2="350" stroke="#57606a" stroke-width="1.6" marker-end="url(#a)"/>
+  <text x="486" y="343" class="branch" fill="#cf222e">empty / shared / exotic-transform sources only</text>
+
+  <!-- TIER 2 -->
+  <rect x="120" y="352" width="700" height="86" rx="10" fill="#fff8f0" stroke="#f0c08a" stroke-width="1.6"/>
+  <text x="138" y="374" class="tier" fill="#9a6700">TIER 2 · narrowed reverse scan  — implemented (this branch)</text>
+  <text x="138" y="394" class="lab">Reverse-scan only the unresolved sources, sublist narrowed to destinations:</text>
+  <text x="152" y="412" class="mono" fill="#7a5400">LoadPrevMsgMulti(sublist, last) — block-skipping via per-block fss</text>
+  <text x="138" y="430" class="lab">Full <tspan class="mono">&gt;</tspan> walk only for a genuine catch-all / partition source.</text>
+  <rect x="700" y="378" width="104" height="44" rx="6" fill="#ffe9cf" stroke="#f0c08a"/>
+  <text x="752" y="393" text-anchor="middle" class="cost" fill="#9a6700">ms … s</text>
+  <text x="752" y="409" text-anchor="middle" class="sub">depth-bound</text>
+
+  <!-- DONE -->
+  <rect x="828" y="150" width="96" height="36" rx="8" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.6"/>
+  <text x="876" y="172" text-anchor="middle" class="tier" fill="#1a7f37">DONE</text>
+
+  <!-- safety callout -->
+  <rect x="120" y="460" width="804" height="116" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1.4"/>
+  <text x="138" y="482" class="tier" fill="#1f2328">Why the watermark makes Tier 0 safe (the map is a cache, never the source of truth)</text>
+  <text x="138" y="503" class="lab">A sourcing resume seq must be <tspan font-weight="700">exact</tspan>: too high ⇒ skip messages (gap/loss); too low ⇒ re-source (duplicates).</text>
+  <text x="138" y="522" class="lab">The map is trusted <tspan font-weight="700">only</tspan> when <tspan class="mono">upToSeq == store.LastSeq</tspan>, i.e. it provably reflects the entire durable log:</text>
+  <text x="152" y="541" class="lab">• <tspan class="mono">upToSeq &lt; LastSeq</tspan> (messages since checkpoint) → stale → Tier 1 recomputes.</text>
+  <text x="152" y="559" class="lab">• <tspan class="mono">upToSeq &gt; LastSeq</tspan> (crash truncated the log) → map leads the log → distrust → Tier 1/2.</text>
+  <text x="138" y="572" class="sub">So persistence timing/fsync races can never cause incorrect resume — at worst they cost one fall-through to the index path.</text>
+</svg>

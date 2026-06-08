@@ -543,6 +543,142 @@ Recommended order: land this index-based resume first (self-contained, no protoc
 every retention type today, and replaces the O(depth) scan in the fallback the persisted design will
 still need), then layer the persistence/durable improvements on top.
 
+## 12. Design sketch: Tier 0, a persisted resume map
+
+This section sketches how the persisted-map approach (a parallel effort) would slot in as **Tier 0** on
+top of the resolver this branch already implements, what it buys, and the options/trade-offs for *where*
+the map lives. Nothing here is implemented on this branch — it is the design we'd build the two efforts
+toward.
+
+### 12.1 The tiered resolver
+
+`startingSequenceForSources` becomes three tiers, each resolving what it cheaply can and passing the
+remainder down. Correctness is identical at every tier — only the cost changes.
+
+![The tiered resolver](diagrams/19-tiered-resolver.svg)
+
+| Tier | Mechanism | Resolves | Cost (16 src / 10M) | Status |
+|---|---|---|---|---|
+| **0** | read a persisted `{upToSeq, map[iname]→sseq}` | everything, if the map matches the log | ~2 µs | design |
+| **1** | `LoadLastMsg(subj)` per source via the subject index | distinct concrete/wildcard-subject sources | ~0.27 ms | **this branch** |
+| **2** | narrowed `LoadPrevMsgMulti` reverse scan | residual catch-all / exotic-transform sources | ms … s | **this branch** |
+
+Tier 0 is a pure *fast path*: when present and trustworthy it returns immediately; otherwise the work
+falls through to the index recompute (Tier 1) and, for the genuine residue, the narrowed scan (Tier 2).
+Because Tiers 1–2 already exist and are cheap, Tier 0 can be added incrementally with no correctness risk
+to the fallback.
+
+### 12.2 How Tier 0 works
+
+The per-source resume sequence (`si.sseq` — the origin sequence of the last message sourced from each
+source) is already tracked in memory: it is set in `processInboundSourceMsg` (`stream.go`) as each
+sourced message is ingested, and today it is **always recomputed** from the store on leader election
+(`setLeader` → `setupSourceConsumers` → `startingSequenceForSources`). No source/mirror resume state is
+persisted anywhere today.
+
+Tier 0 persists that in-memory map so recovery can *read* it instead of recomputing:
+
+1. **Maintain** `map[iname]→sseq` — already done; it is the set of `si.sseq` values.
+2. **Persist** the map, tagged with a watermark `upToSeq` = the hub stream `LastSeq` the map reflects.
+3. **On recovery**, load the map and decide whether to trust it (§12.4); on a hit, set every `si.sseq`
+   from the map and return — no store access at all.
+
+### 12.3 The consistency requirement (why a naive map is unsafe)
+
+A sourcing resume sequence must be **exact**, not merely "not ahead":
+
+* **Map too high** (claims a seq the store doesn't durably have — e.g. a crash truncated messages written
+  after the last checkpoint) ⇒ we resume *past* real messages ⇒ **gap / data loss**.
+* **Map too low** (stale — messages were sourced since the last checkpoint) ⇒ we re-request from the
+  origin and re-append ⇒ **duplicates** (sourced messages carry no `Nats-Msg-Id`, so the store's dedupe
+  does not catch them).
+
+So "persist it and trust it" is only safe if the map is *exactly* the store's state — which is precisely
+the crash-consistency burden a persisted map introduces, and why the state is recomputed today.
+
+### 12.4 The watermark: self-validating trust
+
+The cheap way to get exactness without per-source verification (which would just re-do Tier 1) is a
+single **watermark**. Persist `upToSeq` alongside the map and, on recovery, compare it to the store's
+actual `LastSeq`:
+
+| Condition | Meaning | Action |
+|---|---|---|
+| `upToSeq == LastSeq` | map provably reflects the entire durable log | **trust it** — Tier 0 hit (~µs) |
+| `upToSeq < LastSeq` | messages were stored after the checkpoint | stale → fall to Tier 1 |
+| `upToSeq > LastSeq` | crash truncated the log below the checkpoint | map leads the log → distrust → Tier 1/2 |
+
+This makes Tier 0 **safe by construction and independent of fsync timing**: if the last few sourced
+messages weren't durable and are lost on restart, the recovered `LastSeq` is below `upToSeq`, the map is
+distrusted, and Tier 1 recomputes. The worst case of *any* persistence race is one fall-through to the
+index path — never an incorrect resume. The common clean-shutdown / steady-checkpoint case (the typical
+restart and rolling-upgrade path) hits `upToSeq == LastSeq` and pays ~µs.
+
+### 12.5 Where to persist the map — options
+
+The map is tiny (`iname`→`uint64`, a few dozen entries), so the question is purely *where* it is written
+to stay consistent and *how often*. Five options, roughly increasing in consistency strength and in
+write-path / conflict cost:
+
+| Option | Mechanism | Pros | Cons |
+|---|---|---|---|
+| **A. Inline in `index.db`** | encode the map inside the filestore full-state file (`_writeFullState` / `recoverFullState`) | atomic with stream state; one file; watermark = the state's `LastSeq` for free | touches the checksummed filestore format (highest conflict surface); only as fresh as the periodic full-state write |
+| **B. Sidecar `sources.db`** | a small separate file in the stream's `msgs/` dir, mirroring the consumer-state file pattern (`encodeConsumerState` / `writeState` / highwayhash sum) | self-contained; no change to `index.db`; easy to version & checksum | a second file to write/sync and keep in step; its own staleness window |
+| **C. Write-path update** | update + persist the map on every sourced message (the "always ~2 µs on recovery" design) | map is never stale (`upToSeq` ≈ `LastSeq` almost always) ⇒ Tier 0 hit even after a crash | per-message write amplification; needs batching/debounce; strongest crash-consistency coupling |
+| **D. Periodic + on-stop** | snapshot `{LastSeq, map}` on a timer and on clean `Stop` | trivial; no write-path cost; on-stop write makes clean restarts a guaranteed Tier 0 hit | after a *crash*, almost always stale ⇒ falls to Tier 1 (still ~0.27 ms, so acceptable) |
+| **E. RAFT snapshot (clustered)** | add the map to the stream's replicated snapshot encoding (`StreamReplicatedState` / `stateSnapshot`) | replicated to followers; survives leader change without a recompute | changes the replicated state format & version; must stay consistent across catchup/restore |
+
+Notes:
+
+* **A vs B vs D differ only in the staleness window**, and the watermark makes any window *safe* — it
+  only affects the Tier 0 *hit rate*, not correctness. So a low-risk first cut is **D** (periodic +
+  on-stop, sidecar file), upgrading to **C** later if steady-state recovery latency on crash matters.
+* **C** is what yields the headline "~2 µs even after a crash," at the cost of touching the hot write
+  path; it is the most invasive and the one most worth measuring for write-amplification.
+* **E** is orthogonal to A–D and is required for the *clustered* win — otherwise a clustered stream still
+  recomputes (now via Tier 1) when a new leader has no local map. This is the largest piece and the one
+  with the most format/version care.
+* Whatever the choice, the map must be **bounded by `LastSeq` on read** (§12.4) and treated as a hint the
+  log can always override.
+
+### 12.6 Clustered streams
+
+For replicated streams the resume state lives behind RAFT. Two sub-cases:
+
+* **Same node re-elected / restarted** — a local sidecar/`index.db` map (A/B/D) applies as in the
+  single-server case.
+* **Different node becomes leader** — it may have no local map (or a stale one). Either replicate the map
+  in the stream snapshot (E), or simply let Tier 1 recompute on that node — which, post-this-branch, is
+  ~0.27 ms rather than the old O(depth) scan. That fallback is what makes Tier 0 optional per-node rather
+  than a hard dependency.
+
+### 12.7 Expected performance
+
+From the measured numbers (§10, "At scale"), with 16 sources over a 10M-message store:
+
+| Path | Recovery | Scales with | Flat in store depth? |
+|---|---:|---|---|
+| Old reverse scan (pre-branch) | ~0.97 s | store depth | no — O(depth) |
+| Tier 1 index recompute (this branch) | ~0.27 ms | source count (~12 µs/src) | yes |
+| Tier 0 persisted map (design) | ~2 µs (reported) | source count (~0.13 µs/src) | yes |
+
+So Tier 0 is ~**100× faster than Tier 1 in absolute terms** (a pure in-memory read vs one block load per
+source) and both are flat in depth. The practical question is whether ~0.27 ms recovery is already good
+enough: for most deployments it is, and Tier 1 alone removes the multi-second cliff. Tier 0 earns its
+keep when recovery happens *often* or with *many* sources — frequent leader elections / rolling restarts,
+or hundreds–thousands of sources where 0.27 ms → tens of ms (Tier 1) is worth driving back to µs. It does
+**not** change the asymptotics (both are O(sources)); it lowers the constant by removing store I/O.
+
+### 12.8 Recommendation
+
+1. **Ship Tiers 1–2 now** (this branch): self-contained, no new state, removes the O(depth) cliff for
+   every retention type, and is the fallback Tier 0 needs anyway.
+2. **Add Tier 0 incrementally**: start with option **D** (periodic + on-stop sidecar, watermark-validated)
+   for single-server/R1 — small, safe, and already turns clean restarts into µs. Measure the write path
+   before considering **C**.
+3. **Then Tier 0 for clusters** (option **E**): the largest and most consistency-sensitive piece; gate it
+   behind the same watermark and keep Tier 1 as the per-node fallback so it can never resume incorrectly.
+
 ## Appendix — key references
 
 | Symbol | File:line | Role |
@@ -559,3 +695,13 @@ still need), then layer the persistence/durable improvements on top.
 | `LoadPrevMsgMulti` | `filestore.go:9403` / `memstore.go:1991` | the backward walk used by Phase 2 |
 | `Nats-Stream-Source` header | `stream.go:635` | constant; the per-message source provenance |
 | `genSourceHeader` / `streamAndSeq` | `stream.go:4470` / `4545` | writes / parses origin stream, iname, origin seq |
+
+Tier 0 (design) persistence hooks:
+
+| Symbol | File:line | Role |
+|---|---|---|
+| `processInboundSourceMsg` (`si.sseq = sseq`) | `stream.go:4371` | where the in-memory resume map is updated per sourced message |
+| `setLeader` → `subscribeToStream` → `setupSourceConsumers` | `stream.go:1255` / `4957` / `4927` | the recovery trigger Tier 0 would short-circuit |
+| `_writeFullState` / `recoverFullState` | `filestore.go:11681` / `1871` | filestore full-state write/read (`index.db`) — option A host |
+| `encodeConsumerState` / `writeState` | `store.go:401` / `filestore.go:13164` | consumer-state file pattern to mirror for a sidecar `sources.db` (option B) |
+| `StreamReplicatedState` / `stateSnapshot` | `store.go:229` / `jetstream_cluster.go:9897` | replicated stream state / snapshot — option E host (no source state today) |
