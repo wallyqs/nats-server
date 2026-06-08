@@ -704,10 +704,61 @@ For replicated streams the resume state lives behind RAFT. Two sub-cases:
 
 * **Same node re-elected / restarted** — a local sidecar/`index.db` map (A/B/D) applies as in the
   single-server case.
-* **Different node becomes leader** — it may have no local map (or a stale one). Either replicate the map
-  in the stream snapshot (E), or simply let Tier 1 recompute on that node — which, post-this-branch, is
-  ~0.27 ms rather than the old O(depth) scan. That fallback is what makes Tier 0 optional per-node rather
-  than a hard dependency.
+* **Different node becomes leader** — this is the *leader-election failover* case, and it is the one only
+  option E helps. The new leader was a **follower**: it never ran the source consumers and never wrote a
+  local map, so the local-file options (A/B/C/D) give it nothing — its watermark check can't pass and it
+  falls through to Tier 1. Tier 1 keeps that fall-through cheap (~0.27 ms vs the old O(depth) scan), which
+  is what makes Tier 0 *optional per node* rather than a hard dependency — but to get the ~µs Tier 0 hit
+  on a freshly-elected node, the map has to be **replicated**, which is option E.
+
+#### What option E involves
+
+The replicated resume state rides the same RAFT machinery streams already use for catchup. The pieces:
+
+1. **Carry the map in the replicated state.** Add a `Sources map[string]uint64` (iname→sseq) to
+   `StreamReplicatedState` (`store.go:229`). The watermark is free: the snapshot is taken at a known
+   `LastSeq`, which already lives in the same struct — so "map reflects the log up to `LastSeq`" needs no
+   new field, just the §12.4 comparison on read.
+
+2. **Encode/decode it.** Two strategies, trading conflict surface against simplicity:
+   * **E1 — extend the binary stream-state format.** Append the map in `EncodedStreamState`
+     (`filestore.go:12281`, `memstore.go:2369`) and read it in `DecodeStreamState` (`store.go:245`),
+     behind a bumped `streamStateVersion`. Cleanest single blob, but touches the shared, version-checked
+     stream-state codec (same high-conflict surface as option A — coordinate with whoever owns it).
+   * **E2 — stream-layer envelope.** Leave the store codec untouched and have the stream append its own
+     `SourcesState` block (the §12.9 encoding, reused verbatim) after the store's encoded state in
+     `stateSnapshotLocked` (`jetstream_cluster.go:9905`), splitting it back off before
+     `DecodeStreamState` on apply. Lower conflict surface; costs one extra length-prefix/parse step in the
+     snapshot install/apply path.
+
+3. **Populate on capture.** `stateSnapshotLocked` runs under the stream lock and already calls
+   `EncodedStreamState`; it would read the live `si.sseq` values out of `mset.sources` there (they are the
+   map). No new bookkeeping — the values already exist in memory on the leader.
+
+4. **Apply on the receiving node.** When a node installs/applies the snapshot (`processSnapshot`,
+   `jetstream_cluster.go:10264`, and the apply path that decodes it), stash the decoded map on the stream
+   (e.g. `mset.snapSources`). Then Tier 0 in `startingSequenceForSources` reads that map and applies it
+   **iff** its watermark `== state.LastSeq`, exactly as in §12.4.
+
+5. **Keep it fresh past the snapshot (the real failover nuance).** A snapshot is point-in-time. After an
+   election the new leader typically *catches up* by applying log entries written after the snapshot —
+   advancing `LastSeq` beyond the snapshot's watermark, so a plain snapshot map is stale and Tier 0 misses
+   (falling to Tier 1). To actually hit Tier 0 on failover, the map must also be advanced as those entries
+   apply: when an applied entry is a sourced message (it carries the `JSStreamSource` header), bump
+   `snapSources[iname] = sseq`. That is option **C**'s update, but driven off the **apply** stream rather
+   than the live ingest path — so every replica maintains the map for free as it applies, and any one of
+   them can become leader with a current map.
+
+6. **Compatibility.** Version-gate both directions: a node reading a snapshot without the map (older
+   peer, or first rollout) simply finds no `Sources` and falls through to Tier 1; a node that doesn't
+   understand the new field must skip it cleanly. Because the watermark already makes a missing/stale map
+   safe, mixed-version clusters degrade to the index recompute rather than mis-resuming — no flag-day.
+
+Net: E is the largest and most consistency-sensitive option (it changes replicated state and rides the
+catchup/apply path), but it is also the only one that makes a **freshly-elected leader** resume in ~µs.
+Steps 1–4 give Tier 0 on a clean leader hand-off; step 5 is what extends it to a genuine failover with
+catchup. Throughout, Tier 1 remains the fallback, so a missing, stale, or version-mismatched map only ever
+costs a ~0.27 ms recompute — never a wrong resume.
 
 ### 12.7 Expected performance
 
@@ -869,3 +920,5 @@ Tier 0 (design) persistence hooks:
 | `_writeFullState` / `recoverFullState` | `filestore.go:11681` / `1871` | filestore full-state write/read (`index.db`) — option A host |
 | `encodeConsumerState` / `writeState` | `store.go:401` / `filestore.go:13164` | consumer-state file pattern to mirror for a sidecar `sources.db` (option B) |
 | `StreamReplicatedState` / `stateSnapshot` | `store.go:229` / `jetstream_cluster.go:9897` | replicated stream state / snapshot — option E host (no source state today) |
+| `EncodedStreamState` / `DecodeStreamState` | `filestore.go:12281`, `memstore.go:2369` / `store.go:245` | replicated-state codec to extend for option E1 (version-gated) |
+| `stateSnapshotLocked` / `processSnapshot` | `jetstream_cluster.go:9905` / `10264` | snapshot capture (populate map) and apply (seed map + maintain from applied entries) for option E |
