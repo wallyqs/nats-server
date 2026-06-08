@@ -596,12 +596,13 @@ Recommended order: land this index-based resume first (self-contained, no protoc
 every retention type today, and replaces the O(depth) scan in the fallback the persisted design will
 still need), then layer the persistence/durable improvements on top.
 
-## 12. Design sketch: Tier 0, a persisted resume map
+## 12. Tier 0: a replicated resume map
 
-This section sketches how the persisted-map approach (a parallel effort) would slot in as **Tier 0** on
-top of the resolver this branch already implements, what it buys, and the options/trade-offs for *where*
-the map lives. Nothing here is implemented on this branch — it is the design we'd build the two efforts
-toward.
+This section describes how **Tier 0** slots on top of the resolver, what it buys, and the options for
+*where* the map lives. The **clustered variant (option E, replicated via the stream RAFT snapshot) is now
+implemented on this branch** — see §12.6; the single-server sidecar variants (B/D) remain a design sketch.
+Throughout, Tier 0 is a watermark-gated cache over the index recompute (Tier 1), so it can never resume
+incorrectly regardless of which persistence option is used.
 
 ### 12.1 The tiered resolver
 
@@ -612,7 +613,7 @@ remainder down. Correctness is identical at every tier — only the cost changes
 
 | Tier | Mechanism | Resolves | Cost (16 src / 10M) | Status |
 |---|---|---|---|---|
-| **0** | read a persisted `{upToSeq, map[iname]→sseq}` | everything, if the map matches the log | ~2 µs | design |
+| **0** | read a replicated `map[iname]→sseq` (watermark = snapshot `LastSeq`) | everything, if the map matches the log | ~µs | **this branch (clustered, option E)** |
 | **1** | `LoadLastMsg(subj)` per source via the subject index | distinct concrete/wildcard-subject sources | ~0.27 ms | **this branch** |
 | **2** | narrowed `LoadPrevMsgMulti` reverse scan | residual catch-all / exotic-transform sources | ms … s | **this branch** |
 
@@ -712,6 +713,18 @@ For replicated streams the resume state lives behind RAFT. Two sub-cases:
   on a freshly-elected node, the map has to be **replicated**, which is option E.
 
 #### What option E involves
+
+> **Implemented on this branch.** Option E ships using the **E2 envelope** (below): the store's
+> stream-state codec is untouched; the snapshot is wrapped at the stream layer when a new `SourcesSnapshot`
+> capability flag confirms every peer understands it. The map is maintained as each replica applies sourced
+> messages and refreshed from the authoritative `si.sseq` when a node becomes leader, so a freshly-elected
+> leader hits Tier 0. Key symbols: `wrap/unwrapSourcesSnapshot` (`store.go`), `srcSnap`/`srcSnapSeq` +
+> `trackSourcesSnapLocked`/`refreshSourcesSnapLocked` (`stream.go`), the capture/unwrap/maintenance hooks
+> in `stateSnapshotLocked`/`applyStreamMsgOp` and the Tier 0 read in `startingSequenceForSources`. Tests:
+> `…ClusterSourcingResumeAfterLeaderStepDown` (proves Tier 0 is used), `…AfterRolloutRestart` (snapshot
+> wrap+unwrap across a full restart), `…SourcesSnapshotUpgradeGate` (a peer without the capability forces a
+> plain snapshot), and `TestSourcesSnapshotEnvelopeRoundTrip` (codec). Single-server is unchanged — the map
+> is cluster-only and the index recompute remains the path there.
 
 The replicated resume state rides the same RAFT machinery streams already use for catchup. The pieces:
 
@@ -864,15 +877,16 @@ keep when recovery happens *often* or with *many* sources — frequent leader el
 or hundreds–thousands of sources where 0.27 ms → tens of ms (Tier 1) is worth driving back to µs. It does
 **not** change the asymptotics (both are O(sources)); it lowers the constant by removing store I/O.
 
-### 12.8 Recommendation
+### 12.8 Status & recommendation
 
-1. **Ship Tiers 1–2 now** (this branch): self-contained, no new state, removes the O(depth) cliff for
-   every retention type, and is the fallback Tier 0 needs anyway.
-2. **Add Tier 0 incrementally**: start with option **D** (periodic + on-stop sidecar, watermark-validated)
-   for single-server/R1 — small, safe, and already turns clean restarts into µs. Measure the write path
-   before considering **C**.
-3. **Then Tier 0 for clusters** (option **E**): the largest and most consistency-sensitive piece; gate it
-   behind the same watermark and keep Tier 1 as the per-node fallback so it can never resume incorrectly.
+1. **Tiers 1–2** (this branch): self-contained, no new state, removes the O(depth) cliff for every
+   retention type, and are the fallback Tier 0 relies on. **Done.**
+2. **Tier 0 for clusters** (option **E**, E2 envelope): replicated map carried in the stream snapshot,
+   maintained on apply, watermark-gated, version-gated for upgrade safety. **Done on this branch** — gives
+   a freshly-elected leader a ~µs resume while keeping Tier 1 as the per-node fallback.
+3. **Tier 0 for single-server** (option **B/D** sidecar): still a design sketch. Lower priority — a
+   single-server restart already resumes via the index recompute (~0.27 ms); the sidecar would shave that
+   to ~µs on a clean restart. Add if/when that latency matters.
 
 ### 12.9 Concrete encoding (`SourcesState`)
 
