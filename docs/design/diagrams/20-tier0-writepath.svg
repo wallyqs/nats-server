@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 560" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <style>
+    .ttl{font-size:16px;font-weight:700;fill:#1f2328}
+    .sub{font-size:11px;fill:#656d76}
+    .ll{font-size:12px;font-weight:700;fill:#1f2328}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;fill:#1f2328}
+    .step{font-size:11px;fill:#1f2328}
+    .num{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;font-weight:700;fill:#0a4a8f}
+  </style>
+  <rect x="0" y="0" width="940" height="560" fill="#f6f8fa"/>
+  <text x="24" y="28" class="ttl">Tier 0 · Option C — maintaining the resume map on the write path</text>
+  <text x="24" y="46" class="sub">Per-sourced-message update, debounced. The ordering invariant keeps the watermark safe: the map is persisted only after the message is durable.</text>
+
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="#57606a"/></marker>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="1" refY="3" orient="auto"><path d="M7 0 L1 3 L7 6 z" fill="#57606a"/></marker>
+  </defs>
+
+  <!-- lifelines -->
+  <g>
+    <rect x="60" y="64" width="150" height="30" rx="6" fill="#eaeef2" stroke="#c2c8cf"/>
+    <text x="135" y="84" text-anchor="middle" class="ll">source consumer</text>
+    <line x1="135" y1="94" x2="135" y2="470" stroke="#c2c8cf" stroke-width="1.4" stroke-dasharray="4 4"/>
+
+    <rect x="270" y="64" width="200" height="30" rx="6" fill="#eef6ff" stroke="#6cb1ff"/>
+    <text x="370" y="84" text-anchor="middle" class="ll" fill="#0a4a8f">processInboundSourceMsg</text>
+    <line x1="370" y1="94" x2="370" y2="470" stroke="#6cb1ff" stroke-width="1.4" stroke-dasharray="4 4"/>
+
+    <rect x="540" y="64" width="160" height="30" rx="6" fill="#dafbe1" stroke="#9be0ad"/>
+    <text x="620" y="84" text-anchor="middle" class="ll" fill="#136a2c">message store (log)</text>
+    <line x1="620" y1="94" x2="620" y2="470" stroke="#9be0ad" stroke-width="1.4" stroke-dasharray="4 4"/>
+
+    <rect x="760" y="64" width="160" height="30" rx="6" fill="#fff3d6" stroke="#bf8700"/>
+    <text x="840" y="84" text-anchor="middle" class="ll" fill="#9a6700">persister · sources.db</text>
+    <line x1="840" y1="94" x2="840" y2="470" stroke="#bf8700" stroke-width="1.4" stroke-dasharray="4 4"/>
+  </g>
+
+  <!-- step 1: deliver -->
+  <text x="24" y="128" class="num">1</text>
+  <line x1="135" y1="132" x2="368" y2="132" stroke="#57606a" stroke-width="1.6" marker-end="url(#a)"/>
+  <text x="150" y="124" class="step">deliver(msg, origin seq <tspan class="mono">S</tspan>)</text>
+
+  <!-- step 2: set si.sseq (self) -->
+  <text x="24" y="176" class="num">2</text>
+  <path d="M370 160 h54 v22 h-52" fill="none" stroke="#57606a" stroke-width="1.6" marker-end="url(#a)"/>
+  <text x="284" y="178" class="mono" fill="#0a4a8f">si.sseq = S</text>
+  <text x="430" y="170" class="sub">in-memory only</text>
+
+  <!-- step 3: append to store -->
+  <text x="24" y="224" class="num">3</text>
+  <line x1="370" y1="220" x2="618" y2="220" stroke="#57606a" stroke-width="1.6" marker-end="url(#a)"/>
+  <text x="392" y="212" class="step">append(subj, hdr=<tspan class="mono">JSStreamSource</tspan>, msg)</text>
+  <!-- return durable L -->
+  <text x="24" y="252" class="num">4</text>
+  <line x1="620" y1="248" x2="372" y2="248" stroke="#57606a" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="430" y="240" class="step">durable at hub seq <tspan class="mono">L</tspan>  (= new LastSeq)</text>
+
+  <!-- step 5: mark dirty to persister -->
+  <text x="24" y="300" class="num">5</text>
+  <line x1="370" y1="296" x2="838" y2="296" stroke="#57606a" stroke-width="1.6" marker-end="url(#a)"/>
+  <text x="392" y="288" class="step">mark dirty: map[iname]=S, upToSeq=L</text>
+
+  <!-- step 6: debounced flush (self on persister) -->
+  <text x="24" y="348" class="num">6</text>
+  <path d="M840 328 h54 v22 h-52" fill="none" stroke="#bf8700" stroke-width="1.8" marker-end="url(#a)"/>
+  <text x="586" y="338" class="mono" fill="#9a6700">flush sources.db (debounced/batched)</text>
+  <text x="586" y="354" class="sub">encode {upToSeq, map} + 8B highwayhash, writeFileWithOptionalSync</text>
+
+  <!-- invariant callout -->
+  <rect x="60" y="392" width="860" height="86" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1.4"/>
+  <text x="78" y="414" class="ll">Ordering invariant (what keeps the watermark honest)</text>
+  <text x="78" y="434" class="step">The map is persisted in step 6 <tspan font-weight="700">after</tspan> the message is in the store (steps 3–4), so on disk <tspan class="mono">upToSeq ≤ durable LastSeq</tspan> always.</text>
+  <text x="78" y="453" class="step">A crash between 4 and 6 just leaves the map one-or-more messages stale → recovery sees <tspan class="mono">upToSeq &lt; LastSeq</tspan> → Tier 1 recomputes. Safe.</text>
+  <text x="78" y="471" class="sub">Debounce/batch step 6 (e.g. coalesce N messages or a few ms) so the hot path isn't a file write per message — the cost knob for Option C.</text>
+
+  <text x="60" y="506" class="sub">On clean Stop: force a final flush with upToSeq = LastSeq ⇒ the next restart is a guaranteed Tier 0 hit (~µs).</text>
+  <text x="60" y="524" class="sub">Note: this is a design sketch (Option C in §12.5); not implemented on this branch.</text>
+</svg>

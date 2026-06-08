@@ -634,7 +634,11 @@ Notes:
   only affects the Tier 0 *hit rate*, not correctness. So a low-risk first cut is **D** (periodic +
   on-stop, sidecar file), upgrading to **C** later if steady-state recovery latency on crash matters.
 * **C** is what yields the headline "~2 µs even after a crash," at the cost of touching the hot write
-  path; it is the most invasive and the one most worth measuring for write-amplification.
+  path; it is the most invasive and the one most worth measuring for write-amplification. Its update
+  sequence and the ordering invariant that keeps the watermark honest are shown below:
+
+![Tier 0 option C write-path update](diagrams/20-tier0-writepath.svg)
+
 * **E** is orthogonal to A–D and is required for the *clustered* win — otherwise a clustered stream still
   recomputes (now via Tier 1) when a new leader has no local map. This is the largest piece and the one
   with the most format/version care.
@@ -678,6 +682,113 @@ or hundreds–thousands of sources where 0.27 ms → tens of ms (Tier 1) is wort
    before considering **C**.
 3. **Then Tier 0 for clusters** (option **E**): the largest and most consistency-sensitive piece; gate it
    behind the same watermark and keep Tier 1 as the per-node fallback so it can never resume incorrectly.
+
+### 12.9 Concrete encoding (`SourcesState`)
+
+The map is small, so a flat varint encoding mirroring `encodeConsumerState` (`store.go:401`) is plenty.
+It reuses the filestore conventions: a 2-byte header (`magic = 22`, `version = 1`, `hdrLen = 2`,
+`filestore.go:288–294`) and an 8-byte trailing highwayhash-64 checksum over the preceding bytes
+(`checksumSize = 8`, computed with the store's `fs.hh` digest as in `_writeFullState`).
+
+Byte layout:
+
+| Offset | Field | Type | Notes |
+|---|---|---|---|
+| `0` | `magic` | `u8` | `= 22` (filestore magic) |
+| `1` | `version` | `u8` | `= 1` |
+| `2…` | `upToSeq` | `uvarint` | hub `LastSeq` the map reflects — the watermark (§12.4) |
+| `…` | `n` | `uvarint` | number of source entries |
+| `…` | `len(iname)` | `uvarint` | ┐ repeated `n` times |
+| `…` | `iname` | `bytes` | │ the source's unique index name |
+| `…` | `sseq` | `uvarint` | ┘ last origin sequence sourced for it |
+| *end−8* | `checksum` | `[8]byte` | highwayhash-64 over `buf[0 : end−8]` |
+
+Encode (sketch):
+
+```go
+const sourcesStateMagic = magic // 22, shared filestore magic
+const sourcesStateVersion = uint8(1)
+
+// encodeSourcesState serializes {upToSeq, map[iname]→sseq}. hh is the store's
+// keyed highwayhash digest (fs.hh); pass nil to skip the checksum (tests).
+func encodeSourcesState(upToSeq uint64, seqs map[string]uint64, hh hash.Hash64) []byte {
+	// Upper bound: header + upToSeq + count + per-entry(len + iname + sseq) + checksum.
+	sz := hdrLen + 2*binary.MaxVarintLen64
+	for iname := range seqs {
+		sz += binary.MaxVarintLen64 + len(iname) + binary.MaxVarintLen64
+	}
+	sz += checksumSize
+	buf := make([]byte, sz)
+
+	buf[0], buf[1] = sourcesStateMagic, sourcesStateVersion
+	n := hdrLen
+	n += binary.PutUvarint(buf[n:], upToSeq)
+	n += binary.PutUvarint(buf[n:], uint64(len(seqs)))
+	for iname, sseq := range seqs {
+		n += binary.PutUvarint(buf[n:], uint64(len(iname)))
+		n += copy(buf[n:], iname)
+		n += binary.PutUvarint(buf[n:], sseq)
+	}
+	if hh != nil {
+		hh.Reset()
+		hh.Write(buf[:n])
+		n += copy(buf[n:], hh.Sum(nil)) // 8 bytes
+	}
+	return buf[:n]
+}
+```
+
+Decode (sketch) — rejects a bad magic/version/checksum and returns the map plus the watermark, which
+`startingSequenceForSources` (Tier 0) then compares against `state.LastSeq`:
+
+```go
+func decodeSourcesState(buf []byte, hh hash.Hash64) (upToSeq uint64, seqs map[string]uint64, err error) {
+	if len(buf) < hdrLen+checksumSize || buf[0] != sourcesStateMagic || buf[1] != sourcesStateVersion {
+		return 0, nil, errBadSourcesState
+	}
+	body, sum := buf[:len(buf)-checksumSize], buf[len(buf)-checksumSize:]
+	if hh != nil {
+		hh.Reset()
+		hh.Write(body)
+		if !bytes.Equal(hh.Sum(nil), sum) {
+			return 0, nil, errBadSourcesState
+		}
+	}
+	n := hdrLen
+	upToSeq, c := binary.Uvarint(body[n:]); n += c
+	cnt, c := binary.Uvarint(body[n:]); n += c
+	seqs = make(map[string]uint64, cnt)
+	for i := uint64(0); i < cnt; i++ {
+		l, c := binary.Uvarint(body[n:]); n += c
+		iname := string(body[n : n+int(l)]); n += int(l)
+		sseq, c := binary.Uvarint(body[n:]); n += c
+		seqs[iname] = sseq
+	}
+	return upToSeq, seqs, nil
+}
+```
+
+Size: ~`len(iname)+~12` bytes per source, so a 256-source stream is well under 10 KB — a single small
+write, well within one filesystem block for typical fan-ins. Forward compatibility is the usual `version`
+bump (Tier 0 simply distrusts an unrecognized version and falls through to Tier 1, so an old/new format
+mismatch degrades to the index recompute rather than an error).
+
+The Tier 0 read in `startingSequenceForSources` is then small:
+
+```go
+// Tier 0: trust a persisted map only if it provably matches the durable log.
+if buf, _ := mset.readSourcesState(); len(buf) > 0 {
+	if upToSeq, seqs, err := decodeSourcesState(buf, mset.store.hh()); err == nil && upToSeq == state.LastSeq {
+		for iname, sseq := range seqs {
+			if si := mset.sources[iname]; si != nil {
+				si.sseq, si.dseq = sseq, 0
+			}
+		}
+		return // sources not in the map have never sourced → sseq stays 0 (correct)
+	}
+}
+// else fall through to Tier 1 (index recompute) / Tier 2 (narrowed scan)
+```
 
 ## Appendix — key references
 
