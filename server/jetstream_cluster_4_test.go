@@ -8423,7 +8423,14 @@ func TestJetStreamClusterSourcingResumeAfterLeaderStepDown(t *testing.T) {
 	publishBatch := func(counts map[string]int) {
 		for _, o := range origins {
 			for i := 0; i < counts[o.name]; i++ {
-				_, err := js.Publish(o.pub, nil)
+				// Retry transient timeouts while leaders settle (under load).
+				var err error
+				for try := 0; try < 30; try++ {
+					if _, err = js.Publish(o.pub, nil); err == nil {
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
 				require_NoError(t, err)
 			}
 		}
@@ -8572,7 +8579,15 @@ func TestJetStreamClusterSourcingResumeAfterRolloutRestart(t *testing.T) {
 	publishBatch := func(counts map[string]int) {
 		for _, o := range origins {
 			for i := 0; i < counts[o.name]; i++ {
-				_, err := js.Publish(o.pub, nil)
+				// Retry transient "no responders"/timeouts while leaders settle
+				// (cluster operations can be slow under load right after a restart).
+				var err error
+				for try := 0; try < 30; try++ {
+					if _, err = js.Publish(o.pub, nil); err == nil {
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
 				require_NoError(t, err)
 			}
 		}
@@ -8607,6 +8622,10 @@ func TestJetStreamClusterSourcingResumeAfterRolloutRestart(t *testing.T) {
 	nc.Close()
 	c.stopAll()
 	c.restartAllSamePorts()
+	// Every stream (origins and hub) needs a leader again before we publish.
+	for _, o := range origins {
+		c.waitOnStreamLeader(globalAccountName, o.name)
+	}
 	c.waitOnStreamLeader(globalAccountName, "rhub")
 
 	nc, js = jsClientConnect(t, c.randomServer())
