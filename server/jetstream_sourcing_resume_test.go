@@ -674,3 +674,145 @@ func TestJetStreamStartingSequenceForSourcesDifferential(t *testing.T) {
 		})
 	}
 }
+
+// MemoryStorage path: the resolver must work on a MemStore-backed sourcing
+// stream too (which uses the linear LoadPrevMsgMulti and an index-light
+// LoadLastMsg). Mixes a phase 1 source (distinct subject), a phase 2 catch-all,
+// and a phase 2 concrete transform, all on memory storage.
+func TestJetStreamStartingSequenceForSourcesMemStore(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	for _, o := range []struct{ name, subj string }{{"M1", "m1"}, {"M2", "m2"}, {"M3", "m3"}} {
+		_, err := jsStreamCreate(t, nc, &StreamConfig{Name: o.name, Subjects: []string{o.subj}, Storage: MemoryStorage})
+		require_NoError(t, err)
+	}
+
+	_, err := jsStreamCreate(t, nc, &StreamConfig{
+		Name:     "aggM",
+		Subjects: []string{"direct"},
+		Storage:  MemoryStorage,
+		Sources: []*StreamSource{
+			{Name: "M1", FilterSubject: "m1"}, // distinct subject -> phase 1
+			{Name: "M2"},                      // empty filter (catch-all) -> phase 2
+			{Name: "M3", SubjectTransforms: []SubjectTransformConfig{{Source: "m3", Destination: "tm3"}}}, // concrete transform -> phase 1
+		},
+	})
+	require_NoError(t, err)
+
+	expect := map[string]int{"M1": 4, "M2": 6, "M3": 3}
+	total := 0
+	for subj, name := range map[string]string{"m1": "M1", "m2": "M2", "m3": "M3"} {
+		for i := 0; i < expect[name]; i++ {
+			_, err := js.Publish(subj, nil)
+			require_NoError(t, err)
+		}
+		total += expect[name]
+	}
+	// Some direct traffic to spread depth.
+	for i := 0; i < 200; i++ {
+		_, err := js.Publish("direct", nil)
+		require_NoError(t, err)
+	}
+
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("aggM")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(total+200) {
+			return fmt.Errorf("waiting for sourcing: have %d want %d", si.State.Msgs, total+200)
+		}
+		return nil
+	})
+
+	mset, err := s.globalAccount().lookupStream("aggM")
+	require_NoError(t, err)
+
+	mset.mu.Lock()
+	mset.startingSequenceForSources()
+	got := make(map[string]uint64, len(mset.sources))
+	for _, si := range mset.sources {
+		got[si.name] = si.sseq
+	}
+	mset.mu.Unlock()
+
+	for name, n := range expect {
+		if got[name] != uint64(n) {
+			t.Fatalf("source %q: expected starting seq %d, got %d", name, n, got[name])
+		}
+	}
+}
+
+// Exotic transform (partition): a partition() destination renders to a mapping
+// token that can't be reduced to a subject wildcard, so the source is recovered
+// by the phase 2 full-> fallback. Verify it still resolves to the correct origin
+// sequence, alongside a distinct-subject source that takes the phase 1 fast path.
+func TestJetStreamStartingSequenceForSourcesPartitionTransform(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := jsStreamCreate(t, nc, &StreamConfig{Name: "EVT", Subjects: []string{"evt.*"}, Storage: FileStorage})
+	require_NoError(t, err)
+	_, err = jsStreamCreate(t, nc, &StreamConfig{Name: "DST1", Subjects: []string{"d1"}, Storage: FileStorage})
+	require_NoError(t, err)
+
+	_, err = jsStreamCreate(t, nc, &StreamConfig{
+		Name:     "aggP",
+		Subjects: []string{"direct"},
+		Storage:  FileStorage,
+		Sources: []*StreamSource{
+			// partition() destination -> phase 1 defers, phase 2 full-> recovers it.
+			{Name: "EVT", SubjectTransforms: []SubjectTransformConfig{{Source: "evt.*", Destination: "p.{{partition(10,1)}}"}}},
+			{Name: "DST1", FilterSubject: "d1"}, // distinct subject -> phase 1
+		},
+	})
+	require_NoError(t, err)
+
+	const evtN, dstN = 9, 5
+	for i := 0; i < evtN; i++ {
+		_, err := js.Publish("evt.k", nil)
+		require_NoError(t, err)
+	}
+	for i := 0; i < dstN; i++ {
+		_, err := js.Publish("d1", nil)
+		require_NoError(t, err)
+	}
+	// Bury under direct publishes so a naive scan would have to walk back.
+	for i := 0; i < 3_000; i++ {
+		_, err := js.Publish("direct", nil)
+		require_NoError(t, err)
+	}
+
+	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("aggP")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != uint64(evtN+dstN+3_000) {
+			return fmt.Errorf("waiting for sourcing: have %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	mset, err := s.globalAccount().lookupStream("aggP")
+	require_NoError(t, err)
+
+	mset.mu.Lock()
+	mset.startingSequenceForSources()
+	got := make(map[string]uint64, len(mset.sources))
+	for _, si := range mset.sources {
+		got[si.name] = si.sseq
+	}
+	mset.mu.Unlock()
+
+	for name, n := range map[string]uint64{"EVT": evtN, "DST1": dstN} {
+		if got[name] != n {
+			t.Fatalf("source %q: expected starting seq %d, got %d", name, n, got[name])
+		}
+	}
+}
