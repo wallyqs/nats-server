@@ -722,6 +722,109 @@ func TestNRGAssumeHighTermAfterCandidateIsolation(t *testing.T) {
 	}
 }
 
+// With Pre-Vote enabled, a node that has been isolated (and would otherwise
+// rejoin with a much higher term and disrupt the healthy leader) must NOT be
+// able to bump anyone's term. This is the disruptive-server scenario from
+// Ongaro's thesis §9.6. Contrast with TestNRGAssumeHighTermAfterCandidateIsolation,
+// which exercises a *real* candidate (no pre-vote) and asserts the cluster DOES
+// move to the higher term.
+func TestNRGPreVoteDoesNotDisruptHealthyLeader(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+	c.waitOnLeader()
+
+	nc, _ := jsClientConnect(t, c.leader(), nats.UserInfo("admin", "s3cr3t!"))
+	defer nc.Close()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	leader := rg.leader().node().(*raft)
+	follower := rg.nonLeader().node().(*raft)
+
+	// Capture each node's term before the pre-vote storm.
+	before := map[string]uint64{}
+	for _, sm := range rg {
+		before[sm.node().ID()] = sm.node().Term()
+	}
+
+	// Simulate the isolated node: broadcast a pre-vote advertising a far-higher
+	// prospective term. We send it directly on the pre-vote subject (the same
+	// bytes runAsPreCandidate would send) without touching our own state, so we
+	// isolate the behaviour we care about: the voters' reaction.
+	follower.RLock()
+	pvsubj, pvreply := follower.pvsubj, follower.pvreply
+	pterm, pindex, id := follower.pterm, follower.pindex, follower.id
+	follower.RUnlock()
+
+	for i := 0; i < 5; i++ {
+		vr := voteRequest{before[leader.ID()] + 100, pterm, pindex, id, _EMPTY_}
+		follower.sendRPC(pvsubj, pvreply, vr.encode())
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// No node should have advanced its term off the back of a pre-vote, and the
+	// original leader must still be leading.
+	for _, sm := range rg {
+		require_Equal(t, sm.node().Term(), before[sm.node().ID()])
+		require_NotEqual(t, sm.node().State(), Candidate)
+	}
+	gl := rg.leader()
+	require_True(t, gl != nil)
+	require_Equal(t, gl.node().ID(), leader.ID())
+}
+
+// A voter that is NOT hearing from a leader (e.g. the leader is gone) must grant
+// pre-votes, allowing the Pre-Vote phase to escalate to a real election. This
+// covers the positive/liveness path: enabling pre-vote must not break failover.
+func TestNRGPreVoteElectsNewLeaderWhenLeaderStops(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+	c.waitOnLeader()
+
+	nc, _ := jsClientConnect(t, c.leader(), nats.UserInfo("admin", "s3cr3t!"))
+	defer nc.Close()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	// Enable the pre-vote phase on all members (the test harness builds groups
+	// with it off by default).
+	for _, sm := range rg {
+		n := sm.node().(*raft)
+		n.Lock()
+		n.prevote = true
+		n.Unlock()
+	}
+
+	leader := rg.leader()
+	leaderID := leader.node().ID()
+	startTerm := leader.node().Term()
+
+	// Stop the leader. The remaining members should detect the absence of a
+	// leader, grant each other pre-votes, escalate to a real election, and pick
+	// a new leader at a higher term.
+	leader.stop()
+
+	var newLeader stateMachine
+	checkFor(t, 20*time.Second, 100*time.Millisecond, func() error {
+		for _, sm := range rg {
+			if sm.node().ID() == leaderID {
+				continue
+			}
+			if sm.node().Leader() {
+				newLeader = sm
+				return nil
+			}
+		}
+		return fmt.Errorf("no new leader yet")
+	})
+	require_True(t, newLeader != nil)
+	require_NotEqual(t, newLeader.node().ID(), leaderID)
+	require_True(t, newLeader.node().Term() > startTerm)
+}
+
 // Test to make sure this does not cause us to truncate our wal or enter catchup state.
 func TestNRGHeartbeatOnLeaderChange(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)

@@ -133,6 +133,11 @@ const (
 	Leader
 	Candidate
 	Closed
+	// PreCandidate is a transient state used by the optional Pre-Vote phase.
+	// A node in this state has NOT incremented its term; it is running a trial
+	// election to find out whether a real election (with a term bump) could
+	// succeed. See switchToPreCandidate / runAsPreCandidate.
+	PreCandidate
 )
 
 func (state RaftState) String() string {
@@ -141,6 +146,8 @@ func (state RaftState) String() string {
 		return "FOLLOWER"
 	case Candidate:
 		return "CANDIDATE"
+	case PreCandidate:
+		return "PRE-CANDIDATE"
 	case Leader:
 		return "LEADER"
 	case Closed:
@@ -213,12 +220,14 @@ type raft struct {
 	track bool // Whether out of resources checking is enabled.
 	dflag bool // Debug flag
 
-	psubj  string // Proposals subject
-	rpsubj string // Remove peers subject
-	vsubj  string // Vote requests subject
-	vreply string // Vote responses subject
-	asubj  string // Append entries subject
-	areply string // Append entries responses subject
+	psubj   string // Proposals subject
+	rpsubj  string // Remove peers subject
+	vsubj   string // Vote requests subject
+	vreply  string // Vote responses subject
+	pvsubj  string // Pre-vote requests subject
+	pvreply string // Pre-vote responses subject
+	asubj   string // Append entries subject
+	areply  string // Append entries responses subject
 
 	sq    *sendq        // Send queue for outbound RPC messages
 	aesub *subscription // Subscription for handleAppendEntry callbacks
@@ -231,14 +240,18 @@ type raft struct {
 
 	hcommit uint64 // The commit at the time that applies were paused
 
-	prop  *ipQueue[*proposedEntry]       // Proposals
-	entry *ipQueue[*appendEntry]         // Append entries
-	resp  *ipQueue[*appendEntryResponse] // Append entries responses
-	apply *ipQueue[*CommittedEntry]      // Apply queue (committed entries to be passed to upper layer)
-	reqs  *ipQueue[*voteRequest]         // Vote requests
-	votes *ipQueue[*voteResponse]        // Vote responses
-	leadc chan bool                      // Leader changes
-	quit  chan struct{}                  // Raft group shutdown
+	prop   *ipQueue[*proposedEntry]       // Proposals
+	entry  *ipQueue[*appendEntry]         // Append entries
+	resp   *ipQueue[*appendEntryResponse] // Append entries responses
+	apply  *ipQueue[*CommittedEntry]      // Apply queue (committed entries to be passed to upper layer)
+	reqs   *ipQueue[*voteRequest]         // Vote requests
+	votes  *ipQueue[*voteResponse]        // Vote responses
+	pvotes *ipQueue[*voteResponse]        // Pre-vote responses
+	leadc  chan bool                      // Leader changes
+	quit   chan struct{}                  // Raft group shutdown
+
+	prevote           bool      // Whether the optional Pre-Vote phase is enabled for this group.
+	lastLeaderContact time.Time // Last time we accepted an append entry/heartbeat from a leader (Pre-Vote disruption guard).
 
 	lxfer        bool // Are we doing a leadership transfer?
 	hcbehind     bool // Were we falling behind at the last health check? (see: isCurrent)
@@ -308,6 +321,13 @@ type RaftConfig struct {
 	Log      WAL
 	Track    bool
 	Observer bool
+
+	// PreVote enables the optional Pre-Vote phase. When set, a node that would
+	// otherwise call an election first runs a trial vote round without bumping
+	// its term, and only escalates to a real election if a quorum would grant.
+	// This prevents a partitioned/flapping node from disrupting a healthy
+	// leader on rejoin. See switchToPreCandidate.
+	PreVote bool
 
 	// Recovering must be set for a Raft group that's recovering after a restart, or if it's
 	// first seen after a catchup from another server. If a server recovers with an empty log,
@@ -451,6 +471,8 @@ func (s *Server) initRaftNode(accName string, cfg *RaftConfig, labels pprofLabel
 		quit:     make(chan struct{}),
 		reqs:     newIPQueue[*voteRequest](s, qpfx+"vreq"),
 		votes:    newIPQueue[*voteResponse](s, qpfx+"vresp"),
+		pvotes:   newIPQueue[*voteResponse](s, qpfx+"pvresp"),
+		prevote:  cfg.PreVote,
 		prop:     newIPQueue[*proposedEntry](s, qpfx+"entry"),
 		entry:    newIPQueue[*appendEntry](s, qpfx+"appendEntry"),
 		resp:     newIPQueue[*appendEntryResponse](s, qpfx+"appendEntryResponse"),
@@ -2261,6 +2283,7 @@ func (n *raft) Reset() {
 	n.apply.drain()
 	n.reqs.drain()
 	n.votes.drain()
+	n.pvotes.drain()
 
 	// Remove every snapshot under our snapshots dir, not just the one referenced
 	// by n.snapfile. Orphans (e.g. from a crash between install and the previous
@@ -2298,6 +2321,7 @@ func (n *raft) Reset() {
 const (
 	raftAllSubj        = "$NRG.>"
 	raftVoteSubj       = "$NRG.V.%s"
+	raftPreVoteSubj    = "$NRG.PV.%s"
 	raftAppendSubj     = "$NRG.AE.%s"
 	raftPropSubj       = "$NRG.P.%s"
 	raftRemovePeerSubj = "$NRG.RP.%s"
@@ -2345,6 +2369,7 @@ func (n *raft) unsubscribe(sub *subscription) {
 // Lock should be held.
 func (n *raft) createInternalSubs() error {
 	n.vsubj, n.vreply = fmt.Sprintf(raftVoteSubj, n.group), n.newInbox()
+	n.pvsubj, n.pvreply = fmt.Sprintf(raftPreVoteSubj, n.group), n.newInbox()
 	n.asubj, n.areply = fmt.Sprintf(raftAppendSubj, n.group), n.newInbox()
 	n.psubj = fmt.Sprintf(raftPropSubj, n.group)
 	n.rpsubj = fmt.Sprintf(raftRemovePeerSubj, n.group)
@@ -2354,6 +2379,15 @@ func (n *raft) createInternalSubs() error {
 		return err
 	}
 	if _, err := n.subscribe(n.vsubj, n.handleVoteRequest); err != nil {
+		return err
+	}
+	// Pre-votes. These reuse the voteRequest/voteResponse wire format; the
+	// subject is what marks them as pre-votes, so old peers (which do not
+	// subscribe here) simply never answer — see allPeersSupportPreVote.
+	if _, err := n.subscribe(n.pvreply, n.handlePreVoteResponse); err != nil {
+		return err
+	}
+	if _, err := n.subscribe(n.pvsubj, n.handlePreVoteRequest); err != nil {
 		return err
 	}
 	// AppendEntry
@@ -2450,6 +2484,8 @@ runner:
 		switch n.State() {
 		case Follower:
 			n.runAsFollower()
+		case PreCandidate:
+			n.runAsPreCandidate()
 		case Candidate:
 			n.runAsCandidate()
 		case Leader:
@@ -2483,7 +2519,7 @@ runner:
 	queues := []interface {
 		unregister()
 		drain() int
-	}{n.reqs, n.votes, n.prop, n.entry, n.resp, n.apply}
+	}{n.reqs, n.votes, n.pvotes, n.prop, n.entry, n.resp, n.apply}
 	for _, q := range queues {
 		q.drain()
 		q.unregister()
@@ -2608,7 +2644,10 @@ func (n *raft) runAsFollower() {
 				n.resetElectionTimeout()
 				n.Unlock()
 			} else {
-				n.switchToCandidate()
+				// Begin with the Pre-Vote phase; this is a no-op term-wise and
+				// falls through to a real election when pre-vote is off or
+				// unsupported.
+				n.switchToPreCandidate()
 				return
 			}
 		case <-n.votes.ch:
@@ -3765,6 +3804,83 @@ func (n *raft) trackPeer(peer string) error {
 	return nil
 }
 
+// runAsPreCandidate runs the trial (Pre-Vote) election. It mirrors
+// runAsCandidate but never bumps the term or persists a vote: on success it
+// escalates to a real election via switchToCandidate; on timeout or any sign of
+// a live leader it returns to follower without having disrupted anything.
+func (n *raft) runAsPreCandidate() {
+	n.Lock()
+	n.pvotes.drain()
+	n.Unlock()
+
+	// Ask the cluster whether a real election would succeed.
+	n.sendPreVoteRequest()
+
+	// We "pre-vote" for ourselves.
+	n.pvotes.push(&voteResponse{term: n.Term() + 1, peer: n.ID(), granted: true})
+
+	votes := map[string]struct{}{}
+	emptyVotes := map[string]struct{}{}
+
+	for n.State() == PreCandidate {
+		elect := n.electTimer()
+		select {
+		case <-n.entry.ch:
+			// A live leader's append entry will step us back to follower.
+			n.processAppendEntries()
+		case <-n.resp.ch:
+			n.resp.drain()
+		case <-n.prop.ch:
+			n.prop.drain()
+		case <-n.s.quitCh:
+			return
+		case <-n.quit:
+			return
+		case <-elect.C:
+			// Trial round timed out without winning. Do NOT escalate (that is
+			// the whole point) — go back to follower and try again later.
+			n.debug("Pre-vote round did not succeed, returning to follower")
+			n.switchToFollower(noLeader)
+			return
+		case <-n.pvotes.ch:
+			vresp, ok := n.pvotes.popOne()
+			if !ok {
+				continue
+			}
+			n.RLock()
+			// Pre-votes are evaluated against the prospective term (n.term+1).
+			nterm := n.term + 1
+			csz := n.csz
+			n.RUnlock()
+
+			if vresp.granted && nterm == vresp.term {
+				if !vresp.empty {
+					votes[vresp.peer] = struct{}{}
+				} else {
+					emptyVotes[vresp.peer] = struct{}{}
+				}
+				if n.wonElection(len(votes)) || len(votes)+len(emptyVotes) == csz {
+					// A real election would succeed — escalate to one now.
+					n.debug("Pre-vote succeeded, switching to candidate")
+					n.switchToCandidate()
+					return
+				}
+			}
+			// A higher real term observed in a pre-vote response means someone
+			// is ahead of us; just stay a follower and resync.
+			if vresp.term > nterm {
+				n.switchToFollower(noLeader)
+				return
+			}
+		case <-n.reqs.ch:
+			// Still answer real vote requests while pre-voting.
+			if voteReq, ok := n.reqs.popOne(); ok {
+				n.processVoteRequest(voteReq)
+			}
+		}
+	}
+}
+
 func (n *raft) runAsCandidate() {
 	n.Lock()
 	// Drain old responses.
@@ -4114,7 +4230,7 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 	// If we received an append entry as a candidate then it would appear that
 	// another node has taken on the leader role already, so we should convert
 	// to a follower of that node instead.
-	if n.State() == Candidate {
+	if n.State() == Candidate || n.State() == PreCandidate {
 		// If we have a leader in the current term or higher, we should stepdown,
 		// write the term and vote if the term of the request is higher.
 		if lterm >= n.term {
@@ -4125,7 +4241,7 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 				n.vote = noVote
 				n.writeTermVote()
 			}
-			n.debug("Received append entry in candidate state from %q, converting to follower", ae.leader)
+			n.debug("Received append entry in %s state from %q, converting to follower", n.State(), ae.leader)
 			n.stepdownLocked(ae.leader)
 		}
 	}
@@ -4487,6 +4603,12 @@ CONTINUE:
 	var ar *appendEntryResponse
 	if sub != nil && isNew {
 		ar = newAppendEntryResponse(n.pterm, n.pindex, n.id, true)
+		// Record successful contact from the current leader. This feeds the
+		// Pre-Vote disruption guard: while we are hearing from a leader we will
+		// refuse pre-votes from anyone trying to take over.
+		if n.leader != noLeader && n.leader != n.id {
+			n.lastLeaderContact = time.Now()
+		}
 	}
 	n.Unlock()
 
@@ -5156,6 +5278,121 @@ func (n *raft) requestVote() {
 	n.sendRPC(subj, reply, vr.encode())
 }
 
+// --- Pre-Vote phase -------------------------------------------------------
+//
+// The Pre-Vote phase is an optional, term-preserving trial election that runs
+// before a real election. It directly addresses the "disruptive server"
+// problem (Ongaro thesis §9.6): a node that has been partitioned (or is
+// flapping) repeatedly times out and, in a plain Raft, increments its term and
+// forces the healthy leader to step down on rejoin — even when its log is too
+// stale to win. With Pre-Vote the node first asks "would you vote for me if I
+// started an election at term+1?" *without* bumping its term. A voter grants a
+// pre-vote only if (a) the candidate's log is at least as up-to-date AND (b)
+// the voter has NOT heard from a current leader recently. A healthy follower
+// therefore refuses, so the disruptor never bumps its term and never disrupts.
+//
+// Wire-wise the pre-vote reuses voteRequest/voteResponse verbatim; the dedicated
+// $NRG.PV.<group> subject is what marks it as a pre-vote, which keeps the format
+// backwards compatible (old peers simply do not subscribe and never answer).
+
+// allPeersSupportPreVote reports whether every known peer is on a server
+// version that understands the pre-vote subject. In a mixed-version cluster we
+// must not enter the pre-vote phase, because old peers never answer pre-votes
+// and we would be unable to make progress. Lock should be held.
+func (n *raft) allPeersSupportPreVote() bool {
+	if n.s == nil {
+		return false
+	}
+	for id := range n.peers {
+		if id == n.id {
+			continue
+		}
+		si, ok := n.s.nodeToInfo.Load(id)
+		if !ok || si == nil {
+			// Unknown peer, be conservative.
+			return false
+		}
+		if !versionAtLeast(si.(nodeInfo).version, 2, 15, 0) {
+			return false
+		}
+	}
+	return true
+}
+
+// sendPreVoteRequest broadcasts a pre-vote on behalf of a PreCandidate. The
+// request advertises the *prospective* term (n.term+1) but does not change any
+// durable state.
+func (n *raft) sendPreVoteRequest() {
+	n.Lock()
+	if n.State() != PreCandidate {
+		n.Unlock()
+		return
+	}
+	// Advertise the term we *would* campaign in, plus our log position.
+	vr := voteRequest{n.term + 1, n.pterm, n.pindex, n.id, _EMPTY_}
+	subj, reply := n.pvsubj, n.pvreply
+	n.Unlock()
+
+	n.debug("Sending out preVoteRequest %+v", vr)
+	n.sendRPC(subj, reply, vr.encode())
+}
+
+func (n *raft) handlePreVoteRequest(_ *subscription, _ *client, _ *Account, _, reply string, msg []byte) {
+	vr := decodeVoteRequest(msg, reply)
+	if vr == nil {
+		n.error("Received malformed pre-vote request for %q", n.group)
+		return
+	}
+	// Pre-vote requests do not mutate term/vote/state, so unlike real vote
+	// requests we can answer them inline rather than serializing through the
+	// run loop.
+	n.processPreVoteRequest(vr)
+}
+
+func (n *raft) handlePreVoteResponse(_ *subscription, _ *client, _ *Account, _, reply string, msg []byte) {
+	vr := decodeVoteResponse(msg)
+	if vr == nil {
+		n.error("Received malformed pre-vote response for %q", n.group)
+		return
+	}
+	n.debug("Received a preVoteResponse %+v", vr)
+	// Only meaningful while we are actively running a pre-vote round.
+	if n.State() != PreCandidate {
+		return
+	}
+	n.pvotes.push(vr)
+}
+
+// processPreVoteRequest decides whether we would grant a real vote, without
+// changing any state. The crucial difference from processVoteRequest is the
+// "recent leader contact" guard, which is what makes pre-vote prevent
+// disruption.
+func (n *raft) processPreVoteRequest(vr *voteRequest) {
+	n.debug("Received a preVoteRequest %+v", vr)
+
+	n.RLock()
+	// Disruption guard: if we have a leader and have heard from it within a
+	// couple of heartbeat intervals, refuse — the asker should not be trying
+	// to take over a healthy cluster.
+	haveLeader := n.leader != noLeader && n.leader != n.id
+	recentLeader := haveLeader && !n.lastLeaderContact.IsZero() && time.Since(n.lastLeaderContact) < hbInterval*2
+	// Election restriction: their log must be at least as up-to-date as ours,
+	// and the prospective term must not be behind ours.
+	upToDate := vr.term >= n.term && (vr.lastTerm > n.pterm || (vr.lastTerm == n.pterm && vr.lastIndex >= n.pindex))
+	// Respond with the prospective term so the pre-candidate can match grants
+	// against the term it would campaign in. If we are ahead, report our higher
+	// term so it backs off instead of escalating.
+	respTerm := n.term
+	if vr.term > respTerm {
+		respTerm = vr.term
+	}
+	vresp := &voteResponse{respTerm, n.id, !recentLeader && upToDate, n.pindex == 0}
+	n.RUnlock()
+
+	n.debug("Sending a preVoteResponse %+v -> %q", vresp, vr.reply)
+	n.sendReply(vr.reply, vresp.encode())
+}
+
 func (n *raft) sendRPC(subject, reply string, msg []byte) {
 	if n.sq != nil {
 		n.sq.send(subject, reply, nil, msg)
@@ -5265,6 +5502,35 @@ func (n *raft) switchToFollowerLocked(leader string) {
 	}
 	n.updateLeader(leader)
 	n.switchState(Follower)
+}
+
+// switchToPreCandidate begins the Pre-Vote phase. Unlike switchToCandidate it
+// does NOT increment the term or persist a vote — it only flips state so that
+// runAsPreCandidate can run a trial election. If pre-vote is disabled, not
+// supported by all peers, or this is a leadership transfer, we fall through to
+// a real election instead.
+func (n *raft) switchToPreCandidate() {
+	if n.State() == Closed {
+		return
+	}
+
+	n.Lock()
+	// Same gating as a real election: don't campaign if catching up/observing.
+	if n.observer || n.paused || n.processed < n.commit {
+		n.resetElect(minElectionTimeout / 4)
+		n.Unlock()
+		return
+	}
+	// Fall back to a direct election when pre-vote can't or shouldn't run.
+	if !n.prevote || n.lxfer || !n.allPeersSupportPreVote() {
+		n.Unlock()
+		n.switchToCandidate()
+		return
+	}
+	n.debug("Switching to pre-candidate")
+	// Note: term is intentionally left untouched here.
+	n.switchState(PreCandidate)
+	n.Unlock()
 }
 
 func (n *raft) switchToCandidate() {

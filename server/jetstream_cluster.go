@@ -2931,7 +2931,7 @@ retry:
 			store = ms
 		}
 
-		cfg := &RaftConfig{Name: rgName, Store: storeDir, Log: store, Track: true, Recovering: recovering, ScaleUp: rgScaleUp}
+		cfg := &RaftConfig{Name: rgName, Store: storeDir, Log: store, Track: true, Recovering: recovering, ScaleUp: rgScaleUp, PreVote: true}
 
 		if _, err := readPeerState(storeDir); err != nil {
 			s.bootstrapRaftNode(cfg, rgPeers, true)

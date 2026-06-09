@@ -110,7 +110,8 @@
   <a href="#snapshot">12 · Snapshots, compaction &amp; catchup</a>
   <a href="#counts">13 · Subscription budget</a>
   <a href="#risks">14 · Risks &amp; analysis</a>
-  <a href="#refs">15 · Source map</a>
+  <a href="#prevote">15 · Pre-Vote phase (prototype)</a>
+  <a href="#refs">16 · Source map</a>
 </nav>
 
 <main>
@@ -1025,8 +1026,8 @@
   <table>
     <tr><th>#</th><th>Finding</th><th>Severity</th><th>Detail &amp; comparison</th></tr>
     <tr>
-      <td>R1</td><td>No Pre-Vote phase</td><td><span class="sev high">High</span></td>
-      <td><code>switchToCandidate</code> increments the term <i>before</i> soliciting votes <span class="cite">raft.go:5292</span>. A node partitioned away (or flapping) rejoins with an inflated term and forces the healthy leader to step down — the classic "disruptive server" problem. Ongaro's thesis §9.6 prescribes <b>PreVote</b> (campaign in a trial term, only bump the real term once a majority would grant). etcd/raft and HashiCorp Raft both ship PreVote. NATS partially mitigates via the large 4–9 s timeout and the empty-log rule, but the core protection is absent. <b>Recommendation:</b> add a pre-vote round.</td>
+      <td>R1</td><td>No Pre-Vote phase <span class="pill p-foll" style="border-color:#3a6;color:#9be29b">prototype added</span></td><td><span class="sev high">High</span></td>
+      <td><code>switchToCandidate</code> increments the term <i>before</i> soliciting votes <span class="cite">raft.go:5292</span>. A node partitioned away (or flapping) rejoins with an inflated term and forces the healthy leader to step down — the classic "disruptive server" problem. Ongaro's thesis §9.6 prescribes <b>PreVote</b> (campaign in a trial term, only bump the real term once a majority would grant). etcd/raft and HashiCorp Raft both ship PreVote. NATS partially mitigates via the large 4–9 s timeout and the empty-log rule, but the core protection is absent. <b>A working prototype is implemented on this branch — see <a href="#prevote">§15</a>.</b></td>
     </tr>
     <tr>
       <td>R2</td><td>Coarse failure detection / stale-leader window</td><td><span class="sev med">Medium</span></td>
@@ -1081,12 +1082,92 @@
   </div>
 </section>
 
+<!-- =============================== PRE-VOTE =============================== -->
+<section id="prevote">
+  <h2>15 · Pre-Vote phase (prototype)</h2>
+  <p>This section documents the Pre-Vote prototype implemented on this branch to address risk <a href="#risks">R1</a>. Pre-Vote inserts a <b>trial election that does not touch the term</b>: a node first asks "would a real election at <code>term+1</code> succeed?" and only escalates — incrementing its term and running a normal election — if a quorum would grant. The decisive rule lives on the <b>voter</b>: grant a pre-vote only if you are <i>not</i> currently hearing from a leader.</p>
+
+  <h3>Scenarios it solves</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4>1 · Disruptive rejoin after a partition</h4>
+      <p class="small">A node isolated from the cluster keeps timing out and, in plain Raft, increments its term on each attempt. When the partition heals it rejoins with a much higher term; its first vote/append‑entry forces the healthy leader to step down (<code>processVoteRequest</code> steps down on higher term), causing a needless election — even though the rejoiner's log may be too stale to win. <b>With Pre-Vote</b> the healthy followers refuse the pre-vote (they have a leader), so the rejoiner never bumps its term and never disrupts.</p>
+    </div>
+    <div class="card">
+      <h4>2 · A flapping / half-partitioned node</h4>
+      <p class="small">A node whose link drops heartbeats intermittently (or can send but not receive) repeatedly campaigns and preempts the leader. Pre-Vote turns each of these into a harmless, term-preserving trial that fails fast against a live leader — no term inflation, no churn.</p>
+    </div>
+    <div class="card">
+      <h4>3 · Term inflation across long outages</h4>
+      <p class="small">Without Pre-Vote, terms ratchet upward for every failed election during a long isolation; the eventual rejoin causes a large term jump and repeated leader changes. Pre-Vote keeps the term pinned until a win is actually achievable.</p>
+    </div>
+    <div class="card">
+      <h4>4 · Election storms at scale</h4>
+      <p class="small">With one Raft group <i>per stream and per consumer</i>, a single misbehaving server can trigger simultaneous re-elections across thousands of groups, each a multi-second outage at NATS's 4–9 s timeout. Pre-Vote suppresses the spurious campaigns at the source.</p>
+    </div>
+  </div>
+  <div class="callout good"><b>What it preserves (liveness).</b> When the leader genuinely fails, every follower's "last leader contact" ages out, so they all grant pre-votes and the trial round succeeds — escalating to a normal election. Failover still works; only <i>spurious</i> campaigns are blocked.</div>
+
+  <h3>State machine</h3>
+  <figure>
+  <svg viewBox="0 0 940 300" role="img" aria-label="Pre-Vote state machine">
+    <defs><marker id="pv" markerWidth="11" markerHeight="11" refX="9" refY="3.2" orient="auto"><path d="M0,0 L9,3.2 L0,6.4 Z" fill="#9aa7b4"/></marker></defs>
+    <circle cx="140" cy="150" r="70" fill="#0e1a24" stroke="#3fb6f0" stroke-width="2"/>
+    <text x="140" y="146" text-anchor="middle" fill="#cfe8ff" font-size="15" font-weight="700">FOLLOWER</text>
+    <text x="140" y="166" text-anchor="middle" fill="#9aa7b4" font-size="10">stamps lastLeaderContact</text>
+    <ellipse cx="430" cy="150" rx="86" ry="70" fill="#102433" stroke="#7cc7f0" stroke-width="2" stroke-dasharray="5 3"/>
+    <text x="430" y="142" text-anchor="middle" fill="#7cc7f0" font-size="14" font-weight="700">PRE-CANDIDATE</text>
+    <text x="430" y="161" text-anchor="middle" fill="#9aa7b4" font-size="10">term UNCHANGED · trial vote</text>
+    <text x="430" y="175" text-anchor="middle" fill="#9aa7b4" font-size="10">on $NRG.PV.&lt;grp&gt;</text>
+    <circle cx="720" cy="150" r="70" fill="#241a0e" stroke="#f0c674" stroke-width="2"/>
+    <text x="720" y="146" text-anchor="middle" fill="#ffd9a8" font-size="14" font-weight="700">CANDIDATE</text>
+    <text x="720" y="166" text-anchor="middle" fill="#9aa7b4" font-size="10">term++, real election</text>
+    <!-- F->PC -->
+    <path d="M210,138 C270,116 310,116 350,132" fill="none" stroke="#9aa7b4" stroke-width="1.6" marker-end="url(#pv)"/>
+    <text x="280" y="108" text-anchor="middle" fill="#3fb6f0" font-size="10.5">election timeout (pre-vote on)</text>
+    <!-- PC->C -->
+    <path d="M512,134 C570,114 610,114 652,132" fill="none" stroke="#9aa7b4" stroke-width="1.6" marker-end="url(#pv)"/>
+    <text x="582" y="108" text-anchor="middle" fill="#7ee787" font-size="10.5">quorum would grant</text>
+    <!-- PC->F -->
+    <path d="M350,170 C310,196 270,196 210,176" fill="none" stroke="#9aa7b4" stroke-width="1.6" marker-end="url(#pv)"/>
+    <text x="280" y="214" text-anchor="middle" fill="#ff9b94" font-size="10.5">trial fails / leader seen → no term change</text>
+    <!-- C->L (offpage) -->
+    <path d="M788,132 C840,116 870,130 880,150" fill="none" stroke="#9aa7b4" stroke-width="1.6" marker-end="url(#pv)"/>
+    <text x="845" y="112" text-anchor="middle" fill="#9be29b" font-size="10">→ LEADER</text>
+    <!-- bypass -->
+    <rect x="40" y="246" width="860" height="40" rx="8" fill="#0e131a" stroke="#2a3340"/>
+    <text x="56" y="270" fill="#cdd7e1" font-size="11.5"><b>Bypass:</b> leadership transfer (<tspan font-family="monospace">CampaignImmediately</tspan>/<tspan font-family="monospace">lxfer</tspan>), pre-vote disabled, or a mixed-version peer set all skip PRE-CANDIDATE and go straight to a real election.</text>
+  </svg>
+  <figcaption>The follower→candidate edge now passes through PRE-CANDIDATE. The trial round never mutates the term; only a successful trial escalates to CANDIDATE (the existing real-election path).</figcaption>
+  </figure>
+
+  <h3>How the prototype is wired (this branch)</h3>
+  <ul class="tight">
+    <li><b>State:</b> new <code>PreCandidate RaftState</code>; dispatched by <code>run()</code> to a new <code>runAsPreCandidate</code> loop.</li>
+    <li><b>Entry point:</b> the follower's election‑timeout now calls <code>switchToPreCandidate</code> (no <code>term++</code>) instead of <code>switchToCandidate</code>. On a successful trial it calls the <i>unchanged</i> <code>switchToCandidate</code> → <code>requestVote</code>.</li>
+    <li><b>Wire:</b> reuses the <code>voteRequest</code>/<code>voteResponse</code> bytes verbatim on a new <code>$NRG.PV.&lt;group&gt;</code> subject + a private <code>pvreply</code> inbox — so the format stays backwards compatible (old peers don't subscribe). The voter responds with the <i>prospective</i> term so grants match.</li>
+    <li><b>Voter rule (<code>processPreVoteRequest</code>):</b> mutates nothing; grants only if the log is up‑to‑date <b>and</b> <code>time.Since(lastLeaderContact) ≥ 2×hbInterval</code>. <code>lastLeaderContact</code> is stamped whenever a follower accepts a leader's append entry/heartbeat.</li>
+    <li><b>Safety gates:</b> skipped for leadership transfer (<code>lxfer</code>), when disabled (<code>RaftConfig.PreVote</code>), or when <code>allPeersSupportPreVote()</code> reports a mixed‑version peer set (version‑gated at ≥ 2.15.0) — falling back to today's behavior so liveness is never lost during a rolling upgrade.</li>
+    <li><b>Default:</b> enabled for JetStream groups via <code>createRaftGroup</code> (<code>PreVote: true</code>).</li>
+  </ul>
+
+  <h3>Test coverage added</h3>
+  <table>
+    <tr><th>Test</th><th>What it asserts</th></tr>
+    <tr><td><code>TestNRGPreVoteDoesNotDisruptHealthyLeader</code></td><td>An isolated node broadcasting a pre-vote at <code>term+100</code> against a healthy cluster changes <b>no node's term</b> and the original leader keeps leading — the core anti-disruption property (mirror‑image of the existing real‑vote isolation test, which asserts the cluster <i>does</i> jump term).</td></tr>
+    <tr><td><code>TestNRGPreVoteElectsNewLeaderWhenLeaderStops</code></td><td>With pre-vote enabled, stopping the leader still elects a new leader at a higher term — confirming the trial round escalates and failover is not broken.</td></tr>
+  </table>
+  <p class="small">Both pass, and the existing election/vote/term/stepdown suite (<code>TestNRG.*</code>) remains green. The real‑election path is untouched; pre-vote is purely additive in front of it.</p>
+
+  <div class="callout warn"><b>Prototype caveats (not yet production‑hardened).</b> (1) Mixed‑version detection uses a server‑version check; a robust build would advertise a dedicated capability bit in <code>nodeInfo</code> (like <code>binarySnapshots</code>/<code>accountNRG</code>) rather than a version constant. (2) The <code>lastLeaderContact</code> guard reuses the heartbeat cadence (2×<code>hbInterval</code>); it deserves its own tuning and tests around boundary timing. (3) Interaction with the empty‑log all‑hands rule and observer mode is handled but warrants dedicated tests.</div>
+</section>
+
 <!-- =============================== REFS =============================== -->
 <section id="refs">
-  <h2>15 · Source map</h2>
+  <h2>16 · Source map</h2>
   <div class="twocol small">
     <p><b>Core engine</b> — <code>server/raft.go</code><br/>
-    state machine: <code>runAsFollower</code> 2576, <code>runAsCandidate</code> 3768, <code>runAsLeader</code> 3125 · election: <code>switchToCandidate</code> 5270, <code>switchToLeader</code> 5304, <code>processVoteRequest</code> 5065, <code>requestVote</code> 5141 · replication: <code>Propose</code> 911, <code>sendAppendEntry</code> 4675, <code>processAppendEntry</code> 4054, <code>processAppendEntryResponse</code> 4556, <code>tryCommit</code> 3642, <code>applyCommit</code> 3524 · subjects: <code>createInternalSubs</code> 2346, constants 2299-2305 · wire: <code>appendEntry.encode</code> 2799, <code>voteRequest</code> 4820, <code>voteResponse</code> 5015 · catchup: 3306/3413/3440 · timers: 282-302 · snapshots: <code>encodeSnapshot</code> 1296, <code>InstallSnapshot</code> 1337, <code>installSnapshot</code> 1357, <code>CreateSnapshotCheckpoint</code> 1403, <code>NeedSnapshot</code> 1606, <code>checkpoint</code> 1466, <code>Compact</code> 1381.</p>
+    state machine: <code>runAsFollower</code> 2576, <code>runAsCandidate</code> 3768, <code>runAsLeader</code> 3125 · election: <code>switchToCandidate</code> 5270, <code>switchToLeader</code> 5304, <code>processVoteRequest</code> 5065, <code>requestVote</code> 5141 · replication: <code>Propose</code> 911, <code>sendAppendEntry</code> 4675, <code>processAppendEntry</code> 4054, <code>processAppendEntryResponse</code> 4556, <code>tryCommit</code> 3642, <code>applyCommit</code> 3524 · subjects: <code>createInternalSubs</code> 2346, constants 2299-2305 · wire: <code>appendEntry.encode</code> 2799, <code>voteRequest</code> 4820, <code>voteResponse</code> 5015 · catchup: 3306/3413/3440 · timers: 282-302 · snapshots: <code>encodeSnapshot</code> 1296, <code>InstallSnapshot</code> 1337, <code>installSnapshot</code> 1357, <code>CreateSnapshotCheckpoint</code> 1403, <code>NeedSnapshot</code> 1606, <code>checkpoint</code> 1466, <code>Compact</code> 1381 · <b>pre-vote (prototype):</b> <code>PreCandidate</code> state, <code>switchToPreCandidate</code>, <code>runAsPreCandidate</code>, <code>sendPreVoteRequest</code>, <code>processPreVoteRequest</code>, <code>handlePreVoteRequest/Response</code>, <code>allPeersSupportPreVote</code>, <code>RaftConfig.PreVote</code>; tests in <code>raft_test.go</code> (<code>TestNRGPreVote*</code>).</p>
     <p><b>JetStream cluster</b> — <code>server/jetstream_cluster.go</code><br/>
     <code>createRaftGroup</code> 2794 · entry ops 122-153 · <b>meta:</b> <code>monitorCluster</code> 1574, <code>doSnapshot</code> 1636, <code>metaSnapshot</code>/<code>encodeMetaSnapshot</code> 2010, <code>applyMetaEntries</code>, <code>checkClusterSize</code> 1947, <code>_meta_</code> name 457 · publish <code>processClusteredInboundMsg</code> 10048 · encode <code>encodeStreamMsgAllowCompressAndBatch</code> 9893 · <code>monitorStream</code> 3070, <code>applyStreamEntries</code> 3918, <code>applyStreamMsgOp</code> 4374 · <code>monitorConsumer</code> 6487, <code>applyConsumerEntries</code> 6778, <code>processReplicatedAck</code> 6976 · delete apply 4158 · snapshot thresholds: meta 1588-1615, stream 3119-3123, consumer 6508-6513.</p>
     <p><b>Consumer</b> — <code>server/consumer.go</code><br/>
