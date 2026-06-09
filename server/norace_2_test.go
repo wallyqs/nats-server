@@ -3607,3 +3607,123 @@ func TestNoRaceQuickMultipleConfigReloadRemoteLeafNoDuplicate(t *testing.T) {
 		})
 	}
 }
+
+// Partition soak using the netProxy helper. We build a 3-node JetStream cluster
+// where one server (S2) can only reach the other two through two stoppable
+// proxies (with no_advertise so route gossip can't create a direct bypass).
+// We then cut S2 off from the cluster and measure S2's OWN meta term: with
+// Pre-Vote it can reach no one while partitioned and so never inflates its term
+// (and thus has nothing to disrupt the leader with on rejoin); without Pre-Vote
+// it campaigns repeatedly and its term climbs — the classic disruptive-server
+// scenario, now over a real (proxied) network partition.
+func TestNRGPreVotePartitionSoakDoesNotDisruptMeta(t *testing.T) {
+	const p0, p1, p2 = 24722, 24723, 24724
+	tmpl := `
+	listen: 127.0.0.1:-1
+	server_name: %s
+	jetstream: {max_mem_store: 256MB, max_file_store: 1GB, store_dir: '%s'}
+	cluster {
+		name: "PV3"
+		listen: 127.0.0.1:%d
+		no_advertise: true
+		routes = [%s]
+	}
+	accounts { $SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] } }
+	`
+	c := &cluster{t: t, servers: make([]*Server, 3), opts: make([]*Options, 3), name: "PV3"}
+
+	// S0 and S1 route directly to each other.
+	conf0 := fmt.Sprintf(tmpl, "S0", t.TempDir(), p0, fmt.Sprintf("route://127.0.0.1:%d", p1))
+	c.servers[0], c.opts[0] = RunServerWithConfig(createConfFile(t, []byte(conf0)))
+	conf1 := fmt.Sprintf(tmpl, "S1", t.TempDir(), p1, fmt.Sprintf("route://127.0.0.1:%d", p0))
+	c.servers[1], c.opts[1] = RunServerWithConfig(createConfFile(t, []byte(conf1)))
+
+	// S2 reaches S0 and S1 ONLY through these proxies.
+	const gbit = 1024 * 1024 * 1024
+	pA := createNetProxy(time.Millisecond, gbit, gbit, fmt.Sprintf("route://127.0.0.1:%d", p0), true)
+	pB := createNetProxy(time.Millisecond, gbit, gbit, fmt.Sprintf("route://127.0.0.1:%d", p1), true)
+	c.nproxies = []*netProxy{pA, pB}
+
+	conf2 := fmt.Sprintf(tmpl, "S2", t.TempDir(), p2, fmt.Sprintf("%s, %s", pA.routeURL(), pB.routeURL()))
+	c.servers[2], c.opts[2] = RunServerWithConfig(createConfFile(t, []byte(conf2)))
+
+	defer c.shutdown()
+
+	c.checkClusterFormed()
+	c.waitOnClusterReady()
+	c.waitOnLeader()
+
+	s2 := c.servers[2]
+	s2meta := s2.getJetStream().getMetaGroup().(*raft)
+	setS2MetaPreVote := func(enabled bool) {
+		s2meta.Lock()
+		s2meta.prevote = enabled
+		s2meta.Unlock()
+	}
+
+	// Ensure the meta leader is on S0/S1 (so S2 is the would-be disruptor) and
+	// that S2 is a caught-up follower in contact with that leader.
+	settleWithLeaderOffS2 := func() {
+		t.Helper()
+		checkFor(t, 30*time.Second, 200*time.Millisecond, func() error {
+			l := c.leader()
+			if l == nil {
+				return fmt.Errorf("no meta leader yet")
+			}
+			if l == s2 {
+				s2meta.StepDown()
+				return fmt.Errorf("meta leader is S2, stepping down")
+			}
+			if s2meta.Leaderless() {
+				return fmt.Errorf("S2 not yet in contact with a leader")
+			}
+			return nil
+		})
+		time.Sleep(time.Second)
+	}
+
+	// partitionTermDelta isolates S2 for the soak and returns how much S2's own
+	// meta term advanced while partitioned, then heals and waits for S2 to be
+	// back in contact with a leader.
+	partitionTermDelta := func(soak time.Duration) uint64 {
+		before := s2meta.Term()
+		pA.stop()
+		pB.stop()
+		time.Sleep(soak)
+		after := s2meta.Term()
+		pA.start()
+		pB.start()
+		// Wait for S2 to rejoin and the cluster to have a settled leader again.
+		checkFor(t, 30*time.Second, 200*time.Millisecond, func() error {
+			if c.leader() == nil {
+				return fmt.Errorf("no meta leader after heal")
+			}
+			if s2meta.Leaderless() {
+				return fmt.Errorf("S2 not back in contact after heal")
+			}
+			return nil
+		})
+		return after - before
+	}
+
+	// Soak comfortably longer than a full election timeout so that, without
+	// Pre-Vote, S2 is guaranteed at least one (usually several) term bumps.
+	soak := maxElectionTimeout + 5*time.Second
+
+	// Phase 1: Pre-Vote ENABLED (default). A partitioned S2 reaches no one, so it
+	// never escalates and its term does NOT move — nothing to disrupt with.
+	t.Run("WithPreVote", func(t *testing.T) {
+		setS2MetaPreVote(true)
+		settleWithLeaderOffS2()
+		require_Equal(t, partitionTermDelta(soak), 0)
+	})
+
+	// Phase 2: Pre-Vote DISABLED on the would-be disruptor. The SAME partition
+	// now lets S2 inflate its term while isolated — proving both that the
+	// partition is real and that Pre-Vote is what kept the term pinned above.
+	t.Run("WithoutPreVote", func(t *testing.T) {
+		settleWithLeaderOffS2()
+		setS2MetaPreVote(false)
+		require_True(t, partitionTermDelta(soak) > 0)
+	})
+}
