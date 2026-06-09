@@ -579,6 +579,20 @@
 
   <div class="callout warn"><b>NATS-specific "empty log" rule.</b> A node with an empty log (<code>pindex == 0</code>) sets the <code>empty</code> bit in its vote response. A candidate that cannot reach a normal quorum may still win only if it has heard from <b>every</b> server and the rest came back empty <span class="cite">raft.go:3811-3831</span>. This guards against electing a leader on a fresh/empty log during scale-up — a real data-loss hazard that the vanilla paper does not address.</div>
 
+  <h4>Prior art — how other systems avoid the empty-log hazard</h4>
+  <p>The <i>hazard</i> here is the classic <b>"catching up new servers"</b> problem (Raft thesis §4.2.1, §4.4): if the voter set grows with fresh, empty-log nodes, those nodes can form a quorum and elect a leader that is missing committed data → data loss or a stuck cluster. The plain election restriction (§5.4.1) isn't sufficient on its own during scale-up, because empty nodes compare "up-to-date" only against each other. The <b>goal is universal; the mainstream solution is structural — non-voting learners that must catch up before they can vote</b> — rather than a vote-time flag.</p>
+  <table>
+    <tr><th>System</th><th>Mechanism</th></tr>
+    <tr><td><b>etcd</b></td><td><code>Learner</code> members (since 3.4): docs prescribe adding a member as a learner, catching it up, then promoting to voter.</td></tr>
+    <tr><td><b>CockroachDB</b></td><td><code>LEARNER</code> / non-voting replicas during rebalancing (etcd/raft based).</td></tr>
+    <tr><td><b>TiKV / raft-rs</b></td><td><code>Learner</code> role — replicates but cannot vote until promoted.</td></tr>
+    <tr><td><b>Consul / HashiCorp Raft</b></td><td><b>Non-voter</b> servers + Autopilot <code>ServerStabilizationTime</code>: a server stays non-voting until healthy/caught up.</td></tr>
+    <tr><td><b>MongoDB</b> (Raft-like)</td><td><code>newlyAdded</code> members are non-voting until initial sync completes, then auto-reconfigured to voting.</td></tr>
+    <tr><td><b>Kafka KRaft</b></td><td>Observers catch up before being added as voters (KIP-853 dynamic quorum).</td></tr>
+    <tr><td><b>Raft thesis</b></td><td>§4.2.1 — add new servers as non-voting, replicate until caught up, <i>then</i> count them.</td></tr>
+  </table>
+  <div class="callout good"><b>Where NATS sits.</b> NATS <i>also</i> uses the learner approach — that is exactly what <code>Observer</code> mode + the <code>ScaleUp</code> flag are: a newly added peer can't campaign until its log has data (<code>raft.go</code> <code>scaleUp</code>/<code>setObserverLocked</code>). The empty-log vote bit is a complementary <b>vote-time</b> safety net on top of that: a would-be leader refuses to declare victory while it might be missing the one node that holds the only copy of committed data — i.e. it stays conservative precisely when it can't distinguish "I have the latest log" from "an unreachable peer has more." The exact wire mechanism (an <code>empty</code> bit + all-hands escalation) appears to be NATS-specific; most systems achieve the same safety structurally via learners.</div>
+
   <p>Becoming leader is not instantaneous to the upper layer: <code>switchToLeader</code> immediately sends a PeerState entry (the implementation's equivalent of the Raft <i>no-op on election</i>) and defers signalling "I am leader" (<code>n.aflr</code>) until that entry — and everything before it — has been <b>applied</b>. This guarantees a new leader is caught up before it serves <span class="cite">raft.go:5304-5331</span>.</p>
 </section>
 
