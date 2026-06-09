@@ -1087,6 +1087,20 @@
   <h2>15 · Pre-Vote phase (prototype)</h2>
   <p>This section documents the Pre-Vote prototype implemented on this branch to address risk <a href="#risks">R1</a>. Pre-Vote inserts a <b>trial election that does not touch the term</b>: a node first asks "would a real election at <code>term+1</code> succeed?" and only escalates — incrementing its term and running a normal election — if a quorum would grant. The decisive rule lives on the <b>voter</b>: grant a pre-vote only if you are <i>not</i> currently hearing from a leader.</p>
 
+  <h3>Prior art — pre-vote in other systems</h3>
+  <p>Pre-Vote is a well-established Raft extension; most mature implementations ship it. NATS not having it until now is not unusual — it lives in <b>Ongaro's PhD thesis §9.6</b> ("preventing disruptions when a server rejoins"), not the short extended paper, so from-scratch implementations often defer it until partition/flap churn shows up at scale.</p>
+  <table>
+    <tr><th>System / library</th><th>Pre-Vote?</th><th>Notes</th></tr>
+    <tr><td><b>etcd/raft</b> (Go)</td><td><span class="pill" style="border-color:#3a6;color:#9be29b">Yes</span></td><td>The reference implementation: explicit <code>PreVote</code> option and a <code>StatePreCandidate</code> state (<code>campaignPreElection</code>). The design this prototype most closely mirrors. Configurable since etcd <b>3.4</b> (<code>--pre-vote</code>); default-on in recent releases.</td></tr>
+    <tr><td><b>CockroachDB</b></td><td><span class="pill" style="border-color:#3a6;color:#9be29b">Yes</span></td><td>Uses a fork of etcd/raft, so inherits pre-vote (paired with quiesced ranges + CheckQuorum).</td></tr>
+    <tr><td><b>TiKV / raft-rs</b> (Rust)</td><td><span class="pill" style="border-color:#3a6;color:#9be29b">Yes</span></td><td>raft-rs is a Rust port of etcd/raft; pre-vote is first-class and TiKV runs with it.</td></tr>
+    <tr><td><b>HashiCorp Raft</b> (Consul, Nomad, Vault)</td><td><span class="pill" style="border-color:#7a5;color:#ffd">Yes (recent)</span></td><td>Long-requested (PR&nbsp;#530 sat for years); landed in <b>hashicorp/raft v1.7.0 (2024)</b>. Earlier releases relied on CheckQuorum + leadership transfer + non-voter staging instead. Availability in a given Consul/Vault build depends on the vendored raft-lib version.</td></tr>
+    <tr><td><b>Apache Ratis</b> (Java; Apache Ozone)</td><td><span class="pill" style="border-color:#3a6;color:#9be29b">Yes</span></td><td>Has a pre-vote phase.</td></tr>
+    <tr><td><b>Dragonboat</b> (Go, multi-group)</td><td><span class="pill" style="border-color:#a73;color:#ffd9b3">Not classic form</span></td><td>Performance-focused; historically leaned on other mechanisms (observers/witnesses, CheckQuorum-style) rather than the etcd-style pre-vote state.</td></tr>
+    <tr><td><b>Raft thesis / textbook Raft</b></td><td><span class="pill" style="border-color:#356;color:#cfe8ff">Extension</span></td><td>Defined in Ongaro thesis §9.6 — an optional extension, not part of the core figure-2 protocol.</td></tr>
+  </table>
+  <div class="callout"><b>Pre-Vote is usually paired with CheckQuorum, not a substitute for it.</b> etcd runs both: <i>PreVote</i> stops a returning node from disrupting a healthy leader, while <i>CheckQuorum</i> makes a partitioned leader step down so a genuine failover can proceed. NATS already has the CheckQuorum half (the 10&nbsp;s <code>lostQuorumInterval</code> stepdown); this prototype adds the PreVote half, bringing it in line with the etcd model. The thesis actually proposes two complementary disruption defenses — the trial election <i>and</i> "ignore a RequestVote received within the minimum election timeout of hearing from a leader"; etcd implements both, and our voter guard (<code>recentLeaderContactLocked</code>) folds the second into the pre-vote grant decision.</div>
+
   <h3>Scenarios it solves</h3>
   <div class="grid2">
     <div class="card">
