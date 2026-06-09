@@ -3872,7 +3872,7 @@ func (n *raft) runAsPreCandidate() {
 				} else {
 					emptyVotes[vresp.peer] = struct{}{}
 				}
-				if n.wonElection(len(votes)) || len(votes)+len(emptyVotes) == csz {
+				if n.wonPreVote(len(votes), len(emptyVotes), csz) {
 					// A real election would succeed — escalate to one now.
 					n.debug("Pre-vote succeeded, switching to candidate")
 					n.switchToCandidate()
@@ -5441,6 +5441,16 @@ func (n *raft) sendReply(subject string, msg []byte) {
 
 func (n *raft) wonElection(votes int) bool {
 	return votes >= n.quorumNeeded()
+}
+
+// wonPreVote reports whether a trial (pre-vote) round has gathered enough
+// support to escalate to a real election: either a normal quorum of grants, or
+// grants from every server in the cluster (some of which may have empty logs).
+// The latter mirrors the all-hands rule the real election uses so that the
+// empty-log/scale-up protection is preserved in the pre-vote phase. csz is the
+// cluster size as read under lock by the caller.
+func (n *raft) wonPreVote(nvotes, nempty, csz int) bool {
+	return n.wonElection(nvotes) || nvotes+nempty == csz
 }
 
 // Return the quorum size for a given cluster config.

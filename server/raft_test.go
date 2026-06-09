@@ -951,6 +951,81 @@ func TestNRGPreVoteObserverDoesNotPreCampaign(t *testing.T) {
 	require_Equal(t, follower.Term(), startTerm)
 }
 
+// Deterministic coverage of the pre-vote escalation tally, including the
+// all-hands rule that preserves empty-log/scale-up protection (a node may
+// escalate with fewer than a normal quorum of non-empty grants as long as it
+// has heard from every server).
+func TestNRGPreVoteEscalationTally(t *testing.T) {
+	// 3-node cluster: quorum 2, size 3.
+	n := &raft{qn: 2, csz: 3}
+
+	// Normal quorum of (non-empty) grants escalates.
+	require_True(t, n.wonPreVote(2, 0, 3))
+	require_True(t, n.wonPreVote(3, 0, 3))
+
+	// Below quorum and not all heard from -> do not escalate.
+	require_False(t, n.wonPreVote(1, 0, 3))
+	require_False(t, n.wonPreVote(1, 1, 3))
+	require_False(t, n.wonPreVote(0, 2, 3))
+
+	// All-hands: 1 real grant + 2 empty grants == cluster size -> escalate.
+	require_True(t, n.wonPreVote(1, 2, 3))
+	// Heard from everyone, all empty -> escalate (we have the most up-to-date log).
+	require_True(t, n.wonPreVote(0, 3, 3))
+
+	// Larger cluster: quorum 3, size 5.
+	n = &raft{qn: 3, csz: 5}
+	require_True(t, n.wonPreVote(3, 0, 5))
+	require_False(t, n.wonPreVote(2, 1, 5))
+	require_True(t, n.wonPreVote(2, 3, 5)) // all-hands
+}
+
+// A flapping / half-partitioned node that keeps trying to campaign must never
+// disrupt a healthy leader. We repeatedly force a follower into the pre-vote
+// trial and assert the cluster's term never advances and the leader never
+// changes across many iterations.
+func TestNRGPreVoteFlappingNodeNeverDisrupts(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+	c.waitOnLeader()
+
+	nc, _ := jsClientConnect(t, c.leader(), nats.UserInfo("admin", "s3cr3t!"))
+	defer nc.Close()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	for _, sm := range rg {
+		n := sm.node().(*raft)
+		n.Lock()
+		n.prevote = true
+		n.Unlock()
+	}
+
+	follower := rg.nonLeader().node().(*raft)
+	checkFor(t, 5*time.Second, 50*time.Millisecond, func() error {
+		follower.RLock()
+		ok := follower.allPeersSupportPreVote()
+		follower.RUnlock()
+		if !ok {
+			return fmt.Errorf("pre-vote capability not yet propagated")
+		}
+		return nil
+	})
+
+	leaderID := rg.leader().node().ID()
+	startMax := maxGroupTerm(rg)
+
+	for i := 0; i < 25; i++ {
+		follower.switchToPreCandidate()
+		time.Sleep(40 * time.Millisecond)
+		require_Equal(t, maxGroupTerm(rg), startMax)
+		nl := rg.leader()
+		require_True(t, nl != nil)
+		require_Equal(t, nl.node().ID(), leaderID)
+	}
+}
+
 // Deterministic unit coverage of the pre-vote grant decision and its boundary
 // conditions, exercising grantPreVoteLocked directly without timing/networking.
 func TestNRGPreVoteGrantDecision(t *testing.T) {
