@@ -307,31 +307,195 @@ psi := psi{total: readU64(), fblk: uint32(readU64())}
   </div>
 
   <h2>Version comparison</h2>
+  <p>The <code>info.fblk = info.lblk</code> correction <b>originally existed</b> and was removed in <b>2.12.7</b>, which is
+  what introduced the regression. PR&nbsp;#8285 restores it. So releases at or below <b>2.12.6</b> were never affected.</p>
   <table>
     <thead>
-      <tr><th>Behavior</th><th>2.12 (pre-fix, &ge;2.12.7)</th><th>2.12 + PR&nbsp;#8285</th><th>2.14+</th></tr>
+      <tr>
+        <th>Behavior</th>
+        <th>&le;&nbsp;2.12.6</th>
+        <th>2.12.7 &ndash; pre-fix</th>
+        <th>2.12 + PR&nbsp;#8285</th>
+        <th>2.14+</th>
+      </tr>
     </thead>
     <tbody>
       <tr>
         <td>Persists <code>lblk</code> for single-msg subject</td>
         <td class="no">No (derived from <code>fblk</code>)</td>
         <td class="no">No (derived from <code>fblk</code>)</td>
+        <td class="no">No (derived from <code>fblk</code>)</td>
         <td class="yes">Yes (always)</td>
       </tr>
       <tr>
         <td>Corrects <code>fblk</code> before persisting on FIFO trim-to-one</td>
-        <td class="no">No</td>
         <td class="yes">Yes</td>
+        <td class="no">No (block removed)</td>
+        <td class="yes">Yes (restored)</td>
         <td>N/A (not needed)</td>
       </tr>
       <tr>
         <td>Message retrievable after restart (<code>MaxMsgsPer&gt;1</code>, FIFO)</td>
+        <td class="yes">Yes</td>
+        <td class="no">No &mdash; bug</td>
+        <td class="yes">Yes</td>
+        <td class="yes">Yes</td>
+      </tr>
+      <tr>
+        <td><code>Nats-Expected-Last-Subject-Sequence</code> correct after restart</td>
+        <td class="yes">Yes</td>
         <td class="no">No &mdash; bug</td>
         <td class="yes">Yes</td>
         <td class="yes">Yes</td>
       </tr>
     </tbody>
   </table>
+
+  <h2>Which stream configurations are affected</h2>
+  <p>Three conditions must all hold for a subject to be exposed to the bug:</p>
+  <div class="panel callout">
+    <ol>
+      <li><b>File storage</b> &mdash; the bug only surfaces across a restart via <code>index.db</code>; memory streams are immune.</li>
+      <li><b><code>MaxMsgsPerSubject &gt; 1</code></b> (including unlimited, <code>-1</code>) &mdash; a single subject must be
+      able to accumulate multiple copies, which can land in different blocks. With <code>MaxMsgsPerSubject = 1</code> the
+      existing write-path correction already keeps <code>fblk</code> accurate.</li>
+      <li><b>FIFO / oldest-first removal</b> trimming such a subject down to exactly one surviving message that lives in a
+      <i>later</i> block. This is driven by any limit-based eviction: <code>MaxAge</code> (TTL), <code>MaxMsgs</code>,
+      <code>MaxBytes</code>, or <code>Interest</code>/<code>WorkQueue</code> retention.</li>
+    </ol>
+  </div>
+
+  <h3>Examples that ARE affected</h3>
+  <p><b>KV bucket with history &gt; 1 and a TTL</b> &mdash; the most common real-world trigger. A KV bucket maps to a stream
+  with <code>MaxMsgsPerSubject = history</code>; the TTL drives FIFO expiry of old revisions:</p>
+  <pre><code>nats kv add CONFIG --history=<span class="s">10</span> --ttl=<span class="s">1h</span> --storage=file
+<span class="c">// underlying stream: KV_CONFIG</span>
+<span class="c">//   max_msgs_per_subject = 10, max_age = 1h, storage = file</span></code></pre>
+
+  <p><b>Limits stream with a per-subject cap plus age-based eviction:</b></p>
+  <pre><code>{
+  <span class="s">"name"</span>: <span class="s">"EVENTS"</span>,
+  <span class="s">"storage"</span>: <span class="s">"file"</span>,
+  <span class="s">"subjects"</span>: [<span class="s">"events.&gt;"</span>],
+  <span class="s">"retention"</span>: <span class="s">"limits"</span>,
+  <span class="s">"max_msgs_per_subject"</span>: <span class="s">5</span>,      <span class="c">// &gt; 1  -> multiple copies per subject</span>
+  <span class="s">"max_age"</span>: <span class="s">3600000000000</span>      <span class="c">// 1h TTL  -> FIFO expiry</span>
+}</code></pre>
+
+  <p><b>Per-subject cap plus a total message/byte limit:</b></p>
+  <pre><code>{
+  <span class="s">"name"</span>: <span class="s">"ORDERS"</span>,
+  <span class="s">"storage"</span>: <span class="s">"file"</span>,
+  <span class="s">"subjects"</span>: [<span class="s">"orders.*"</span>],
+  <span class="s">"max_msgs_per_subject"</span>: <span class="s">3</span>,      <span class="c">// &gt; 1</span>
+  <span class="s">"max_msgs"</span>: <span class="s">1000000</span>           <span class="c">// total cap -> oldest-first eviction</span>
+}</code></pre>
+
+  <h3>Examples that are NOT affected</h3>
+  <ul>
+    <li><b>Memory storage</b> (<code>"storage": "memory"</code>) &mdash; no <code>index.db</code>, no restart restore path.</li>
+    <li><b><code>max_msgs_per_subject = 1</code></b> (e.g. a KV bucket with <code>--history=1</code>) &mdash; the write-path
+    correction (<code>filestore.go</code>: <code>info.total == 1 &amp;&amp; mmp == 1</code>) already keeps <code>fblk</code> correct.</li>
+    <li><b>No eviction</b> &mdash; a stream that only ever grows (no <code>MaxAge</code>/<code>MaxMsgs</code>/<code>MaxBytes</code>,
+    Limits retention) never performs the FIFO trim-to-one that strands the pointer.</li>
+    <li><b>Any 2.14+ deployment</b>, and any release <b>&le; 2.12.6</b>, regardless of config.</li>
+  </ul>
+
+  <h2>Are KV streams affected?</h2>
+  <div class="panel callout bug">
+    <p><b>Yes &mdash; KV buckets created with <code>history &gt; 1</code> on file storage are squarely in the blast radius,
+    and are the most likely place to hit this bug in practice.</b></p>
+  </div>
+
+  <p>A JetStream KV bucket is just a stream under the hood, named <code>KV_&lt;bucket&gt;</code>, where:</p>
+  <ul>
+    <li>each <b>key</b> maps to a <b>subject</b> (<code>$KV.&lt;bucket&gt;.&lt;key&gt;</code>), and</li>
+    <li>the bucket&rsquo;s <b>history</b> setting is translated directly into <code>MaxMsgsPerSubject = history</code>.</li>
+  </ul>
+
+  <p>So a bucket with <code>history = N (N &gt; 1)</code> keeps up to <i>N</i> revisions per key &mdash; i.e. multiple
+  messages per subject, exactly condition&nbsp;2 of the bug. Revisions are then trimmed <b>FIFO</b> (oldest revision first)
+  whenever history is exceeded or a per-bucket TTL (<code>MaxAge</code>) expires old revisions &mdash; exactly condition&nbsp;3.
+  When a key is trimmed down to a single surviving revision that happens to live in a later block, its <code>fblk</code>
+  goes stale and is persisted; after a server restart the key&rsquo;s scan window collapses onto the wrong block.</p>
+
+  <pre><code><span class="c">// Affected: history &gt; 1 on file storage</span>
+nats kv add SESSIONS --history=<span class="s">5</span> --storage=file
+<span class="c">//   -> stream KV_SESSIONS, max_msgs_per_subject = 5</span>
+
+<span class="c">// NOT affected: default history = 1  (max_msgs_per_subject = 1)</span>
+nats kv add FLAGS --storage=file</code></pre>
+
+  <h3>How KV operations break after a restart</h3>
+  <p>Because every KV read and conditional write resolves the key&rsquo;s <i>last</i> revision through the same
+  <code>LoadLastMsg</code> path that depends on <code>fblk</code>/<code>lblk</code>:</p>
+  <ul>
+    <li><b><code>kv.Get(key)</code> / <code>kv.History(key)</code></b> &mdash; the surviving value sits in a block outside the
+    stale scan window, so the lookup reports the <b>key as missing</b> even though the data is intact on disk. Reads appear
+    to lose data until something forces the pointer to self-correct.</li>
+    <li><b><code>kv.Update(key, val, rev)</code> (compare-and-set)</b> &mdash; KV implements CAS using the
+    <code>Nats-Expected-Last-Subject-Sequence</code> header (see below). With the stale pointer the server reports the
+    last revision as <code>0</code>, so a correct <code>Update</code> at the real revision is <b>wrongly rejected</b> with a
+    wrong-last-sequence error.</li>
+    <li><b><code>kv.Create(key, val)</code> (create-only)</b> &mdash; <code>Create</code> guards with expected revision
+    <code>0</code> (&ldquo;key must not exist&rdquo;). Since the server also believes the key is gone, the create is
+    <b>wrongly accepted</b>, silently overwriting / duplicating an existing key and breaking the create-once guarantee.</li>
+  </ul>
+  <p>In short: a KV bucket with history&nbsp;&gt;&nbsp;1 on disk can, after a restart, appear to drop keys and make CAS
+  operations return wrong results &mdash; even though no data was actually lost. The mechanism for the CAS failures is the
+  expected-last-subject-sequence check, explained next.</p>
+
+  <h2>Why <code>Nats-Expected-Last-Subject-Sequence</code> is affected</h2>
+  <p>This publish header implements per-subject optimistic concurrency: &ldquo;only accept my message if the last sequence
+  currently stored for this subject equals <i>N</i>.&rdquo; The server evaluates it in <code>processJetStreamMsg</code>
+  (<code>server/stream.go</code>) by asking the store for the subject&rsquo;s last message:</p>
+
+  <pre><code><span class="c">// stream.go &mdash; expected last sequence per subject</span>
+<span class="k">if</span> seq, exists := getExpectedLastSeqPerSubject(hdr); exists {
+    sm, err := store.<span class="fn">LoadLastMsg</span>(seqSubj, &amp;smv)
+    <span class="k">if</span> sm != <span class="k">nil</span> {
+        fseq = sm.seq
+    }
+    <span class="k">if</span> err == ErrStoreMsgNotFound &amp;&amp; seq == <span class="s">0</span> {
+        fseq, err = <span class="s">0</span>, <span class="k">nil</span>
+    }
+    <span class="k">if</span> err != <span class="k">nil</span> || fseq != seq {      <span class="c">// mismatch -> reject the publish</span>
+        resp.Error = <span class="fn">NewJSStreamWrongLastSequenceError</span>(fseq)
+        ...
+    }
+}</code></pre>
+
+  <p>The catch is <em>how</em> <code>LoadLastMsg</code> finds that last message. For a literal subject it calls
+  <code>loadLast</code>, which walks blocks <b>backwards using the very same per-subject pointers</b> (<code>filestore.go</code>):</p>
+
+  <pre><code><span class="k">if</span> info, ok := fs.psim.Find(stringToBytes(subj)); ok {
+    start, stop = info.lblk, info.fblk   <span class="c">// scan window [lblk .. fblk], backwards</span>
+}
+<span class="c">// Walk blocks backwards looking for the subject&rsquo;s last message.</span>
+<span class="k">for</span> i := start; i &gt;= stop; i-- { <span class="c">/* ... */</span> }</code></pre>
+
+  <div class="panel callout bug">
+    <h3>The failure</h3>
+    <p>After a restart in the buggy scenario, the single-message subject restores to
+    <code>{fblk: 1, lblk: 1}</code> (the stale value) even though the real message is in block&nbsp;7. <code>loadLast</code>
+    therefore scans only block&nbsp;1, finds nothing, and returns <code>ErrStoreMsgNotFound</code> &rarr; <code>fseq = 0</code>.
+    The server now believes the subject is empty, which corrupts the header check in <b>both directions</b>:</p>
+    <ul>
+      <li><b>Wrongful rejection.</b> A correct publisher sends <code>Nats-Expected-Last-Subject-Sequence: 7</code> (the true
+      last). The server compares <code>fseq (0) != 7</code> and rejects with <code>JSStreamWrongLastSequenceError</code> &mdash;
+      a valid write is refused and the publisher is told the wrong current sequence (<code>0</code>).</li>
+      <li><b>Wrongful acceptance.</b> A publisher guarding &ldquo;only if this subject is brand new&rdquo; sends
+      <code>Nats-Expected-Last-Subject-Sequence: 0</code>. Because the server also thinks the subject is empty
+      (<code>fseq == 0</code>), the check passes and the message is accepted &mdash; silently defeating the optimistic-concurrency
+      guarantee and clobbering/duplicating an existing subject.</li>
+    </ul>
+  </div>
+
+  <p>So the stale <code>fblk</code> isn&rsquo;t just a &ldquo;message not found on <code>get</code>&rdquo; problem &mdash; it
+  poisons every per-subject sequence lookup that rides on those pointers, and the expected-last-subject-sequence header is
+  the most visible casualty because it turns a storage glitch into incorrect publish accept/reject decisions. Restoring
+  <code>info.fblk = info.lblk</code> (or, on 2.14, persisting <code>lblk</code> directly) keeps the scan window pointing at the
+  real block, so <code>LoadLastMsg</code> returns the correct sequence again.</p>
 
   <h2>Scope &amp; limitations</h2>
   <ul>
@@ -345,7 +509,8 @@ psi := psi{total: readU64(), fblk: uint32(readU64())}
   <footer>
     Generated explainer for <a href="https://github.com/nats-io/nats-server/pull/8285">nats-io/nats-server#8285</a>.
     Code references: <code>server/filestore.go</code> (<code>firstSeqForSubj</code>, <code>removePerSubject</code>,
-    index.db encode/decode). For authoritative behavior, consult the PR and the source.
+    <code>loadLast</code>, index.db encode/decode) and <code>server/stream.go</code> (expected-last-subject-sequence check,
+    <code>LoadLastMsg</code>). For authoritative behavior, consult the PR and the source.
   </footer>
 
 </div>
