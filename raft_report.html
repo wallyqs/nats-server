@@ -317,6 +317,79 @@
 
   <div class="callout"><b>Failure-domain separation.</b> Because the meta group is separate from every data group, losing meta <i>quorum</i> freezes the <b>control plane</b> (no new streams/consumers, no placement changes, no API mutations) but established streams keep serving reads/writes via their own independent Raft groups — and vice-versa. The meta monitor loop is <code>monitorCluster()</code> <span class="cite">jetstream_cluster.go:1574</span>.</div>
 
+  <h3 id="metasnap">The <code>metaSnapshot</code> operation — the cluster's heaviest serialization</h3>
+  <p>Unlike a stream snapshot (which captures opaque message-store state), the meta snapshot is a <b>full serialization of the entire cluster's configuration</b>. There is no delta encoding: every snapshot re-serializes <b>every stream and every consumer in every account</b>, regardless of how little changed. On large clusters (tens of thousands of assets) this is the single most expensive recurring operation in the control plane.</p>
+
+  <figure>
+  <svg viewBox="0 0 940 300" role="img" aria-label="metaSnapshot pipeline">
+    <defs><marker id="ms1" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#7cc7f0"/></marker></defs>
+    <text x="470" y="22" fill="#e6edf3" font-size="13" font-weight="700" text-anchor="middle">encodeMetaSnapshot: three full O(streams + consumers) passes, every time</text>
+    <!-- stage 1 -->
+    <rect x="30" y="50" width="200" height="120" rx="10" fill="#13202c" stroke="#356"/>
+    <text x="130" y="74" text-anchor="middle" fill="#7cc7f0" font-size="12" font-weight="700">1 · WALK + BUILD</text>
+    <text x="130" y="96" text-anchor="middle" fill="#9aa7b4" font-size="10.5">for each account →</text>
+    <text x="130" y="111" text-anchor="middle" fill="#9aa7b4" font-size="10.5">each stream → each</text>
+    <text x="130" y="126" text-anchor="middle" fill="#9aa7b4" font-size="10.5">consumer</text>
+    <text x="130" y="146" text-anchor="middle" fill="#cbb3ff" font-size="10" font-family="monospace">[]writeableStreamAssignment</text>
+    <text x="130" y="160" text-anchor="middle" fill="#9be29b" font-size="9.5">reuses cached ConfigJSON (RawMessage)</text>
+    <!-- stage 2 -->
+    <rect x="270" y="50" width="200" height="120" rx="10" fill="#221a2e" stroke="#86c"/>
+    <text x="370" y="74" text-anchor="middle" fill="#cbb3ff" font-size="12" font-weight="700">2 · json.Marshal</text>
+    <text x="370" y="98" text-anchor="middle" fill="#9aa7b4" font-size="10.5">serialize the whole</text>
+    <text x="370" y="113" text-anchor="middle" fill="#9aa7b4" font-size="10.5">slice to one big</text>
+    <text x="370" y="128" text-anchor="middle" fill="#9aa7b4" font-size="10.5">JSON buffer</text>
+    <text x="370" y="150" text-anchor="middle" fill="#f0c674" font-size="10">timed: <tspan font-family="monospace">marshal</tspan></text>
+    <!-- stage 3 -->
+    <rect x="510" y="50" width="200" height="120" rx="10" fill="#142117" stroke="#3a6"/>
+    <text x="610" y="74" text-anchor="middle" fill="#9be29b" font-size="12" font-weight="700">3 · s2.Encode</text>
+    <text x="610" y="98" text-anchor="middle" fill="#9aa7b4" font-size="10.5">S2-compress the</text>
+    <text x="610" y="113" text-anchor="middle" fill="#9aa7b4" font-size="10.5">JSON into the final</text>
+    <text x="610" y="128" text-anchor="middle" fill="#9aa7b4" font-size="10.5">snapshot blob</text>
+    <text x="610" y="150" text-anchor="middle" fill="#f0c674" font-size="10">timed: <tspan font-family="monospace">s2</tspan></text>
+    <!-- output -->
+    <rect x="750" y="50" width="160" height="120" rx="10" fill="#0e131a" stroke="#2a3340"/>
+    <text x="830" y="74" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="700">snapshot</text>
+    <text x="830" y="98" text-anchor="middle" fill="#9aa7b4" font-size="10.5">InstallSnapshot</text>
+    <text x="830" y="113" text-anchor="middle" fill="#9aa7b4" font-size="10.5">→ compact log</text>
+    <text x="830" y="134" text-anchor="middle" fill="#9be29b" font-size="9.5">size ∝ total config,</text>
+    <text x="830" y="147" text-anchor="middle" fill="#9be29b" font-size="9.5">not # of changes</text>
+    <line x1="230" y1="110" x2="268" y2="110" stroke="#7cc7f0" marker-end="url(#ms1)"/>
+    <line x1="470" y1="110" x2="508" y2="110" stroke="#7cc7f0" marker-end="url(#ms1)"/>
+    <line x1="710" y1="110" x2="748" y2="110" stroke="#7cc7f0" marker-end="url(#ms1)"/>
+    <!-- warn banner -->
+    <rect x="30" y="190" width="880" height="44" rx="8" fill="#22120e" stroke="#6e2b2b"/>
+    <text x="46" y="212" fill="#ffd0c8" font-size="12" font-weight="700">A &gt; 2 s run is logged with the full breakdown:</text>
+    <text x="46" y="228" fill="#cdd7e1" font-size="10.5" font-family="monospace">"Metalayer snapshot generation took 3.1s (streams: 8000, consumers: 42000, marshal: 1.9s, s2: 0.9s, uncompressed: 64MB, compressed: 9MB)"</text>
+    <!-- monitoring -->
+    <rect x="30" y="246" width="880" height="40" rx="8" fill="#0b1119" stroke="#2a3340"/>
+    <text x="46" y="270" fill="#9aa7b4" font-size="11">Duration &amp; timestamp are exported for monitoring: <tspan font-family="monospace" fill="#cfe8ff">cc.lastMetaSnapDuration</tspan> / <tspan font-family="monospace" fill="#cfe8ff">lastMetaSnapTime</tspan> (visible in <tspan font-family="monospace" fill="#cfe8ff">jsz</tspan>). <tspan class="cite" fill="#7d8a98">jetstream_cluster.go:2195-2261</tspan></text>
+  </svg>
+  <figcaption>The meta snapshot pipeline. The cost is dominated by JSON-marshalling and S2-compressing the <i>entire</i> config set on every snapshot. <span class="cite">encodeMetaSnapshot jetstream_cluster.go:2195</span></figcaption>
+  </figure>
+
+  <h4>Blocking vs. asynchronous — and the lock that matters</h4>
+  <p>The two strategies differ in <b>one critical way: whether they hold the global JetStream lock (<code>js.mu</code>) while serializing</b>.</p>
+  <div class="grid2">
+    <div class="card">
+      <h4 style="margin-top:0">Blocking (<code>metaSnapshot()</code>)</h4>
+      <ul class="tight small">
+        <li>Takes <code>js.mu.RLock()</code> and calls <code>encodeMetaSnapshot(cc.streams)</code> on the <b>live</b> cluster map <span class="cite">jetstream_cluster.go:2010-2015</span>.</li>
+        <li>The marshal + S2 compress run <b>while holding the JS read lock</b> — so for the whole duration, anything needing the write lock (new assignments, API mutations, placement) stalls.</li>
+        <li>Used after repeated async failures, on shutdown, and when the log has grown past 10× the size threshold.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4 style="margin-top:0">Async (default)</h4>
+      <ul class="tight small">
+        <li>Runs in its own goroutine and <b>never takes <code>js.mu</code></b> (only brief Raft-node locks).</li>
+        <li>Instead of reading live state, it reconstructs current state from <b>last snapshot + replayed log tail</b>: <code>LoadLastSnapshot</code> → <code>decodeMetaSnapshot</code> (JSON+S2 decode) → <code>collectStreamAndConsumerChanges</code> (replay entries via <code>AppendEntriesSeq</code>) → <code>encodeMetaSnapshot</code> <span class="cite">jetstream_cluster.go:1764-1796</span>.</li>
+        <li>Pays an extra decode-then-replay cost to stay off the global lock — a deliberate latency-for-availability trade.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout warn"><b>Why this is the expensive one.</b> Because it is a <i>full</i> snapshot, cost grows with <b>total cluster size</b>, not with churn — adding one consumer to a 50k-consumer cluster still re-marshals and re-compresses all 50k. Two mitigations are already in place: per-asset configs are cached as pre-marshalled <code>json.RawMessage</code> (<code>ConfigJSON</code>) so structs aren't re-encoded, and the async path keeps it off <code>js.mu</code>. The residual risks: (1) the meta log compacts only as fast as snapshots complete, so a slow snapshot on a huge cluster lets the <code>_meta_</code> WAL grow; (2) if it degrades to the blocking path, a multi-second serialization stalls all control-plane operations cluster-wide. Watch <code>lastMetaSnapDuration</code> and the "snapshot generation took" warnings.</div>
+
   <h3>Meta-group recovery</h3>
   <p>On startup each server replays its <code>_meta_</code> WAL into a <code>recoveryUpdates</code> staging set; when the apply queue emits the catchup-complete nil guard, staged stream/consumer adds, updates and removals are applied in dependency order, <code>metaRecovering</code> is cleared, and a <b>forced compacting snapshot</b> is taken so the node starts with a small log <span class="cite">jetstream_cluster.go:1623-1786</span>.</p>
 </section>
@@ -864,6 +937,68 @@
     <li><b>Failure back-off</b>: a failed async snapshot reduces the timer to 15 s and switches the next attempt to blocking, so the log cannot grow unbounded while async keeps failing.</li>
   </ul>
 
+  <h3>CLFS — reconciling the two sequence spaces</h3>
+  <p><b>CLFS = "Count of (the number of) Failed NRG Sequences"</b> (<code>NRG</code> = NATS Raft Group). It is the running count of committed Raft log entries on a stream's group that <b>did not produce a stored stream message</b> <span class="cite">stream.go:554</span>. It exists to bridge a fundamental mismatch in clustered streams:</p>
+  <figure>
+  <svg viewBox="0 0 940 250" role="img" aria-label="CLFS sequence reconciliation">
+    <defs><marker id="cf" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#9aa7b4"/></marker></defs>
+    <text x="470" y="22" fill="#e6edf3" font-size="13" font-weight="700" text-anchor="middle">A stream has TWO sequence spaces; CLFS is the offset between them</text>
+    <!-- raft log row -->
+    <text x="40" y="66" fill="#cbb3ff" font-size="12" font-weight="700">Raft log index</text>
+    <text x="40" y="82" fill="#9aa7b4" font-size="10">(clseq · every proposal)</text>
+    <g font-family="monospace" font-size="11" text-anchor="middle">
+      <rect x="200" y="50" width="80" height="34" fill="#221a2e" stroke="#86c"/><text x="240" y="72" fill="#cbb3ff">idx 1</text>
+      <rect x="290" y="50" width="80" height="34" fill="#221a2e" stroke="#86c"/><text x="330" y="72" fill="#cbb3ff">idx 2</text>
+      <rect x="380" y="50" width="80" height="34" fill="#3a1416" stroke="#6e2b2b"/><text x="420" y="68" fill="#ff9b94">idx 3</text><text x="420" y="80" fill="#ff9b94" font-size="8">FAILED</text>
+      <rect x="470" y="50" width="80" height="34" fill="#221a2e" stroke="#86c"/><text x="510" y="72" fill="#cbb3ff">idx 4</text>
+      <rect x="560" y="50" width="80" height="34" fill="#3a1416" stroke="#6e2b2b"/><text x="600" y="68" fill="#ff9b94">idx 5</text><text x="600" y="80" fill="#ff9b94" font-size="8">FAILED</text>
+      <rect x="650" y="50" width="80" height="34" fill="#221a2e" stroke="#86c"/><text x="690" y="72" fill="#cbb3ff">idx 6</text>
+    </g>
+    <!-- mapping arrows -->
+    <line x1="240" y1="86" x2="240" y2="128" stroke="#9aa7b4" marker-end="url(#cf)"/>
+    <line x1="330" y1="86" x2="330" y2="128" stroke="#9aa7b4" marker-end="url(#cf)"/>
+    <line x1="510" y1="86" x2="430" y2="128" stroke="#9aa7b4" marker-end="url(#cf)"/>
+    <line x1="690" y1="86" x2="610" y2="128" stroke="#9aa7b4" marker-end="url(#cf)"/>
+    <text x="420" y="108" fill="#ff7b72" font-size="9" text-anchor="middle">clfs++</text>
+    <text x="600" y="108" fill="#ff7b72" font-size="9" text-anchor="middle">clfs++</text>
+    <!-- stream seq row -->
+    <text x="40" y="150" fill="#9be29b" font-size="12" font-weight="700">Stream message seq</text>
+    <text x="40" y="166" fill="#9aa7b4" font-size="10">(lseq · only stored msgs)</text>
+    <g font-family="monospace" font-size="11" text-anchor="middle">
+      <rect x="200" y="132" width="80" height="34" fill="#142117" stroke="#3a6"/><text x="240" y="154" fill="#9be29b">seq 1</text>
+      <rect x="290" y="132" width="80" height="34" fill="#142117" stroke="#3a6"/><text x="330" y="154" fill="#9be29b">seq 2</text>
+      <rect x="380" y="132" width="80" height="34" fill="#142117" stroke="#3a6"/><text x="420" y="154" fill="#9be29b">seq 3</text>
+      <rect x="560" y="132" width="80" height="34" fill="#142117" stroke="#3a6"/><text x="600" y="154" fill="#9be29b">seq 4</text>
+    </g>
+    <rect x="40" y="192" width="860" height="44" rx="8" fill="#0b1119" stroke="#2a3340"/>
+    <text x="56" y="214" fill="#cfe8ff" font-size="12" font-family="monospace">stored_seq = leader_assigned_lseq + 1 − clfs        invariant (caught up):  clseq = lseq + clfs</text>
+    <text x="56" y="230" fill="#9aa7b4" font-size="11">Every replica applies the same entries in the same order, bumps clfs at the same points, and so computes the same stored seq — deterministically.</text>
+  </svg>
+  <figcaption>Raft index 3 and 5 committed but stored nothing (e.g. a limit was hit, or an expected-sequence precondition failed), so each bumps <code>clfs</code>. The stored sequence is recovered by subtracting <code>clfs</code>. <span class="cite">stream.go:6963, 7394</span></figcaption>
+  </figure>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>Why the two spaces diverge</h4>
+      <p class="small">The leader proposes optimistically and bumps <code>clseq</code> (last seq sent to the NRG layer) immediately, so it can pipeline ahead of commits. But not every committed entry results in a stored message. On apply, <code>processJetStreamMsg</code> calls <code>bumpCLFS()</code> when an entry is deterministically rejected:</p>
+      <ul class="tight small">
+        <li>store limit hit — <code>MaxMsgs</code> / <code>MaxBytes</code> / <code>MaxMsgsPerSubject</code> / <code>MsgTooLarge</code> <span class="cite">stream.go:6990</span></li>
+        <li><code>expected-last-sequence</code> or <code>expected-last-msgId</code> precondition mismatch <span class="cite">stream.go:6627</span></li>
+        <li>rejected partial-batch entries</li>
+      </ul>
+      <p class="small">Pure I/O errors do <i>not</i> bump CLFS — they stop the replica instead, so state stays comparable.</p>
+    </div>
+    <div class="card">
+      <h4>Why it must be consistent — and why it gates snapshots</h4>
+      <ul class="tight small">
+        <li><b>Determinism:</b> because every replica must compute the <i>same</i> stored sequence, all replicas must agree on exactly which entries "failed." This is why a partial batch is explicitly rejected on every node "to ensure CLFS is correct" <span class="cite">jetstream_cluster.go:3377</span>.</li>
+        <li><b>Persisted in the snapshot:</b> CLFS is part of the stream snapshot (<code>streamSnapshot.Failed</code> / <code>EncodedStreamState(getCLFS())</code>) <span class="cite">jetstream_cluster.go:9999, 10016</span>, so a recovering or caught-up node restores the correct offset.</li>
+        <li><b>Snapshot trigger:</b> the monitor records <code>pclfs</code> before applying a batch and snapshots if <code>getCLFS() &gt; pclfs</code> — i.e. whenever this batch advanced CLFS — so the new offset is durably captured promptly (within the min-delta window) <span class="cite">jetstream_cluster.go:3353, 3446</span>.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="callout warn"><b>Operational signal.</b> A persistently climbing CLFS means the stream is committing Raft entries that store nothing — typically a client repeatedly hitting limits or sending bad expected-sequence/msgId preconditions. It inflates the Raft log relative to stored data and triggers extra snapshots. The lag check <code>clseq − (lseq + clfs) &gt; streamLagWarnThreshold</code> emits a "high message lag" warning when the leader runs too far ahead of applies <span class="cite">stream.go:7531</span>.</div>
+
   <h3>Installing a leader snapshot &amp; catchup</h3>
   <p>A follower that is too far behind (below the leader's first WAL sequence, e.g. just placed via scale-up) cannot be caught up entry-by-entry, so it receives a <b>snapshot instead</b>.</p>
   <div class="callout">Catchup flow: a behind follower replies <i>unsuccessfully</i> to an append entry, putting a fresh <code>$NRG.CR.&lt;rnd&gt;</code> catchup inbox in the reply subject. The leader runs <code>catchupFollower</code> → <code>runCatchup</code>, streaming WAL entries to that inbox with a <b>2 MB outstanding window</b>; if the follower is below the WAL's first sequence it calls <code>sendSnapshotToFollower</code>, shipping the snapshot as an <code>EntrySnapshot</code> + <code>EntryPeerState</code> append entry <span class="cite">raft.go:3306,3413,3440</span>. There is <b>no dedicated snapshot subject</b> — snapshots ride the normal append-entry channel. Catchup responses <i>never</i> count toward quorum (a key safety guard), and the leader refuses to create a new snapshot while a catchup is in progress unless forced.</div>
@@ -928,6 +1063,10 @@
     <tr>
       <td>R10</td><td>8-byte (truncated-hash) node IDs</td><td><span class="sev info">Info</span></td>
       <td><code>idLen = 8</code> from a HighwayHash of the server name <span class="cite">raft.go:2893</span>. Collision probability is negligible at realistic cluster sizes (birthday bound), but it is a truncated hash rather than a UUID; operationally, ensure server names are unique.</td>
+    </tr>
+    <tr>
+      <td>R11</td><td>Full (non-incremental) meta snapshot cost</td><td><span class="sev med">Medium</span></td>
+      <td>Every meta snapshot re-serializes the <b>entire</b> cluster config — all streams + consumers in all accounts — via JSON-marshal + S2-compress, with no delta encoding (<a href="#metasnap">§3</a>; <code>encodeMetaSnapshot</code> <span class="cite">jetstream_cluster.go:2195</span>). Cost scales with total cluster size, not churn, so on large clusters (10k+ assets) snapshots become slow and the <code>_meta_</code> WAL can only compact as fast as they finish. The async path keeps it off <code>js.mu</code>, but the <b>blocking fallback holds the JS read lock for the whole serialization</b> <span class="cite">jetstream_cluster.go:2010</span>, stalling all control-plane operations cluster-wide for its duration. <b>Recommendation:</b> alert on <code>lastMetaSnapDuration</code> / "snapshot generation took" warnings; keep total asset counts within tested bounds; avoid config churn storms that force frequent meta snapshots.</td>
     </tr>
   </table>
 
