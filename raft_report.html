@@ -1171,6 +1171,81 @@
   <div class="callout good"><b>Hardening completed on this branch.</b> (1) Mixed-version safety now uses a dedicated <code>PreVote</code> capability bit advertised in statsz and tracked as <code>nodeInfo.prevote</code> (not a version string). (2) A leader now explicitly refuses pre-votes (fixes a bug where the leader's own <code>n.leader == n.id</code> made it grant — which would have let a disruptor win the trial). (3) The guard window is a named constant <code>preVoteLeaderContactInterval</code> and the decision is factored into <code>grantPreVoteLocked</code> with a deterministic unit test. (4) Lost-quorum alerting is preserved on trial timeout. (5) Covered by tests: the before/after improvement, observer non-participation, and leadership-transfer bypass.</div>
   <div class="callout"><b>Validation runs.</b> The full Raft suite (<code>go test -run TestNRG</code>, ~6.7&nbsp;min) passes, plus a <code>-race</code> run and a <code>-count=3</code> repeat of the pre-vote tests (no flakes). Representative JetStream-cluster failover/stepdown/snapshot integration tests pass with pre-vote enabled by default (<code>TestJetStreamClusterStreamLeaderStepDown</code>, <code>TestJetStreamClusterMetaSnapshotsAndCatchup</code>, <code>TestJetStreamClusterLeaderStepdown</code>, <code>TestJetStreamClusterMemLeaderRestart</code>, <code>TestJetStreamClusterMultiRestartBug</code>). The real-election path is untouched; pre-vote is purely additive in front of it.</div>
   <div class="callout warn"><b>Remaining before production.</b> A design decision on whether a candidate that times out on a split vote should re-enter pre-vote rather than re-campaign directly; and a dedicated capability‑propagation test for the rolling‑upgrade fallback (the gate logic is exercised by tests, but not the statsz round‑trip itself). The real-partition soak now exists (<code>TestNRGPreVotePartitionSoakDoesNotDisruptMeta</code>) but is a single-topology proxy test rather than a randomized chaos job.</div>
+
+  <h3>Pros, cons &amp; trade-offs</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4 style="margin-top:0;color:var(--accent2)">Pros</h4>
+      <ul class="tight">
+        <li><b>Stops disruptive rejoin.</b> A partitioned/flapping node can no longer unseat a healthy leader on reconnect — the primary fix for risk R1.</li>
+        <li><b>No term inflation.</b> A node that can't reach the cluster never bumps its term, so reconnection is a non-event instead of a forced re-election.</li>
+        <li><b>Protects the whole cluster.</b> Enabled on the meta group and every stream/consumer group, so one bad server can't trigger a cluster-wide re-election storm across thousands of groups.</li>
+        <li><b>Cheap &amp; safe.</b> The trial round writes <i>no</i> durable state (no term/vote persistence), so it adds no fsyncs and cannot corrupt anything.</li>
+        <li><b>Additive &amp; reversible.</b> The real-election path is untouched; the feature is gated by a flag and a capability bit and can be turned off or rolled back at any time.</li>
+        <li><b>Wire-compatible.</b> Reuses the existing vote message bytes on a new subject — no change to the established vote/append-entry formats.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4 style="margin-top:0;color:var(--bad)">Cons / costs</h4>
+      <ul class="tight">
+        <li><b>One extra round-trip</b> before a <i>legitimate</i> election when the leader is genuinely gone. Negligible against the 4–9&nbsp;s election timeout, but non-zero.</li>
+        <li><b>More surface area.</b> A new state (<code>PreCandidate</code>), two more subscriptions per group (<code>$NRG.PV</code> + a reply inbox), new queues, and a new capability bit to maintain and test.</li>
+        <li><b>A new tunable.</b> The leader-contact guard (<code>preVoteLeaderContactInterval</code>, 2×hb) must stay correctly related to the heartbeat interval, and depends on <code>lastLeaderContact</code> being stamped on every accepted heartbeat.</li>
+        <li><b>Correctness interactions.</b> Must keep behaving for leadership transfer, observer mode, empty-log scale-up and the all-hands rule — each an extra path to get right (all covered by tests here).</li>
+        <li><b>Mixed-version complexity.</b> Needs capability negotiation; a detection mistake risks either a liveness stall (can't elect) or losing the protection.</li>
+        <li><b>Not a cure-all.</b> Does nothing for the stale-leader read window (R2) or the multi-second failover budget (R3) — those are separate.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Upgrade path considerations</h3>
+  <p>The rollout is designed to be <b>safe under a standard rolling restart with no operator coordination</b>. The feature self-activates per group once every peer of that group advertises support, and self-disables (falls back to today's behavior) the moment any peer doesn't.</p>
+
+  <figure>
+  <svg viewBox="0 0 940 250" role="img" aria-label="Rolling upgrade activation">
+    <defs><marker id="ua" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#9aa7b4"/></marker></defs>
+    <text x="470" y="22" fill="#e6edf3" font-size="13" font-weight="700" text-anchor="middle">Pre-Vote auto-activates per group only when ALL its peers advertise the capability</text>
+    <line x1="40" y1="210" x2="900" y2="210" stroke="#2a3340"/>
+    <!-- stage boxes -->
+    <rect x="40" y="48" width="270" height="120" rx="10" fill="#22120e" stroke="#6e2b2b"/>
+    <text x="175" y="72" text-anchor="middle" fill="#ffd0c8" font-size="12" font-weight="700">1 · All old (pre-feature)</text>
+    <text x="175" y="94" text-anchor="middle" fill="#9aa7b4" font-size="10.5">no $NRG.PV subscriptions</text>
+    <text x="175" y="110" text-anchor="middle" fill="#9aa7b4" font-size="10.5">no PreVote capability bit</text>
+    <text x="175" y="132" text-anchor="middle" fill="#ff9b94" font-size="11">behaviour = today (direct elections)</text>
+    <text x="175" y="150" text-anchor="middle" fill="#9aa7b4" font-size="10">Pre-Vote: OFF</text>
+
+    <rect x="335" y="48" width="270" height="120" rx="10" fill="#2a2410" stroke="#6e5a2b"/>
+    <text x="470" y="72" text-anchor="middle" fill="#f0c674" font-size="12" font-weight="700">2 · Mixed versions (rolling)</text>
+    <text x="470" y="94" text-anchor="middle" fill="#9aa7b4" font-size="10.5">new nodes advertise PreVote;</text>
+    <text x="470" y="110" text-anchor="middle" fill="#9aa7b4" font-size="10.5">allPeersSupportPreVote = false</text>
+    <text x="470" y="132" text-anchor="middle" fill="#f0c674" font-size="11">new nodes FALL BACK to direct</text>
+    <text x="470" y="150" text-anchor="middle" fill="#9aa7b4" font-size="10">Pre-Vote: OFF (auto)</text>
+
+    <rect x="630" y="48" width="270" height="120" rx="10" fill="#13251a" stroke="#2b6e54"/>
+    <text x="765" y="72" text-anchor="middle" fill="#9be29b" font-size="12" font-weight="700">3 · All upgraded</text>
+    <text x="765" y="94" text-anchor="middle" fill="#9aa7b4" font-size="10.5">every peer's nodeInfo.prevote=true</text>
+    <text x="765" y="110" text-anchor="middle" fill="#9aa7b4" font-size="10.5">via statsz capability gossip</text>
+    <text x="765" y="132" text-anchor="middle" fill="#9be29b" font-size="11">Pre-Vote activates automatically</text>
+    <text x="765" y="150" text-anchor="middle" fill="#9aa7b4" font-size="10">Pre-Vote: ON (auto)</text>
+
+    <line x1="310" y1="108" x2="333" y2="108" stroke="#9aa7b4" marker-end="url(#ua)"/>
+    <line x1="605" y1="108" x2="628" y2="108" stroke="#9aa7b4" marker-end="url(#ua)"/>
+    <text x="470" y="200" text-anchor="middle" fill="#9aa7b4" font-size="11">↤ downgrade any node and the affected groups detect it and revert to stage 2 (safe, just unprotected) ↦</text>
+    <text x="470" y="232" text-anchor="middle" fill="#7cc7f0" font-size="11">No on-disk format change · no new WAL/snapshot/peer-state types · rollback = restart on the old binary</text>
+  </svg>
+  <figcaption>Capability-gated activation. There is never a window where a new node pre-votes against peers that can't answer — it only enters the trial once all peers advertise support.</figcaption>
+  </figure>
+
+  <table>
+    <tr><th>Concern</th><th>How it is handled</th></tr>
+    <tr><td>Wire compatibility</td><td>Pre-votes ride a <b>new</b> subject (<code>$NRG.PV.&lt;group&gt;</code>) and reuse the existing <code>voteRequest</code>/<code>voteResponse</code> bytes. Existing vote/append-entry formats are unchanged, so an old node simply never sees a pre-vote.</td></tr>
+    <tr><td>Mixed-version safety</td><td><code>allPeersSupportPreVote()</code> requires every peer to advertise the <code>PreVote</code> <code>ServerCapability</code> (via statsz → <code>nodeInfo.prevote</code>). If any peer lacks it — or is not yet known — the node falls back to a normal election, so <b>liveness is never lost during the rollout</b>.</td></tr>
+    <tr><td>Conservative defaults</td><td>Before statsz is exchanged, a freshly learned peer is recorded with <code>prevote=false</code> (route INFO default), so the cluster never assumes the capability prematurely.</td></tr>
+    <tr><td>No state migration</td><td>The feature adds <b>no</b> persisted state: no new WAL entry types, no snapshot or peer-state format change, and term/vote files are untouched. Nothing to migrate up or down.</td></tr>
+    <tr><td>Rollback / downgrade</td><td>Downgrading a node simply drops its <code>$NRG.PV</code> subscription; peers detect the missing capability and revert that group to direct elections. Setting <code>PreVote: false</code> disables it without a downgrade. Both are clean and immediate.</td></tr>
+    <tr><td>Activation order</td><td>Per-group: a stream/consumer group activates once all <i>its</i> placed peers are upgraded; the meta group activates once <i>all</i> servers are upgraded. No coordinated flag-flip is required.</td></tr>
+  </table>
+  <div class="callout"><b>Operational note.</b> Because activation is automatic and silent, surface it in logs/metrics (e.g. a debug line when a group first enters <code>PreCandidate</code>, or a per-group "pre-vote active" gauge) so operators can confirm the feature engaged after a fleet upgrade.</div>
 </section>
 
 <!-- =============================== REFS =============================== -->
