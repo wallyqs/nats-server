@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NATS Filestore: Stale fblk Restore Bug (PR #8285)</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a212b;
+    --panel-2: #222b36;
+    --text: #e6edf3;
+    --muted: #9aa7b4;
+    --accent: #27aae1;     /* NATS blue */
+    --green: #3fb950;
+    --red: #f85149;
+    --amber: #d29922;
+    --border: #2d3743;
+    --code-bg: #11161c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; }
+  header.hero {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  .tag {
+    display: inline-block;
+    font-size: .72rem;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    padding: .25rem .6rem;
+    border-radius: 999px;
+    background: rgba(39,170,225,.15);
+    color: var(--accent);
+    border: 1px solid rgba(39,170,225,.4);
+  }
+  .tag.fix { background: rgba(63,185,80,.12); color: var(--green); border-color: rgba(63,185,80,.4); }
+  h1 { font-size: 1.9rem; margin: .9rem 0 .4rem; line-height: 1.25; }
+  h2 {
+    font-size: 1.3rem; margin: 2.4rem 0 .8rem;
+    padding-top: 1.2rem; border-top: 1px solid var(--border);
+  }
+  h3 { font-size: 1.05rem; margin: 1.4rem 0 .5rem; color: var(--accent); }
+  .sub { color: var(--muted); font-size: 1.02rem; }
+  a { color: var(--accent); }
+  code {
+    font-family: "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+    background: var(--code-bg);
+    padding: .12em .4em;
+    border-radius: 4px;
+    font-size: .88em;
+    border: 1px solid var(--border);
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+    overflow-x: auto;
+    font-size: .85rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; border: none; padding: 0; }
+  .k { color: #ff7b72; }     /* keyword */
+  .c { color: #8b949e; font-style: italic; }   /* comment */
+  .s { color: #a5d6ff; }     /* string */
+  .fn { color: #d2a8ff; }    /* function */
+  .add { color: var(--green); }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.1rem 1.3rem;
+    margin: 1.2rem 0;
+  }
+  .callout { border-left: 4px solid var(--accent); }
+  .callout.bug { border-left-color: var(--red); }
+  .callout.good { border-left-color: var(--green); }
+  .callout.warn { border-left-color: var(--amber); }
+  .callout h3 { margin-top: 0; }
+  ul, ol { padding-left: 1.3rem; }
+  li { margin: .3rem 0; }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 1.5rem;
+    font-size: .9rem; color: var(--muted); margin-top: .8rem;
+  }
+  .meta b { color: var(--text); font-weight: 600; }
+  table {
+    border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92rem;
+  }
+  th, td { border: 1px solid var(--border); padding: .6rem .8rem; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); }
+  td.yes { color: var(--green); font-weight: 600; }
+  td.no { color: var(--red); font-weight: 600; }
+  .steps { counter-reset: step; list-style: none; padding-left: 0; }
+  .steps li {
+    position: relative; padding: .7rem 0 .7rem 3rem; border-bottom: 1px dashed var(--border);
+  }
+  .steps li:last-child { border-bottom: none; }
+  .steps li::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 0; top: .7rem;
+    width: 1.9rem; height: 1.9rem; border-radius: 50%;
+    background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--accent); font-weight: 700;
+    display: flex; align-items: center; justify-content: center; font-size: .9rem;
+  }
+  .blocks { display: flex; gap: .5rem; flex-wrap: wrap; margin: .6rem 0; }
+  .blk {
+    border: 1px solid var(--border); border-radius: 6px; padding: .5rem .7rem;
+    background: var(--panel-2); font-family: monospace; font-size: .82rem; text-align: center;
+    min-width: 64px;
+  }
+  .blk .lbl { display: block; color: var(--muted); font-size: .7rem; margin-bottom: .25rem; }
+  .blk.has { border-color: var(--green); }
+  .blk.empty { opacity: .45; }
+  .blk.ptr-old { box-shadow: 0 0 0 2px var(--red) inset; }
+  .blk.ptr-new { box-shadow: 0 0 0 2px var(--green) inset; }
+  .legend { font-size: .82rem; color: var(--muted); margin-top: .3rem; }
+  footer {
+    margin-top: 3rem; padding-top: 1.2rem; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: .85rem;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <span class="tag fix">Bug Fix &middot; 2.12 line</span>
+    <h1>Filestore restores a stale <code>fblk</code> for <code>MaxMsgsPer&gt;1</code> with FIFO removal</h1>
+    <p class="sub">Why per-subject message lookups could fail after a restart on nats-server 2.12 &mdash; and why 2.14 is structurally immune.</p>
+    <div class="meta">
+      <span><b>PR:</b> <a href="https://github.com/nats-io/nats-server/pull/8285">nats-io/nats-server#8285</a></span>
+      <span><b>File:</b> <code>server/filestore.go</code></span>
+      <span><b>Affects:</b> file-backed JetStream, <code>MaxMsgsPer &gt; 1</code></span>
+      <span><b>Trigger:</b> FIFO eviction + restart</span>
+    </div>
+  </header>
+
+  <h2>TL;DR</h2>
+  <div class="panel callout">
+    <p>The filestore keeps a per-subject pointer, <code>fblk</code> (&ldquo;first block&rdquo;), so it can find a subject&rsquo;s
+    oldest message without scanning every block on disk. On the <b>2.12</b> line, when a subject with several copies is
+    trimmed down to a single message by <b>FIFO eviction</b>, <code>fblk</code> can be left pointing at a block that no
+    longer holds any message for that subject. Because of how <code>index.db</code> serializes single-message subjects, this
+    <b>stale pointer gets persisted</b>, and after a <b>restart</b> lookups start scanning from the wrong place and
+    <b>fail to find the message</b>. PR #8285 restores a one-line correction (<code>info.fblk = info.lblk</code>) that fixes
+    the pointer before it is persisted. On <b>2.14</b> the on-disk format always stores both pointers, so the bug cannot occur.</p>
+  </div>
+
+  <h2>Background: what <code>fblk</code> and <code>lblk</code> are for</h2>
+  <p>A file-backed stream is split into many message <b>blocks</b> on disk (<code>1.blk</code>, <code>2.blk</code>, &hellip;).
+  To answer &ldquo;what is the first/oldest sequence for subject X?&rdquo; quickly, the store keeps a small per-subject
+  info record (<code>psi</code>) in memory:</p>
+
+  <pre><code><span class="k">type</span> psi <span class="k">struct</span> {
+    total uint64  <span class="c">// how many messages this subject currently has</span>
+    fblk  uint32  <span class="c">// first block that holds a message for this subject</span>
+    lblk  uint32  <span class="c">// last block that holds a message for this subject</span>
+}</code></pre>
+
+  <p>Lookups use this pair as a search window instead of scanning the whole store
+  (<code>server/filestore.go</code>, <code>firstSeqForSubj</code>):</p>
+
+  <pre><code><span class="c">// See if we can optimize where we start.</span>
+start, stop := fs.blks[<span class="s">0</span>].index, fs.lmb.index
+<span class="k">if</span> info, ok := fs.psim.Find(stringToBytes(subj)); ok {
+    start, stop = info.fblk, info.lblk   <span class="c">// &lt;-- only scan [fblk .. lblk]</span>
+}</code></pre>
+
+  <p>So correctness hinges on one invariant: <b><code>fblk</code> must point at (or before) the block that actually
+  contains the subject&rsquo;s oldest surviving message.</b> If <code>fblk</code> points past it, the message is invisible to the scan.</p>
+
+  <h2>The key detail: how single-message subjects are persisted</h2>
+  <p>When stream state is written to <code>index.db</code>, the 2.12 format does <b>not</b> store <code>lblk</code> for a
+  subject that has only one message &mdash; it stores <code>total</code> and <code>fblk</code>, and on restore it
+  reconstructs <code>lblk = fblk</code>:</p>
+
+  <pre><code><span class="c">// decode (2.12 behavior)</span>
+psi := psi{total: readU64(), fblk: uint32(readU64())}
+<span class="k">if</span> psi.total &gt; <span class="s">1</span> {
+    psi.lblk = uint32(readU64())
+} <span class="k">else</span> {
+    psi.lblk = psi.fblk   <span class="c">// single-msg subject: lblk is *derived* from fblk</span>
+}</code></pre>
+
+  <div class="panel callout warn">
+    <p>This is the heart of it: for a one-message subject, <b><code>fblk</code> is the only pointer that survives a restart</b>,
+    and <code>lblk</code> is rebuilt from it. So if <code>fblk</code> is wrong when <code>total == 1</code>, then after a
+    restart <em>both</em> pointers are wrong, and the search window <code>[fblk .. lblk]</code> collapses onto the wrong block.</p>
+  </div>
+
+  <h2>Why the pointer goes stale: lazy <code>fblk</code> updates</h2>
+  <p>On removal, the store deliberately does <b>not</b> recompute <code>fblk</code> right away &mdash; it&rsquo;s a lazy
+  optimization, normally corrected later during a lookup (<code>removePerSubject</code>):</p>
+
+  <pre><code><span class="c">// We do not update sense of fblk here but will do so when we resolve during lookup.</span>
+<span class="k">if</span> info, ok := fs.psim.Find(bsubj); ok {
+    info.total--
+    <span class="c">// ... fblk left unchanged ...</span>
+}</code></pre>
+
+  <p>That laziness is fine <i>as long as a lookup happens before the state is persisted</i>. The dangerous combination is
+  <code>MaxMsgsPer &gt; 1</code> (a subject legitimately living across several blocks) trimmed by <b>FIFO eviction</b>
+  (oldest-first), so the surviving message ends up in a <i>later</i> block than <code>fblk</code> &mdash; and then the
+  state is written out and the server restarts before any lookup corrects it.</p>
+
+  <h3>Walkthrough</h3>
+  <ol class="steps">
+    <li>Subject <code>foo</code> with <code>MaxMsgsPer = 3</code> has copies in blocks 1, 4, and 7.<br>
+      <span style="color:var(--muted)">psi = {total: 3, fblk: 1, lblk: 7}</span>
+      <div class="blocks">
+        <div class="blk has ptr-old"><span class="lbl">blk 1</span>foo</div>
+        <div class="blk empty"><span class="lbl">blk 2</span>&mdash;</div>
+        <div class="blk empty"><span class="lbl">blk 3</span>&mdash;</div>
+        <div class="blk has"><span class="lbl">blk 4</span>foo</div>
+        <div class="blk empty"><span class="lbl">blk 5</span>&mdash;</div>
+        <div class="blk empty"><span class="lbl">blk 6</span>&mdash;</div>
+        <div class="blk has ptr-new"><span class="lbl">blk 7</span>foo</div>
+      </div>
+      <div class="legend"><span style="color:var(--red)">red outline</span> = <code>fblk</code> &middot; <span style="color:var(--green)">green outline</span> = <code>lblk</code></div>
+    </li>
+    <li>FIFO eviction removes the two oldest copies (blocks 1 and 4). Only the copy in block&nbsp;7 survives.<br>
+      <span style="color:var(--muted)">total drops 3 &rarr; 1, but <code>fblk</code> is <b>not</b> recomputed (lazy).</span>
+      <div class="blocks">
+        <div class="blk empty ptr-old"><span class="lbl">blk 1</span>&mdash;</div>
+        <div class="blk empty"><span class="lbl">blk 2</span>&mdash;</div>
+        <div class="blk empty"><span class="lbl">blk 3</span>&mdash;</div>
+        <div class="blk empty"><span class="lbl">blk 4</span>&mdash;</div>
+        <div class="blk empty"><span class="lbl">blk 5</span>&mdash;</div>
+        <div class="blk empty"><span class="lbl">blk 6</span>&mdash;</div>
+        <div class="blk has ptr-new"><span class="lbl">blk 7</span>foo</div>
+      </div>
+      <span style="color:var(--muted)">psi = {total: 1, <span style="color:var(--red)">fblk: 1 (stale!)</span>, lblk: 7}</span>
+    </li>
+    <li>Stream state is flushed to <code>index.db</code>. Because <code>total == 1</code>, only <code>fblk = 1</code> is written;
+      <code>lblk</code> is not persisted.</li>
+    <li>Server restarts. On restore: <code>fblk = 1</code> and <code>lblk = fblk = 1</code>.<br>
+      <span style="color:var(--muted)">psi = {total: 1, fblk: 1, lblk: 1} &mdash; search window is now just block 1.</span></li>
+    <li><b>Lookup for <code>foo</code> scans only block 1, finds nothing, and the message in block 7 is effectively lost.</b></li>
+  </ol>
+
+  <h2>The fix (PR #8285)</h2>
+  <p>The PR restores a block that had been removed in 2.12.7. When FIFO removal brings a subject down to a single message,
+  it eagerly corrects <code>fblk</code> to <code>lblk</code> &mdash; the block where the survivor actually is &mdash; so the
+  value that gets persisted is correct:</p>
+
+  <pre><code><span class="c">// If we only ever store one/last message for a subject,</span>
+<span class="c">// can correct the first block to where we&rsquo;ve just written.</span>
+<span class="k">if</span> info != <span class="k">nil</span> &amp;&amp; info.total == <span class="s">1</span> &amp;&amp; mmp == <span class="s">1</span> {
+    <span class="add">info.fblk = info.lblk</span>
+}</code></pre>
+
+  <p>Now at step&nbsp;2 above, <code>fblk</code> becomes 7, the persisted pointer is correct, and after restart the lookup
+  scans block 7 and finds the message.</p>
+
+  <div class="panel callout good">
+    <h3>Test coverage</h3>
+    <p>The PR adds a regression test in <code>server/filestore_test.go</code> that builds a subject spanning multiple blocks
+    under <code>MaxMsgsPer&gt;1</code>, drives FIFO removal down to one message, restarts the store, and asserts the message
+    is still retrievable (i.e. <code>fblk</code> is not stale).</p>
+  </div>
+
+  <h2>Why 2.14 is no longer affected</h2>
+  <p>The 2.14 line fixes this at the <b>format level</b> rather than by patching the removal path. The newer
+  <code>index.db</code> encoder <b>always</b> writes both <code>fblk</code> and <code>lblk</code> for every subject,
+  regardless of <code>total</code>:</p>
+
+  <pre><code><span class="c">// encode (2.14) &mdash; always persists both pointers</span>
+buf = binary.AppendUvarint(buf, psi.total)
+buf = binary.AppendUvarint(buf, uint64(psi.fblk))
+buf = binary.AppendUvarint(buf, uint64(psi.lblk))   <span class="c">// always written</span></code></pre>
+
+  <pre><code><span class="c">// decode (2.14) &mdash; reads lblk whenever the format version supports it</span>
+psi := psi{total: readU64(), fblk: uint32(readU64())}
+<span class="k">if</span> psi.total &gt; <span class="s">1</span> || version &gt;= <span class="s">4</span> {
+    psi.lblk = uint32(readU64())
+} <span class="k">else</span> {
+    psi.lblk = psi.fblk
+}</code></pre>
+
+  <p>Two things follow from this:</p>
+  <ul>
+    <li><code>lblk</code> is no longer <i>derived</i> from <code>fblk</code> on restore &mdash; it&rsquo;s read directly from disk
+    and remains correct (e.g. block 7) even if <code>fblk</code> is stale.</li>
+    <li>Because <code>lblk</code> survives accurately, the lazy-<code>fblk</code> design works as intended: after restart the
+    search window <code>[fblk .. lblk]</code> still includes the surviving message&rsquo;s block, the lookup finds it, and the
+    same lookup then self-corrects <code>fblk</code> back to the right block.</li>
+  </ul>
+
+  <div class="panel callout good">
+    <p><b>In short:</b> on 2.12 the survivor&rsquo;s location had to be encoded into <code>fblk</code> (because <code>lblk</code>
+    wasn&rsquo;t persisted for single-message subjects), so a stale <code>fblk</code> was fatal. On 2.14 the location is
+    persisted independently in <code>lblk</code>, so a temporarily-stale <code>fblk</code> is harmless and self-healing.
+    PR #8285 is the backport-shaped workaround that gives 2.12 the same guarantee without changing its on-disk format.</p>
+  </div>
+
+  <h2>Version comparison</h2>
+  <table>
+    <thead>
+      <tr><th>Behavior</th><th>2.12 (pre-fix, &ge;2.12.7)</th><th>2.12 + PR&nbsp;#8285</th><th>2.14+</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Persists <code>lblk</code> for single-msg subject</td>
+        <td class="no">No (derived from <code>fblk</code>)</td>
+        <td class="no">No (derived from <code>fblk</code>)</td>
+        <td class="yes">Yes (always)</td>
+      </tr>
+      <tr>
+        <td>Corrects <code>fblk</code> before persisting on FIFO trim-to-one</td>
+        <td class="no">No</td>
+        <td class="yes">Yes</td>
+        <td>N/A (not needed)</td>
+      </tr>
+      <tr>
+        <td>Message retrievable after restart (<code>MaxMsgsPer&gt;1</code>, FIFO)</td>
+        <td class="no">No &mdash; bug</td>
+        <td class="yes">Yes</td>
+        <td class="yes">Yes</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Scope &amp; limitations</h2>
+  <ul>
+    <li><b>2.12 only.</b> The fix targets the 2.12 release line; 2.14+ already handles this via the format change.</li>
+    <li><b>FIFO removal path only.</b> The correction is applied on the limits/eviction path. Other removal patterns on the
+    2.12 line (e.g. an explicit <code>RemoveMsg</code> on the newest message rather than oldest-first eviction) can still
+    leave a stale pointer &mdash; a known, documented constraint of 2.12.</li>
+    <li><b>Low risk.</b> It restores previously-shipped behavior plus a regression test; no on-disk format change.</li>
+  </ul>
+
+  <footer>
+    Generated explainer for <a href="https://github.com/nats-io/nats-server/pull/8285">nats-io/nats-server#8285</a>.
+    Code references: <code>server/filestore.go</code> (<code>firstSeqForSubj</code>, <code>removePerSubject</code>,
+    index.db encode/decode). For authoritative behavior, consult the PR and the source.
+  </footer>
+
+</div>
+</body>
+</html>
