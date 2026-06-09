@@ -951,6 +951,59 @@ func TestNRGPreVoteObserverDoesNotPreCampaign(t *testing.T) {
 	require_Equal(t, follower.Term(), startTerm)
 }
 
+// Deterministic unit coverage of the pre-vote grant decision and its boundary
+// conditions, exercising grantPreVoteLocked directly without timing/networking.
+func TestNRGPreVoteGrantDecision(t *testing.T) {
+	const self = "SELF1234"
+	// Our log: term 5, pterm 5, pindex 10.
+	base := func() *raft { return &raft{id: self, term: 5, pterm: 5, pindex: 10} }
+	// An up-to-date request campaigning in prospective term 6.
+	upToDate := &voteRequest{term: 6, lastTerm: 5, lastIndex: 10, candidate: "CAND0001"}
+
+	// 1. No leader + up-to-date log -> grant, echo the prospective term.
+	n := base()
+	n.leader = noLeader
+	g, rt := n.grantPreVoteLocked(upToDate)
+	require_True(t, g)
+	require_Equal(t, rt, uint64(6))
+
+	// 2. We are the leader -> never help unseat ourselves.
+	n = base()
+	n.leader = self
+	g, _ = n.grantPreVoteLocked(upToDate)
+	require_False(t, g)
+
+	// 3. Recent contact from a leader -> deny (disruption guard).
+	n = base()
+	n.leader = "LEADER01"
+	n.lastLeaderContact = time.Now()
+	g, _ = n.grantPreVoteLocked(upToDate)
+	require_False(t, g)
+
+	// 4. Leader contact has aged past the window -> grant.
+	n = base()
+	n.leader = "LEADER01"
+	n.lastLeaderContact = time.Now().Add(-2 * preVoteLeaderContactInterval)
+	g, _ = n.grantPreVoteLocked(upToDate)
+	require_True(t, g)
+
+	// 5. Candidate's log is behind ours -> deny even with no leader.
+	n = base()
+	n.leader = noLeader
+	behind := &voteRequest{term: 6, lastTerm: 5, lastIndex: 9, candidate: "CAND0001"}
+	g, _ = n.grantPreVoteLocked(behind)
+	require_False(t, g)
+
+	// 6. Prospective term is behind ours -> deny and report our higher term so
+	// the asker backs off instead of escalating.
+	n = base()
+	n.leader = noLeader
+	stale := &voteRequest{term: 4, lastTerm: 5, lastIndex: 10, candidate: "CAND0001"}
+	g, rt = n.grantPreVoteLocked(stale)
+	require_False(t, g)
+	require_Equal(t, rt, uint64(5))
+}
+
 // Leadership transfer must bypass the Pre-Vote phase: the transfer target needs
 // to campaign immediately, and peers would otherwise refuse its pre-vote
 // because they still consider the (departing) leader recent. If the bypass
