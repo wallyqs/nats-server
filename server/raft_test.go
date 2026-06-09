@@ -1024,6 +1024,11 @@ func TestNRGPreVoteFlappingNodeNeverDisrupts(t *testing.T) {
 		require_True(t, nl != nil)
 		require_Equal(t, nl.node().ID(), leaderID)
 	}
+
+	// The cluster must still be fully functional after the flapping storm.
+	rg.waitOnLeader()
+	rg.leader().(*stateAdder).proposeDelta(1)
+	rg.waitOnTotal(t, 1)
 }
 
 // Deterministic unit coverage of the pre-vote grant decision and its boundary
