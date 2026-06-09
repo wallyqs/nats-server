@@ -96,20 +96,21 @@
   <h3>Contents</h3>
   <a href="#overview">1 · Overview &amp; topology</a>
   <a href="#groups">2 · Raft groups &amp; storage</a>
-  <a href="#subs">3 · Subscriptions &amp; subjects</a>
-  <a href="#wire">4 · Wire protocol / byte layouts</a>
-  <a href="#election">5 · Leader election</a>
-  <a href="#timers">6 · Timers, intervals &amp; heartbeats</a>
-  <a href="#commit">7 · Replication &amp; commit engine</a>
+  <a href="#meta">3 · The Meta group</a>
+  <a href="#subs">4 · Subscriptions &amp; subjects</a>
+  <a href="#wire">5 · Wire protocol / byte layouts</a>
+  <a href="#election">6 · Leader election</a>
+  <a href="#timers">7 · Timers, intervals &amp; heartbeats</a>
+  <a href="#commit">8 · Replication &amp; commit engine</a>
   <h3>End-to-end flows</h3>
-  <a href="#publish">8 · Publishing a message</a>
-  <a href="#consume">9 · Consume + ack (WorkQueue)</a>
-  <a href="#electseq">10 · Election sequence</a>
+  <a href="#publish">9 · Publishing a message</a>
+  <a href="#consume">10 · Consume + ack (WorkQueue)</a>
+  <a href="#electseq">11 · Election sequence</a>
   <h3>Operational</h3>
-  <a href="#snapshot">11 · Snapshots &amp; catchup</a>
-  <a href="#counts">12 · Subscription budget</a>
-  <a href="#risks">13 · Risks &amp; analysis</a>
-  <a href="#refs">14 · Source map</a>
+  <a href="#snapshot">12 · Snapshots, compaction &amp; catchup</a>
+  <a href="#counts">13 · Subscription budget</a>
+  <a href="#risks">14 · Risks &amp; analysis</a>
+  <a href="#refs">15 · Source map</a>
 </nav>
 
 <main>
@@ -120,7 +121,7 @@
   <p>NATS implements <b>Raft from scratch</b> in <code>server/raft.go</code> rather than vendoring an external library. The novel twist: the transport is <b>NATS itself</b> — peers talk over subject-based pub/sub on an internal system client, and each Raft node's write-ahead log is a <b>JetStream file/mem store</b> (the same engine that stores stream messages). Consensus is used at three independent layers.</p>
 
   <figure>
-  <svg viewBox="0 0 940 430" role="img" aria-label="Raft group topology">
+  <svg viewBox="0 0 940 460" role="img" aria-label="Raft group topology">
     <defs>
       <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#9aa7b4"/></marker>
       <linearGradient id="gMeta" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#1d2b3a"/><stop offset="1" stop-color="#13202c"/></linearGradient>
@@ -140,20 +141,33 @@
       <rect x="822" y="62" width="60" height="26" rx="6" fill="#0e1a24" stroke="#356"/><text x="852" y="79" fill="#cfe8ff" text-anchor="middle">srv-3</text>
       <rect x="690" y="98" width="192" height="24" rx="6" fill="#16241c" stroke="#3a6"/><text x="786" y="114" fill="#9be29b" text-anchor="middle">R = replication factor / placement</text>
     </g>
+    <text x="58" y="126" fill="#7cc7f0" font-size="10.5" font-family="monospace">subjects: $NRG.AE._meta_ · $NRG.V._meta_ · $NRG.P._meta_ · $NRG.RP._meta_ · $NRG.R.&lt;rnd&gt; · $NRG.CR.&lt;rnd&gt;</text>
     <!-- stream layer -->
-    <rect x="40" y="160" width="420" height="110" rx="12" fill="url(#gStream)" stroke="#3a6"/>
-    <text x="58" y="184" fill="#9be29b" font-size="13" font-weight="700">STREAM GROUP  (per replicated stream)</text>
-    <text x="58" y="204" fill="#9aa7b4" font-size="12">Replicates the ordered message log.</text>
-    <text x="58" y="221" fill="#9aa7b4" font-size="12">Entry payload op = streamMsgOp / deleteMsgOp …</text>
-    <text x="58" y="238" fill="#9aa7b4" font-size="12">WAL = JetStream FileStore (medium blocks).</text>
-    <text x="58" y="258" fill="#7ee787" font-size="11.5" font-family="monospace">subjects: $NRG.AE.&lt;grp&gt; · $NRG.V.&lt;grp&gt; …</text>
+    <rect x="40" y="160" width="420" height="158" rx="12" fill="url(#gStream)" stroke="#3a6"/>
+    <text x="58" y="182" fill="#9be29b" font-size="13" font-weight="700">STREAM GROUP  (per replicated stream)</text>
+    <text x="58" y="200" fill="#9aa7b4" font-size="11.5">Replicates the ordered message log · WAL = FileStore.</text>
+    <text x="58" y="219" fill="#7ee787" font-size="11" font-weight="700">All NATS subjects (grp = stream's RAFT group name):</text>
+    <g font-family="monospace" font-size="10.5" fill="#9be29b">
+      <text x="58" y="236">$NRG.AE.&lt;grp&gt;    append entries + heartbeats</text>
+      <text x="58" y="251">$NRG.V.&lt;grp&gt;     vote requests</text>
+      <text x="58" y="266">$NRG.P.&lt;grp&gt;     forwarded proposals (leader)</text>
+      <text x="58" y="281">$NRG.RP.&lt;grp&gt;    forwarded remove-peer (leader)</text>
+      <text x="58" y="296">$NRG.R.&lt;rnd&gt;     vote/AE reply inboxes</text>
+      <text x="58" y="311">$NRG.CR.&lt;rnd&gt;    catchup inbox (transient)</text>
+    </g>
     <!-- consumer layer -->
-    <rect x="480" y="160" width="420" height="110" rx="12" fill="url(#gCons)" stroke="#86c"/>
-    <text x="498" y="184" fill="#cbb3ff" font-size="13" font-weight="700">CONSUMER GROUP  (per durable consumer)</text>
-    <text x="498" y="204" fill="#9aa7b4" font-size="12">Replicates delivery/ack state machine.</text>
-    <text x="498" y="221" fill="#9aa7b4" font-size="12">Entry op = updateDeliveredOp / updateAcksOp …</text>
-    <text x="498" y="238" fill="#9aa7b4" font-size="12">Separate from its parent stream's group.</text>
-    <text x="498" y="258" fill="#bc8cff" font-size="11.5" font-family="monospace">ConsumerState: Delivered · AckFloor · Pending</text>
+    <rect x="480" y="160" width="420" height="158" rx="12" fill="url(#gCons)" stroke="#86c"/>
+    <text x="498" y="182" fill="#cbb3ff" font-size="13" font-weight="700">CONSUMER GROUP  (per durable consumer)</text>
+    <text x="498" y="200" fill="#9aa7b4" font-size="11.5">Replicates delivery/ack state · own log, separate group.</text>
+    <text x="498" y="219" fill="#bc8cff" font-size="11" font-weight="700">Same subject scheme (grp = consumer's RAFT group):</text>
+    <g font-family="monospace" font-size="10.5" fill="#cbb3ff">
+      <text x="498" y="236">$NRG.AE.&lt;grp&gt;    append entries + heartbeats</text>
+      <text x="498" y="251">$NRG.V.&lt;grp&gt;     vote requests</text>
+      <text x="498" y="266">$NRG.P.&lt;grp&gt;     forwarded proposals (leader)</text>
+      <text x="498" y="281">$NRG.RP.&lt;grp&gt;    forwarded remove-peer (leader)</text>
+      <text x="498" y="296">$NRG.R.&lt;rnd&gt;     vote/AE reply inboxes</text>
+      <text x="498" y="311">$NRG.CR.&lt;rnd&gt;    catchup inbox (transient)</text>
+    </g>
     <!-- arrows meta->groups -->
     <line x1="250" y1="138" x2="250" y2="160" stroke="#9aa7b4" marker-end="url(#arr)"/>
     <line x1="690" y1="138" x2="690" y2="160" stroke="#9aa7b4" marker-end="url(#arr)"/>
@@ -161,11 +175,11 @@
     <!-- bridge -->
     <line x1="460" y1="240" x2="480" y2="240" stroke="#ff9bce" stroke-dasharray="4 3" marker-end="url(#arr)"/>
     <!-- bottom note -->
-    <rect x="40" y="300" width="860" height="100" rx="12" fill="#0e131a" stroke="#2a3340"/>
-    <text x="58" y="324" fill="#e6edf3" font-size="13" font-weight="700">The consumer↔stream bridge (WorkQueue / Interest retention)</text>
-    <text x="58" y="346" fill="#9aa7b4" font-size="12.5">An ACK committed on the <tspan fill="#cbb3ff">consumer group</tspan> calls <tspan font-family="monospace" fill="#cfe8ff">mset.ackMsg()</tspan>, which (for non-Limits retention) proposes a</text>
-    <text x="58" y="365" fill="#9aa7b4" font-size="12.5"><tspan font-family="monospace" fill="#cfe8ff">deleteMsgOp</tspan> to the <tspan fill="#9be29b">stream group</tspan> → the message is physically removed on every replica.</text>
-    <text x="58" y="386" fill="#ff9bce" font-size="12.5" font-weight="600">⇒ one client ACK on a clustered WorkQueue = TWO independent Raft consensus rounds.</text>
+    <rect x="40" y="334" width="860" height="100" rx="12" fill="#0e131a" stroke="#2a3340"/>
+    <text x="58" y="358" fill="#e6edf3" font-size="13" font-weight="700">The consumer↔stream bridge (WorkQueue / Interest retention)</text>
+    <text x="58" y="380" fill="#9aa7b4" font-size="12.5">An ACK committed on the <tspan fill="#cbb3ff">consumer group</tspan> calls <tspan font-family="monospace" fill="#cfe8ff">mset.ackMsg()</tspan>, which (for non-Limits retention) proposes a</text>
+    <text x="58" y="399" fill="#9aa7b4" font-size="12.5"><tspan font-family="monospace" fill="#cfe8ff">deleteMsgOp</tspan> to the <tspan fill="#9be29b">stream group</tspan> → the message is physically removed on every replica.</text>
+    <text x="58" y="420" fill="#ff9bce" font-size="12.5" font-weight="600">⇒ one client ACK on a clustered WorkQueue = TWO independent Raft consensus rounds.</text>
   </svg>
   <figcaption>Three-tier consensus: the Meta group governs placement; each Stream and each Consumer is its own Raft group with its own log, leader and subscriptions.</figcaption>
   </figure>
@@ -204,9 +218,112 @@
   <div class="callout">All Raft traffic runs on a dedicated <b>internal system client</b> (<code>n.c</code>), normally on the <b>system account</b>; with account-NRG enabled and all peers capable, traffic moves to the asset's configured NRG account <span class="cite">raft.go:680-744</span>. Outbound messages go through a per-account send queue (<code>n.sq</code>, <code>sendq.go</code>) that injects them as if published by an internal client.</p></div>
 </section>
 
+<!-- =============================== META =============================== -->
+<section id="meta">
+  <h2>3 · The Meta group — the cluster's control plane</h2>
+  <p>The <b>Meta group</b> (raft group name <code>_meta_</code>, <code>defaultMetaGroupName</code> <span class="cite">jetstream_cluster.go:457</span>) is a single, special Raft group whose <b>members are every JetStream-enabled server in the cluster</b>. It is not a data plane — it stores <i>no</i> stream messages. Instead its replicated log is the cluster's <b>authoritative map of "what runs where"</b>: which streams and consumers exist, their configs, and which peers host each stream/consumer Raft group. Its leader is the <b>"meta leader"</b> (<code>s.isMetaLeader</code>), the node that drives all placement decisions and answers the JetStream management API.</p>
+
+  <figure>
+  <svg viewBox="0 0 940 430" role="img" aria-label="Meta group control plane">
+    <defs><marker id="mA" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#7cc7f0"/></marker>
+    <marker id="mB" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#7ee787"/></marker></defs>
+    <text x="470" y="22" fill="#e6edf3" font-size="14" font-weight="700" text-anchor="middle">Meta group = replicated assignment state machine for the whole cluster</text>
+    <!-- API client -->
+    <rect x="30" y="60" width="150" height="56" rx="8" fill="#101820" stroke="#356"/>
+    <text x="105" y="84" text-anchor="middle" fill="#cfe8ff" font-size="12" font-weight="700">JS mgmt API client</text>
+    <text x="105" y="102" text-anchor="middle" fill="#9aa7b4" font-size="10.5">$JS.API.STREAM.CREATE.&lt;name&gt;</text>
+    <!-- meta leader -->
+    <rect x="260" y="50" width="200" height="120" rx="10" fill="#13202c" stroke="#7cc7f0" stroke-width="2"/>
+    <text x="360" y="74" text-anchor="middle" fill="#7cc7f0" font-size="13" font-weight="700">META LEADER</text>
+    <text x="360" y="94" text-anchor="middle" fill="#9aa7b4" font-size="10.5">validate · place peers</text>
+    <text x="360" y="110" text-anchor="middle" fill="#9aa7b4" font-size="10.5">Propose(assignStreamOp)</text>
+    <text x="360" y="126" text-anchor="middle" fill="#9aa7b4" font-size="10.5">monitorCluster() loop</text>
+    <text x="360" y="146" text-anchor="middle" fill="#bff0bf" font-size="10.5" font-family="monospace">log: assignments only</text>
+    <text x="360" y="160" text-anchor="middle" fill="#9aa7b4" font-size="10">(no stream messages)</text>
+    <!-- meta followers -->
+    <rect x="540" y="50" width="170" height="56" rx="10" fill="#0e1a24" stroke="#356"/>
+    <text x="625" y="74" text-anchor="middle" fill="#cfe8ff" font-size="12" font-weight="700">META FOLLOWER</text>
+    <text x="625" y="92" text-anchor="middle" fill="#9aa7b4" font-size="10.5">applyMetaEntries → act</text>
+    <rect x="540" y="116" width="170" height="56" rx="10" fill="#0e1a24" stroke="#356"/>
+    <text x="625" y="140" text-anchor="middle" fill="#cfe8ff" font-size="12" font-weight="700">META FOLLOWER</text>
+    <text x="625" y="158" text-anchor="middle" fill="#9aa7b4" font-size="10.5">applyMetaEntries → act</text>
+    <!-- arrows -->
+    <line x1="180" y1="88" x2="258" y2="100" stroke="#7cc7f0" marker-end="url(#mA)"/>
+    <line x1="460" y1="86" x2="538" y2="80" stroke="#7cc7f0" marker-end="url(#mA)"/>
+    <line x1="460" y1="120" x2="538" y2="140" stroke="#7cc7f0" marker-end="url(#mA)"/>
+    <text x="500" y="44" fill="#7cc7f0" font-size="10" text-anchor="middle">replicate via $NRG.AE._meta_</text>
+    <!-- effect: each meta member acts locally -->
+    <rect x="540" y="60" width="0" height="0"/>
+    <text x="725" y="80" fill="#9be29b" font-size="10" text-anchor="start">↳ each member</text>
+    <text x="725" y="94" fill="#9be29b" font-size="10" text-anchor="start">   that is a peer</text>
+    <text x="725" y="108" fill="#9be29b" font-size="10" text-anchor="start">   of the assigned</text>
+    <text x="725" y="122" fill="#9be29b" font-size="10" text-anchor="start">   group starts a</text>
+    <text x="725" y="136" fill="#9be29b" font-size="10" text-anchor="start">   stream/consumer</text>
+    <text x="725" y="150" fill="#9be29b" font-size="10" text-anchor="start">   monitor + RAFT node</text>
+    <!-- spawned groups -->
+    <rect x="40" y="220" width="270" height="90" rx="10" fill="#142117" stroke="#3a6"/>
+    <text x="175" y="244" text-anchor="middle" fill="#9be29b" font-size="12" font-weight="700">Stream RAFT group(s)</text>
+    <text x="175" y="264" text-anchor="middle" fill="#9aa7b4" font-size="10.5">createRaftGroup() on each placed peer</text>
+    <text x="175" y="282" text-anchor="middle" fill="#9aa7b4" font-size="10.5">monitorStream()</text>
+    <text x="175" y="300" text-anchor="middle" fill="#9aa7b4" font-size="10.5">own leader, own log, own subjects</text>
+    <rect x="340" y="220" width="270" height="90" rx="10" fill="#1d1726" stroke="#86c"/>
+    <text x="475" y="244" text-anchor="middle" fill="#cbb3ff" font-size="12" font-weight="700">Consumer RAFT group(s)</text>
+    <text x="475" y="264" text-anchor="middle" fill="#9aa7b4" font-size="10.5">createRaftGroup() on each placed peer</text>
+    <text x="475" y="282" text-anchor="middle" fill="#9aa7b4" font-size="10.5">monitorConsumer()</text>
+    <text x="475" y="300" text-anchor="middle" fill="#9aa7b4" font-size="10.5">own leader, own log, own subjects</text>
+    <rect x="640" y="220" width="260" height="90" rx="10" fill="#0e131a" stroke="#2a3340"/>
+    <text x="770" y="244" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="700">Meta is the parent</text>
+    <text x="770" y="264" text-anchor="middle" fill="#9aa7b4" font-size="10.5">It births &amp; reaps the data-plane</text>
+    <text x="770" y="280" text-anchor="middle" fill="#9aa7b4" font-size="10.5">groups but never carries their</text>
+    <text x="770" y="296" text-anchor="middle" fill="#9aa7b4" font-size="10.5">messages or acks.</text>
+    <line x1="360" y1="170" x2="200" y2="218" stroke="#7ee787" stroke-dasharray="3 3" marker-end="url(#mB)"/>
+    <line x1="400" y1="170" x2="470" y2="218" stroke="#7ee787" stroke-dasharray="3 3" marker-end="url(#mB)"/>
+    <text x="360" y="200" fill="#7ee787" font-size="10.5" text-anchor="middle">applied assignment ⇒ spawn data-plane Raft groups</text>
+    <!-- bottom: subjects -->
+    <rect x="40" y="328" width="860" height="80" rx="10" fill="#0b1119" stroke="#2a3340"/>
+    <text x="58" y="350" fill="#7cc7f0" font-size="12" font-weight="700">Meta uses the identical $NRG protocol — group name is the literal "_meta_":</text>
+    <text x="58" y="372" fill="#cfe8ff" font-size="11" font-family="monospace">$NRG.AE._meta_   $NRG.V._meta_   $NRG.P._meta_   $NRG.RP._meta_   $NRG.R.&lt;rnd&gt;   $NRG.CR.&lt;rnd&gt;</text>
+    <text x="58" y="394" fill="#9aa7b4" font-size="11">WAL: a FileStore stream named <tspan font-family="monospace" fill="#cfe8ff">_meta_</tspan> at <tspan font-family="monospace" fill="#cfe8ff">&lt;StoreDir&gt;/$SYS/_js_/_meta_/</tspan> · API replies fan out on <tspan font-family="monospace" fill="#cfe8ff">$JS.API.&gt;</tspan>.</text>
+  </svg>
+  <figcaption>The Meta group is the control plane: the meta leader proposes assignments; every server applies them and, if it is a placed peer, spins up the corresponding stream/consumer Raft group (the data plane).</figcaption>
+  </figure>
+
+  <h3>Responsibilities</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4>What the meta log carries (meta-only entry ops)</h4>
+      <table style="margin:0">
+        <tr><th>Op</th><th>Meaning</th></tr>
+        <tr><td><code>assignStreamOp</code></td><td>create/place a stream on a peer set</td></tr>
+        <tr><td><code>removeStreamOp</code></td><td>delete a stream</td></tr>
+        <tr><td><code>assignConsumerOp</code> / <code>assignCompressedConsumerOp</code></td><td>create/place a consumer</td></tr>
+        <tr><td><code>removeConsumerOp</code></td><td>delete a consumer</td></tr>
+        <tr><td><code>updateStreamOp</code></td><td>reconfigure an existing stream</td></tr>
+        <tr><td><i>peer entries</i> (<code>EntryAddPeer</code>/<code>EntryRemovePeer</code>)</td><td>cluster membership changes</td></tr>
+      </table>
+      <p class="small" style="margin-top:8px">Decoded &amp; acted on in <code>applyMetaEntries</code>; entry ops at <span class="cite">jetstream_cluster.go:122-153</span>.</p>
+    </div>
+    <div class="card">
+      <h4>What the meta leader does</h4>
+      <ul class="tight">
+        <li><b>API gateway:</b> validates and serves <code>$JS.API.&gt;</code> stream/consumer create/update/delete requests; only the leader proposes.</li>
+        <li><b>Placement:</b> chooses peer sets (RF, tags, balance) and writes them as assignments.</li>
+        <li><b>Reconciliation:</b> on apply, every server starts/stops the stream/consumer Raft groups it is a peer of (<code>processStreamAssignment</code> / <code>processConsumerAssignment</code>).</li>
+        <li><b>Membership &amp; health:</b> tracks peers, runs <code>checkClusterSize()</code>, handles peer add/remove and mixed-mode boot sizing.</li>
+        <li><b>Orphan cleanup:</b> <code>checkForOrphans</code> 30 s after recovery.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout"><b>Failure-domain separation.</b> Because the meta group is separate from every data group, losing meta <i>quorum</i> freezes the <b>control plane</b> (no new streams/consumers, no placement changes, no API mutations) but established streams keep serving reads/writes via their own independent Raft groups — and vice-versa. The meta monitor loop is <code>monitorCluster()</code> <span class="cite">jetstream_cluster.go:1574</span>.</div>
+
+  <h3>Meta-group recovery</h3>
+  <p>On startup each server replays its <code>_meta_</code> WAL into a <code>recoveryUpdates</code> staging set; when the apply queue emits the catchup-complete nil guard, staged stream/consumer adds, updates and removals are applied in dependency order, <code>metaRecovering</code> is cleared, and a <b>forced compacting snapshot</b> is taken so the node starts with a small log <span class="cite">jetstream_cluster.go:1623-1786</span>.</p>
+</section>
+
 <!-- =============================== SUBS =============================== -->
 <section id="subs">
-  <h2>3 · NATS subscriptions &amp; subjects</h2>
+  <h2>4 · NATS subscriptions &amp; subjects</h2>
   <p>Everything Raft does is one of a handful of subjects under the <code>$NRG</code> ("NATS Raft Group") prefix. Subjects keyed by <code>%s = group</code> are <b>shared</b> (all peers subscribe); <code>reply</code> subjects are <b>private inboxes</b> with an 8-char random base-62 suffix. <b>All are plain subscriptions — never queue groups</b> <span class="cite">raft.go:2331-2336</span>.</p>
 
   <figure>
@@ -267,7 +384,7 @@
 
 <!-- =============================== WIRE =============================== -->
 <section id="wire">
-  <h2>4 · Wire protocol — byte layouts</h2>
+  <h2>5 · Wire protocol — byte layouts</h2>
   <p>All four RPCs are hand-rolled, fixed/length-prefixed, <b>little-endian</b> binary. There is no protobuf/JSON on the hot path. Below, each cell is annotated with its byte offset.</p>
 
   <h4>appendEntry &nbsp;<span class="cite">raft.go:2799 · base len = idLen + 4·8 + 2 = 50 B</span></h4>
@@ -286,13 +403,13 @@
         <rect x="840" y="20" width="90"  height="40" fill="#2a2410" stroke="#a83"/><text x="885" y="44" fill="#f0c674">lterm uvarint</text>
       </g>
       <g fill="#7d8a98" font-size="9">
-        <text x="70" y="74">0</text><text x="175" y="74">8</text><text x="265" y="74">16</text><text x="355" y="74">24</text><text x="445" y="74">32</text><text x="525" y="74">40</text><text x="700" y="74">42…</text><text x="885" y="74">tail</text>
+        <text x="70" y="74">0</text><text x="175" y="74">8</text><text x="265" y="74">16</text><text x="355" y="74">24</text><text x="445" y="74">32</text><text x="525" y="74">40</text><text x="700" y="74">42+</text><text x="885" y="74">tail</text>
       </g>
       <!-- entry detail -->
       <text x="120" y="104" fill="#9aa7b4" text-anchor="start">each entry →</text>
       <rect x="210" y="92" width="150" height="30" fill="#221a2e" stroke="#86c"/><text x="285" y="111" fill="#cbb3ff">len = 1+|Data| (4)</text>
       <rect x="360" y="92" width="80"  height="30" fill="#2a2233" stroke="#86c"/><text x="400" y="111" fill="#cbb3ff">type (1)</text>
-      <rect x="440" y="92" width="240" height="30" fill="#1d1726" stroke="#86c"/><text x="560" y="111" fill="#cbb3ff">Data … (e.g. streamMsgOp payload)</text>
+      <rect x="440" y="92" width="240" height="30" fill="#1d1726" stroke="#86c"/><text x="560" y="111" fill="#cbb3ff">Data [variable] (e.g. streamMsgOp payload)</text>
     </g>
   </svg>
   </figure>
@@ -343,7 +460,7 @@
 
 <!-- =============================== ELECTION =============================== -->
 <section id="election">
-  <h2>5 · Leader election</h2>
+  <h2>6 · Leader election</h2>
   <p>The node is always in exactly one state, driven by a dedicated goroutine. Transitions follow the Raft paper closely, with a few deliberate NATS additions.</p>
 
   <figure>
@@ -393,7 +510,7 @@
 
 <!-- =============================== TIMERS =============================== -->
 <section id="timers">
-  <h2>6 · Timers, intervals &amp; heartbeats</h2>
+  <h2>7 · Timers, intervals &amp; heartbeats</h2>
 
   <figure>
   <svg viewBox="0 0 940 200" role="img" aria-label="Timing relationships">
@@ -449,7 +566,7 @@
 
 <!-- =============================== COMMIT =============================== -->
 <section id="commit">
-  <h2>7 · Replication &amp; commit engine</h2>
+  <h2>8 · Replication &amp; commit engine</h2>
   <p>The leader batches proposals (≤ 256 KB or ≤ 512 entries), writes them to <b>its own WAL first</b>, fans out, then commits on quorum. Two correctness rules from the paper are implemented precisely:</p>
   <div class="grid2">
     <div class="callout good"><b>Quorum counts the leader.</b> <code>tryCommit</code> adds 1 for the leader itself (if still a member) and requires <code>acks ≥ qn = csz/2+1</code> <span class="cite">raft.go:3642-3661</span>.</div>
@@ -460,7 +577,7 @@
 
 <!-- =============================== PUBLISH =============================== -->
 <section id="publish">
-  <h2>8 · End-to-end: publishing a message</h2>
+  <h2>9 · End-to-end: publishing a message</h2>
   <p>A producer publishes to a clustered (R&gt;1) stream subject. The PubAck is returned only after the message is <b>committed (quorum-durable in Raft WALs)</b> and <b>applied (written to the leader's stream store)</b>.</p>
 
   <figure>
@@ -531,7 +648,7 @@
 
 <!-- =============================== CONSUME =============================== -->
 <section id="consume">
-  <h2>9 · End-to-end: consume + acknowledge (WorkQueue)</h2>
+  <h2>10 · End-to-end: consume + acknowledge (WorkQueue)</h2>
   <p>WorkQueue retention deletes a message once it is acknowledged. On a clustered stream this is the most consensus-heavy flow in the system: <b>a single client ACK drives two serialized Raft rounds</b> — first on the consumer group (record the ack), then on the stream group (delete the message).</p>
 
   <h4>Delivery is also quorum-gated</h4>
@@ -612,7 +729,7 @@
         <tr><td><code>updateDeliveredOp</code></td><td>message delivered (dseq,sseq,dc,ts)</td></tr>
         <tr><td><code>updateAcksOp</code></td><td>message acked (dseq,sseq)</td></tr>
         <tr><td><code>updateSkipOp</code></td><td>filtered consumer skipped ahead</td></tr>
-        <tr><td><code>addPendingRequest</code>/<code>remove…</code></td><td>track in-flight pull waiters</td></tr>
+        <tr><td><code>addPendingRequest</code> / <code>removePendingRequest</code></td><td>track in-flight pull waiters</td></tr>
         <tr><td><code>resetSeqOp</code></td><td>reset start sequence (quorum-gated)</td></tr>
       </table>
     </div>
@@ -629,7 +746,7 @@
 
 <!-- =============================== ELECTION SEQ =============================== -->
 <section id="electseq">
-  <h2>10 · End-to-end: a leader election</h2>
+  <h2>11 · End-to-end: a leader election</h2>
   <figure>
   <svg viewBox="0 0 940 420" role="img" aria-label="Election sequence">
     <defs><marker id="e1" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#f0c674"/></marker>
@@ -670,20 +787,92 @@
 
 <!-- =============================== SNAPSHOT =============================== -->
 <section id="snapshot">
-  <h2>11 · Snapshots, compaction &amp; catchup</h2>
-  <p>The WAL cannot grow forever. Each upper-layer monitor periodically snapshots its state and compacts the Raft log behind the snapshot. A lagging follower is brought up to date by <b>streaming entries (or a snapshot) over a private catchup inbox</b> — there is <i>no</i> dedicated snapshot subject; snapshots ride as ordinary <code>EntrySnapshot</code>/<code>EntryPeerState</code> append entries.</p>
+  <h2>12 · Snapshots, compaction &amp; catchup</h2>
+  <p>A Raft log cannot grow forever, so each layer periodically captures its <b>application state</b> as a snapshot and <b>compacts</b> (truncates) the WAL behind it. The crucial design point in NATS: the snapshot is <b>produced by the upper layer</b> (the FSM), not by Raft. Raft only stores the snapshot blob + a watermark and discards superseded log entries. Two distinct words matter:</p>
+  <div class="grid2">
+    <div class="callout"><b>Snapshot</b> = an opaque, self-contained encoding of the FSM's current state (meta assignments / stream state / consumer ack state) at a given applied index. Stored at <code>&lt;sd&gt;/snapshots/snap.&lt;term&gt;.&lt;index&gt;</code>.</div>
+    <div class="callout"><b>Compaction</b> = <code>wal.Compact(snapIndex+1)</code> — physically drops all log entries ≤ the snapshot index, which is what actually reclaims disk/memory <span class="cite">raft.go:1381</span>.</div>
+  </div>
+
+  <h3>The snapshot file format</h3>
+  <figure>
+  <svg viewBox="0 0 940 110" role="img" aria-label="Snapshot file layout">
+    <g font-family="monospace" font-size="11" text-anchor="middle">
+      <rect x="20"  y="30" width="120" height="40" fill="#13202c" stroke="#356"/><text x="80"  y="54" fill="#cfe8ff">lastTerm (8)</text>
+      <rect x="140" y="30" width="130" height="40" fill="#13202c" stroke="#356"/><text x="205" y="54" fill="#cfe8ff">lastIndex (8)</text>
+      <rect x="270" y="30" width="120" height="40" fill="#1d2b1a" stroke="#3a6"/><text x="330" y="54" fill="#9be29b">|peerstate| (4)</text>
+      <rect x="390" y="30" width="160" height="40" fill="#142117" stroke="#3a6"/><text x="470" y="54" fill="#9be29b">peerstate (var)</text>
+      <rect x="550" y="30" width="250" height="40" fill="#221a2e" stroke="#86c"/><text x="675" y="54" fill="#cbb3ff">data = FSM snapshot (var)</text>
+      <rect x="800" y="30" width="120" height="40" fill="#2a2410" stroke="#a83"/><text x="860" y="54" fill="#f0c674">HighwayHash (8)</text>
+      <g fill="#7d8a98" font-size="9"><text x="80" y="84">0</text><text x="205" y="84">8</text><text x="330" y="84">16</text><text x="470" y="84">20</text><text x="675" y="84">20+ps</text><text x="860" y="84">trailer</text></g>
+    </g>
+  </svg>
+  <figcaption><code>encodeSnapshot</code> <span class="cite">raft.go:1296</span>: a 28-byte header+checksum frame (<code>minSnapshotLen</code>) wrapping the peer state and the upper-layer blob; integrity guarded by a trailing HighwayHash-64.</figcaption>
+  </figure>
+
+  <h3>How a snapshot is produced — the checkpoint dance</h3>
+  <p>To avoid blocking the Raft node while the FSM serializes potentially large state, snapshotting defaults to <b>asynchronous</b> via a <i>checkpoint</i> handle (<code>CreateSnapshotCheckpoint</code> → <code>RaftNodeCheckpoint</code>) <span class="cite">raft.go:1403</span>. The upper layer can build the snapshot off-lock, then atomically install it; it may also <code>Abort()</code> at any time.</p>
+
+  <figure>
+  <svg viewBox="0 0 940 360" role="img" aria-label="Snapshot operation sequence">
+    <defs><marker id="s1" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#7cc7f0"/></marker>
+    <marker id="s2" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#bc8cff"/></marker>
+    <marker id="s3" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#ff7b72"/></marker></defs>
+    <g font-size="12" font-weight="700" text-anchor="middle">
+      <rect x="40"  y="20" width="220" height="30" rx="6" fill="#13202c" stroke="#356"/><text x="150" y="40" fill="#cfe8ff">Monitor loop (FSM)</text>
+      <rect x="380" y="20" width="180" height="30" rx="6" fill="#221a2e" stroke="#86c"/><text x="470" y="40" fill="#cbb3ff">Raft node</text>
+      <rect x="700" y="20" width="200" height="30" rx="6" fill="#142117" stroke="#3a6"/><text x="800" y="40" fill="#9be29b">WAL + snapshot file</text>
+    </g>
+    <g stroke="#2a3340" stroke-dasharray="3 4"><line x1="150" y1="50" x2="150" y2="346"/><line x1="470" y1="50" x2="470" y2="346"/><line x1="800" y1="50" x2="800" y2="346"/></g>
+    <g font-family="monospace" font-size="10.5">
+      <rect x="40" y="66" width="220" height="20" fill="#0e131a" stroke="#2a3340"/><text x="150" y="80" text-anchor="middle" fill="#9aa7b4">trigger: timer OR thresholds met</text>
+      <line x1="150" y1="100" x2="468" y2="100" stroke="#7cc7f0" marker-end="url(#s1)"/>
+      <text x="305" y="94" fill="#7cc7f0" text-anchor="middle">CreateSnapshotCheckpoint(force)</text>
+      <text x="470" y="120" fill="#9aa7b4" text-anchor="middle" font-size="10">snapshotting=true · pin applied index/term</text>
+      <text x="470" y="134" fill="#ff9b94" text-anchor="middle" font-size="10">refuses if catchups running (unless force)</text>
+      <line x1="150" y1="158" x2="150" y2="158"/>
+      <rect x="40" y="148" width="220" height="34" fill="#1d1726" stroke="#86c"/>
+      <text x="150" y="163" text-anchor="middle" fill="#cbb3ff" font-size="10">LoadLastSnapshot + replay log</text>
+      <text x="150" y="176" text-anchor="middle" fill="#cbb3ff" font-size="10">encode new FSM snapshot (off-lock)</text>
+      <line x1="150" y1="204" x2="468" y2="204" stroke="#bc8cff" marker-end="url(#s2)"/>
+      <text x="305" y="198" fill="#cbb3ff" text-anchor="middle">InstallSnapshot(snap)</text>
+      <line x1="470" y1="226" x2="798" y2="226" stroke="#7ee787" marker-end="url(#s1)"/>
+      <text x="635" y="220" fill="#9be29b" text-anchor="middle">write snap.&lt;term&gt;.&lt;index&gt; (fsync)</text>
+      <line x1="470" y1="252" x2="798" y2="252" stroke="#ff7b72" marker-end="url(#s3)"/>
+      <text x="635" y="246" fill="#ff9b94" text-anchor="middle">wal.Compact(index+1) → drop old entries</text>
+      <text x="470" y="276" fill="#9aa7b4" text-anchor="middle" font-size="10">papplied=index · delete previous snap file</text>
+      <line x1="468" y1="298" x2="152" y2="298" stroke="#9aa7b4" marker-end="url(#s2)"/>
+      <text x="305" y="292" fill="#9aa7b4" text-anchor="middle">compacted size returned · lastSnapTime=now</text>
+    </g>
+    <rect x="40" y="318" width="860" height="34" rx="8" fill="#22120e" stroke="#6e2b2b"/>
+    <text x="56" y="339" fill="#ffd0c8" font-size="11.5">Guards: one snapshot at a time (<tspan font-family="monospace">snapshotting</tspan>) · skipped during recovery · falls back to a <b>blocking</b> snapshot after repeated async failures or when the log grows past 10× the size threshold.</text>
+  </svg>
+  <figcaption>Async snapshot via the checkpoint API. The Raft lock is held only briefly to pin the index and to install; the expensive FSM encoding happens unlocked. <span class="cite">raft.go:1337-1520 · jetstream_cluster.go:1636-1797</span></figcaption>
+  </figure>
+
+  <h3>Triggers &amp; timers per layer</h3>
+  <p>Each FSM monitor runs its own snapshot timer plus event-driven checks after every batch of applied entries. <code>Applied()</code> returns the count of entries / bytes now reclaimable, which feeds the threshold checks.</p>
   <table>
-    <tr><th>Layer</th><th>Compact triggers</th><th>Min delta</th><th class="cite">jetstream_cluster.go</th></tr>
-    <tr><td>Meta</td><td>size &gt; 8 MB (configurable), or <code>NeedSnapshot()</code></td><td>30 s</td><td>1614, 1615</td></tr>
-    <tr><td>Stream</td><td>≥ 65,536 entries, or &gt; 8 MB, or CLFS moved</td><td>—</td><td>3122-3123, 3446</td></tr>
-    <tr><td>Consumer</td><td>≥ 1,024 entries, or &gt; 64 KB</td><td>10 s</td><td>6511-6512</td></tr>
+    <tr><th>Layer</th><th>Periodic timer</th><th>Min interval after failure</th><th>Min delta between snaps</th><th>Size / entry thresholds</th><th class="cite">jetstream_cluster.go</th></tr>
+    <tr><td><b>Meta</b></td><td><code>compactInterval = 1 min</code></td><td><code>compactMinInterval = 15 s</code> (timer reset on failure)</td><td><code>minSnapDelta = 30 s</code></td><td>&gt; 8 MB (or configurable <code>JetStreamMetaCompact[Size]</code>), or <code>NeedSnapshot()</code>; peer-entries force immediately</td><td>1588-1615</td></tr>
+    <tr><td><b>Stream</b></td><td><code>2 min + rand(0–1 min)</code> jitter</td><td><code>15 s</code></td><td>—</td><td>≥ 65,536 entries, or &gt; 8 MB, or CLFS advanced</td><td>3119-3123, 3446</td></tr>
+    <tr><td><b>Consumer</b></td><td><code>2 min + rand(0–1 min)</code> jitter</td><td><code>15 s</code></td><td><code>minSnapDelta = 10 s</code></td><td>≥ 1,024 entries, or &gt; 64 KB</td><td>6508-6513, 6627</td></tr>
   </table>
-  <div class="callout">Catchup flow: a behind follower replies <i>unsuccessfully</i> with a catchup inbox in the reply subject; the leader runs <code>catchupFollower</code>/<code>runCatchup</code>, streaming WAL entries with a 2 MB outstanding window, or <code>sendSnapshotToFollower</code> if the follower is below the WAL's first sequence <span class="cite">raft.go:3306,3413,3440</span>. Catchup responses never count toward quorum (a key safety guard).</div>
+  <ul class="tight small">
+    <li><b>Startup jitter</b> (stream/consumer): a random 0–60 s is added to the 2-min ticker so thousands of groups don't all snapshot in lockstep after a restart <span class="cite">jetstream_cluster.go:3126</span>.</li>
+    <li><b>Forced snapshots</b>: taken on becoming leader, right after recovery (to start with a small log), and on membership (peer) changes; meta forces if &gt; 4 async failures accumulate.</li>
+    <li><b>Failure back-off</b>: a failed async snapshot reduces the timer to 15 s and switches the next attempt to blocking, so the log cannot grow unbounded while async keeps failing.</li>
+  </ul>
+
+  <h3>Installing a leader snapshot &amp; catchup</h3>
+  <p>A follower that is too far behind (below the leader's first WAL sequence, e.g. just placed via scale-up) cannot be caught up entry-by-entry, so it receives a <b>snapshot instead</b>.</p>
+  <div class="callout">Catchup flow: a behind follower replies <i>unsuccessfully</i> to an append entry, putting a fresh <code>$NRG.CR.&lt;rnd&gt;</code> catchup inbox in the reply subject. The leader runs <code>catchupFollower</code> → <code>runCatchup</code>, streaming WAL entries to that inbox with a <b>2 MB outstanding window</b>; if the follower is below the WAL's first sequence it calls <code>sendSnapshotToFollower</code>, shipping the snapshot as an <code>EntrySnapshot</code> + <code>EntryPeerState</code> append entry <span class="cite">raft.go:3306,3413,3440</span>. There is <b>no dedicated snapshot subject</b> — snapshots ride the normal append-entry channel. Catchup responses <i>never</i> count toward quorum (a key safety guard), and the leader refuses to create a new snapshot while a catchup is in progress unless forced.</div>
+  <p class="small">On the receiving side, an <code>EntrySnapshot</code> commit triggers <code>installSnapshot</code>: write the snap file, <code>wal.Compact</code>, advance <code>papplied</code>, and hand the blob up to the FSM via the ApplyQ so it can rebuild its state <span class="cite">raft.go:1357, 3581-3591</span>.</p>
 </section>
 
 <!-- =============================== COUNTS =============================== -->
 <section id="counts">
-  <h2>12 · Subscription budget (capacity planning)</h2>
+  <h2>13 · Subscription budget (capacity planning)</h2>
   <p>Subscription count scales with the number of Raft groups, which scales with streams × replicas and consumers × replicas. This is a real operational dimension on dense servers.</p>
   <div class="grid3">
     <div class="card kpi"><span class="v">4</span><span class="l">subs per group on a follower (AE, V, areply, vreply)</span></div>
@@ -695,7 +884,7 @@
 
 <!-- =============================== RISKS =============================== -->
 <section id="risks">
-  <h2>13 · Risks &amp; analysis vs. the Raft paper and field implementations</h2>
+  <h2>14 · Risks &amp; analysis vs. the Raft paper and field implementations</h2>
   <p>Compared against Ongaro &amp; Ousterhout's Raft (the 2014 paper and Ongaro's PhD thesis) and mature implementations (etcd/raft, HashiCorp Raft, Dragonboat), the design is <b>safety-faithful in its core</b> but makes transport- and workload-specific choices that carry trade-offs.</p>
 
   <table>
@@ -755,12 +944,12 @@
 
 <!-- =============================== REFS =============================== -->
 <section id="refs">
-  <h2>14 · Source map</h2>
+  <h2>15 · Source map</h2>
   <div class="twocol small">
     <p><b>Core engine</b> — <code>server/raft.go</code><br/>
-    state machine: <code>runAsFollower</code> 2576, <code>runAsCandidate</code> 3768, <code>runAsLeader</code> 3125 · election: <code>switchToCandidate</code> 5270, <code>switchToLeader</code> 5304, <code>processVoteRequest</code> 5065, <code>requestVote</code> 5141 · replication: <code>Propose</code> 911, <code>sendAppendEntry</code> 4675, <code>processAppendEntry</code> 4054, <code>processAppendEntryResponse</code> 4556, <code>tryCommit</code> 3642, <code>applyCommit</code> 3524 · subjects: <code>createInternalSubs</code> 2346, constants 2299-2305 · wire: <code>appendEntry.encode</code> 2799, <code>voteRequest</code> 4820, <code>voteResponse</code> 5015 · catchup: 3306/3413/3440 · timers: 282-302.</p>
+    state machine: <code>runAsFollower</code> 2576, <code>runAsCandidate</code> 3768, <code>runAsLeader</code> 3125 · election: <code>switchToCandidate</code> 5270, <code>switchToLeader</code> 5304, <code>processVoteRequest</code> 5065, <code>requestVote</code> 5141 · replication: <code>Propose</code> 911, <code>sendAppendEntry</code> 4675, <code>processAppendEntry</code> 4054, <code>processAppendEntryResponse</code> 4556, <code>tryCommit</code> 3642, <code>applyCommit</code> 3524 · subjects: <code>createInternalSubs</code> 2346, constants 2299-2305 · wire: <code>appendEntry.encode</code> 2799, <code>voteRequest</code> 4820, <code>voteResponse</code> 5015 · catchup: 3306/3413/3440 · timers: 282-302 · snapshots: <code>encodeSnapshot</code> 1296, <code>InstallSnapshot</code> 1337, <code>installSnapshot</code> 1357, <code>CreateSnapshotCheckpoint</code> 1403, <code>NeedSnapshot</code> 1606, <code>checkpoint</code> 1466, <code>Compact</code> 1381.</p>
     <p><b>JetStream cluster</b> — <code>server/jetstream_cluster.go</code><br/>
-    <code>createRaftGroup</code> 2794 · entry ops 122-153 · publish <code>processClusteredInboundMsg</code> 10048 · encode <code>encodeStreamMsgAllowCompressAndBatch</code> 9893 · <code>monitorStream</code> 3070, <code>applyStreamEntries</code> 3918, <code>applyStreamMsgOp</code> 4374 · <code>monitorConsumer</code> 6487, <code>applyConsumerEntries</code> 6778, <code>processReplicatedAck</code> 6976 · delete apply 4158.</p>
+    <code>createRaftGroup</code> 2794 · entry ops 122-153 · <b>meta:</b> <code>monitorCluster</code> 1574, <code>doSnapshot</code> 1636, <code>metaSnapshot</code>/<code>encodeMetaSnapshot</code> 2010, <code>applyMetaEntries</code>, <code>checkClusterSize</code> 1947, <code>_meta_</code> name 457 · publish <code>processClusteredInboundMsg</code> 10048 · encode <code>encodeStreamMsgAllowCompressAndBatch</code> 9893 · <code>monitorStream</code> 3070, <code>applyStreamEntries</code> 3918, <code>applyStreamMsgOp</code> 4374 · <code>monitorConsumer</code> 6487, <code>applyConsumerEntries</code> 6778, <code>processReplicatedAck</code> 6976 · delete apply 4158 · snapshot thresholds: meta 1588-1615, stream 3119-3123, consumer 6508-6513.</p>
     <p><b>Consumer</b> — <code>server/consumer.go</code><br/>
     node attach 1524 · <code>processAck</code> 2730 · <code>processAckMsgLocked</code> 3619 (<code>ackInPlace</code> 3669) · <code>updateDelivered</code> 2964, <code>updateAcks</code> 3015 · <code>deliverMsg</code>/<code>replicateDeliveries</code> 5620/5686 · WQ enforcement 1096-1166.</p>
     <p><b>Stream</b> — <code>server/stream.go</code><br/>
