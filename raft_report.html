@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>NATS Server — Raft Implementation: End-to-End Technical Report</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --ink:#e6edf3; --mut:#9aa7b4;
+    --line:#2a3340; --accent:#3fb6f0; --accent2:#7ee787; --warn:#f0c674; --bad:#ff7b72;
+    --purple:#bc8cff; --pink:#ff9bce; --mono:"SFMono-Regular", Consolas,"Liberation Mono",Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6;font-size:16px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  header.hero{
+    padding:48px 32px 40px;background:
+      radial-gradient(1200px 400px at 10% -10%,rgba(63,182,240,.18),transparent),
+      radial-gradient(900px 400px at 90% 0%,rgba(188,140,255,.16),transparent),
+      linear-gradient(180deg,#11161d,#0d1117);
+    border-bottom:1px solid var(--line);
+  }
+  header.hero h1{margin:0 0 8px;font-size:34px;letter-spacing:-.5px}
+  header.hero p{margin:4px 0;color:var(--mut);max-width:980px}
+  .tagrow{margin-top:16px;display:flex;flex-wrap:wrap;gap:8px}
+  .tag{font-family:var(--mono);font-size:12px;padding:4px 10px;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--mut)}
+  .layout{display:grid;grid-template-columns:260px 1fr;gap:0;align-items:start}
+  nav.toc{position:sticky;top:0;height:100vh;overflow:auto;padding:24px 18px;border-right:1px solid var(--line);background:#0b0f14}
+  nav.toc h3{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--mut);margin:18px 0 8px}
+  nav.toc a{display:block;padding:5px 10px;border-radius:6px;color:var(--mut);font-size:13.5px}
+  nav.toc a:hover{background:var(--panel);color:var(--ink);text-decoration:none}
+  main{padding:32px 40px 120px;max-width:1180px}
+  section{margin:0 0 56px;scroll-margin-top:20px}
+  h2{font-size:25px;margin:8px 0 6px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h3{font-size:19px;margin:28px 0 6px;color:#fff}
+  h4{font-size:15px;margin:20px 0 4px;color:var(--accent2)}
+  p{color:#cdd7e1}
+  code{font-family:var(--mono);background:#0b1119;border:1px solid var(--line);padding:1px 6px;border-radius:5px;font-size:13px;color:#cfe8ff}
+  .cite{font-family:var(--mono);font-size:11.5px;color:var(--mut)}
+  .card{background:linear-gradient(180deg,var(--panel),#12171f);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#0f151d;color:#cfe1f2;font-weight:600}
+  td code{font-size:12px}
+  tr:nth-child(even) td{background:#10151c}
+  .kpi{display:flex;flex-direction:column;gap:2px}
+  .kpi .v{font-size:26px;font-weight:700;color:#fff;font-family:var(--mono)}
+  .kpi .l{font-size:12px;color:var(--mut)}
+  .pill{display:inline-block;font-size:11px;font-family:var(--mono);padding:2px 8px;border-radius:999px;border:1px solid var(--line)}
+  .p-leader{color:#ffd; border-color:#7a5; background:#1b2417}
+  .p-foll{color:#cfe8ff;border-color:#356; background:#0e1a24}
+  .p-cand{color:#ffd9b3;border-color:#a73; background:#241a0e}
+  .sev{font-weight:700;font-size:11px;padding:3px 9px;border-radius:6px;font-family:var(--mono)}
+  .sev.high{background:#3a1416;color:#ff8b82;border:1px solid #6e2b2b}
+  .sev.med{background:#3a3014;color:#f0c674;border:1px solid #6e5a2b}
+  .sev.low{background:#13302a;color:#7ee787;border:1px solid #2b6e54}
+  .sev.info{background:#102434;color:#7cc7f0;border:1px solid #2b566e}
+  .callout{border-left:3px solid var(--accent);background:#0e1822;padding:12px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  .callout.good{border-color:var(--accent2);background:#0e1d16}
+  .callout.warn{border-color:var(--warn);background:#221d0e}
+  .callout.bad{border-color:var(--bad);background:#22120e}
+  figure{margin:18px 0;background:#0a0e13;border:1px solid var(--line);border-radius:12px;padding:14px}
+  figcaption{color:var(--mut);font-size:12.5px;margin-top:8px;text-align:center}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto;font-family:var(--sans)}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;justify-content:center;margin-top:10px;font-size:12px;color:var(--mut)}
+  .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+  ul.tight li{margin:3px 0}
+  .mono{font-family:var(--mono)}
+  .small{font-size:13px;color:var(--mut)}
+  hr.soft{border:0;border-top:1px dashed var(--line);margin:26px 0}
+  .footnote{color:var(--mut);font-size:12.5px}
+  .twocol{column-count:2;column-gap:26px}
+  @media(max-width:980px){.layout{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}.grid2,.grid3{grid-template-columns:1fr}.twocol{column-count:1}}
+</style>
+</head>
+<body>
+<header class="hero">
+  <h1>NATS Server — Raft Implementation</h1>
+  <p>An end-to-end technical walkthrough of the consensus layer that powers JetStream clustering: leader election &amp; timers, heartbeats, the NATS subscription/wire protocol, and the full lifecycle of <b>publishing</b>, <b>consuming</b> and <b>acknowledging</b> a WorkQueue message — with a risk assessment against the Raft paper and field implementations.</p>
+  <div class="tagrow">
+    <span class="tag">server/raft.go · 5,325 LOC</span>
+    <span class="tag">server/jetstream_cluster.go</span>
+    <span class="tag">server/consumer.go</span>
+    <span class="tag">server/stream.go</span>
+    <span class="tag">Generated 2026-06-09</span>
+  </div>
+</header>
+
+<div class="layout">
+<nav class="toc">
+  <h3>Contents</h3>
+  <a href="#overview">1 · Overview &amp; topology</a>
+  <a href="#groups">2 · Raft groups &amp; storage</a>
+  <a href="#subs">3 · Subscriptions &amp; subjects</a>
+  <a href="#wire">4 · Wire protocol / byte layouts</a>
+  <a href="#election">5 · Leader election</a>
+  <a href="#timers">6 · Timers, intervals &amp; heartbeats</a>
+  <a href="#commit">7 · Replication &amp; commit engine</a>
+  <h3>End-to-end flows</h3>
+  <a href="#publish">8 · Publishing a message</a>
+  <a href="#consume">9 · Consume + ack (WorkQueue)</a>
+  <a href="#electseq">10 · Election sequence</a>
+  <h3>Operational</h3>
+  <a href="#snapshot">11 · Snapshots &amp; catchup</a>
+  <a href="#counts">12 · Subscription budget</a>
+  <a href="#risks">13 · Risks &amp; analysis</a>
+  <a href="#refs">14 · Source map</a>
+</nav>
+
+<main>
+
+<!-- =============================== OVERVIEW =============================== -->
+<section id="overview">
+  <h2>1 · Overview &amp; topology</h2>
+  <p>NATS implements <b>Raft from scratch</b> in <code>server/raft.go</code> rather than vendoring an external library. The novel twist: the transport is <b>NATS itself</b> — peers talk over subject-based pub/sub on an internal system client, and each Raft node's write-ahead log is a <b>JetStream file/mem store</b> (the same engine that stores stream messages). Consensus is used at three independent layers.</p>
+
+  <figure>
+  <svg viewBox="0 0 940 430" role="img" aria-label="Raft group topology">
+    <defs>
+      <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#9aa7b4"/></marker>
+      <linearGradient id="gMeta" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#1d2b3a"/><stop offset="1" stop-color="#13202c"/></linearGradient>
+      <linearGradient id="gStream" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#1d2e22"/><stop offset="1" stop-color="#142117"/></linearGradient>
+      <linearGradient id="gCons" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#2a2233"/><stop offset="1" stop-color="#1d1726"/></linearGradient>
+    </defs>
+    <!-- servers -->
+    <text x="470" y="24" fill="#e6edf3" font-size="15" font-weight="700" text-anchor="middle">A NATS cluster = one Meta Raft group + N Stream groups + M Consumer groups</text>
+    <!-- meta layer -->
+    <rect x="40" y="46" width="860" height="92" rx="12" fill="url(#gMeta)" stroke="#356"/>
+    <text x="58" y="70" fill="#7cc7f0" font-size="13" font-weight="700">META GROUP  «_meta_»</text>
+    <text x="58" y="90" fill="#9aa7b4" font-size="12">Cluster-wide: stream/consumer assignments, peer placement, account state.</text>
+    <text x="58" y="108" fill="#9aa7b4" font-size="12">Members = every JetStream-enabled server. Leader = JS "meta leader".</text>
+    <g font-size="11" font-family="monospace">
+      <rect x="690" y="62" width="60" height="26" rx="6" fill="#0e1a24" stroke="#356"/><text x="720" y="79" fill="#cfe8ff" text-anchor="middle">srv-1</text>
+      <rect x="756" y="62" width="60" height="26" rx="6" fill="#0e1a24" stroke="#356"/><text x="786" y="79" fill="#cfe8ff" text-anchor="middle">srv-2</text>
+      <rect x="822" y="62" width="60" height="26" rx="6" fill="#0e1a24" stroke="#356"/><text x="852" y="79" fill="#cfe8ff" text-anchor="middle">srv-3</text>
+      <rect x="690" y="98" width="192" height="24" rx="6" fill="#16241c" stroke="#3a6"/><text x="786" y="114" fill="#9be29b" text-anchor="middle">R = replication factor / placement</text>
+    </g>
+    <!-- stream layer -->
+    <rect x="40" y="160" width="420" height="110" rx="12" fill="url(#gStream)" stroke="#3a6"/>
+    <text x="58" y="184" fill="#9be29b" font-size="13" font-weight="700">STREAM GROUP  (per replicated stream)</text>
+    <text x="58" y="204" fill="#9aa7b4" font-size="12">Replicates the ordered message log.</text>
+    <text x="58" y="221" fill="#9aa7b4" font-size="12">Entry payload op = streamMsgOp / deleteMsgOp …</text>
+    <text x="58" y="238" fill="#9aa7b4" font-size="12">WAL = JetStream FileStore (medium blocks).</text>
+    <text x="58" y="258" fill="#7ee787" font-size="11.5" font-family="monospace">subjects: $NRG.AE.&lt;grp&gt; · $NRG.V.&lt;grp&gt; …</text>
+    <!-- consumer layer -->
+    <rect x="480" y="160" width="420" height="110" rx="12" fill="url(#gCons)" stroke="#86c"/>
+    <text x="498" y="184" fill="#cbb3ff" font-size="13" font-weight="700">CONSUMER GROUP  (per durable consumer)</text>
+    <text x="498" y="204" fill="#9aa7b4" font-size="12">Replicates delivery/ack state machine.</text>
+    <text x="498" y="221" fill="#9aa7b4" font-size="12">Entry op = updateDeliveredOp / updateAcksOp …</text>
+    <text x="498" y="238" fill="#9aa7b4" font-size="12">Separate from its parent stream's group.</text>
+    <text x="498" y="258" fill="#bc8cff" font-size="11.5" font-family="monospace">ConsumerState: Delivered · AckFloor · Pending</text>
+    <!-- arrows meta->groups -->
+    <line x1="250" y1="138" x2="250" y2="160" stroke="#9aa7b4" marker-end="url(#arr)"/>
+    <line x1="690" y1="138" x2="690" y2="160" stroke="#9aa7b4" marker-end="url(#arr)"/>
+    <text x="470" y="152" fill="#9aa7b4" font-size="11" text-anchor="middle">meta assigns groups to peers</text>
+    <!-- bridge -->
+    <line x1="460" y1="240" x2="480" y2="240" stroke="#ff9bce" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+    <!-- bottom note -->
+    <rect x="40" y="300" width="860" height="100" rx="12" fill="#0e131a" stroke="#2a3340"/>
+    <text x="58" y="324" fill="#e6edf3" font-size="13" font-weight="700">The consumer↔stream bridge (WorkQueue / Interest retention)</text>
+    <text x="58" y="346" fill="#9aa7b4" font-size="12.5">An ACK committed on the <tspan fill="#cbb3ff">consumer group</tspan> calls <tspan font-family="monospace" fill="#cfe8ff">mset.ackMsg()</tspan>, which (for non-Limits retention) proposes a</text>
+    <text x="58" y="365" fill="#9aa7b4" font-size="12.5"><tspan font-family="monospace" fill="#cfe8ff">deleteMsgOp</tspan> to the <tspan fill="#9be29b">stream group</tspan> → the message is physically removed on every replica.</text>
+    <text x="58" y="386" fill="#ff9bce" font-size="12.5" font-weight="600">⇒ one client ACK on a clustered WorkQueue = TWO independent Raft consensus rounds.</text>
+  </svg>
+  <figcaption>Three-tier consensus: the Meta group governs placement; each Stream and each Consumer is its own Raft group with its own log, leader and subscriptions.</figcaption>
+  </figure>
+
+  <div class="grid3">
+    <div class="card kpi"><span class="v">3</span><span class="l">independent Raft layers (meta / stream / consumer)</span></div>
+    <div class="card kpi"><span class="v">4–6</span><span class="l">NATS subscriptions per Raft group (follower→leader)</span></div>
+    <div class="card kpi"><span class="v">4–9 s</span><span class="l">randomized election timeout; 1 s heartbeat</span></div>
+  </div>
+</section>
+
+<!-- =============================== GROUPS =============================== -->
+<section id="groups">
+  <h2>2 · Raft groups, identity &amp; storage</h2>
+  <p>A Raft group is created by <code>js.createRaftGroup()</code> <span class="cite">jetstream_cluster.go:2794</span>. The node is bootstrapped (<code>bootstrapRaftNode</code>) and started (<code>startRaftNode</code>), then attached to its asset — <code>rg.node</code> for streams, <code>o.node = ca.Group.node</code> for consumers <span class="cite">consumer.go:1524</span>. A nil <code>node</code> is the universal "am I single-replica (R1)?" test.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>Identity</h4>
+      <ul class="tight">
+        <li>Node / peer IDs are <b>8 bytes</b> (<code>idLen = 8</code>), a truncated HighwayHash of the server name.</li>
+        <li>Group name (<code>n.group</code>) keys all shared subjects.</li>
+        <li>Term &amp; vote persisted to <code>tav.idx</code>; peer set to <code>peers.idx</code> <span class="cite">raft.go:4856,4938</span>.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Write-ahead log (WAL)</h4>
+      <ul class="tight">
+        <li>The Raft log <b>is a JetStream store</b>: a <code>FileStore</code> (<code>defaultMediumBlockSize</code>) or <code>MemStore</code> <span class="cite">jetstream_cluster.go:2911-2929</span>.</li>
+        <li>Each append entry is one "message" in that store, keyed by Raft index.</li>
+        <li>Stored under <code>&lt;StoreDir&gt;/$SYS/_js_/&lt;group&gt;/</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout">All Raft traffic runs on a dedicated <b>internal system client</b> (<code>n.c</code>), normally on the <b>system account</b>; with account-NRG enabled and all peers capable, traffic moves to the asset's configured NRG account <span class="cite">raft.go:680-744</span>. Outbound messages go through a per-account send queue (<code>n.sq</code>, <code>sendq.go</code>) that injects them as if published by an internal client.</p></div>
+</section>
+
+<!-- =============================== SUBS =============================== -->
+<section id="subs">
+  <h2>3 · NATS subscriptions &amp; subjects</h2>
+  <p>Everything Raft does is one of a handful of subjects under the <code>$NRG</code> ("NATS Raft Group") prefix. Subjects keyed by <code>%s = group</code> are <b>shared</b> (all peers subscribe); <code>reply</code> subjects are <b>private inboxes</b> with an 8-char random base-62 suffix. <b>All are plain subscriptions — never queue groups</b> <span class="cite">raft.go:2331-2336</span>.</p>
+
+  <figure>
+  <svg viewBox="0 0 940 340" role="img" aria-label="Subjects per node">
+    <defs><marker id="arr2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#7ee787"/></marker>
+    <marker id="arr3" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#3fb6f0"/></marker></defs>
+    <!-- leader -->
+    <rect x="60" y="70" width="220" height="200" rx="12" fill="#1b2417" stroke="#7a5"/>
+    <text x="170" y="96" text-anchor="middle" fill="#ffd" font-size="14" font-weight="700">LEADER</text>
+    <g font-family="monospace" font-size="11.5" fill="#cfe8ff">
+      <text x="78" y="124">SUB $NRG.AE.&lt;grp&gt;</text>
+      <text x="78" y="144">SUB $NRG.V.&lt;grp&gt;</text>
+      <text x="78" y="164">SUB $NRG.R.&lt;rnd&gt;  (areply)</text>
+      <text x="78" y="184">SUB $NRG.R.&lt;rnd&gt;  (vreply)</text>
+      <text x="78" y="206" fill="#ffd9a8">SUB $NRG.P.&lt;grp&gt;   ★</text>
+      <text x="78" y="226" fill="#ffd9a8">SUB $NRG.RP.&lt;grp&gt;  ★</text>
+    </g>
+    <text x="170" y="252" text-anchor="middle" fill="#9be29b" font-size="11">★ = leader-only (2 extra)</text>
+    <!-- followers -->
+    <rect x="660" y="50" width="220" height="110" rx="12" fill="#0e1a24" stroke="#356"/>
+    <text x="770" y="74" text-anchor="middle" fill="#cfe8ff" font-size="14" font-weight="700">FOLLOWER</text>
+    <g font-family="monospace" font-size="11.5" fill="#cfe8ff">
+      <text x="678" y="98">SUB $NRG.AE.&lt;grp&gt;</text>
+      <text x="678" y="116">SUB $NRG.V.&lt;grp&gt;</text>
+      <text x="678" y="134">SUB $NRG.R.&lt;rnd&gt; ×2</text>
+    </g>
+    <rect x="660" y="180" width="220" height="100" rx="12" fill="#0e1a24" stroke="#356"/>
+    <text x="770" y="204" text-anchor="middle" fill="#cfe8ff" font-size="14" font-weight="700">FOLLOWER</text>
+    <g font-family="monospace" font-size="11.5" fill="#cfe8ff">
+      <text x="678" y="228">SUB $NRG.AE.&lt;grp&gt;</text>
+      <text x="678" y="246">SUB $NRG.V.&lt;grp&gt;</text>
+      <text x="678" y="264">SUB $NRG.R.&lt;rnd&gt; ×2</text>
+    </g>
+    <!-- arrows -->
+    <line x1="285" y1="120" x2="655" y2="100" stroke="#7ee787" stroke-width="1.6" marker-end="url(#arr2)"/>
+    <text x="470" y="100" fill="#7ee787" font-size="11" text-anchor="middle">PUB $NRG.AE.&lt;grp&gt; (entries + heartbeats)</text>
+    <line x1="285" y1="140" x2="655" y2="220" stroke="#7ee787" stroke-width="1.6" marker-end="url(#arr2)"/>
+    <line x1="655" y1="120" x2="290" y2="160" stroke="#3fb6f0" stroke-width="1.6" marker-end="url(#arr3)"/>
+    <text x="470" y="190" fill="#3fb6f0" font-size="11" text-anchor="middle">reply → $NRG.R.&lt;rnd&gt; (areply): appendEntryResponse</text>
+    <line x1="655" y1="240" x2="290" y2="175" stroke="#3fb6f0" stroke-width="1.6" marker-end="url(#arr3)"/>
+    <text x="170" y="300" text-anchor="middle" fill="#9aa7b4" font-size="11">Forwarded proposals (followers→leader) use $NRG.P / $NRG.RP</text>
+  </svg>
+  <figcaption>Message planes for one group. The leader fans out to the shared <code>$NRG.AE.&lt;grp&gt;</code>; each follower replies to the leader's private <code>areply</code> inbox.</figcaption>
+  </figure>
+
+  <table>
+    <tr><th>Field</th><th>Subject pattern</th><th>Handler</th><th>Carries</th><th>Who subs</th></tr>
+    <tr><td><code>asubj</code></td><td><code>$NRG.AE.&lt;grp&gt;</code></td><td><code>handleAppendEntry</code></td><td>append entries + heartbeats (from leader)</td><td>all</td></tr>
+    <tr><td><code>areply</code></td><td><code>$NRG.R.&lt;rnd&gt;</code></td><td><code>handleAppendEntryResponse</code></td><td>per-entry success/fail acks</td><td>own inbox</td></tr>
+    <tr><td><code>vsubj</code></td><td><code>$NRG.V.&lt;grp&gt;</code></td><td><code>handleVoteRequest</code></td><td>RequestVote RPCs</td><td>all</td></tr>
+    <tr><td><code>vreply</code></td><td><code>$NRG.R.&lt;rnd&gt;</code></td><td><code>handleVoteResponse</code></td><td>vote grants/denials</td><td>own inbox</td></tr>
+    <tr><td><code>psubj</code></td><td><code>$NRG.P.&lt;grp&gt;</code></td><td><code>handleForwardedProposal</code></td><td>proposals forwarded by followers</td><td><span class="pill p-leader">leader only</span></td></tr>
+    <tr><td><code>rpsubj</code></td><td><code>$NRG.RP.&lt;grp&gt;</code></td><td><code>handleForwardedRemovePeerProposal</code></td><td>remove-peer proposals</td><td><span class="pill p-leader">leader only</span></td></tr>
+    <tr><td><i>catchup</i></td><td><code>$NRG.CR.&lt;rnd&gt;</code></td><td><code>handleAppendEntry</code></td><td>streamed log catchup + snapshots</td><td><span class="pill p-foll">transient</span></td></tr>
+  </table>
+  <p class="small">Inbound messages are decoded and pushed onto in-process queues (<code>ipQueue</code>): <code>entry</code>, <code>resp</code>, <code>reqs</code>, <code>votes</code>, <code>prop</code> — and drained by the single state-machine goroutine (<code>runAsFollower</code> / <code>runAsCandidate</code> / <code>runAsLeader</code>). Committed entries leave via the <code>apply</code> queue (<code>ApplyQ()</code>).</p>
+</section>
+
+<!-- =============================== WIRE =============================== -->
+<section id="wire">
+  <h2>4 · Wire protocol — byte layouts</h2>
+  <p>All four RPCs are hand-rolled, fixed/length-prefixed, <b>little-endian</b> binary. There is no protobuf/JSON on the hot path. Below, each cell is annotated with its byte offset.</p>
+
+  <h4>appendEntry &nbsp;<span class="cite">raft.go:2799 · base len = idLen + 4·8 + 2 = 50 B</span></h4>
+  <figure>
+  <svg viewBox="0 0 940 150" role="img" aria-label="appendEntry layout">
+    <g font-family="monospace" font-size="11" text-anchor="middle">
+      <!-- header row -->
+      <g>
+        <rect x="10"  y="20" width="120" height="40" fill="#162033" stroke="#356"/><text x="70"  y="44" fill="#cfe8ff">leader (8)</text>
+        <rect x="130" y="20" width="90"  height="40" fill="#13202c" stroke="#356"/><text x="175" y="44" fill="#cfe8ff">term (8)</text>
+        <rect x="220" y="20" width="90"  height="40" fill="#13202c" stroke="#356"/><text x="265" y="44" fill="#cfe8ff">commit (8)</text>
+        <rect x="310" y="20" width="90"  height="40" fill="#13202c" stroke="#356"/><text x="355" y="44" fill="#cfe8ff">pterm (8)</text>
+        <rect x="400" y="20" width="90"  height="40" fill="#13202c" stroke="#356"/><text x="445" y="44" fill="#cfe8ff">pindex (8)</text>
+        <rect x="490" y="20" width="70"  height="40" fill="#1d2b1a" stroke="#3a6"/><text x="525" y="44" fill="#9be29b">#ent (2)</text>
+        <rect x="560" y="20" width="280" height="40" fill="#221a2e" stroke="#86c"/><text x="700" y="44" fill="#cbb3ff">entries[] (variable)</text>
+        <rect x="840" y="20" width="90"  height="40" fill="#2a2410" stroke="#a83"/><text x="885" y="44" fill="#f0c674">lterm uvarint</text>
+      </g>
+      <g fill="#7d8a98" font-size="9">
+        <text x="70" y="74">0</text><text x="175" y="74">8</text><text x="265" y="74">16</text><text x="355" y="74">24</text><text x="445" y="74">32</text><text x="525" y="74">40</text><text x="700" y="74">42…</text><text x="885" y="74">tail</text>
+      </g>
+      <!-- entry detail -->
+      <text x="120" y="104" fill="#9aa7b4" text-anchor="start">each entry →</text>
+      <rect x="210" y="92" width="150" height="30" fill="#221a2e" stroke="#86c"/><text x="285" y="111" fill="#cbb3ff">len = 1+|Data| (4)</text>
+      <rect x="360" y="92" width="80"  height="30" fill="#2a2233" stroke="#86c"/><text x="400" y="111" fill="#cbb3ff">type (1)</text>
+      <rect x="440" y="92" width="240" height="30" fill="#1d1726" stroke="#86c"/><text x="560" y="111" fill="#cbb3ff">Data … (e.g. streamMsgOp payload)</text>
+    </g>
+  </svg>
+  </figure>
+  <p class="small">The trailing <code>lterm</code> (leader's highest term, used during catchup) is appended after the entries as a uvarint; older nodes safely ignore trailing bytes. <code>EntryType</code> values: <code>EntryNormal</code> (all app data), <code>EntryPeerState</code>, <code>EntryAddPeer</code>, <code>EntryRemovePeer</code>, <code>EntryLeaderTransfer</code>, <code>EntrySnapshot</code>, <code>EntryOldSnapshot</code>, plus the internal <code>EntryCatchup</code> <span class="cite">raft.go:2742-2756</span>.</p>
+
+  <div class="grid3">
+    <figure>
+      <svg viewBox="0 0 300 120" aria-label="appendEntryResponse">
+        <text x="150" y="16" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="700">appendEntryResponse — 25 B</text>
+        <g font-family="monospace" font-size="10" text-anchor="middle">
+          <rect x="14" y="34" width="70" height="34" fill="#13202c" stroke="#356"/><text x="49" y="55" fill="#cfe8ff">term(8)</text>
+          <rect x="84" y="34" width="70" height="34" fill="#13202c" stroke="#356"/><text x="119" y="55" fill="#cfe8ff">index(8)</text>
+          <rect x="154" y="34" width="70" height="34" fill="#162033" stroke="#356"/><text x="189" y="55" fill="#cfe8ff">peer(8)</text>
+          <rect x="224" y="34" width="40" height="34" fill="#1d2b1a" stroke="#3a6"/><text x="244" y="55" fill="#9be29b">ok(1)</text>
+          <g fill="#7d8a98" font-size="8"><text x="49" y="82">0</text><text x="119" y="82">8</text><text x="189" y="82">16</text><text x="244" y="82">24</text></g>
+        </g>
+      </svg>
+    </figure>
+    <figure>
+      <svg viewBox="0 0 300 120" aria-label="voteRequest">
+        <text x="150" y="16" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="700">voteRequest — 32 B</text>
+        <g font-family="monospace" font-size="10" text-anchor="middle">
+          <rect x="8"  y="34" width="66" height="34" fill="#13202c" stroke="#356"/><text x="41"  y="55" fill="#cfe8ff">term(8)</text>
+          <rect x="74" y="34" width="74" height="34" fill="#13202c" stroke="#356"/><text x="111" y="50" fill="#cfe8ff">last</text><text x="111" y="62" fill="#cfe8ff">Term(8)</text>
+          <rect x="148" y="34" width="74" height="34" fill="#13202c" stroke="#356"/><text x="185" y="50" fill="#cfe8ff">last</text><text x="185" y="62" fill="#cfe8ff">Index(8)</text>
+          <rect x="222" y="34" width="70" height="34" fill="#162033" stroke="#356"/><text x="257" y="55" fill="#cfe8ff">cand(8)</text>
+          <g fill="#7d8a98" font-size="8"><text x="41" y="82">0</text><text x="111" y="82">8</text><text x="185" y="82">16</text><text x="257" y="82">24</text></g>
+        </g>
+      </svg>
+    </figure>
+    <figure>
+      <svg viewBox="0 0 300 120" aria-label="voteResponse">
+        <text x="150" y="16" text-anchor="middle" fill="#e6edf3" font-size="12" font-weight="700">voteResponse — 17 B</text>
+        <g font-family="monospace" font-size="10" text-anchor="middle">
+          <rect x="34" y="34" width="80" height="34" fill="#13202c" stroke="#356"/><text x="74" y="55" fill="#cfe8ff">term(8)</text>
+          <rect x="114" y="34" width="80" height="34" fill="#162033" stroke="#356"/><text x="154" y="55" fill="#cfe8ff">peer(8)</text>
+          <rect x="194" y="34" width="72" height="34" fill="#2a2410" stroke="#a83"/><text x="230" y="50" fill="#f0c674">flags(1)</text><text x="230" y="62" fill="#f0c674">grant|empty</text>
+          <g fill="#7d8a98" font-size="8"><text x="74" y="82">0</text><text x="154" y="82">8</text><text x="230" y="82">16</text></g>
+        </g>
+      </svg>
+    </figure>
+  </div>
+  <p class="small">The vote response <code>flags</code> byte packs two bits: <code>granted</code> (bit 0) and <code>empty</code> (bit 1 — "my log is empty"). The <code>empty</code> bit drives a NATS-specific safety rule (see §5).</p>
+
+  <h4>The application payload inside <code>EntryNormal</code> (a published message)</h4>
+  <p>Raft is oblivious to JetStream semantics. A stream message is encoded by <code>encodeStreamMsg</code> into the <code>Entry.Data</code> bytes: <code>[op:1][lseq:8][ts:8][slen:2][subject][rlen:2][reply][hlen:2][hdr][mlen:4][msg][flags:uvarint]</code>, where <code>op = streamMsgOp</code> (or <code>compressedStreamMsgOp</code> when the total exceeds the 8 KB compress threshold) <span class="cite">jetstream_cluster.go:9893</span>.</p>
+</section>
+
+<!-- =============================== ELECTION =============================== -->
+<section id="election">
+  <h2>5 · Leader election</h2>
+  <p>The node is always in exactly one state, driven by a dedicated goroutine. Transitions follow the Raft paper closely, with a few deliberate NATS additions.</p>
+
+  <figure>
+  <svg viewBox="0 0 940 320" role="img" aria-label="Raft state machine">
+    <defs><marker id="sm" markerWidth="11" markerHeight="11" refX="9" refY="3.2" orient="auto"><path d="M0,0 L9,3.2 L0,6.4 Z" fill="#9aa7b4"/></marker></defs>
+    <!-- Follower -->
+    <circle cx="160" cy="160" r="74" fill="#0e1a24" stroke="#3fb6f0" stroke-width="2"/>
+    <text x="160" y="155" text-anchor="middle" fill="#cfe8ff" font-size="17" font-weight="700">FOLLOWER</text>
+    <text x="160" y="176" text-anchor="middle" fill="#9aa7b4" font-size="11">resets elect timer on</text>
+    <text x="160" y="190" text-anchor="middle" fill="#9aa7b4" font-size="11">valid AppendEntry</text>
+    <!-- Candidate -->
+    <circle cx="470" cy="160" r="74" fill="#241a0e" stroke="#f0c674" stroke-width="2"/>
+    <text x="470" y="155" text-anchor="middle" fill="#ffd9a8" font-size="17" font-weight="700">CANDIDATE</text>
+    <text x="470" y="176" text-anchor="middle" fill="#9aa7b4" font-size="11">term++, vote self,</text>
+    <text x="470" y="190" text-anchor="middle" fill="#9aa7b4" font-size="11">RequestVote fan-out</text>
+    <!-- Leader -->
+    <circle cx="780" cy="160" r="74" fill="#1b2417" stroke="#7ee787" stroke-width="2"/>
+    <text x="780" y="155" text-anchor="middle" fill="#bff0bf" font-size="17" font-weight="700">LEADER</text>
+    <text x="780" y="176" text-anchor="middle" fill="#9aa7b4" font-size="11">send PeerState (NOOP),</text>
+    <text x="780" y="190" text-anchor="middle" fill="#9aa7b4" font-size="11">heartbeat every 1 s</text>
+    <!-- F->C -->
+    <path d="M234,150 C300,120 360,120 400,140" fill="none" stroke="#9aa7b4" stroke-width="1.6" marker-end="url(#sm)"/>
+    <text x="320" y="112" text-anchor="middle" fill="#f0c674" font-size="11">election timeout fires (4–9 s)</text>
+    <!-- C->L -->
+    <path d="M544,150 C610,120 670,120 710,140" fill="none" stroke="#9aa7b4" stroke-width="1.6" marker-end="url(#sm)"/>
+    <text x="628" y="112" text-anchor="middle" fill="#7ee787" font-size="11">wins quorum of votes</text>
+    <!-- C->C self -->
+    <path d="M440,90 C420,55 520,55 500,90" fill="none" stroke="#9aa7b4" stroke-width="1.4" marker-end="url(#sm)"/>
+    <text x="470" y="52" text-anchor="middle" fill="#9aa7b4" font-size="10.5">split vote → timeout → term++ retry</text>
+    <!-- C->F -->
+    <path d="M400,182 C360,210 300,210 234,182" fill="none" stroke="#9aa7b4" stroke-width="1.6" marker-end="url(#sm)"/>
+    <text x="320" y="230" text-anchor="middle" fill="#3fb6f0" font-size="11">sees leader / higher term</text>
+    <!-- L->F -->
+    <path d="M710,200 C620,260 320,260 200,224" fill="none" stroke="#9aa7b4" stroke-width="1.6" marker-end="url(#sm)"/>
+    <text x="470" y="282" text-anchor="middle" fill="#ff7b72" font-size="11">lost quorum (10 s) · higher term · leader overrun · stepdown</text>
+  </svg>
+  <figcaption>The standard three-state machine. Note the LEADER→FOLLOWER edge is taken proactively on <i>lost quorum</i> and <i>leader-overrun</i>, not only on seeing a higher term.</figcaption>
+  </figure>
+
+  <h3>The vote decision</h3>
+  <p><code>processVoteRequest</code> <span class="cite">raft.go:5065</span> grants a vote only when (a) the candidate's term ≥ ours, (b) we haven't already voted for someone else this term, and (c) the candidate's log is at least as up-to-date (<code>lastTerm &gt; pterm</code>, or equal term and <code>lastIndex ≥ pindex</code>) — exactly the Raft §5.4.1 "election restriction." Granting resets our election timer; if we have a <i>more</i> up-to-date log and haven't voted, we shorten our own timer to campaign sooner.</p>
+
+  <div class="callout warn"><b>NATS-specific "empty log" rule.</b> A node with an empty log (<code>pindex == 0</code>) sets the <code>empty</code> bit in its vote response. A candidate that cannot reach a normal quorum may still win only if it has heard from <b>every</b> server and the rest came back empty <span class="cite">raft.go:3811-3831</span>. This guards against electing a leader on a fresh/empty log during scale-up — a real data-loss hazard that the vanilla paper does not address.</div>
+
+  <p>Becoming leader is not instantaneous to the upper layer: <code>switchToLeader</code> immediately sends a PeerState entry (the implementation's equivalent of the Raft <i>no-op on election</i>) and defers signalling "I am leader" (<code>n.aflr</code>) until that entry — and everything before it — has been <b>applied</b>. This guarantees a new leader is caught up before it serves <span class="cite">raft.go:5304-5331</span>.</p>
+</section>
+
+<!-- =============================== TIMERS =============================== -->
+<section id="timers">
+  <h2>6 · Timers, intervals &amp; heartbeats</h2>
+
+  <figure>
+  <svg viewBox="0 0 940 200" role="img" aria-label="Timing relationships">
+    <!-- axis -->
+    <line x1="40" y1="150" x2="900" y2="150" stroke="#2a3340"/>
+    <g font-family="monospace" font-size="10" fill="#7d8a98">
+      <text x="40" y="172">0</text><text x="240" y="172">1s</text><text x="440" y="172">4s</text><text x="640" y="172">9s</text><text x="840" y="172">10s</text>
+    </g>
+    <!-- heartbeat -->
+    <g>
+      <rect x="40" y="40" width="200" height="22" rx="5" fill="#13202c" stroke="#3fb6f0"/>
+      <text x="50" y="56" fill="#cfe8ff" font-size="12" font-family="monospace">hbInterval = 1s</text>
+      <circle cx="40" cy="150" r="4" fill="#3fb6f0"/><circle cx="240" cy="150" r="4" fill="#3fb6f0"/>
+      <line x1="40" y1="62" x2="40" y2="150" stroke="#3fb6f0" stroke-dasharray="3 3"/>
+      <line x1="240" y1="62" x2="240" y2="150" stroke="#3fb6f0" stroke-dasharray="3 3"/>
+    </g>
+    <!-- election window -->
+    <g>
+      <rect x="440" y="74" width="200" height="22" rx="5" fill="#241a0e" stroke="#f0c674"/>
+      <text x="450" y="90" fill="#ffd9a8" font-size="12" font-family="monospace">election timeout: rand[4s,9s]</text>
+      <rect x="440" y="100" width="200" height="40" fill="#f0c674" opacity="0.10"/>
+      <line x1="440" y1="96" x2="440" y2="150" stroke="#f0c674" stroke-dasharray="3 3"/>
+      <line x1="640" y1="96" x2="640" y2="150" stroke="#f0c674" stroke-dasharray="3 3"/>
+    </g>
+    <!-- lost quorum -->
+    <g>
+      <rect x="40" y="110" width="800" height="22" rx="5" fill="#22120e" stroke="#ff7b72"/>
+      <text x="50" y="126" fill="#ff9b94" font-size="12" font-family="monospace">lostQuorumInterval = 10s (leader steps down if no quorum heard)</text>
+      <line x1="840" y1="132" x2="840" y2="150" stroke="#ff7b72" stroke-dasharray="3 3"/>
+    </g>
+    <text x="470" y="24" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="700">Heartbeat ≪ election timeout ≪ failure-detection window</text>
+  </svg>
+  <figcaption>The ratios satisfy the Raft paper's guidance (broadcast ≪ election timeout), but the absolute values are an order of magnitude larger than the paper's 150–300 ms — a deliberate trade favoring stability over a pub/sub transport.</figcaption>
+  </figure>
+
+  <table>
+    <tr><th>Constant</th><th>Default</th><th>Role</th><th class="cite">raft.go</th></tr>
+    <tr><td><code>minElectionTimeout</code> / <code>maxElectionTimeout</code></td><td><b>4 s / 9 s</b></td><td>Randomized window a follower waits without contact before campaigning.</td><td>282-283</td></tr>
+    <tr><td><code>minCampaignTimeout</code> / <code>maxCampaignTimeout</code></td><td>100 ms / 800 ms</td><td>Short pre-campaign delay (e.g. preferred-leader transfer, faster start when log is ahead).</td><td>284-285</td></tr>
+    <tr><td><code>hbInterval</code></td><td><b>1 s</b></td><td>Leader heartbeat tick; a heartbeat is only sent if <code>notActive()</code> (no entry sent within the last 1 s).</td><td>286</td></tr>
+    <tr><td><code>lostQuorumInterval</code></td><td>10 s</td><td>A peer is "lost" if not heard from within this; a leader losing quorum steps down.</td><td>287</td></tr>
+    <tr><td><code>lostQuorumCheck</code></td><td>10 s</td><td>Ticker cadence for the leader's lost-quorum check.</td><td>288</td></tr>
+    <tr><td><i>peer-current</i> (<code>hbInterval*2</code>)</td><td>2 s</td><td>A follower is considered "current" if seen within 2×hb.</td><td>1844, 2139</td></tr>
+    <tr><td><i>healthy</i> (<code>hbInterval*3</code>)</td><td>3 s</td><td><code>Healthy()</code> liveness threshold per peer.</td><td>1993, 2008</td></tr>
+    <tr><td><code>observerModeInterval</code></td><td>48 h</td><td>Observers never campaign — election timer parked.</td><td>289</td></tr>
+    <tr><td><code>peerRemoveTimeout</code></td><td>5 min</td><td>Grace before a removed peer can be re-tracked.</td><td>290</td></tr>
+    <tr><td><code>pauseQuorumThreshold</code></td><td>100,000</td><td>Uncommitted/​unapplied backlog at which the leader self-steps-down (overrun).</td><td>4669</td></tr>
+    <tr><td><code>paeDropThreshold</code></td><td>20,000</td><td>In-memory pending-append-entry cache cap before dropping (forces WAL reload on apply).</td><td>4670</td></tr>
+  </table>
+
+  <div class="callout"><b>Heartbeats are lazy and piggybacked.</b> Real data <code>appendEntry</code>s double as heartbeats. The dedicated <code>sendHeartbeat()</code> (an empty append entry) only fires when the leader has been idle &gt; <code>hbInterval</code> <span class="cite">raft.go:3214-3216, 4816</span>. After a commit advances, the leader also pushes one extra heartbeat so followers can apply promptly without waiting a full tick <span class="cite">raft.go:4583-4585</span>.</div>
+</section>
+
+<!-- =============================== COMMIT =============================== -->
+<section id="commit">
+  <h2>7 · Replication &amp; commit engine</h2>
+  <p>The leader batches proposals (≤ 256 KB or ≤ 512 entries), writes them to <b>its own WAL first</b>, fans out, then commits on quorum. Two correctness rules from the paper are implemented precisely:</p>
+  <div class="grid2">
+    <div class="callout good"><b>Quorum counts the leader.</b> <code>tryCommit</code> adds 1 for the leader itself (if still a member) and requires <code>acks ≥ qn = csz/2+1</code> <span class="cite">raft.go:3642-3661</span>.</div>
+    <div class="callout good"><b>Only current-term entries commit by counting.</b> <code>trackResponse</code> ignores acks where <code>ar.term != n.term</code> — earlier-term entries are committed only indirectly, matching Raft §5.4.2 / Figure 8 <span class="cite">raft.go:3686</span>.</div>
+  </div>
+  <p>Committed entries are pushed onto the <b>ApplyQ</b>; the upper layer (stream/consumer monitor) applies them and calls <code>Applied(index)</code> back, which advances the snapshot/compaction watermark and can release the new-leader latch.</p>
+</section>
+
+<!-- =============================== PUBLISH =============================== -->
+<section id="publish">
+  <h2>8 · End-to-end: publishing a message</h2>
+  <p>A producer publishes to a clustered (R&gt;1) stream subject. The PubAck is returned only after the message is <b>committed (quorum-durable in Raft WALs)</b> and <b>applied (written to the leader's stream store)</b>.</p>
+
+  <figure>
+  <svg viewBox="0 0 940 560" role="img" aria-label="Publish sequence">
+    <defs><marker id="m1" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#7ee787"/></marker>
+    <marker id="m2" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#3fb6f0"/></marker>
+    <marker id="m3" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#bc8cff"/></marker></defs>
+    <!-- lifelines -->
+    <g font-size="12" font-weight="700" text-anchor="middle">
+      <rect x="40"  y="20" width="120" height="30" rx="6" fill="#101820" stroke="#356"/><text x="100" y="40" fill="#cfe8ff">Producer</text>
+      <rect x="240" y="20" width="150" height="30" rx="6" fill="#1b2417" stroke="#7a5"/><text x="315" y="40" fill="#ffd">Stream LEADER</text>
+      <rect x="470" y="20" width="150" height="30" rx="6" fill="#0e1a24" stroke="#356"/><text x="545" y="40" fill="#cfe8ff">Followers (×2)</text>
+      <rect x="700" y="20" width="100" height="30" rx="6" fill="#13202c" stroke="#356"/><text x="750" y="40" fill="#cfe8ff">WAL</text>
+      <rect x="820" y="20" width="100" height="30" rx="6" fill="#221a2e" stroke="#86c"/><text x="870" y="40" fill="#cbb3ff">ApplyQ/Store</text>
+    </g>
+    <g stroke="#2a3340" stroke-dasharray="3 4">
+      <line x1="100" y1="50" x2="100" y2="540"/><line x1="315" y1="50" x2="315" y2="540"/>
+      <line x1="545" y1="50" x2="545" y2="540"/><line x1="750" y1="50" x2="750" y2="540"/><line x1="870" y1="50" x2="870" y2="540"/>
+    </g>
+    <!-- steps -->
+    <g font-family="monospace" font-size="11">
+      <line x1="100" y1="78" x2="312" y2="78" stroke="#7ee787" marker-end="url(#m1)"/>
+      <text x="206" y="72" fill="#9be29b" text-anchor="middle">PUB foo  (reply=inbox)</text>
+      <text x="120" y="96" fill="#9aa7b4">processInboundJetStreamMsg → mset.msgs queue</text>
+
+      <line x1="315" y1="118" x2="315" y2="118"/>
+      <rect x="245" y="108" width="140" height="20" fill="#1b2417" stroke="#7a5"/><text x="315" y="122" fill="#ffd" text-anchor="middle">Propose(EntryNormal)</text>
+      <text x="250" y="142" fill="#9aa7b4">commitSingleMsg → encodeStreamMsg(streamMsgOp)</text>
+
+      <line x1="315" y1="162" x2="748" y2="162" stroke="#7a5" stroke-dasharray="2 2" marker-end="url(#m2)"/>
+      <text x="530" y="156" fill="#9aa7b4" text-anchor="middle">storeToWAL (leader first) → pindex++</text>
+
+      <line x1="315" y1="190" x2="542" y2="190" stroke="#7ee787" marker-end="url(#m1)"/>
+      <text x="430" y="184" fill="#9be29b" text-anchor="middle">PUB $NRG.AE.&lt;grp&gt; (appendEntry)</text>
+      <line x1="545" y1="214" x2="748" y2="214" stroke="#356" stroke-dasharray="2 2" marker-end="url(#m2)"/>
+      <text x="640" y="208" fill="#9aa7b4" text-anchor="middle">followers storeToWAL</text>
+
+      <line x1="542" y1="244" x2="318" y2="244" stroke="#3fb6f0" marker-end="url(#m2)"/>
+      <text x="430" y="238" fill="#7cc7f0" text-anchor="middle">reply → areply: appendEntryResponse(success)</text>
+
+      <rect x="240" y="262" width="150" height="38" fill="#0f1a12" stroke="#3a6"/>
+      <text x="315" y="278" fill="#9be29b" text-anchor="middle" font-size="10.5">trackResponse + tryCommit</text>
+      <text x="315" y="292" fill="#9be29b" text-anchor="middle" font-size="10.5">acks(1 self+1) ≥ qn ✓ COMMIT</text>
+
+      <line x1="315" y1="320" x2="868" y2="320" stroke="#bc8cff" marker-end="url(#m3)"/>
+      <text x="590" y="314" fill="#cbb3ff" text-anchor="middle">applyCommit → push CommittedEntry → ApplyQ</text>
+
+      <rect x="800" y="338" width="120" height="54" fill="#1d1726" stroke="#86c"/>
+      <text x="860" y="356" fill="#cbb3ff" text-anchor="middle" font-size="10.5">monitorStream pops</text>
+      <text x="860" y="370" fill="#cbb3ff" text-anchor="middle" font-size="10.5">applyStreamMsgOp</text>
+      <text x="860" y="384" fill="#cbb3ff" text-anchor="middle" font-size="10.5">store.StoreMsg ✓</text>
+
+      <line x1="800" y1="418" x2="318" y2="418" stroke="#bc8cff" marker-end="url(#m3)"/>
+      <text x="560" y="412" fill="#cbb3ff" text-anchor="middle">processJetStreamMsg assigns seq</text>
+
+      <line x1="315" y1="448" x2="102" y2="448" stroke="#7ee787" marker-end="url(#m1)"/>
+      <text x="206" y="442" fill="#9be29b" text-anchor="middle">+OK PubAck{stream,seq}</text>
+
+      <line x1="868" y1="478" x2="318" y2="478" stroke="#9aa7b4" marker-end="url(#m2)"/>
+      <text x="590" y="472" fill="#9aa7b4" text-anchor="middle">n.Applied(index) → advance compaction watermark</text>
+    </g>
+    <rect x="40" y="500" width="880" height="40" rx="8" fill="#0e131a" stroke="#2a3340"/>
+    <text x="56" y="525" fill="#cdd7e1" font-size="12">Durability contract: PubAck ⇒ entry is in a quorum of Raft WALs <b>and</b> in the leader's stream store. Error/duplicate PubAcks are sent <i>before</i> proposing.</text>
+  </svg>
+  <figcaption>Publish path. Two encoding layers stack: a Raft <code>Entry{EntryNormal}</code> wrapping a <code>streamMsgOp</code> payload. <span class="cite">jetstream_cluster.go:10048, 9893 · jetstream_batching.go:1064 · raft.go:3177,4683,3642 · stream.go:6960,7097</span></figcaption>
+  </figure>
+</section>
+
+<!-- =============================== CONSUME =============================== -->
+<section id="consume">
+  <h2>9 · End-to-end: consume + acknowledge (WorkQueue)</h2>
+  <p>WorkQueue retention deletes a message once it is acknowledged. On a clustered stream this is the most consensus-heavy flow in the system: <b>a single client ACK drives two serialized Raft rounds</b> — first on the consumer group (record the ack), then on the stream group (delete the message).</p>
+
+  <h4>Delivery is also quorum-gated</h4>
+  <p>For a clustered consumer with an ack policy other than <code>AckNone</code>, <code>deliverMsg</code> first proposes <code>updateDeliveredOp</code> and parks the message in <code>pendingDeliveries</code>; the client only receives it after that delivered-state commits <span class="cite">consumer.go:5645-5688 · jetstream_cluster.go:6858-6873</span>. This prevents a just-failed-over leader from re-delivering inconsistently.</p>
+
+  <figure>
+  <svg viewBox="0 0 940 600" role="img" aria-label="WorkQueue ack sequence">
+    <defs><marker id="c1" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#7ee787"/></marker>
+    <marker id="c2" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#bc8cff"/></marker>
+    <marker id="c3" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#ff9bce"/></marker></defs>
+    <g font-size="11.5" font-weight="700" text-anchor="middle">
+      <rect x="30"  y="20" width="110" height="30" rx="6" fill="#101820" stroke="#356"/><text x="85" y="40" fill="#cfe8ff">Consumer app</text>
+      <rect x="190" y="20" width="150" height="30" rx="6" fill="#2a2233" stroke="#86c"/><text x="265" y="40" fill="#cbb3ff">Consumer LEADER</text>
+      <rect x="390" y="20" width="150" height="30" rx="6" fill="#1d1726" stroke="#86c"/><text x="465" y="40" fill="#cbb3ff">CONSUMER group</text>
+      <rect x="590" y="20" width="150" height="30" rx="6" fill="#1b2417" stroke="#7a5"/><text x="665" y="40" fill="#ffd">Stream LEADER</text>
+      <rect x="790" y="20" width="140" height="30" rx="6" fill="#142117" stroke="#3a6"/><text x="860" y="40" fill="#9be29b">STREAM group</text>
+    </g>
+    <g stroke="#2a3340" stroke-dasharray="3 4">
+      <line x1="85" y1="50" x2="85" y2="582"/><line x1="265" y1="50" x2="265" y2="582"/>
+      <line x1="465" y1="50" x2="465" y2="582"/><line x1="665" y1="50" x2="665" y2="582"/><line x1="860" y1="50" x2="860" y2="582"/>
+    </g>
+    <g font-family="monospace" font-size="10.5">
+      <!-- delivery -->
+      <line x1="265" y1="76" x2="463" y2="76" stroke="#bc8cff" marker-end="url(#c2)"/>
+      <text x="365" y="70" fill="#cbb3ff" text-anchor="middle">Propose updateDeliveredOp</text>
+      <line x1="465" y1="98" x2="267" y2="98" stroke="#bc8cff" stroke-dasharray="2 2" marker-end="url(#c2)"/>
+      <text x="365" y="112" fill="#9aa7b4" text-anchor="middle">commit → pop pendingDeliveries</text>
+      <line x1="265" y1="134" x2="88" y2="134" stroke="#7ee787" marker-end="url(#c1)"/>
+      <text x="176" y="128" fill="#9be29b" text-anchor="middle">deliver msg (seq=S)</text>
+
+      <!-- ack round 1 -->
+      <line x1="85" y1="174" x2="263" y2="174" stroke="#7ee787" marker-end="url(#c1)"/>
+      <text x="176" y="168" fill="#9be29b" text-anchor="middle">PUB ack (+ACK)</text>
+      <text x="100" y="192" fill="#9aa7b4">processAck → processAckMsgLocked</text>
+      <text x="100" y="206" fill="#ff9b94">node≠nil ⇒ ackInPlace=false (stream untouched here)</text>
+
+      <rect x="190" y="216" width="150" height="20" fill="#2a2233" stroke="#86c"/>
+      <text x="265" y="230" fill="#cbb3ff" text-anchor="middle">updateAcks → Propose</text>
+      <line x1="265" y1="252" x2="463" y2="252" stroke="#bc8cff" marker-end="url(#c2)"/>
+      <text x="365" y="246" fill="#cbb3ff" text-anchor="middle">ROUND ① updateAcksOp</text>
+      <line x1="465" y1="274" x2="267" y2="274" stroke="#bc8cff" stroke-dasharray="2 2" marker-end="url(#c2)"/>
+      <text x="365" y="288" fill="#9aa7b4" text-anchor="middle">commit on consumer quorum</text>
+
+      <rect x="190" y="300" width="150" height="34" fill="#1d1726" stroke="#86c"/>
+      <text x="265" y="316" fill="#cbb3ff" text-anchor="middle" font-size="10">applyConsumerEntries</text>
+      <text x="265" y="329" fill="#cbb3ff" text-anchor="middle" font-size="10">processReplicatedAck</text>
+
+      <!-- bridge -->
+      <line x1="265" y1="356" x2="663" y2="356" stroke="#ff9bce" marker-end="url(#c3)"/>
+      <text x="464" y="350" fill="#ff9bce" text-anchor="middle">mset.ackMsg(seq) — noInterest? (WQ: unique consumer ⇒ yes)</text>
+
+      <!-- ack round 2 -->
+      <rect x="590" y="372" width="150" height="20" fill="#1b2417" stroke="#7a5"/>
+      <text x="665" y="386" fill="#ffd" text-anchor="middle">ForwardProposal(delete)</text>
+      <line x1="665" y1="408" x2="858" y2="408" stroke="#7ee787" marker-end="url(#c1)"/>
+      <text x="762" y="402" fill="#9be29b" text-anchor="middle">ROUND ② deleteMsgOp</text>
+      <line x1="858" y1="430" x2="667" y2="430" stroke="#7ee787" stroke-dasharray="2 2" marker-end="url(#c1)"/>
+      <text x="762" y="444" fill="#9aa7b4" text-anchor="middle">commit on stream quorum</text>
+
+      <rect x="590" y="458" width="150" height="20" fill="#142117" stroke="#3a6"/>
+      <text x="665" y="472" fill="#9be29b" text-anchor="middle">removeMsg(seq) on all replicas</text>
+
+      <line x1="265" y1="506" x2="88" y2="506" stroke="#7ee787" marker-end="url(#c1)"/>
+      <text x="176" y="500" fill="#9be29b" text-anchor="middle">+OK ack reply (if requested)</text>
+    </g>
+    <rect x="30" y="528" width="900" height="54" rx="8" fill="#22120e" stroke="#6e2b2b"/>
+    <text x="46" y="550" fill="#ffd0c8" font-size="12" font-weight="700">Two-round consensus per ACK.</text>
+    <text x="46" y="568" fill="#cdd7e1" font-size="11.5">Round ① (consumer group) records the ack/floor; only after it commits does Round ② (stream group) delete the message. Limits-retention streams skip both stream rounds — messages age out by limits, never on ack.</text>
+  </svg>
+  <figcaption>WorkQueue consume+ack. <span class="cite">consumer.go:2730,3619(ackInPlace@3669),3736 · jetstream_cluster.go:6976,7017 · stream.go:8886,8963 · jetstream_cluster.go:4158</span></figcaption>
+  </figure>
+
+  <h4>Consumer Raft entry ops &amp; ack policies</h4>
+  <div class="grid2">
+    <div class="card">
+      <table style="margin:0">
+        <tr><th>Op</th><th>Meaning</th></tr>
+        <tr><td><code>updateDeliveredOp</code></td><td>message delivered (dseq,sseq,dc,ts)</td></tr>
+        <tr><td><code>updateAcksOp</code></td><td>message acked (dseq,sseq)</td></tr>
+        <tr><td><code>updateSkipOp</code></td><td>filtered consumer skipped ahead</td></tr>
+        <tr><td><code>addPendingRequest</code>/<code>remove…</code></td><td>track in-flight pull waiters</td></tr>
+        <tr><td><code>resetSeqOp</code></td><td>reset start sequence (quorum-gated)</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h4 style="margin-top:0">Ack policy → Raft cost</h4>
+      <ul class="tight">
+        <li><b>AckExplicit</b> — one <code>updateAcksOp</code> <i>per message</i>; <code>Pending</code>/<code>Redelivered</code> maps replicated. WorkQueue forces this.</li>
+        <li><b>AckAll</b> — one op covers a whole range; apply reconstructs the gap and removes each seq. Fewer proposals.</li>
+        <li><b>AckNone</b> — no client acks; delivery <i>not</i> quorum-gated; removal driven from <code>deliverMsg</code> (still an <code>updateAcksOp</code> for clustered non-direct).</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- =============================== ELECTION SEQ =============================== -->
+<section id="electseq">
+  <h2>10 · End-to-end: a leader election</h2>
+  <figure>
+  <svg viewBox="0 0 940 420" role="img" aria-label="Election sequence">
+    <defs><marker id="e1" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#f0c674"/></marker>
+    <marker id="e2" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#3fb6f0"/></marker>
+    <marker id="e3" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L9,3 L0,6 Z" fill="#7ee787"/></marker></defs>
+    <g font-size="12" font-weight="700" text-anchor="middle">
+      <rect x="60"  y="20" width="160" height="30" rx="6" fill="#22120e" stroke="#6e2b2b"/><text x="140" y="40" fill="#ff9b94">old LEADER (crashes)</text>
+      <rect x="380" y="20" width="160" height="30" rx="6" fill="#241a0e" stroke="#a83"/><text x="460" y="40" fill="#ffd9a8">Node B → CANDIDATE</text>
+      <rect x="700" y="20" width="160" height="30" rx="6" fill="#0e1a24" stroke="#356"/><text x="780" y="40" fill="#cfe8ff">Node C (follower)</text>
+    </g>
+    <g stroke="#2a3340" stroke-dasharray="3 4"><line x1="140" y1="50" x2="140" y2="400"/><line x1="460" y1="50" x2="460" y2="400"/><line x1="780" y1="50" x2="780" y2="400"/></g>
+    <g font-family="monospace" font-size="11">
+      <rect x="60" y="70" width="160" height="22" fill="#22120e" stroke="#6e2b2b"/><text x="140" y="85" fill="#ff9b94" text-anchor="middle">✗ heartbeats stop</text>
+      <text x="460" y="120" fill="#f0c674" text-anchor="middle">elect timer fires (4–9 s)</text>
+      <rect x="385" y="128" width="150" height="36" fill="#241a0e" stroke="#a83"/>
+      <text x="460" y="144" fill="#ffd9a8" text-anchor="middle" font-size="10">switchToCandidate</text>
+      <text x="460" y="157" fill="#ffd9a8" text-anchor="middle" font-size="10">term++, vote=self, persist</text>
+      <line x1="460" y1="186" x2="778" y2="186" stroke="#f0c674" marker-end="url(#e1)"/>
+      <text x="620" y="180" fill="#f0c674" text-anchor="middle">PUB $NRG.V.&lt;grp&gt; RequestVote{term,lastTerm,lastIndex}</text>
+      <rect x="700" y="196" width="160" height="36" fill="#0e1a24" stroke="#356"/>
+      <text x="780" y="212" fill="#cfe8ff" text-anchor="middle" font-size="10">log ≥ ours? not voted?</text>
+      <text x="780" y="225" fill="#cfe8ff" text-anchor="middle" font-size="10">grant → persist term+vote</text>
+      <line x1="778" y1="252" x2="462" y2="252" stroke="#3fb6f0" marker-end="url(#e2)"/>
+      <text x="620" y="246" fill="#7cc7f0" text-anchor="middle">reply → vreply: voteResponse{granted}</text>
+      <rect x="385" y="262" width="150" height="36" fill="#0f1a12" stroke="#3a6"/>
+      <text x="460" y="278" fill="#9be29b" text-anchor="middle" font-size="10">self + grant ≥ qn ✓</text>
+      <text x="460" y="291" fill="#9be29b" text-anchor="middle" font-size="10">switchToLeader</text>
+      <line x1="460" y1="320" x2="778" y2="320" stroke="#7ee787" marker-end="url(#e3)"/>
+      <text x="620" y="314" fill="#9be29b" text-anchor="middle">PUB $NRG.AE: PeerState (NOOP) + heartbeats</text>
+      <text x="460" y="352" fill="#9aa7b4" text-anchor="middle">leadership signalled only after PeerState is applied (n.aflr)</text>
+    </g>
+    <rect x="60" y="368" width="800" height="32" rx="8" fill="#0e131a" stroke="#2a3340"/>
+    <text x="76" y="389" fill="#cdd7e1" font-size="11.5">Typical failover budget ≈ election timeout (4–9 s, randomized to avoid split votes) + 1 RTT vote round + apply of the NOOP. Split votes retry with a fresh higher term.</text>
+  </svg>
+  <figcaption>Election. The candidate self-votes, requires <code>qn = csz/2+1</code>, and (NATS extension) needs the empty-log all-hands rule if it cannot reach a normal quorum.</figcaption>
+  </figure>
+</section>
+
+<!-- =============================== SNAPSHOT =============================== -->
+<section id="snapshot">
+  <h2>11 · Snapshots, compaction &amp; catchup</h2>
+  <p>The WAL cannot grow forever. Each upper-layer monitor periodically snapshots its state and compacts the Raft log behind the snapshot. A lagging follower is brought up to date by <b>streaming entries (or a snapshot) over a private catchup inbox</b> — there is <i>no</i> dedicated snapshot subject; snapshots ride as ordinary <code>EntrySnapshot</code>/<code>EntryPeerState</code> append entries.</p>
+  <table>
+    <tr><th>Layer</th><th>Compact triggers</th><th>Min delta</th><th class="cite">jetstream_cluster.go</th></tr>
+    <tr><td>Meta</td><td>size &gt; 8 MB (configurable), or <code>NeedSnapshot()</code></td><td>30 s</td><td>1614, 1615</td></tr>
+    <tr><td>Stream</td><td>≥ 65,536 entries, or &gt; 8 MB, or CLFS moved</td><td>—</td><td>3122-3123, 3446</td></tr>
+    <tr><td>Consumer</td><td>≥ 1,024 entries, or &gt; 64 KB</td><td>10 s</td><td>6511-6512</td></tr>
+  </table>
+  <div class="callout">Catchup flow: a behind follower replies <i>unsuccessfully</i> with a catchup inbox in the reply subject; the leader runs <code>catchupFollower</code>/<code>runCatchup</code>, streaming WAL entries with a 2 MB outstanding window, or <code>sendSnapshotToFollower</code> if the follower is below the WAL's first sequence <span class="cite">raft.go:3306,3413,3440</span>. Catchup responses never count toward quorum (a key safety guard).</div>
+</section>
+
+<!-- =============================== COUNTS =============================== -->
+<section id="counts">
+  <h2>12 · Subscription budget (capacity planning)</h2>
+  <p>Subscription count scales with the number of Raft groups, which scales with streams × replicas and consumers × replicas. This is a real operational dimension on dense servers.</p>
+  <div class="grid3">
+    <div class="card kpi"><span class="v">4</span><span class="l">subs per group on a follower (AE, V, areply, vreply)</span></div>
+    <div class="card kpi"><span class="v">6</span><span class="l">subs per group on a leader (+ P, RP)</span></div>
+    <div class="card kpi"><span class="v">+1</span><span class="l">transient catchup sub while behind</span></div>
+  </div>
+  <p class="small">Per server, total ≈ Σ over (meta + each hosted stream replica + each hosted consumer replica) of 4–6. A server hosting 1,000 R3 streams each with one R3 consumer holds on the order of 1,000×~5 + 1,000×~5 + meta ≈ <b>~10k Raft subscriptions</b>, all plain (non-queue) on the internal system client.</p>
+</section>
+
+<!-- =============================== RISKS =============================== -->
+<section id="risks">
+  <h2>13 · Risks &amp; analysis vs. the Raft paper and field implementations</h2>
+  <p>Compared against Ongaro &amp; Ousterhout's Raft (the 2014 paper and Ongaro's PhD thesis) and mature implementations (etcd/raft, HashiCorp Raft, Dragonboat), the design is <b>safety-faithful in its core</b> but makes transport- and workload-specific choices that carry trade-offs.</p>
+
+  <table>
+    <tr><th>#</th><th>Finding</th><th>Severity</th><th>Detail &amp; comparison</th></tr>
+    <tr>
+      <td>R1</td><td>No Pre-Vote phase</td><td><span class="sev high">High</span></td>
+      <td><code>switchToCandidate</code> increments the term <i>before</i> soliciting votes <span class="cite">raft.go:5292</span>. A node partitioned away (or flapping) rejoins with an inflated term and forces the healthy leader to step down — the classic "disruptive server" problem. Ongaro's thesis §9.6 prescribes <b>PreVote</b> (campaign in a trial term, only bump the real term once a majority would grant). etcd/raft and HashiCorp Raft both ship PreVote. NATS partially mitigates via the large 4–9 s timeout and the empty-log rule, but the core protection is absent. <b>Recommendation:</b> add a pre-vote round.</td>
+    </tr>
+    <tr>
+      <td>R2</td><td>Coarse failure detection / stale-leader window</td><td><span class="sev med">Medium</span></td>
+      <td>CheckQuorum is implemented as a 10 s <code>lostQuorumInterval</code>/<code>lostQuorumCheck</code> <span class="cite">raft.go:287-288,3258</span>. A partitioned leader can believe it is leader for up to ~10 s. Writes still fail safely (they need quorum acks), but anything keyed off <code>Leader()</code>/<code>Current()</code> for routing or non-linearizable reads can be stale for seconds. etcd uses a leader lease tied to the (sub-second) election timeout. <b>Recommendation:</b> ensure all read/routing paths gate on quorum freshness, not just the leader flag.</td>
+    </tr>
+    <tr>
+      <td>R3</td><td>Multi-second failover by design</td><td><span class="sev med">Medium</span></td>
+      <td>Election timeout 4–9 s with a 1 s heartbeat means leader loss is detected only after several seconds, and a contended election adds more. The paper targets 150–300 ms. This is an intentional trade for stability over a pub/sub transport and WAN/gossip clusters, but applications must tolerate multi-second unavailability windows per group during failover. Many groups failing over together (e.g. node restart) amplifies the storm.</td>
+    </tr>
+    <tr>
+      <td>R4</td><td>Double-consensus for WorkQueue ack</td><td><span class="sev med">Medium</span></td>
+      <td>One client ACK = two serialized Raft rounds (consumer group, then stream group; §9). This is <i>correct</i> and deliberately ordered, but it doubles latency and write-amplification on the hottest path, and creates a window where the ack is committed but the delete is not. Idempotency (pre-acks, dedupe, redelivery-on-recover) covers it, but exactly-once consumers must understand that a crash between rounds can surface as a redelivery. Contrast: a single-log design (consumer+stream colocated) would need one round, at the cost of coupling.</td>
+    </tr>
+    <tr>
+      <td>R5</td><td>Lossy transport, limited per-peer flow control</td><td><span class="sev info">Info</span></td>
+      <td>RPCs ride core NATS (at-most-once); the only outbound primitive is fire-and-forget <code>sendRPC</code> <span class="cite">raft.go:5159</span>. Raft tolerates loss by design (heartbeat/catchup recover), so this is safe, but there is no per-peer pipelining/flow-window like etcd's MsgApp (catchup has its own 2 MB window). On a saturated system, dropped append entries simply convert into catchups. Acceptable, but capacity-sensitive.</td>
+    </tr>
+    <tr>
+      <td>R6</td><td>Leader-overrun self-stepdown can cause churn</td><td><span class="sev med">Medium</span></td>
+      <td>A leader that accrues &gt; 100,000 uncommitted/unapplied entries steps down <span class="cite">raft.go:974-984</span>. Under sustained overload or a slow follower, the most up-to-date node abdicates, triggering an election; the replacement may hit the same wall → election churn. The intent ("let the system breathe") is sound, but it couples back-pressure to leadership stability. <b>Recommendation:</b> monitor <code>overrunCount</code>; prefer client-side back-pressure before the threshold.</td>
+    </tr>
+    <tr>
+      <td>R7</td><td>Forwarded proposals are unconfirmed</td><td><span class="sev low">Low</span></td>
+      <td><code>ForwardProposal</code> sends to <code>$NRG.P</code> with no reply and no ack — there's an explicit TODO to add confirmation <span class="cite">raft.go:988-998</span>. In JetStream the leader is the proposer so impact is limited, but any path relying on follower-side forwarding gets no delivery/commit guarantee.</td>
+    </tr>
+    <tr>
+      <td>R8</td><td>Pending-entry cache eviction → WAL reload</td><td><span class="sev low">Low</span></td>
+      <td>Above <code>paeDropThreshold</code> (20,000) the in-memory append-entry cache is bypassed <span class="cite">raft.go:4718-4732</span>, so <code>applyCommit</code> re-reads from the WAL — extra I/O exactly when the node is already behind. Self-limiting but worth watching under burst.</td>
+    </tr>
+    <tr>
+      <td>R9</td><td>Fail-stop on any write error</td><td><span class="sev info">Info</span></td>
+      <td>A critical WAL write error sets <code>werr</code> and <b>shuts the node down</b> <span class="cite">raft.go:4929-4965</span>. Excellent for safety (no silent corruption), but a transient disk/quota hiccup takes the replica offline until restart — a deliberate availability-for-safety trade. Out-of-space/permission errors escalate to disabling JetStream.</td>
+    </tr>
+    <tr>
+      <td>R10</td><td>8-byte (truncated-hash) node IDs</td><td><span class="sev info">Info</span></td>
+      <td><code>idLen = 8</code> from a HighwayHash of the server name <span class="cite">raft.go:2893</span>. Collision probability is negligible at realistic cluster sizes (birthday bound), but it is a truncated hash rather than a UUID; operationally, ensure server names are unique.</td>
+    </tr>
+  </table>
+
+  <h3>What the implementation gets right (highlights)</h3>
+  <div class="grid2">
+    <div class="callout good"><b>Figure-8 safety.</b> Commits only count acks for current-term entries (<code>ar.term == n.term</code>), so a new leader never commits a prior-term entry by raw vote-counting <span class="cite">raft.go:3686</span> — the subtle rule many home-grown Rafts miss.</div>
+    <div class="callout good"><b>Election restriction.</b> Votes require an equal-or-more-up-to-date log (lastTerm/lastIndex), preventing a lagging node from winning <span class="cite">raft.go:5109</span>.</div>
+    <div class="callout good"><b>Empty-log guard.</b> The <code>empty</code> vote bit + all-hands rule closes a real scale-up data-loss hole beyond the vanilla paper <span class="cite">raft.go:3811-3831</span>.</div>
+    <div class="callout good"><b>Single-server membership changes.</b> One change at a time, serialized via <code>membChangeIndex</code> — the simpler, safe approach from Raft §4 (avoids joint-consensus complexity).</div>
+    <div class="callout good"><b>Caught-up before serving.</b> A new leader withholds the leadership signal until its election NOOP (PeerState) is applied (<code>n.aflr</code>) — avoids serving stale state right after winning.</div>
+    <div class="callout good"><b>Durable PubAck contract.</b> Acks to publishers are sent only after quorum-commit <i>and</i> leader-store apply — a clear, strong durability guarantee.</div>
+  </div>
+</section>
+
+<!-- =============================== REFS =============================== -->
+<section id="refs">
+  <h2>14 · Source map</h2>
+  <div class="twocol small">
+    <p><b>Core engine</b> — <code>server/raft.go</code><br/>
+    state machine: <code>runAsFollower</code> 2576, <code>runAsCandidate</code> 3768, <code>runAsLeader</code> 3125 · election: <code>switchToCandidate</code> 5270, <code>switchToLeader</code> 5304, <code>processVoteRequest</code> 5065, <code>requestVote</code> 5141 · replication: <code>Propose</code> 911, <code>sendAppendEntry</code> 4675, <code>processAppendEntry</code> 4054, <code>processAppendEntryResponse</code> 4556, <code>tryCommit</code> 3642, <code>applyCommit</code> 3524 · subjects: <code>createInternalSubs</code> 2346, constants 2299-2305 · wire: <code>appendEntry.encode</code> 2799, <code>voteRequest</code> 4820, <code>voteResponse</code> 5015 · catchup: 3306/3413/3440 · timers: 282-302.</p>
+    <p><b>JetStream cluster</b> — <code>server/jetstream_cluster.go</code><br/>
+    <code>createRaftGroup</code> 2794 · entry ops 122-153 · publish <code>processClusteredInboundMsg</code> 10048 · encode <code>encodeStreamMsgAllowCompressAndBatch</code> 9893 · <code>monitorStream</code> 3070, <code>applyStreamEntries</code> 3918, <code>applyStreamMsgOp</code> 4374 · <code>monitorConsumer</code> 6487, <code>applyConsumerEntries</code> 6778, <code>processReplicatedAck</code> 6976 · delete apply 4158.</p>
+    <p><b>Consumer</b> — <code>server/consumer.go</code><br/>
+    node attach 1524 · <code>processAck</code> 2730 · <code>processAckMsgLocked</code> 3619 (<code>ackInPlace</code> 3669) · <code>updateDelivered</code> 2964, <code>updateAcks</code> 3015 · <code>deliverMsg</code>/<code>replicateDeliveries</code> 5620/5686 · WQ enforcement 1096-1166.</p>
+    <p><b>Stream</b> — <code>server/stream.go</code><br/>
+    ingest <code>processInboundJetStreamMsg</code> 4840 · <code>processJetStreamMsg</code> 6124 (store 6960, PubAck 7097) · <code>ackMsg</code> 8886 (delete proposal 8963) · interest check 8746.</p>
+    <p><b>Transport</b> — <code>server/sendq.go</code> (outbound), <code>server/events.go</code> (<code>systemSubscribe</code> 2845), <code>server/jetstream_batching.go</code> (<code>commitSingleMsg</code> 1059), <code>server/store.go</code> (<code>ConsumerState</code> 387).</p>
+    <p><b>External references</b><br/>
+    D. Ongaro &amp; J. Ousterhout, “In Search of an Understandable Consensus Algorithm (Extended)”, 2014. · D. Ongaro, “Consensus: Bridging Theory and Practice” (PhD thesis, 2014) — §4 membership, §9.6 PreVote. · etcd-io/raft, hashicorp/raft, lni/dragonboat for field comparison.</p>
+  </div>
+  <hr class="soft"/>
+  <p class="footnote">Line numbers reflect the working tree at report-generation time and may drift with future edits. All findings were derived by reading the source in this repository; no code was modified.</p>
+</section>
+
+</main>
+</div>
+</body>
+</html>
