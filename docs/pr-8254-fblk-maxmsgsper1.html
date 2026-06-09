@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NATS Filestore: fblk stale for MaxMsgsPerSubject=1 (PR #8254)</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a212b;
+    --panel-2: #222b36;
+    --text: #e6edf3;
+    --muted: #9aa7b4;
+    --accent: #27aae1;
+    --green: #3fb950;
+    --red: #f85149;
+    --amber: #d29922;
+    --border: #2d3743;
+    --code-bg: #11161c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; }
+  header.hero {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  .tag {
+    display: inline-block;
+    font-size: .72rem;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    padding: .25rem .6rem;
+    border-radius: 999px;
+    background: rgba(39,170,225,.15);
+    color: var(--accent);
+    border: 1px solid rgba(39,170,225,.4);
+  }
+  .tag.fix { background: rgba(63,185,80,.12); color: var(--green); border-color: rgba(63,185,80,.4); }
+  h1 { font-size: 1.9rem; margin: .9rem 0 .4rem; line-height: 1.25; }
+  h2 {
+    font-size: 1.3rem; margin: 2.4rem 0 .8rem;
+    padding-top: 1.2rem; border-top: 1px solid var(--border);
+  }
+  h3 { font-size: 1.05rem; margin: 1.4rem 0 .5rem; color: var(--accent); }
+  .sub { color: var(--muted); font-size: 1.02rem; }
+  a { color: var(--accent); }
+  code {
+    font-family: "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+    background: var(--code-bg);
+    padding: .12em .4em;
+    border-radius: 4px;
+    font-size: .88em;
+    border: 1px solid var(--border);
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+    overflow-x: auto;
+    font-size: .85rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; border: none; padding: 0; }
+  .k { color: #ff7b72; }
+  .c { color: #8b949e; font-style: italic; }
+  .s { color: #a5d6ff; }
+  .fn { color: #d2a8ff; }
+  .add { color: var(--green); }
+  .del { color: var(--red); }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.1rem 1.3rem;
+    margin: 1.2rem 0;
+  }
+  .callout { border-left: 4px solid var(--accent); }
+  .callout.bug { border-left-color: var(--red); }
+  .callout.good { border-left-color: var(--green); }
+  .callout.warn { border-left-color: var(--amber); }
+  .callout h3 { margin-top: 0; }
+  ul, ol { padding-left: 1.3rem; }
+  li { margin: .3rem 0; }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 1.5rem;
+    font-size: .9rem; color: var(--muted); margin-top: .8rem;
+  }
+  .meta b { color: var(--text); font-weight: 600; }
+  table {
+    border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92rem;
+  }
+  th, td { border: 1px solid var(--border); padding: .6rem .8rem; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); }
+  td.yes { color: var(--green); font-weight: 600; }
+  td.no { color: var(--red); font-weight: 600; }
+  .steps { counter-reset: step; list-style: none; padding-left: 0; }
+  .steps li {
+    position: relative; padding: .7rem 0 .7rem 3rem; border-bottom: 1px dashed var(--border);
+  }
+  .steps li:last-child { border-bottom: none; }
+  .steps li::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 0; top: .7rem;
+    width: 1.9rem; height: 1.9rem; border-radius: 50%;
+    background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--accent); font-weight: 700;
+    display: flex; align-items: center; justify-content: center; font-size: .9rem;
+  }
+  .blocks { display: flex; gap: .5rem; flex-wrap: wrap; margin: .6rem 0; }
+  .blk {
+    border: 1px solid var(--border); border-radius: 6px; padding: .5rem .7rem;
+    background: var(--panel-2); font-family: monospace; font-size: .82rem; text-align: center;
+    min-width: 64px;
+  }
+  .blk .lbl { display: block; color: var(--muted); font-size: .7rem; margin-bottom: .25rem; }
+  .blk.has { border-color: var(--green); }
+  .blk.empty { opacity: .45; }
+  .blk.ptr-old { box-shadow: 0 0 0 2px var(--red) inset; }
+  .blk.ptr-new { box-shadow: 0 0 0 2px var(--green) inset; }
+  .legend { font-size: .82rem; color: var(--muted); margin-top: .3rem; }
+  .xref {
+    background: rgba(39,170,225,.08);
+    border: 1px solid rgba(39,170,225,.3);
+    border-radius: 8px; padding: .8rem 1.1rem; margin: 1.2rem 0; font-size: .95rem;
+  }
+  footer {
+    margin-top: 3rem; padding-top: 1.2rem; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: .85rem;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <span class="tag fix">Bug Fix</span>
+    <h1>Filestore only stores the last block when <code>MaxMsgsPerSubject = 1</code></h1>
+    <p class="sub">A stale per-subject <code>fblk</code> pointer makes a single-message subject unreadable after restart &mdash; the
+      <code>MaxMsgsPerSubject&nbsp;=&nbsp;1</code> sibling of the FIFO bug in PR #8285.</p>
+    <div class="meta">
+      <span><b>PR:</b> <a href="https://github.com/nats-io/nats-server/pull/8254">nats-io/nats-server#8254</a></span>
+      <span><b>Files:</b> <code>filestore.go</code>, <code>memstore.go</code></span>
+      <span><b>Affects:</b> <code>MaxMsgsPerSubject = 1</code> (incl. default KV)</span>
+      <span><b>Trigger:</b> replace-on-publish + restart</span>
+    </div>
+  </header>
+
+  <div class="xref">
+    <b>Relationship to PR #8285.</b> These two fixes are the same bug family &mdash; a lazily-updated per-subject first-block
+    pointer (<code>fblk</code>) that becomes stale and gets persisted as the <i>only</i> pointer for a single-message subject.
+    <b>#8254 (this report)</b> covers the <code>MaxMsgsPerSubject&nbsp;=&nbsp;1</code> &ldquo;replace the previous message&rdquo;
+    path. <b>#8285</b> covers the <code>MaxMsgsPerSubject&nbsp;&gt;&nbsp;1</code> FIFO-eviction path. Together they close both
+    ways a subject can be trimmed down to one surviving message in a later block.
+  </div>
+
+  <h2>TL;DR</h2>
+  <div class="panel callout">
+    <p>For each subject the filestore keeps <code>fblk</code> (first block) and <code>lblk</code> (last block) so lookups
+    scan only the relevant block range. When <code>MaxMsgsPerSubject = 1</code>, publishing a new message for a subject
+    <b>replaces</b> the previous one: the new copy lands in the current (later) block and the old copy is removed. The code
+    updated <code>lblk</code> to the new block but left <code>fblk</code> pointing at the <b>old, now-empty</b> block. Because
+    a single-message subject persists <b>only <code>fblk</code></b> to <code>index.db</code>, that stale value survived a
+    restart and the message became unreadable. PR #8254 adds a one-line correction &mdash; when a subject is down to one
+    message under a per-subject limit of 1, set <code>fblk = lblk</code> &mdash; plus a related fix so switching a stream to a
+    per-subject limit actually enforces it.</p>
+  </div>
+
+  <h2>Background: <code>fblk</code> / <code>lblk</code> and how single-message subjects persist</h2>
+  <p>A file-backed stream is split into many on-disk blocks (<code>1.blk</code>, <code>2.blk</code>, &hellip;). Per subject the
+  store keeps a small record:</p>
+  <pre><code><span class="k">type</span> psi <span class="k">struct</span> {
+    total uint64  <span class="c">// messages currently stored for this subject</span>
+    fblk  uint32  <span class="c">// first block holding a message for this subject</span>
+    lblk  uint32  <span class="c">// last block holding a message for this subject</span>
+}</code></pre>
+  <p>Lookups use <code>[fblk .. lblk]</code> as a search window. The critical detail (shared with #8285): when stream state is
+  snapshotted to <code>index.db</code>, a subject with <code>total == 1</code> persists only <code>total</code> and
+  <code>fblk</code>; on restore <code>lblk</code> is reconstructed as <code>lblk = fblk</code>. <b>So for a one-message subject,
+  <code>fblk</code> is the single source of truth &mdash; if it is wrong, both pointers are wrong after a restart.</b></p>
+
+  <h2>The bug: replace-on-publish leaves <code>fblk</code> behind</h2>
+  <p>With <code>MaxMsgsPerSubject = 1</code>, the store keeps exactly one message per subject. On each new publish for an
+  existing subject, the new record is appended to the current block and the previous record is removed by the per-subject
+  limit. In the store path, <code>lblk</code> is advanced to the new block&hellip;</p>
+
+  <pre><code><span class="c">// filestore.go &mdash; storeRawMsg, per-subject bookkeeping</span>
+<span class="k">if</span> info, ok = fs.psim.Find(stringToBytes(subj)); ok {
+    info.total++
+    <span class="k">if</span> index &gt; info.lblk {
+        info.lblk = index      <span class="c">// lblk advances to the new (current) block</span>
+    }
+}</code></pre>
+
+  <p>&hellip;but <code>fblk</code> is updated only <i>lazily</i> (normally corrected during a later lookup). If the old copy is
+  removed and the state is snapshotted &mdash; then the server restarts &mdash; before any lookup runs, <code>fblk</code> still
+  points at the old block, and that stale value is the only one persisted.</p>
+
+  <h3>Walkthrough (<code>MaxMsgsPerSubject = 1</code>)</h3>
+  <ol class="steps">
+    <li>Subject <code>foo</code> has its one message in block&nbsp;1. <span style="color:var(--muted)">psi = {total: 1, fblk: 1, lblk: 1}</span>
+      <div class="blocks">
+        <div class="blk has ptr-old ptr-new"><span class="lbl">blk 1</span>foo</div>
+        <div class="blk empty"><span class="lbl">blk 2</span>&mdash;</div>
+        <div class="blk empty"><span class="lbl">blk 3</span>&mdash;</div>
+      </div>
+    </li>
+    <li>A new message for <code>foo</code> is published; it lands in the current block&nbsp;3. <code>lblk</code> advances to 3.
+      The per-subject limit (1) removes the old copy in block&nbsp;1. <code>fblk</code> is <b>not</b> recomputed (lazy).
+      <div class="blocks">
+        <div class="blk empty ptr-old"><span class="lbl">blk 1</span>&mdash;</div>
+        <div class="blk empty"><span class="lbl">blk 2</span>&mdash;</div>
+        <div class="blk has ptr-new"><span class="lbl">blk 3</span>foo</div>
+      </div>
+      <span style="color:var(--muted)">psi = {total: 1, <span style="color:var(--red)">fblk: 1 (stale!)</span>, lblk: 3}</span>
+      <div class="legend"><span style="color:var(--red)">red</span> = <code>fblk</code> &middot; <span style="color:var(--green)">green</span> = <code>lblk</code></div>
+    </li>
+    <li>State is snapshotted to <code>index.db</code>. Because <code>total == 1</code>, only <code>fblk = 1</code> is written.</li>
+    <li>Server restarts &rarr; <code>fblk = 1</code>, <code>lblk = fblk = 1</code>. The search window collapses onto block&nbsp;1.</li>
+    <li><b>A lookup for <code>foo</code> scans only block&nbsp;1, finds nothing, and the live message in block&nbsp;3 is invisible.</b></li>
+  </ol>
+
+  <h2>The fix (PR #8254)</h2>
+  <h3>1. Correct <code>fblk</code> for single-message subjects</h3>
+  <p>After the per-subject bookkeeping, if the subject is down to a single message under a per-subject limit of 1, eagerly snap
+  <code>fblk</code> to <code>lblk</code> so the persisted pointer references where the message actually is:</p>
+  <pre><code><span class="c">// If we only ever store one/last message for a subject,</span>
+<span class="c">// can correct the first block to where we&rsquo;ve just written.</span>
+<span class="k">if</span> info != <span class="k">nil</span> &amp;&amp; info.total == <span class="s">1</span> &amp;&amp; mmp == <span class="s">1</span> {
+    <span class="add">info.fblk = info.lblk</span>
+}</code></pre>
+  <p>Now at step&nbsp;2 above, <code>fblk</code> becomes 3, the persisted pointer is correct, and after restart the lookup finds
+  the message. (This is the exact correction PR #8285 later restored/extended to the <code>MaxMsgsPer&nbsp;&gt;&nbsp;1</code>
+  FIFO path on the 2.12 line.)</p>
+
+  <h3>2. Actually enforce the limit when config switches to per-subject</h3>
+  <p>The condition that decides whether to run per-subject enforcement on a config update was tightened from <code>== 0</code>
+  to <code>&le; 0</code>, so a transition from <i>unlimited</i> (<code>-1</code>) to a positive limit is correctly treated as
+  &ldquo;newly limited&rdquo; and triggers a trim:</p>
+  <pre><code><span class="c">// filestore.go &mdash; on UpdateConfig</span>
+<span class="k">if</span> fs.cfg.MaxMsgsPer &gt; <span class="s">0</span> &amp;&amp; (old_cfg.MaxMsgsPer <span class="add">&lt;= 0</span> || fs.cfg.MaxMsgsPer &lt; old_cfg.MaxMsgsPer) {
+    fs.<span class="fn">enforceMsgPerSubjectLimit</span>(<span class="k">true</span>)
+}</code></pre>
+  <p>Before the fix, <code>old == 0</code> would be false when the previous value was <code>-1</code> (unlimited), so enabling a
+  per-subject limit on an existing stream would silently skip enforcement, leaving over-limit subjects untrimmed (and, combined
+  with issue #1, prone to the stale-pointer problem).</p>
+
+  <h3>3. Memstore parity</h3>
+  <p>The same <code>&le; 0</code> enforcement-trigger condition was mirrored in <code>memstore.go</code> for consistency. (The
+  stale-<code>fblk</code> persistence problem itself is filestore-only, since memory stores have no <code>index.db</code> and do
+  not survive a restart.)</p>
+  <pre><code><span class="c">// memstore.go</span>
+<span class="k">if</span> ms.maxp &gt; <span class="s">0</span> &amp;&amp; (maxp <span class="add">&lt;= 0</span> || ms.maxp &lt; maxp) {
+    <span class="c">// enforce new per-subject limit</span>
+}</code></pre>
+
+  <div class="panel callout good">
+    <h3>Tests</h3>
+    <p>Added coverage in <code>server/filestore_test.go</code> and <code>server/store_test.go</code> verifying that a message
+    stays retrievable after a config update to <code>MaxMsgsPerSubject = 1</code> and after a server restart &mdash; i.e. that
+    <code>fblk</code> is no longer stale.</p>
+  </div>
+
+  <h2>Which configurations are affected</h2>
+  <p>Two conditions must hold:</p>
+  <div class="panel callout">
+    <ol>
+      <li><b>File storage</b> &mdash; the bug only manifests across a restart via <code>index.db</code>; memory streams are immune.</li>
+      <li><b><code>MaxMsgsPerSubject = 1</code></b> &mdash; the replace-on-publish path that strands <code>fblk</code> when a
+      subject&rsquo;s single message moves to a newer block.</li>
+    </ol>
+    <p style="margin-bottom:0">A secondary exposure: enabling a per-subject limit on a stream that previously had none
+    (<code>-1</code> &rarr; positive) did not enforce the limit before the fix.</p>
+  </div>
+
+  <h3>Examples that ARE affected</h3>
+  <pre><code>{
+  <span class="s">"name"</span>: <span class="s">"LATEST"</span>,
+  <span class="s">"storage"</span>: <span class="s">"file"</span>,
+  <span class="s">"subjects"</span>: [<span class="s">"state.&gt;"</span>],
+  <span class="s">"max_msgs_per_subject"</span>: <span class="s">1</span>     <span class="c">// keep only the latest value per subject</span>
+}</code></pre>
+  <p>&ldquo;Last value cache&rdquo; / latest-state streams are the classic shape here: one retained message per subject,
+  overwritten on each publish.</p>
+
+  <div class="panel callout bug">
+    <h3>KV buckets &mdash; the default is affected</h3>
+    <p>A KV bucket maps to a stream with <code>MaxMsgsPerSubject = history</code>, and the <b>default history is 1</b>. So an
+    ordinary file-backed KV bucket created without an explicit history sits exactly on this bug:</p>
+    <pre><code>nats kv add CONFIG --storage=file        <span class="c">// history defaults to 1 -> affected by #8254</span>
+nats kv add CONFIG --storage=file --history=5  <span class="c">// history &gt; 1 -> affected by #8285 instead</span></code></pre>
+    <p style="margin-bottom:0">After a restart, an affected key can appear <b>missing</b> on <code>kv.Get</code> even though the
+    value is intact on disk, and conditional writes mis-evaluate (see next section). Note this is the mirror image of #8285:
+    <b>#8254 hits <code>history = 1</code> (the default), #8285 hits <code>history &gt; 1</code></b> &mdash; between them, KV
+    buckets at any history were exposed on affected releases.</p>
+  </div>
+
+  <h3>Not affected</h3>
+  <ul>
+    <li><b>Memory storage</b> &mdash; no <code>index.db</code>, no restart-restore path.</li>
+    <li><b><code>MaxMsgsPerSubject &gt; 1</code></b> &mdash; a different path (covered by PR #8285), not this fix.</li>
+    <li><b>No per-subject limit at all</b> (<code>-1</code>) &mdash; nothing trims the subject to a single stale-pointer message.</li>
+  </ul>
+
+  <h2>Knock-on effect: <code>Nats-Expected-Last-Subject-Sequence</code></h2>
+  <p>As with #8285, the damage isn&rsquo;t limited to plain reads. The per-subject optimistic-concurrency header is evaluated
+  via <code>store.LoadLastMsg(subject)</code> &rarr; <code>loadLast</code>, which scans backwards over the same
+  <code>[lblk .. fblk]</code> window:</p>
+  <pre><code><span class="c">// stream.go</span>
+<span class="k">if</span> seq, exists := getExpectedLastSeqPerSubject(hdr); exists {
+    sm, err := store.<span class="fn">LoadLastMsg</span>(seqSubj, &amp;smv)   <span class="c">// uses fblk/lblk</span>
+    <span class="k">if</span> sm != <span class="k">nil</span> { fseq = sm.seq }
+    <span class="k">if</span> err != <span class="k">nil</span> || fseq != seq {              <span class="c">// mismatch -&gt; reject publish</span>
+        resp.Error = <span class="fn">NewJSStreamWrongLastSequenceError</span>(fseq)
+    }
+}</code></pre>
+  <p>With a stale <code>fblk</code>, <code>LoadLastMsg</code> returns &ldquo;not found&rdquo; (<code>fseq = 0</code>) for a subject
+  that does have a message. That corrupts the check both ways: a valid conditional publish at the real sequence is
+  <b>wrongly rejected</b>, while a create-only publish (expected sequence <code>0</code>) is <b>wrongly accepted</b> and clobbers
+  the existing value. For KV (<code>history = 1</code>) this surfaces as broken <code>Update</code>/<code>Create</code> (CAS)
+  semantics after a restart.</p>
+
+  <h2>Version comparison</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Behavior</th>
+        <th>Pre-fix</th>
+        <th>With PR&nbsp;#8254</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Corrects <code>fblk</code> when subject &rarr; 1 msg under <code>MaxMsgsPer = 1</code></td>
+        <td class="no">No</td>
+        <td class="yes">Yes</td>
+      </tr>
+      <tr>
+        <td>Single-msg subject retrievable after restart (<code>MaxMsgsPer = 1</code>)</td>
+        <td class="no">No &mdash; bug</td>
+        <td class="yes">Yes</td>
+      </tr>
+      <tr>
+        <td>Enforces limit when config switches <code>-1</code> &rarr; positive</td>
+        <td class="no">No (<code>== 0</code> guard)</td>
+        <td class="yes">Yes (<code>&le; 0</code> guard)</td>
+      </tr>
+      <tr>
+        <td><code>Nats-Expected-Last-Subject-Sequence</code> correct after restart</td>
+        <td class="no">No &mdash; bug</td>
+        <td class="yes">Yes</td>
+      </tr>
+      <tr>
+        <td>Memory store enforcement parity</td>
+        <td class="no">Inconsistent</td>
+        <td class="yes">Aligned</td>
+      </tr>
+    </tbody>
+  </table>
+  <p style="color:var(--muted);font-size:.9rem">Note: 2.14+ also persists both <code>fblk</code> and <code>lblk</code> to
+  <code>index.db</code> unconditionally, which independently neutralizes the stale-pointer class of bug regardless of
+  <code>MaxMsgsPerSubject</code>. PR #8254 is the targeted source-level fix; the format change is the structural one.</p>
+
+  <h2>Recovery for already-affected data</h2>
+  <p>Identical to the #8285 remediation: the stale pointers live only in <code>index.db</code>; the messages are intact in the
+  block files. Force a rebuild:</p>
+  <ol class="steps">
+    <li><b>Stop the nats-server</b> (it rewrites <code>index.db</code> on clean shutdown).</li>
+    <li><b>Delete only <code>index.db</code></b> for the affected stream:
+      <pre><code>rm &lt;store_dir&gt;/jetstream/&lt;account&gt;/streams/&lt;stream&gt;/msgs/index.db
+<span class="c"># e.g. KV bucket CONFIG -&gt; stream KV_CONFIG</span></code></pre>
+      Leave all <code>*.blk</code> files in place.</li>
+    <li><b>Restart.</b> The server rebuilds <code>fblk</code>/<code>lblk</code> by scanning the blocks; the &ldquo;missing&rdquo;
+      message reappears and the expected-last-subject-sequence check returns the correct value.</li>
+    <li><b>Clustered (R&gt;1):</b> recover one replica at a time, preserving quorum; or step down / re-add the replica to re-sync
+      from the leader.</li>
+  </ol>
+  <div class="panel callout good">
+    <p>The rebuild is safe and non-destructive (<code>index.db</code> is always reconstructable from the blocks), but scans the
+    whole stream &mdash; expect extra startup I/O for large streams. To <i>prevent</i> recurrence, upgrade to a build that
+    includes PR&nbsp;#8254 (and #8285 for the <code>MaxMsgsPer&gt;1</code> path), or to 2.14+.</p>
+  </div>
+
+  <h2>Scope &amp; limitations</h2>
+  <ul>
+    <li><b>Targets the <code>MaxMsgsPerSubject = 1</code> path.</b> The <code>MaxMsgsPer&gt;1</code> FIFO-removal variant is
+    handled separately by PR&nbsp;#8285.</li>
+    <li><b>File storage only</b> for the data-recovery aspect; the enforcement-condition fix also applies to memstore.</li>
+    <li><b>Low risk.</b> A one-line pointer correction plus a guard-condition broadening, with added regression tests; no
+    on-disk format change.</li>
+  </ul>
+
+  <footer>
+    Generated explainer for <a href="https://github.com/nats-io/nats-server/pull/8254">nats-io/nats-server#8254</a>
+    (sibling of <a href="https://github.com/nats-io/nats-server/pull/8285">#8285</a>).
+    Code references: <code>server/filestore.go</code> (<code>storeRawMsg</code> per-subject bookkeeping,
+    <code>enforceMsgPerSubjectLimit</code>, <code>loadLast</code>), <code>server/memstore.go</code>,
+    <code>server/stream.go</code> (expected-last-subject-sequence). For authoritative behavior, consult the PR and the source.
+  </footer>
+
+</div>
+</body>
+</html>
