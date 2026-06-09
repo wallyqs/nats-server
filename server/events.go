@@ -269,6 +269,7 @@ const (
 	JetStreamEnabled     ServerCapability = 1 << iota // Server had JetStream enabled.
 	BinaryStreamSnapshot                              // New stream snapshot capability.
 	AccountNRG                                        // Move NRG traffic out of system account.
+	PreVote                                           // Raft Pre-Vote phase support.
 )
 
 // Set JetStream capability.
@@ -303,6 +304,17 @@ func (si *ServerInfo) SetAccountNRG() {
 // system account and into the asset account.
 func (si *ServerInfo) AccountNRG() bool {
 	return si.Flags&AccountNRG != 0
+}
+
+// Set Raft Pre-Vote capability.
+func (si *ServerInfo) SetPreVote() {
+	si.Flags |= PreVote
+}
+
+// PreVote indicates whether or not this server understands the Raft Pre-Vote
+// phase (i.e. subscribes to and answers $NRG.PV.* pre-vote requests).
+func (si *ServerInfo) PreVote() bool {
+	return si.Flags&PreVote != 0
 }
 
 // ClientInfo is detailed information about the client forming a connection.
@@ -546,6 +558,7 @@ RESET:
 						// New capability based flags.
 						si.SetJetStreamEnabled()
 						si.SetBinaryStreamSnapshot()
+						si.SetPreVote()
 						if s.accountNRGAllowed.Load() {
 							si.SetAccountNRG()
 						}
@@ -1778,6 +1791,7 @@ func (s *Server) remoteServerUpdate(sub *subscription, c *client, _ *Account, su
 		js:              si.JetStreamEnabled(),
 		binarySnapshots: si.BinaryStreamSnapshot(),
 		accountNRG:      accountNRG,
+		prevote:         si.PreVote(),
 	})
 	if oldInfo == nil || accountNRG != oldInfo.(nodeInfo).accountNRG {
 		// One of the servers we received statsz from changed its mind about
@@ -1832,6 +1846,7 @@ func (s *Server) processNewServer(si *ServerInfo) {
 				js:              si.JetStreamEnabled(),
 				binarySnapshots: si.BinaryStreamSnapshot(),
 				accountNRG:      si.AccountNRG(),
+				prevote:         si.PreVote(),
 			})
 		}
 	}

@@ -398,6 +398,7 @@ type nodeInfo struct {
 	js              bool
 	binarySnapshots bool
 	accountNRG      bool
+	prevote         bool
 }
 
 type stats struct {
@@ -836,6 +837,7 @@ func NewServer(opts *Options) (*Server, error) {
 			js:              true,
 			binarySnapshots: true,
 			accountNRG:      true,
+			prevote:         true,
 		})
 	}
 

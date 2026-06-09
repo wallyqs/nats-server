@@ -825,6 +825,174 @@ func TestNRGPreVoteElectsNewLeaderWhenLeaderStops(t *testing.T) {
 	require_True(t, newLeader.node().Term() > startTerm)
 }
 
+// maxGroupTerm returns the highest term observed across the group.
+func maxGroupTerm(sg smGroup) uint64 {
+	var mx uint64
+	for _, sm := range sg {
+		if t := sm.node().Term(); t > mx {
+			mx = t
+		}
+	}
+	return mx
+}
+
+// This is the headline test for the Pre-Vote improvement: it drives the exact
+// same scenario (a follower's election timer fires while the leader is healthy)
+// through the same entry point, once with Pre-Vote OFF and once with it ON, and
+// shows that:
+//   - WITHOUT Pre-Vote the follower bumps its term and disrupts the leader
+//     (the cluster's term advances), and
+//   - WITH Pre-Vote the trial round is refused (the leader is alive), so no
+//     term is bumped and the leader is not disrupted.
+func TestNRGPreVotePreventsLeaderDisruption(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+	c.waitOnLeader()
+
+	nc, _ := jsClientConnect(t, c.leader(), nats.UserInfo("admin", "s3cr3t!"))
+	defer nc.Close()
+
+	// run sets up an independent raft group, toggles Pre-Vote, then forces a
+	// follower down the election-timeout path while the leader is healthy.
+	run := func(t *testing.T, name string, preVote bool) (disrupted bool) {
+		rg := c.createRaftGroup(name, 3, newStateAdder)
+		rg.waitOnLeader()
+
+		for _, sm := range rg {
+			n := sm.node().(*raft)
+			n.Lock()
+			n.prevote = preVote
+			n.Unlock()
+		}
+
+		// When testing the ON path, wait until the pre-vote capability has
+		// propagated to all peers, otherwise switchToPreCandidate would
+		// (correctly) fall back to a real election and we'd be testing the
+		// wrong thing.
+		if preVote {
+			follower := rg.nonLeader().node().(*raft)
+			checkFor(t, 5*time.Second, 50*time.Millisecond, func() error {
+				follower.RLock()
+				ok := follower.allPeersSupportPreVote()
+				follower.RUnlock()
+				if !ok {
+					return fmt.Errorf("pre-vote capability not yet propagated")
+				}
+				return nil
+			})
+		}
+
+		leaderID := rg.leader().node().ID()
+		startMax := maxGroupTerm(rg)
+
+		// Force a follower through the same entry point the election timer uses.
+		follower := rg.nonLeader().node().(*raft)
+		follower.switchToPreCandidate()
+
+		if preVote {
+			// Assert that for a sustained window the term does NOT advance and
+			// the leader does not change — i.e. no disruption.
+			for i := 0; i < 12; i++ {
+				if maxGroupTerm(rg) != startMax {
+					return true
+				}
+				if rg.leader() != nil && rg.leader().node().ID() != leaderID {
+					return true
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			return false
+		}
+
+		// Without pre-vote we expect disruption: the cluster term advances.
+		err := checkForErr(3*time.Second, 50*time.Millisecond, func() error {
+			if maxGroupTerm(rg) > startMax {
+				return nil
+			}
+			return fmt.Errorf("term not advanced yet")
+		})
+		return err == nil
+	}
+
+	t.Run("WithoutPreVote", func(t *testing.T) {
+		require_True(t, run(t, "NOPV", false))
+	})
+	t.Run("WithPreVote", func(t *testing.T) {
+		require_False(t, run(t, "PV", true))
+	})
+}
+
+// An observer must never campaign — not even via the Pre-Vote phase. It should
+// stay a follower and never bump its term.
+func TestNRGPreVoteObserverDoesNotPreCampaign(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+	c.waitOnLeader()
+
+	nc, _ := jsClientConnect(t, c.leader(), nats.UserInfo("admin", "s3cr3t!"))
+	defer nc.Close()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	follower := rg.nonLeader().node().(*raft)
+	follower.Lock()
+	follower.prevote = true
+	follower.Unlock()
+	follower.SetObserver(true)
+
+	startTerm := follower.Term()
+	// Drive the election-timeout entry point. An observer must short-circuit.
+	follower.switchToPreCandidate()
+	time.Sleep(500 * time.Millisecond)
+
+	require_NotEqual(t, follower.State(), PreCandidate)
+	require_NotEqual(t, follower.State(), Candidate)
+	require_Equal(t, follower.Term(), startTerm)
+}
+
+// Leadership transfer must bypass the Pre-Vote phase: the transfer target needs
+// to campaign immediately, and peers would otherwise refuse its pre-vote
+// because they still consider the (departing) leader recent. If the bypass
+// regressed, this would hang.
+func TestNRGPreVoteLeaderTransferBypassesPreVote(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+	c.waitOnLeader()
+
+	nc, _ := jsClientConnect(t, c.leader(), nats.UserInfo("admin", "s3cr3t!"))
+	defer nc.Close()
+
+	rg := c.createRaftGroup("TEST", 3, newStateAdder)
+	rg.waitOnLeader()
+
+	for _, sm := range rg {
+		n := sm.node().(*raft)
+		n.Lock()
+		n.prevote = true
+		n.Unlock()
+	}
+
+	leader := rg.leader()
+	target := rg.nonLeader()
+	targetID := target.node().ID()
+	startTerm := leader.node().Term()
+
+	require_NoError(t, leader.node().StepDown(targetID))
+
+	checkFor(t, 5*time.Second, 50*time.Millisecond, func() error {
+		nl := rg.leader()
+		if nl == nil {
+			return fmt.Errorf("no leader yet")
+		}
+		if nl.node().ID() != targetID {
+			return fmt.Errorf("expected transfer target to lead")
+		}
+		return nil
+	})
+	require_True(t, rg.leader().node().Term() > startTerm)
+}
+
 // Test to make sure this does not cause us to truncate our wal or enter catchup state.
 func TestNRGHeartbeatOnLeaderChange(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)

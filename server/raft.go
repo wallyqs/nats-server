@@ -301,6 +301,11 @@ const (
 	lostQuorumCheckIntervalDefault = hbIntervalDefault * 10 // 10 seconds
 	observerModeIntervalDefault    = 48 * time.Hour
 	peerRemoveTimeoutDefault       = 5 * time.Minute
+	// preVoteLeaderContactInterval is how recently we must have heard from a
+	// leader to refuse a pre-vote. Kept at 2x the heartbeat interval: a live
+	// leader heartbeats every hbInterval, so healthy followers always refuse
+	// disruptors, yet the window ages out quickly once a leader is truly gone.
+	preVoteLeaderContactInterval = hbIntervalDefault * 2
 )
 
 var (
@@ -3839,6 +3844,14 @@ func (n *raft) runAsPreCandidate() {
 		case <-elect.C:
 			// Trial round timed out without winning. Do NOT escalate (that is
 			// the whole point) — go back to follower and try again later.
+			// Preserve the lost-quorum alert that a repeatedly-failing real
+			// candidate would have surfaced to the upper layers.
+			n.Lock()
+			if n.lostQuorumLocked() && time.Since(n.llqrt) > 20*time.Second {
+				n.updateLeadChange(false)
+				n.llqrt = time.Now()
+			}
+			n.Unlock()
 			n.debug("Pre-vote round did not succeed, returning to follower")
 			n.switchToFollower(noLeader)
 			return
@@ -5312,7 +5325,7 @@ func (n *raft) allPeersSupportPreVote() bool {
 			// Unknown peer, be conservative.
 			return false
 		}
-		if !versionAtLeast(si.(nodeInfo).version, 2, 15, 0) {
+		if !si.(nodeInfo).prevote {
 			return false
 		}
 	}
@@ -5367,26 +5380,47 @@ func (n *raft) handlePreVoteResponse(_ *subscription, _ *client, _ *Account, _, 
 // changing any state. The crucial difference from processVoteRequest is the
 // "recent leader contact" guard, which is what makes pre-vote prevent
 // disruption.
+// recentLeaderContactLocked reports whether we believe a leader is currently
+// alive. This is the Pre-Vote disruption guard: a node refuses to pre-vote for
+// anyone while a leader appears healthy. Lock should be held.
+func (n *raft) recentLeaderContactLocked() bool {
+	if n.leader == noLeader {
+		return false
+	}
+	// If we are the leader we will not help anyone unseat us.
+	if n.leader == n.id {
+		return true
+	}
+	// Otherwise, refuse if we have accepted an append entry/heartbeat from the
+	// leader within preVoteLeaderContactInterval.
+	return !n.lastLeaderContact.IsZero() && time.Since(n.lastLeaderContact) < preVoteLeaderContactInterval
+}
+
+// grantPreVoteLocked computes the pre-vote decision without mutating any state.
+// It returns whether to grant and the term to report back (the prospective term
+// on success, or our own higher term so the asker backs off). Lock should be held.
+func (n *raft) grantPreVoteLocked(vr *voteRequest) (granted bool, respTerm uint64) {
+	// Election restriction: their log must be at least as up-to-date as ours,
+	// and the prospective term must not be behind ours.
+	upToDate := vr.term >= n.term && (vr.lastTerm > n.pterm || (vr.lastTerm == n.pterm && vr.lastIndex >= n.pindex))
+	// Disruption guard: refuse if a leader is currently alive.
+	granted = upToDate && !n.recentLeaderContactLocked()
+	// Respond with the prospective term so the pre-candidate can match grants
+	// against the term it would campaign in. If we are ahead, report our higher
+	// term so it backs off instead of escalating.
+	respTerm = n.term
+	if vr.term > respTerm {
+		respTerm = vr.term
+	}
+	return granted, respTerm
+}
+
 func (n *raft) processPreVoteRequest(vr *voteRequest) {
 	n.debug("Received a preVoteRequest %+v", vr)
 
 	n.RLock()
-	// Disruption guard: if we have a leader and have heard from it within a
-	// couple of heartbeat intervals, refuse — the asker should not be trying
-	// to take over a healthy cluster.
-	haveLeader := n.leader != noLeader && n.leader != n.id
-	recentLeader := haveLeader && !n.lastLeaderContact.IsZero() && time.Since(n.lastLeaderContact) < hbInterval*2
-	// Election restriction: their log must be at least as up-to-date as ours,
-	// and the prospective term must not be behind ours.
-	upToDate := vr.term >= n.term && (vr.lastTerm > n.pterm || (vr.lastTerm == n.pterm && vr.lastIndex >= n.pindex))
-	// Respond with the prospective term so the pre-candidate can match grants
-	// against the term it would campaign in. If we are ahead, report our higher
-	// term so it backs off instead of escalating.
-	respTerm := n.term
-	if vr.term > respTerm {
-		respTerm = vr.term
-	}
-	vresp := &voteResponse{respTerm, n.id, !recentLeader && upToDate, n.pindex == 0}
+	granted, respTerm := n.grantPreVoteLocked(vr)
+	vresp := &voteResponse{respTerm, n.id, granted, n.pindex == 0}
 	n.RUnlock()
 
 	n.debug("Sending a preVoteResponse %+v -> %q", vresp, vr.reply)
