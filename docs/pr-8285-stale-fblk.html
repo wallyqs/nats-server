@@ -497,6 +497,57 @@ nats kv add FLAGS --storage=file</code></pre>
   <code>info.fblk = info.lblk</code> (or, on 2.14, persisting <code>lblk</code> directly) keeps the scan window pointing at the
   real block, so <code>LoadLastMsg</code> returns the correct sequence again.</p>
 
+  <h2>Recovery: rebuild <code>index.db</code></h2>
+  <p>If you are already running an affected version and a stream/KV bucket has stranded a key, you don&rsquo;t need the patched
+  binary to get your data back. The stale pointers live <b>only</b> in the per-stream state snapshot, <code>index.db</code>.
+  The actual messages are in the immutable block files (<code>1.blk</code>, <code>2.blk</code>, &hellip;), which are untouched
+  by this bug. Deleting <code>index.db</code> forces the server to <b>rebuild the per-subject state by scanning the blocks</b>
+  on restart, which recomputes <code>fblk</code>/<code>lblk</code> from the real data &mdash; correctly.</p>
+
+  <div class="panel callout good">
+    <p><b>This is safe and non-destructive.</b> <code>index.db</code> is a cache/optimization that is always reconstructable
+    from the block files. The server already rebuilds it automatically whenever it detects the snapshot is stale
+    (<code>filestore.go</code>: &ldquo;<i>Detected a stale index.db &hellip; will rebuild</i>&rdquo;). You are just forcing that
+    rebuild.</p>
+  </div>
+
+  <h3>Procedure (single server)</h3>
+  <ol class="steps">
+    <li><b>Stop the nats-server.</b> This is required &mdash; the server rewrites <code>index.db</code> on clean shutdown, so
+      deleting it on a live server would simply be overwritten (or recreated) with the same stale data.</li>
+    <li><b>Locate the stream&rsquo;s message directory.</b> The layout under the JetStream store dir is:
+      <pre><code>&lt;store_dir&gt;/jetstream/&lt;account&gt;/streams/&lt;stream&gt;/msgs/index.db
+
+<span class="c"># e.g. a KV bucket "SESSIONS" -&gt; stream "KV_SESSIONS":</span>
+/data/jetstream/jetstream/$G/streams/KV_SESSIONS/msgs/index.db</code></pre>
+      <span style="color:var(--muted)">(<code>$G</code> is the global account; a named account uses its account ID. Confirm
+      your store dir via the server config <code>jetstream { store_dir }</code>.)</span></li>
+    <li><b>Delete only <code>index.db</code></b> for the affected stream. Leave every <code>*.blk</code> file (and
+      <code>thw.db</code>/<code>sched.db</code>) in place &mdash; those hold your messages.
+      <pre><code>rm /data/jetstream/jetstream/$G/streams/KV_SESSIONS/msgs/index.db</code></pre></li>
+    <li><b>Restart the nats-server.</b> On startup it finds no snapshot, walks the block files, and rebuilds
+      <code>fblk</code>/<code>lblk</code> from the messages that actually exist. The previously &ldquo;missing&rdquo; key/message
+      is visible again and the <code>Nats-Expected-Last-Subject-Sequence</code> check returns the correct value.</li>
+    <li><b>Verify</b>, e.g. <code>nats stream info &lt;stream&gt;</code>, a <code>kv.Get</code>/get on the affected key, or a
+      conditional publish at the expected revision.</li>
+  </ol>
+
+  <div class="panel callout warn">
+    <h3>Clustered / replicated streams (R&gt;1)</h3>
+    <p>The bug and its on-disk state are <b>per node</b>, so the stale <code>index.db</code> may exist on one, some, or all
+    replicas. Recover <b>one node at a time</b>: stop a single server, delete that node&rsquo;s <code>index.db</code> for the
+    stream, restart it, and let it rejoin and catch up before moving to the next. Do not delete on multiple replicas
+    simultaneously &mdash; keep a quorum healthy throughout. (An alternative on a healthy cluster is to step down / remove and
+    re-add the affected replica so it re-syncs from the leader.)</p>
+  </div>
+
+  <div class="panel callout">
+    <p><b>Cost &amp; caveats:</b> the rebuild scans all blocks for the stream, so for very large streams expect extra startup
+    time and disk I/O proportional to the stream size. Take a backup/snapshot first if you want belt-and-suspenders. This is a
+    one-shot remediation for already-affected data; to <i>prevent</i> recurrence, upgrade to a build that includes PR&nbsp;#8285
+    (2.12 line) or to 2.14+.</p>
+  </div>
+
   <h2>Scope &amp; limitations</h2>
   <ul>
     <li><b>2.12 only.</b> The fix targets the 2.12 release line; 2.14+ already handles this via the format change.</li>
