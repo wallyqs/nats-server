@@ -4742,3 +4742,116 @@ func TestClientMsgsMetric(t *testing.T) {
 		t.Fatalf("Did not get expected outClientMsg/Bytes for message sent on qsub")
 	}
 }
+
+// benchDrainedConn returns a TCP connection on loopback whose peer is
+// continuously drained, so that writes complete without the socket send
+// buffer filling up and blocking on the poller.
+func benchDrainedConn(b *testing.B) net.Conn {
+	b.Helper()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatalf("Error listening: %v", err)
+	}
+
+	accepted := make(chan struct{})
+	go func() {
+		defer close(accepted)
+		nc, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer nc.Close()
+		io.Copy(io.Discard, nc)
+	}()
+
+	conn, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		l.Close()
+		b.Fatalf("Error dialing: %v", err)
+	}
+
+	b.Cleanup(func() {
+		conn.Close()
+		l.Close()
+		<-accepted
+	})
+	return conn
+}
+
+// BenchmarkSetWriteDeadline measures what SetWriteDeadline actually costs on a
+// TCP connection. It is not a syscall: net.(*conn).SetWriteDeadline ends up in
+// runtime.poll_runtime_pollSetDeadline, which takes the pollDesc lock and
+// arms, re-arms or stops the netpoll write timer.
+//
+// "Arm" re-arms an already-armed timer, which is what flushOutbound does at the
+// top of every loop iteration. "ArmAndClear" adds the disarm that used to sit
+// inside the loop, so the difference between the two is the per-iteration cost
+// that moving the clear out of the loop saves.
+func BenchmarkSetWriteDeadline(b *testing.B) {
+	conn := benchDrainedConn(b)
+	wdl := 2 * time.Second
+
+	b.Run("Arm", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			conn.SetWriteDeadline(time.Now().Add(wdl))
+		}
+		conn.SetWriteDeadline(time.Time{})
+	})
+
+	b.Run("ArmAndClear", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			conn.SetWriteDeadline(time.Now().Add(wdl))
+			conn.SetWriteDeadline(time.Time{})
+		}
+	})
+}
+
+// BenchmarkFlushOutboundVectors exercises flushOutbound across the boundary
+// where its write loop starts needing more than one iteration.
+//
+// Buffers queued by queueOutbound come from the nbPool in fixed sizes, so a
+// payload of exactly nbPoolSizeLarge produces exactly one buffer per call. The
+// loop slices at most nbMaxVectorSize (1024) buffers per iteration, so 1024
+// buffers is a single pass and 1025 is two — a difference of one extra deadline
+// arm/clear pair plus one more (small) write, against ~64MB of data either way.
+func BenchmarkFlushOutboundVectors(b *testing.B) {
+	for _, nbufs := range []int{1, 1024, 1025, 2048, 2049} {
+		b.Run(fmt.Sprintf("%dbufs", nbufs), func(b *testing.B) {
+			opts := DefaultOptions()
+			// DefaultOptions() leaves WriteDeadline at zero; only
+			// setBaselineOptions() fills it in. Without this every write
+			// would get a deadline of "now" and immediately time out.
+			opts.WriteDeadline = DEFAULT_FLUSH_DEADLINE
+			// Keep the slow consumer check out of the way, we are queueing
+			// far more than any sane MaxPending would allow.
+			opts.MaxPending = int64(nbufs)*nbPoolSizeLarge*2 + 1
+			s := &Server{opts: opts}
+
+			c := &client{srv: s, nc: benchDrainedConn(b)}
+			c.initClient()
+
+			payload := make([]byte, nbPoolSizeLarge)
+			b.SetBytes(int64(nbufs) * nbPoolSizeLarge)
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				c.mu.Lock()
+				for j := 0; j < nbufs; j++ {
+					c.queueOutbound(payload)
+				}
+				for c.out.pb > 0 && !c.isClosed() {
+					c.flushOutbound()
+				}
+				pb := c.out.pb
+				c.mu.Unlock()
+				if pb > 0 {
+					b.Fatalf("flushOutbound left %d pending bytes", pb)
+				}
+			}
+		})
+	}
+}
